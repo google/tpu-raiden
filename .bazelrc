@@ -1,0 +1,4 @@
+common --enable_bzlmod --noenable_workspace
+fetch --enable_bzlmod --noenable_workspace
+query --enable_bzlmod --noenable_workspace
+common --experimental_repo_remote_exec
