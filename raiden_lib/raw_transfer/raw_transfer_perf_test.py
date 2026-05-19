@@ -1,4 +1,4 @@
-# Copyright 2026 Google LLC
+# Copyright 2026 Google LLC.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,21 +14,16 @@
 
 import gc
 import os
-import sys
 import time
-
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-# Point to the bazel-bin directory containing the compiled .so files
-current_dir = os.path.dirname(os.path.abspath(__file__))
-bazel_bin_dir = os.path.abspath(os.path.join(current_dir, "./bazel-bin"))
-sys.path.insert(0, bazel_bin_dir)
-
-import raw_transfer
+from google3.perftools.accelerators.xprof.api.python import traceme
+from raiden_lib.raw_transfer import raw_transfer
+from raiden_lib.raw_transfer import raw_transfer_profiled
+from raiden_lib.raw_transfer import utils
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 
@@ -40,7 +35,7 @@ SUPPORTED_DTYPES = {
 }
 
 
-class RawTransferPerfTestSimple(parameterized.TestCase):
+class RawTransferPerfTest(parameterized.TestCase):
 
   def create_mesh(self, axis_shapes, axis_names, devices=None):
     """Creates a JAX device mesh with the specified or default devices."""
@@ -132,6 +127,13 @@ class RawTransferPerfTestSimple(parameterized.TestCase):
           jax.device_put(jnp.empty(shape, dtype=dtype), tpu_sharding)
       )
     jax.block_until_ready(tpu_dst_arrs)
+
+    # Create pinned host arrays for kv_cache_copy
+
+    pinned_host_dst_arrs = []
+    for _ in range(num_layers):
+      pinned_host_dst_arrs.append(alloc_zeros())
+    jax.block_until_ready(pinned_host_dst_arrs)
 
     # Benchmark our library (batch, optimized)
     d2h_times = []
@@ -239,7 +241,6 @@ class RawTransferPerfTestSimple(parameterized.TestCase):
         f" (median) / {np.mean(sync_h2d_times):.6f} s (mean)"
     )
 
-
     # Benchmark our library (Library native batch)
     naive_batched_d2h_times = []
     naive_batched_h2d_times = []
@@ -332,7 +333,6 @@ class RawTransferPerfTestSimple(parameterized.TestCase):
         f" {np.mean(naive_batched_h2d_times):.6f} s (mean)"
     )
 
-
     print(
         f"[{dtype}, {num_layers} layers, shape={shape}] Library"
         " transfer_d2h_batch_async dispatch times:"
@@ -369,14 +369,6 @@ class RawTransferPerfTestSimple(parameterized.TestCase):
         " transfer_h2d_batch_async avg time:"
         f" {np.median(batched_h2d_times):.6f} s"
     )
-
-    # Free up large auxiliary buffers
-    del dst_arrs
-    del tpu_dst_arrs
-    if "futures" in locals():
-      del futures
-    gc.enable()
-    gc.collect()
 
     # Benchmark JAX
     jax_d2h_times = []
@@ -451,7 +443,6 @@ class RawTransferPerfTestSimple(parameterized.TestCase):
     jax_h2d_bw_mean = (
         total_bytes / np.mean(jax_h2d_times) / (1024 * 1024 * 1024)
     )
-
     lib_d2h_bw = lib_d2h_bw_median
     lib_h2d_bw = lib_h2d_bw_median
     jax_d2h_bw = jax_d2h_bw_median
@@ -488,14 +479,6 @@ class RawTransferPerfTestSimple(parameterized.TestCase):
         f" bandwidth: {jax_h2d_bw:.3f} GB/s"
     )
     print(
-        f"[{dtype}, {num_layers} layers, shape={shape}] Relative D2H bandwidth"
-        f" (Lib/JAX): {lib_d2h_bw / jax_d2h_bw:.2f}x"
-    )
-    print(
-        f"[{dtype}, {num_layers} layers, shape={shape}] Relative H2D bandwidth"
-        f" (Lib/JAX): {lib_h2d_bw / jax_h2d_bw:.2f}x"
-    )
-    print(
         f"[{dtype}, {num_layers} layers, shape={shape}] Relative Sync D2H"
         f" bandwidth (Lib_Sync/JAX): {lib_sync_d2h_bw / jax_d2h_bw:.2f}x"
     )
@@ -503,6 +486,43 @@ class RawTransferPerfTestSimple(parameterized.TestCase):
         f"[{dtype}, {num_layers} layers, shape={shape}] Relative Sync H2D"
         f" bandwidth (Lib_Sync/JAX): {lib_sync_h2d_bw / jax_h2d_bw:.2f}x"
     )
+
+    # Recreate arrays for profiling to respect earlier cleanups
+    dst_arrs = [alloc_zeros() for _ in range(num_layers)]
+    tpu_dst_arrs = [
+        jax.device_put(jnp.empty(shape, dtype=dtype), tpu_sharding)
+        for _ in range(num_layers)
+    ]
+    pinned_host_dst_arrs = [alloc_zeros() for _ in range(num_layers)]
+    jax.block_until_ready(dst_arrs + tpu_dst_arrs + pinned_host_dst_arrs)
+
+    # Profile transfer_d2h_async, transfer_h2d_async and copy_to_dest with
+    # TraceMe tag
+    print("Starting profiling with TraceMe...")
+    n_profiles = 3
+    with utils.xprof_session_manager(
+        f"raw_transfer_perf_and_copy_to_dest_{dtype}"
+    ):
+      for i in range(n_profiles):
+        with traceme.TraceMe(f"transfer_d2h_async_{i}"):
+          all_futures = []
+          for j in range(num_layers):
+            futures = raw_transfer.transfer_d2h_async(src_arrs[j], dst_arrs[j])
+            all_futures.append(futures)
+          for f in all_futures:
+            f.Await()
+
+      for i in range(n_profiles):
+        with traceme.TraceMe(f"transfer_h2d_async_{i}"):
+          all_futures = []
+          for j in range(num_layers):
+            futures = raw_transfer.transfer_h2d_async(
+                dst_arrs[j], tpu_dst_arrs[j]
+            )
+            all_futures.append(futures)
+          for f in all_futures:
+            f.Await()
+    print("Profiling with TraceMe completed.")
 
   @parameterized.named_parameters(
       ("1_layers_bf16", 1, (8, 128, 1024, 128), jnp.bfloat16),
@@ -739,10 +759,99 @@ class RawTransferPerfTestSimple(parameterized.TestCase):
     report_perf("JAX D2H", jax_d2h_times)
     report_perf("JAX H2D", jax_h2d_times)
 
+  def test_perf_profiled(self):
+    dtype = jnp.int32
+    num_layers = 1024
+    num_blocks = 16
+
+    try:
+      devices = jax.devices("tpu")
+    except RuntimeError:
+      self.skipTest("No TPU devices found")
+    if not devices:
+      self.skipTest("No TPU devices found")
+
+    num_devices = len(devices)
+    print(f"Found {len(devices)} TPU devices")
+
+    axis_shapes = (1, num_devices)
+    axis_names = ("data", "model")
+    mesh = self.create_mesh(axis_shapes, axis_names)
+    spec = jax.sharding.PartitionSpec(None, None, "model")
+    shape = (num_blocks, 128, 8, 2, 128)
+
+    tpu_sharding = jax.sharding.NamedSharding(mesh, spec)
+    src_arrs = []
+    for _ in range(num_layers):
+      arr = jnp.arange(np.prod(shape), dtype=dtype).reshape(shape)
+      src_arrs.append(jax.device_put(arr, tpu_sharding))
+    jax.block_until_ready(src_arrs)
+
+    pinned_host_sharding = jax.sharding.NamedSharding(
+        mesh, spec, memory_kind="pinned_host"
+    )
+
+    def _create_zeros():
+      return jnp.zeros(shape, dtype=dtype)
+
+    alloc_zeros = jax.jit(_create_zeros, out_shardings=pinned_host_sharding)
+
+    dst_arrs = []
+    for _ in range(num_layers):
+      dst_arrs.append(alloc_zeros())
+    jax.block_until_ready(dst_arrs)
+
+    tpu_dst_arrs = []
+    for _ in range(num_layers):
+      tpu_dst_arrs.append(
+          jax.device_put(jnp.empty(shape, dtype=dtype), tpu_sharding)
+      )
+    jax.block_until_ready(tpu_dst_arrs)
+
+    print("Running profiled transfer_d2h_batch_async...")
+    start = time.time()
+    futures = raw_transfer_profiled.transfer_d2h_batch_async(src_arrs, dst_arrs)
+    dispatch_time = time.time() - start
+
+    start = time.time()
+    futures.Await()
+    wait_time = time.time() - start
+    print(
+        f"Profiled D2H completed. Dispatch: {dispatch_time:.6f}s, Wait:"
+        f" {wait_time:.6f}s"
+    )
+
+    print("Running profiled transfer_h2d_batch_async...")
+    start = time.time()
+    futures = raw_transfer_profiled.transfer_h2d_batch_async(
+        dst_arrs, tpu_dst_arrs
+    )
+    dispatch_time = time.time() - start
+
+    start = time.time()
+    futures.Await()
+    wait_time = time.time() - start
+    print(
+        f"Profiled H2D completed. Dispatch: {dispatch_time:.6f}s, Wait:"
+        f" {wait_time:.6f}s"
+    )
+
+    print("Running profiled transfer_d2h_batch...")
+    start = time.time()
+    raw_transfer_profiled.transfer_d2h_batch(src_arrs, dst_arrs)
+    sync_time = time.time() - start
+    print(f"Profiled Sync D2H completed in {sync_time:.6f}s")
+
+    print("Running profiled transfer_h2d_batch...")
+    start = time.time()
+    raw_transfer_profiled.transfer_h2d_batch(dst_arrs, tpu_dst_arrs)
+    sync_time = time.time() - start
+    print(f"Profiled Sync H2D completed in {sync_time:.6f}s")
+
 
 if __name__ == "__main__":
   import sys
 
-  # sys.argv.append("--pjrt_tpu_track_event_dependencies=false")
-  # sys.argv.append("--jax_max_inflight_async_computations=64")
+  sys.argv.append("--pjrt_tpu_track_event_dependencies=false")
+  sys.argv.append("--jax_max_inflight_async_computations=64")
   absltest.main()

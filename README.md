@@ -1,5 +1,11 @@
 # TPU Raiden
 
+> [!IMPORTANT]
+> **TPU Raiden is currently under active development and is not yet recommended for general use.**
+> If you are interested in adopting this library, please reach out to the owners first to discuss compatibility, or proceed at your own risk.
+
+go/tpu-raiden
+
 ## Prerequisites
 
 ### Installing Bazel

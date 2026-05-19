@@ -1,4 +1,4 @@
-# Copyright 2026 Google LLC
+# Copyright 2026 Google LLC.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,22 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-default_install_hook_types:
-  - pre-commit
-  - commit-msg
-default_stages:
-  - pre-commit # Run locally
-repos:
--   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
-    hooks:
-    -   id: check-yaml
-        exclude: ^mkdocs\.yml$ # Exclude mkdocs.yml from this check
-    -   id: end-of-file-fixer
-    -   id: trailing-whitespace
-repos:
-- repo: https://github.com/google/addlicense
-  rev: v1.2.0
-  hooks:
-  - id: addlicense
-    args: [ "-c", "Google LLC", "-l", "apache" ]    
+# TPU Raiden Library Python package namespace declaration.

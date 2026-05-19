@@ -1,68 +1,56 @@
-/*
- * Copyright 2026 Google LLC
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright 2026 Google LLC.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-#ifndef JAXLIB_PY_RAW_TRANSFER_IMPL_H_
-#define JAXLIB_PY_RAW_TRANSFER_IMPL_H_
+#ifndef THIRD_PARTY_TPU_RAIDEN_RAIDEN_LIB_RAW_TRANSFER_RAW_TRANSFER_IMPL_H_
+#define THIRD_PARTY_TPU_RAIDEN_RAIDEN_LIB_RAW_TRANSFER_RAW_TRANSFER_IMPL_H_
 
 #include <Python.h>
 
-#include <iostream>
 #include <optional>
 #include <typeinfo>
 #include <vector>
 
-#include "nanobind/nanobind.h"
-#include "nanobind/ndarray.h"
-#include "jaxlib/py_array.h"
+#if __has_include( \
+    "raiden_lib/raw_transfer/raw_transfer_core.h")
+#include "raiden_lib/raw_transfer/raw_transfer_core.h"
+#elif __has_include("raiden_lib/raw_transfer/raw_transfer_core.h")
+#include "raiden_lib/raw_transfer/raw_transfer_core.h"
+#else
+#include "raw_transfer_core.h"
+#endif
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "nanobind/include/nanobind/nanobind.h"
+#include "nanobind/include/nanobind/ndarray.h"
+#include "third_party/py/jax/jaxlib/py_array.h"
 #include "xla/pjrt/abstract_tracked_device_buffer.h"
 #include "xla/pjrt/c/pjrt_c_api_raw_buffer_external.h"
 #include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_layout.h"
 #include "xla/pjrt/raw_buffer.h"
+#include "xla/pjrt/status_casters.h"
 #include "xla/python/ifrt/array.h"
 #include "xla/python/pjrt_ifrt/pjrt_array.h"
 #include "xla/shape_util.h"
-#include "tsl/platform/logging.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/logging.h"
+#include "xla/tsl/platform/statusor.h"
 
 namespace nb = nanobind;
 
-struct RawBufferHolder {
-  const PJRT_Api* c_api;
-  const PJRT_RawBuffer_Extension* extension;
-  PJRT_RawBuffer* buffer;
-
-  RawBufferHolder(const PJRT_Api* api, const PJRT_RawBuffer_Extension* ext,
-                  PJRT_RawBuffer* buf)
-      : c_api(api), extension(ext), buffer(buf) {}
-
-  ~RawBufferHolder() {
-    if (buffer) {
-      pjrt::PjRtCApiRawBuffer_Destroy(c_api, extension, buffer);
-    }
-  }
-};
-
 namespace jax {
-
-using xla::CommonPjRtBuffer;
-using xla::CommonPjRtRawBuffer;
-using xla::PjRtBuffer;
-using xla::PjRtCApiBuffer;
-using xla::PjRtCApiClient;
 
 struct PyArrayObject {
   PyObject_HEAD;
@@ -89,10 +77,9 @@ inline xla::PjRtBuffer* GetPjrtBufferFromPyObject(PyObject* obj) {
   xla::ifrt::Array* ifrt_array = storage->ifrt_array.get();
 
   auto* arr =
-      dynamic_cast<xla::ifrt::PjRtCompatibleArray*>(ifrt_array);
+      llvm::dyn_cast_or_null<xla::ifrt::PjRtCompatibleArray>(ifrt_array);
   if (arr == nullptr) {
-    std::string type_name = ifrt_array ? typeid(*ifrt_array).name() : "nullptr";
-    throw std::runtime_error(std::string("Not a PjRt compatible array, type: ") + type_name);
+    throw std::runtime_error("Not a PjRt compatible array");
   }
   return arr->pjrt_buffers().front().get();
 }
@@ -106,104 +93,25 @@ inline xla::ifrt::Array* GetIfrtArrayFromPyObject(PyObject* obj) {
   return storage->ifrt_array.get();
 }
 
-class PjRtCopyFuture {
- public:
-  // Default constructor for nanobind binding
-  PjRtCopyFuture() : futures_(), c_api_holds_(), holds_(), ext_holds_() {}
+}  // namespace jax
 
-  PjRtCopyFuture(
-      std::vector<xla::Future<>> futures,
-      std::vector<std::shared_ptr<RawBufferHolder>> c_api_holds = {},
-      std::vector<std::shared_ptr<CommonPjRtBuffer::ScopedHold>> holds = {})
-      : futures_(std::move(futures)),
-        c_api_holds_(std::move(c_api_holds)),
-        holds_(std::move(holds)) {}
+namespace raiden {
 
-  PjRtCopyFuture(
-      std::vector<xla::Future<>> futures,
-      std::shared_ptr<RawBufferHolder> c_api_hold,
-      std::shared_ptr<CommonPjRtBuffer::ScopedHold> hold = nullptr)
-      : futures_(std::move(futures)) {
-    if (c_api_hold) c_api_holds_.push_back(std::move(c_api_hold));
-    if (hold) holds_.push_back(std::move(hold));
-  }
+using namespace xla;
 
-  void Await() {
-    nb::gil_scoped_release release;
-    for (auto& f : futures_) {
-      absl::Status status = f.Await();
-      if (!status.ok()) {
-        throw std::runtime_error(std::string("Async copy failed: ") +
-                                 std::string(status.message()));
-      }
-    }
-    futures_.clear();
-    c_api_holds_.clear();
-    holds_.clear();
-    ext_holds_.clear();
-  }
 
-  void Append(PjRtCopyFuture other) {
-    futures_.insert(futures_.end(),
-                    std::make_move_iterator(other.futures_.begin()),
-                    std::make_move_iterator(other.futures_.end()));
-    c_api_holds_.insert(c_api_holds_.end(),
-                        std::make_move_iterator(other.c_api_holds_.begin()),
-                        std::make_move_iterator(other.c_api_holds_.end()));
-    holds_.insert(holds_.end(), std::make_move_iterator(other.holds_.begin()),
-                  std::make_move_iterator(other.holds_.end()));
-    ext_holds_.insert(ext_holds_.end(),
-                      std::make_move_iterator(other.ext_holds_.begin()),
-                      std::make_move_iterator(other.ext_holds_.end()));
-  }
 
-  void Append(
-      std::vector<xla::Future<>> other_futures,
-      std::shared_ptr<RawBufferHolder> other_c_api_hold = nullptr,
-      std::shared_ptr<CommonPjRtBuffer::ScopedHold> other_hold = nullptr) {
-    futures_.insert(futures_.end(),
-                    std::make_move_iterator(other_futures.begin()),
-                    std::make_move_iterator(other_futures.end()));
-    if (other_c_api_hold) c_api_holds_.push_back(std::move(other_c_api_hold));
-    if (other_hold) holds_.push_back(std::move(other_hold));
-  }
-
-  void Append(
-      std::vector<xla::Future<>> other_futures,
-      std::vector<std::shared_ptr<RawBufferHolder>> other_c_api_holds,
-      std::vector<std::shared_ptr<CommonPjRtBuffer::ScopedHold>> other_holds) {
-    futures_.insert(futures_.end(),
-                    std::make_move_iterator(other_futures.begin()),
-                    std::make_move_iterator(other_futures.end()));
-    c_api_holds_.insert(c_api_holds_.end(),
-                        std::make_move_iterator(other_c_api_holds.begin()),
-                        std::make_move_iterator(other_c_api_holds.end()));
-    holds_.insert(holds_.end(), std::make_move_iterator(other_holds.begin()),
-                  std::make_move_iterator(other_holds.end()));
-  }
-
-  void AddExtHold(std::unique_ptr<xla::PjRtBuffer::ExternalReference> hold) {
-    ext_holds_.push_back(std::move(hold));
-  }
-
- private:
-  std::vector<xla::Future<>> futures_;
-  std::vector<std::shared_ptr<RawBufferHolder>> c_api_holds_;
-  std::vector<std::shared_ptr<CommonPjRtBuffer::ScopedHold>> holds_;
-  std::vector<std::shared_ptr<xla::PjRtBuffer::ExternalReference>> ext_holds_;
-};
-
-inline void transfer_d2h_internal(const nb::object& src_arr,
-                                  const nb::object& dst_arr,
-                                  const nb::list& src_offsets_major_dim,
-                                  const nb::list& dst_offsets_major_dim,
-                                  const nb::list& copy_sizes_major_dim,
-                                  PjRtCopyFuture& acc) {
+inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_internal(
+    const nb::object& src_arr, const nb::object& dst_arr,
+    const nb::list& src_offsets_major_dim,
+    const nb::list& dst_offsets_major_dim,
+    const nb::list& copy_sizes_major_dim) {
+  PjRtCopyFuture acc({});
   nb::object addressable_shards = src_arr.attr("addressable_shards");
   size_t num_shards = nb::len(addressable_shards);
 
   if (num_shards == 0) {
-    return;
+    return acc;
   }
 
   if (src_offsets_major_dim.size() != dst_offsets_major_dim.size() ||
@@ -255,87 +163,28 @@ inline void transfer_d2h_internal(const nb::object& src_arr,
         "Number of shards in source and destination must match");
   }
 
-  int64_t itemsize =
-      xla::ShapeUtil::ByteSizeOfPrimitiveType(shape.element_type());
-
-  int64_t logical_elements = 1;
-  for (int i = 0; i < shape.dimensions_size(); ++i) {
-    logical_elements *= shape.dimensions(i);
-  }
-
-  int64_t stride = 1;
-  if (shape.dimensions_size() > 1) {
-    for (int i = 1; i < shape.dimensions_size(); ++i) {
-      stride *= shape.dimensions(i);
-    }
-  }
-
-  int64_t non_major_product = stride;
-
-  if (is_partial && (non_major_product * itemsize) % 4096 != 0) {
-    throw std::runtime_error(
-        "Unsupported shape: product of non-major dimensions must be a multiple "
-        "of tile size (4KB) on device for partial copies");
-  }
-
   PjRtBuffer* first_src_buffer =
       jax::GetPjrtBufferFromPyObject(first_shard_data.ptr());
 
-  auto status_or_src_size = first_src_buffer->GetOnDeviceSizeInBytes();
-  if (!status_or_src_size.ok()) {
-    throw std::runtime_error("Failed to get source buffer size");
-  }
-  int64_t physical_size = status_or_src_size.value();
+  TF_ASSIGN_OR_RETURN(int64_t physical_size,
+                      first_src_buffer->GetOnDeviceSizeInBytes());
 
-  CommonPjRtBuffer* first_common_buffer =
-      dynamic_cast<CommonPjRtBuffer*>(first_src_buffer);
+  const PJRT_Api* c_api = nullptr;
+  const PJRT_RawBuffer_Extension* extension =
+      GetRawBufferExtension(first_src_buffer, &c_api);
   PjRtCApiBuffer* first_capi_buffer =
       dynamic_cast<PjRtCApiBuffer*>(first_src_buffer);
 
-  const PJRT_Api* c_api = nullptr;
-  const PJRT_RawBuffer_Extension* extension = nullptr;
-
-  if (first_capi_buffer) {
-    c_api = first_capi_buffer->pjrt_c_api();
-    PjRtCApiClient* capi_client =
-        dynamic_cast<PjRtCApiClient*>(first_capi_buffer->client());
-    extension = capi_client->FindExtension<PJRT_RawBuffer_Extension>(
-        PJRT_Extension_Type::PJRT_Extension_Type_RawBuffer);
-    if (!extension) {
-      throw std::runtime_error(
-          "RawBuffer extension not found in PjRtCApiClient");
-    }
+  if (first_capi_buffer && !extension) {
+    throw std::runtime_error("RawBuffer extension not found in PjRtCApiClient");
   }
 
-  auto pjrt_layout = first_src_buffer->layout();
-  const xla::Layout* xla_layout = nullptr;
-  if (pjrt_layout) {
-    xla_layout = &pjrt_layout->xla_layout();
-  }
+  int64_t slice_byte_size = GetMajorSliceByteSize(first_src_buffer);
 
-  int64_t size_per_major_dim = 0;
-  if (is_partial) {
-    if (xla_layout && !xla_layout->tiles().empty()) {
-      const xla::Tile& tile = xla_layout->tiles()[0];
-      auto tile_dims = tile.dimensions();
-      if (tile_dims.size() != 2) {
-        throw std::runtime_error("Only 2D tiling supported for now");
-      }
-      int64_t tH = tile_dims[0];
-      int64_t tW = tile_dims[1];
-
-      int64_t rank = shape.dimensions_size();
-      int64_t H = shape.dimensions(rank - 2);
-      int64_t W = shape.dimensions(rank - 1);
-
-      int64_t num_tiles_H = (H + tH - 1) / tH;
-      int64_t num_tiles_W = (W + tW - 1) / tW;
-
-      size_per_major_dim = num_tiles_H * num_tiles_W * tH * tW * itemsize;
-      for (int i = 1; i < rank - 2; ++i) {
-        size_per_major_dim *= shape.dimensions(i);
-      }
-    }
+  if (is_partial && slice_byte_size % 4096 != 0) {
+    throw std::runtime_error(
+        "Unsupported shape: slice byte size must be a multiple "
+        "of tile size (4KB) on device for partial copies");
   }
 
   for (size_t i = 0; i < num_shards; ++i) {
@@ -369,11 +218,8 @@ inline void transfer_d2h_internal(const nb::object& src_arr,
       }
       raw_buffer = hold->buffer()->raw_buffer();
     } else if (capi_buffer) {
-      auto status_or_ext = src_buffer->AcquireExternalReference();
-      if (!status_or_ext.ok()) {
-        throw std::runtime_error("Failed to acquire external reference");
-      }
-      acc.AddExtHold(std::move(status_or_ext.value()));
+      TF_ASSIGN_OR_RETURN(auto ext_ref, src_buffer->AcquireExternalReference());
+      acc.AddExtHold(std::move(ext_ref));
     } else {
       throw std::runtime_error(std::string("Unsupported buffer type! Type: ") +
                                typeid(*src_buffer).name());
@@ -381,7 +227,6 @@ inline void transfer_d2h_internal(const nb::object& src_arr,
 
     if (!is_partial) {
       // Full copy.
-      int64_t physical_size = status_or_src_size.value();
       if (dst_size < physical_size) {
         throw std::runtime_error(
             "Destination buffer too small for raw tiled copy");
@@ -400,70 +245,54 @@ inline void transfer_d2h_internal(const nb::object& src_arr,
             nb::cast<int64_t>(dst_offsets_major_dim[j]);
         int64_t major_dim_size = nb::cast<int64_t>(copy_sizes_major_dim[j]);
 
-        // Partial copy.
-        if (xla_layout && !xla_layout->tiles().empty()) {
-          // Tiled layout!
-          int64_t physical_offset = src_major_dim_offset * size_per_major_dim;
-          int64_t size_to_copy = major_dim_size * size_per_major_dim;
-          int64_t dst_offset = dst_major_dim_offset * size_per_major_dim;
+        int64_t physical_offset = src_major_dim_offset * slice_byte_size;
+        int64_t size_to_copy = major_dim_size * slice_byte_size;
+        int64_t dst_offset = dst_major_dim_offset * slice_byte_size;
 
-          if (physical_offset + size_to_copy > status_or_src_size.value()) {
-            throw std::runtime_error("Copy range exceeds source buffer size");
-          }
-
-          if (dst_offset + size_to_copy > dst_size) {
-            throw std::runtime_error(
-                "Copy range exceeds destination buffer size");
-          }
-
-          uint8_t* dst_ptr = dst_data + dst_offset;
-
-          xla::Future<> future;
-          {
-            nb::gil_scoped_release release;
-            future = src_buffer->CopyRawToHost(dst_ptr, physical_offset,
-                                               size_to_copy);
-          }
-          shard_futures.push_back(std::move(future));
-        } else {
-          // Non-tiled or simple layout.
-          int64_t src_offset = src_major_dim_offset * stride * itemsize;
-          int64_t dst_offset = dst_major_dim_offset * stride * itemsize;
-          int64_t size = major_dim_size * stride * itemsize;
-
-          if (src_offset + size > status_or_src_size.value()) {
-            throw std::runtime_error("Copy range exceeds source buffer size");
-          }
-
-          if (dst_offset + size > dst_size) {
-            throw std::runtime_error(
-                "Copy range exceeds destination buffer size");
-          }
-
-          uint8_t* dst_ptr = dst_data + dst_offset;
-
-          xla::Future<> future;
-          {
-            nb::gil_scoped_release release;
-            future = src_buffer->CopyRawToHost(dst_ptr, src_offset, size);
-          }
-          shard_futures.push_back(std::move(future));
+        if (physical_offset + size_to_copy > physical_size) {
+          throw std::runtime_error("Copy range exceeds source buffer size. "
+                                   "physical_offset: " + std::to_string(physical_offset) +
+                                   ", size_to_copy: " + std::to_string(size_to_copy) +
+                                   ", physical_size: " + std::to_string(physical_size) +
+                                   ", slice_byte_size: " + std::to_string(slice_byte_size) +
+                                   ", major_dim_size: " + std::to_string(major_dim_size) +
+                                   ", src_major_dim_offset: " + std::to_string(src_major_dim_offset));
         }
+
+        if (dst_offset + size_to_copy > dst_size) {
+          throw std::runtime_error(
+              "Copy range exceeds destination buffer size. "
+              "dst_offset: " + std::to_string(dst_offset) +
+              ", size_to_copy: " + std::to_string(size_to_copy) +
+              ", dst_size: " + std::to_string(dst_size) +
+              ", slice_byte_size: " + std::to_string(slice_byte_size) +
+              ", major_dim_size: " + std::to_string(major_dim_size) +
+              ", dst_major_dim_offset: " + std::to_string(dst_major_dim_offset));
+        }
+
+        uint8_t* dst_ptr = dst_data + dst_offset;
+
+        xla::Future<> future;
+        {
+          nb::gil_scoped_release release;
+          future =
+              src_buffer->CopyRawToHost(dst_ptr, physical_offset, size_to_copy);
+        }
+        shard_futures.push_back(std::move(future));
       }
     }
     acc.Append(std::move(shard_futures), c_api_hold);
   }
+  return acc;
 }
 
-inline PjRtCopyFuture transfer_d2h_async(
+inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_async(
     const nb::object& src_arr, const nb::object& dst_arr,
     const nb::list& src_offsets_major_dim = nb::list(),
     const nb::list& dst_offsets_major_dim = nb::list(),
     const nb::list& copy_sizes_major_dim = nb::list()) {
-  PjRtCopyFuture acc;
-  transfer_d2h_internal(src_arr, dst_arr, src_offsets_major_dim,
-                        dst_offsets_major_dim, copy_sizes_major_dim, acc);
-  return acc;
+  return transfer_d2h_internal(src_arr, dst_arr, src_offsets_major_dim,
+                               dst_offsets_major_dim, copy_sizes_major_dim);
 }
 
 inline PjRtCopyFuture transfer_d2h_batch_async_naive(
@@ -475,15 +304,16 @@ inline PjRtCopyFuture transfer_d2h_batch_async_naive(
     throw std::runtime_error("Lengths of src_arrs and dst_arrs must match");
   }
   size_t n = nb::len(src_arrs);
-  PjRtCopyFuture acc;
+  PjRtCopyFuture acc({});
   for (size_t i = 0; i < n; ++i) {
-    transfer_d2h_internal(src_arrs[i], dst_arrs[i], src_offsets_major_dim,
-                          dst_offsets_major_dim, copy_sizes_major_dim, acc);
+    acc.Append(ValueOrThrow(
+        transfer_d2h_internal(src_arrs[i], dst_arrs[i], src_offsets_major_dim,
+                              dst_offsets_major_dim, copy_sizes_major_dim)));
   }
   return acc;
 }
 
-inline PjRtCopyFuture transfer_d2h_batch_async_impl(
+inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async_impl(
     const nb::list& src_arrs, const nb::list& dst_arrs,
     const nb::list& src_offsets_major_dim = nb::list(),
     const nb::list& dst_offsets_major_dim = nb::list(),
@@ -492,7 +322,7 @@ inline PjRtCopyFuture transfer_d2h_batch_async_impl(
     throw std::runtime_error("Lengths of src_arrs and dst_arrs must match");
   }
   size_t n = nb::len(src_arrs);
-  PjRtCopyFuture acc;
+  PjRtCopyFuture acc({});
   if (n == 0) return acc;
 
   nb::object first_src_arr = src_arrs[0];
@@ -520,37 +350,24 @@ inline PjRtCopyFuture transfer_d2h_batch_async_impl(
     }
   }
 
-  auto status_or_src_size = first_buffer->GetOnDeviceSizeInBytes();
-  if (!status_or_src_size.ok()) {
-    throw std::runtime_error("Failed to get source buffer size");
-  }
-  int64_t physical_size = status_or_src_size.value();
+  TF_ASSIGN_OR_RETURN(int64_t physical_size,
+                      first_buffer->GetOnDeviceSizeInBytes());
 
   nb::object first_dst_shard_data =
       first_dst_arr.attr("addressable_shards")[0].attr("data");
   PjRtBuffer* first_dst_buffer =
       jax::GetPjrtBufferFromPyObject(first_dst_shard_data.ptr());
-  auto status_or_dst_size = first_dst_buffer->GetOnDeviceSizeInBytes();
-  if (!status_or_dst_size.ok()) {
-    throw std::runtime_error("Failed to get destination buffer size");
-  }
-  size_t dst_size = status_or_dst_size.value();
+  TF_ASSIGN_OR_RETURN(size_t dst_size,
+                      first_dst_buffer->GetOnDeviceSizeInBytes());
 
   const PJRT_Api* c_api = nullptr;
-  const PJRT_RawBuffer_Extension* extension = nullptr;
+  const PJRT_RawBuffer_Extension* extension =
+      GetRawBufferExtension(first_buffer, &c_api);
   PjRtCApiBuffer* first_capi_buffer =
       dynamic_cast<PjRtCApiBuffer*>(first_buffer);
 
-  if (first_capi_buffer) {
-    c_api = first_capi_buffer->pjrt_c_api();
-    PjRtCApiClient* capi_client =
-        dynamic_cast<PjRtCApiClient*>(first_capi_buffer->client());
-    extension = capi_client->FindExtension<PJRT_RawBuffer_Extension>(
-        PJRT_Extension_Type::PJRT_Extension_Type_RawBuffer);
-    if (!extension) {
-      throw std::runtime_error(
-          "RawBuffer extension not found in PjRtCApiClient");
-    }
+  if (first_capi_buffer && !extension) {
+    throw std::runtime_error("RawBuffer extension not found in PjRtCApiClient");
   }
 
   bool is_common_buffer =
@@ -575,10 +392,10 @@ inline PjRtCopyFuture transfer_d2h_batch_async_impl(
             jax::GetIfrtArrayFromPyObject(dst.ptr());
 
         auto* src_compat_arr =
-            dynamic_cast<xla::ifrt::PjRtCompatibleArray*>(
+            llvm::dyn_cast_or_null<xla::ifrt::PjRtCompatibleArray>(
                 src_ifrt_array);
         auto* dst_compat_arr =
-            dynamic_cast<xla::ifrt::PjRtCompatibleArray*>(
+            llvm::dyn_cast_or_null<xla::ifrt::PjRtCompatibleArray>(
                 dst_ifrt_array);
 
         if (src_compat_arr == nullptr || dst_compat_arr == nullptr) {
@@ -597,13 +414,10 @@ inline PjRtCopyFuture transfer_d2h_batch_async_impl(
           PjRtBuffer* src_buffer = src_buffers[i].get();
           PjRtBuffer* dst_buffer = dst_buffers[i].get();
 
-          auto status_or_ptr =
-              dst_buffer->client()->UnsafeBufferPointer(dst_buffer);
-          if (!status_or_ptr.ok()) {
-            throw std::runtime_error(
-                "Failed to get unsafe buffer pointer for dst");
-          }
-          uint8_t* dst_data = reinterpret_cast<uint8_t*>(status_or_ptr.value());
+          TF_ASSIGN_OR_RETURN(
+              uintptr_t u_ptr,
+              dst_buffer->client()->UnsafeBufferPointer(dst_buffer));
+          uint8_t* dst_data = reinterpret_cast<uint8_t*>(u_ptr);
 
           if (dst_size < physical_size) {
             throw std::runtime_error(
@@ -642,10 +456,10 @@ inline PjRtCopyFuture transfer_d2h_batch_async_impl(
             jax::GetIfrtArrayFromPyObject(dst.ptr());
 
         auto* src_compat_arr =
-            dynamic_cast<xla::ifrt::PjRtCompatibleArray*>(
+            llvm::dyn_cast_or_null<xla::ifrt::PjRtCompatibleArray>(
                 src_ifrt_array);
         auto* dst_compat_arr =
-            dynamic_cast<xla::ifrt::PjRtCompatibleArray*>(
+            llvm::dyn_cast_or_null<xla::ifrt::PjRtCompatibleArray>(
                 dst_ifrt_array);
 
         if (src_compat_arr == nullptr || dst_compat_arr == nullptr) {
@@ -664,13 +478,10 @@ inline PjRtCopyFuture transfer_d2h_batch_async_impl(
           PjRtBuffer* src_buffer = src_buffers[i].get();
           PjRtBuffer* dst_buffer = dst_buffers[i].get();
 
-          auto status_or_ptr =
-              dst_buffer->client()->UnsafeBufferPointer(dst_buffer);
-          if (!status_or_ptr.ok()) {
-            throw std::runtime_error(
-                "Failed to get unsafe buffer pointer for dst");
-          }
-          uint8_t* dst_data = reinterpret_cast<uint8_t*>(status_or_ptr.value());
+          TF_ASSIGN_OR_RETURN(
+              uintptr_t u_ptr,
+              dst_buffer->client()->UnsafeBufferPointer(dst_buffer));
+          uint8_t* dst_data = reinterpret_cast<uint8_t*>(u_ptr);
 
           if (dst_size < physical_size) {
             throw std::runtime_error(
@@ -717,51 +528,12 @@ inline PjRtCopyFuture transfer_d2h_batch_async_impl(
     }
   }
 
-  int64_t itemsize =
-      xla::ShapeUtil::ByteSizeOfPrimitiveType(shape.element_type());
-  int64_t logical_elements = 1;
-  for (int i = 0; i < shape.dimensions_size(); ++i) {
-    logical_elements *= shape.dimensions(i);
-  }
+  int64_t slice_byte_size = GetMajorSliceByteSize(first_buffer);
 
-  int64_t stride = 1;
-  if (shape.dimensions_size() > 1) {
-    for (int i = 1; i < shape.dimensions_size(); ++i) {
-      stride *= shape.dimensions(i);
-    }
-  }
-
-  int64_t non_major_product = stride;
-  if ((non_major_product * itemsize) % 4096 != 0) {
+  if (slice_byte_size % 4096 != 0) {
     throw std::runtime_error(
-        "Unsupported shape: product of non-major dimensions must be a multiple "
+        "Unsupported shape: slice byte size must be a multiple "
         "of tile size (4KB)");
-  }
-
-  auto pjrt_layout = first_buffer->layout();
-  const xla::Layout* xla_layout = nullptr;
-  if (pjrt_layout) {
-    xla_layout = &pjrt_layout->xla_layout();
-  }
-
-  int64_t size_per_major_dim = 0;
-  if (xla_layout && !xla_layout->tiles().empty()) {
-    const xla::Tile& tile = xla_layout->tiles()[0];
-    auto tile_dims = tile.dimensions();
-    if (tile_dims.size() != 2) {
-      throw std::runtime_error("Only 2D tiling supported for now");
-    }
-    int64_t tH = tile_dims[0];
-    int64_t tW = tile_dims[1];
-    int64_t rank = shape.dimensions_size();
-    int64_t H = shape.dimensions(rank - 2);
-    int64_t W = shape.dimensions(rank - 1);
-    int64_t num_tiles_H = (H + tH - 1) / tH;
-    int64_t num_tiles_W = (W + tW - 1) / tW;
-    size_per_major_dim = num_tiles_H * num_tiles_W * tH * tW * itemsize;
-    for (int i = 1; i < rank - 2; ++i) {
-      size_per_major_dim *= shape.dimensions(i);
-    }
   }
 
   for (size_t layer_idx = 0; layer_idx < n; ++layer_idx) {
@@ -772,9 +544,9 @@ inline PjRtCopyFuture transfer_d2h_batch_async_impl(
     xla::ifrt::Array* dst_ifrt_array = jax::GetIfrtArrayFromPyObject(dst.ptr());
 
     auto* src_compat_arr =
-        dynamic_cast<xla::ifrt::PjRtCompatibleArray*>(src_ifrt_array);
+        llvm::dyn_cast_or_null<xla::ifrt::PjRtCompatibleArray>(src_ifrt_array);
     auto* dst_compat_arr =
-        dynamic_cast<xla::ifrt::PjRtCompatibleArray*>(dst_ifrt_array);
+        llvm::dyn_cast_or_null<xla::ifrt::PjRtCompatibleArray>(dst_ifrt_array);
 
     if (src_compat_arr == nullptr || dst_compat_arr == nullptr) {
       throw std::runtime_error("Not a PjRt compatible array");
@@ -820,6 +592,12 @@ inline PjRtCopyFuture transfer_d2h_batch_async_impl(
           throw std::runtime_error("Failed to acquire external reference");
         }
         acc.AddExtHold(std::move(status_or_ext.value()));
+
+        TF_ASSIGN_OR_RETURN(c_raw_buffer,
+                            pjrt::PjRtCApiBuffer_CreateRawAliasOfBuffer(
+                                c_api, extension, capi_buffer->c_buffer()));
+        c_api_hold =
+            std::make_shared<RawBufferHolder>(c_api, extension, c_raw_buffer);
       }
 
       for (size_t j = 0; j < src_offsets_major_dim.size(); ++j) {
@@ -829,48 +607,41 @@ inline PjRtCopyFuture transfer_d2h_batch_async_impl(
             nb::cast<int64_t>(dst_offsets_major_dim[j]);
         int64_t major_dim_size = nb::cast<int64_t>(copy_sizes_major_dim[j]);
 
-        if (xla_layout && !xla_layout->tiles().empty()) {
-          int64_t physical_offset = src_major_dim_offset * size_per_major_dim;
-          int64_t size_to_copy = major_dim_size * size_per_major_dim;
-          int64_t dst_offset = dst_major_dim_offset * size_per_major_dim;
+        int64_t physical_offset = src_major_dim_offset * slice_byte_size;
+        int64_t size_to_copy = major_dim_size * slice_byte_size;
+        int64_t dst_offset = dst_major_dim_offset * slice_byte_size;
 
-          if (physical_offset + size_to_copy > physical_size) {
-            throw std::runtime_error("Copy range exceeds source buffer size");
-          }
-          if (dst_offset + size_to_copy > dst_size) {
-            throw std::runtime_error(
-                "Copy range exceeds destination buffer size");
-          }
-          uint8_t* dst_ptr = dst_data + dst_offset;
-
-          xla::Future<> future;
-          {
-            nb::gil_scoped_release release;
-            future = src_buffer->CopyRawToHost(dst_ptr, physical_offset,
-                                               size_to_copy);
-          }
-          shard_futures.push_back(std::move(future));
-        } else {
-          int64_t src_offset = src_major_dim_offset * stride * itemsize;
-          int64_t dst_offset = dst_major_dim_offset * stride * itemsize;
-          int64_t size = major_dim_size * stride * itemsize;
-
-          if (src_offset + size > physical_size) {
-            throw std::runtime_error("Copy range exceeds source buffer size");
-          }
-          if (dst_offset + size > dst_size) {
-            throw std::runtime_error(
-                "Copy range exceeds destination buffer size");
-          }
-          uint8_t* dst_ptr = dst_data + dst_offset;
-
-          xla::Future<> future;
-          {
-            nb::gil_scoped_release release;
-            future = src_buffer->CopyRawToHost(dst_ptr, src_offset, size);
-          }
-          shard_futures.push_back(std::move(future));
+        if (physical_offset + size_to_copy > physical_size) {
+          throw std::runtime_error("Copy range exceeds source buffer size. "
+                                   "physical_offset: " + std::to_string(physical_offset) +
+                                   ", size_to_copy: " + std::to_string(size_to_copy) +
+                                   ", physical_size: " + std::to_string(physical_size) +
+                                   ", slice_byte_size: " + std::to_string(slice_byte_size) +
+                                   ", major_dim_size: " + std::to_string(major_dim_size) +
+                                   ", src_major_dim_offset: " + std::to_string(src_major_dim_offset));
         }
+        if (dst_offset + size_to_copy > dst_size) {
+          throw std::runtime_error(
+              "Copy range exceeds destination buffer size. "
+              "dst_offset: " + std::to_string(dst_offset) +
+              ", size_to_copy: " + std::to_string(size_to_copy) +
+              ", dst_size: " + std::to_string(dst_size) +
+              ", slice_byte_size: " + std::to_string(slice_byte_size) +
+              ", major_dim_size: " + std::to_string(major_dim_size) +
+              ", dst_major_dim_offset: " + std::to_string(dst_major_dim_offset));
+        }
+        uint8_t* dst_ptr = dst_data + dst_offset;
+
+        xla::Future<> future;
+        if (common_buffer) {
+          future =
+              src_buffer->CopyRawToHost(dst_ptr, physical_offset, size_to_copy);
+        } else if (capi_buffer) {
+          future = pjrt::PjRtCApiRawBuffer_CopyRawDeviceToHost(
+              c_api, extension, c_raw_buffer, dst_ptr, physical_offset,
+              size_to_copy);
+        }
+        shard_futures.push_back(std::move(future));
       }
       acc.Append(std::move(shard_futures), c_api_hold);
     }
@@ -878,17 +649,17 @@ inline PjRtCopyFuture transfer_d2h_batch_async_impl(
   return acc;
 }
 
-inline void transfer_h2d_internal(const nb::object& src_arr,
-                                  const nb::object& dst_arr,
-                                  const nb::list& src_offsets_major_dim,
-                                  const nb::list& dst_offsets_major_dim,
-                                  const nb::list& copy_sizes_major_dim,
-                                  PjRtCopyFuture& acc) {
+inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_internal(
+    const nb::object& src_arr, const nb::object& dst_arr,
+    const nb::list& src_offsets_major_dim,
+    const nb::list& dst_offsets_major_dim,
+    const nb::list& copy_sizes_major_dim) {
+  PjRtCopyFuture acc({});
   nb::object addressable_shards = dst_arr.attr("addressable_shards");
   size_t num_shards = nb::len(addressable_shards);
 
   if (num_shards == 0) {
-    return;
+    return acc;
   }
 
   nb::object first_shard_data = addressable_shards[0].attr("data");
@@ -935,22 +706,6 @@ inline void transfer_h2d_internal(const nb::object& src_arr,
         "Number of shards in source and destination must match");
   }
 
-  int64_t itemsize =
-      xla::ShapeUtil::ByteSizeOfPrimitiveType(shape.element_type());
-  int64_t stride = 1;
-  if (shape.dimensions_size() == 1) {
-    stride = shape.dimensions(0);
-  } else {
-    for (int i = 1; i < shape.dimensions_size(); ++i) {
-      stride *= shape.dimensions(i);
-    }
-  }
-  if (is_partial && (stride * itemsize) % 4096 != 0) {
-    throw std::runtime_error(
-        "Unsupported shape: product of non-major dimensions must be a multiple "
-        "of tile size (4KB) on device for partial copies");
-  }
-
   PjRtBuffer* first_dst_buffer =
       jax::GetPjrtBufferFromPyObject(first_shard_data.ptr());
 
@@ -960,55 +715,22 @@ inline void transfer_h2d_internal(const nb::object& src_arr,
   }
   int64_t physical_size = status_or_dst_size.value();
 
-  CommonPjRtBuffer* first_common_buffer =
-      dynamic_cast<CommonPjRtBuffer*>(first_dst_buffer);
+  const PJRT_Api* c_api = nullptr;
+  const PJRT_RawBuffer_Extension* extension =
+      GetRawBufferExtension(first_dst_buffer, &c_api);
   PjRtCApiBuffer* first_capi_buffer =
       dynamic_cast<PjRtCApiBuffer*>(first_dst_buffer);
 
-  const PJRT_Api* c_api = nullptr;
-  const PJRT_RawBuffer_Extension* extension = nullptr;
-
-  if (first_capi_buffer) {
-    c_api = first_capi_buffer->pjrt_c_api();
-    PjRtCApiClient* capi_client =
-        dynamic_cast<PjRtCApiClient*>(first_capi_buffer->client());
-    extension = capi_client->FindExtension<PJRT_RawBuffer_Extension>(
-        PJRT_Extension_Type::PJRT_Extension_Type_RawBuffer);
-    if (!extension) {
-      throw std::runtime_error(
-          "RawBuffer extension not found in PjRtCApiClient");
-    }
+  if (first_capi_buffer && !extension) {
+    throw std::runtime_error("RawBuffer extension not found in PjRtCApiClient");
   }
 
-  auto pjrt_layout = first_dst_buffer->layout();
-  const xla::Layout* xla_layout = nullptr;
-  if (pjrt_layout) {
-    xla_layout = &pjrt_layout->xla_layout();
-  }
+  int64_t slice_byte_size = GetMajorSliceByteSize(first_dst_buffer);
 
-  int64_t size_per_major_dim = 0;
-  if (is_partial) {
-    if (xla_layout && !xla_layout->tiles().empty()) {
-      const xla::Tile& tile = xla_layout->tiles()[0];
-      auto tile_dims = tile.dimensions();
-      if (tile_dims.size() != 2) {
-        throw std::runtime_error("Only 2D tiling supported for now");
-      }
-      int64_t tH = tile_dims[0];
-      int64_t tW = tile_dims[1];
-
-      int64_t rank = shape.dimensions_size();
-      int64_t H = shape.dimensions(rank - 2);
-      int64_t W = shape.dimensions(rank - 1);
-
-      int64_t num_tiles_H = (H + tH - 1) / tH;
-      int64_t num_tiles_W = (W + tW - 1) / tW;
-
-      size_per_major_dim = num_tiles_H * num_tiles_W * tH * tW * itemsize;
-      for (int i = 1; i < rank - 2; ++i) {
-        size_per_major_dim *= shape.dimensions(i);
-      }
-    }
+  if (is_partial && slice_byte_size % 4096 != 0) {
+    throw std::runtime_error(
+        "Unsupported shape: slice byte size must be a multiple "
+        "of tile size (4KB) on device for partial copies");
   }
 
   for (size_t i = 0; i < num_shards; ++i) {
@@ -1064,7 +786,6 @@ inline void transfer_h2d_internal(const nb::object& src_arr,
 
     if (!is_partial) {
       // Full copy.
-      int64_t physical_size = status_or_dst_size.value();
       if (src_size < physical_size) {
         throw std::runtime_error("Source buffer too small for raw tiled copy");
       }
@@ -1091,84 +812,49 @@ inline void transfer_h2d_internal(const nb::object& src_arr,
             nb::cast<int64_t>(dst_offsets_major_dim[j]);
         int64_t major_dim_size = nb::cast<int64_t>(copy_sizes_major_dim[j]);
 
-        // Partial copy.
-        if (xla_layout && !xla_layout->tiles().empty() &&
-            shape.dimensions_size() >= 1) {
-          int64_t physical_offset = dst_major_dim_offset * size_per_major_dim;
-          int64_t size_to_copy = major_dim_size * size_per_major_dim;
-          int64_t src_offset = src_major_dim_offset * size_per_major_dim;
+        int64_t physical_offset = dst_major_dim_offset * slice_byte_size;
+        int64_t size_to_copy = major_dim_size * slice_byte_size;
+        int64_t src_offset = src_major_dim_offset * slice_byte_size;
 
-          if (src_offset + size_to_copy > src_size) {
-            throw std::runtime_error("Copy range exceeds source buffer size");
-          }
-          if (physical_offset + size_to_copy > physical_size) {
-            throw std::runtime_error(
-                "Copy range exceeds destination buffer size");
-          }
-          const uint8_t* src_ptr = src_data + src_offset;
+        if (src_offset + size_to_copy > src_size) {
+          throw std::runtime_error("Copy range exceeds source buffer size");
+        }
+        if (physical_offset + size_to_copy > physical_size) {
+          throw std::runtime_error(
+              "Copy range exceeds destination buffer size");
+        }
+        const uint8_t* src_ptr = src_data + src_offset;
 
-          xla::Future<> future;
-          if (common_buffer) {
-            {
-              nb::gil_scoped_release release;
-              future = raw_buffer->CopyRawHostToDevice(src_ptr, physical_offset,
-                                                       size_to_copy);
-            }
-            acc.Append({std::move(future)}, c_api_hold, shared_hold);
-          } else if (capi_buffer) {
-            {
-              nb::gil_scoped_release release;
-              future = pjrt::PjRtCApiRawBuffer_CopyRawHostToDevice(
-                  c_api, extension, c_raw_buffer, src_ptr, physical_offset,
-                  size_to_copy);
-            }
-            acc.Append({std::move(future)}, c_api_hold, nullptr);
+        xla::Future<> future;
+        if (common_buffer) {
+          {
+            nb::gil_scoped_release release;
+            future = raw_buffer->CopyRawHostToDevice(src_ptr, physical_offset,
+                                                     size_to_copy);
           }
-        } else {
-          int64_t src_offset = src_major_dim_offset * stride * itemsize;
-          int64_t dst_offset = dst_major_dim_offset * stride * itemsize;
-          int64_t size = major_dim_size * stride * itemsize;
-
-          if (src_offset + size > src_size) {
-            throw std::runtime_error("Copy range exceeds source buffer size");
+          acc.Append({std::move(future)}, c_api_hold, shared_hold);
+        } else if (capi_buffer) {
+          {
+            nb::gil_scoped_release release;
+            future = pjrt::PjRtCApiRawBuffer_CopyRawHostToDevice(
+                c_api, extension, c_raw_buffer, src_ptr, physical_offset,
+                size_to_copy);
           }
-          if (dst_offset + size > physical_size) {
-            throw std::runtime_error(
-                "Copy range exceeds destination buffer size");
-          }
-          const uint8_t* src_ptr = src_data + src_offset;
-
-          xla::Future<> future;
-          if (common_buffer) {
-            {
-              nb::gil_scoped_release release;
-              future =
-                  raw_buffer->CopyRawHostToDevice(src_ptr, dst_offset, size);
-            }
-            acc.Append({std::move(future)}, c_api_hold, shared_hold);
-          } else if (capi_buffer) {
-            {
-              nb::gil_scoped_release release;
-              future = pjrt::PjRtCApiRawBuffer_CopyRawHostToDevice(
-                  c_api, extension, c_raw_buffer, src_ptr, dst_offset, size);
-            }
-            acc.Append({std::move(future)}, c_api_hold, nullptr);
-          }
+          acc.Append({std::move(future)}, c_api_hold, nullptr);
         }
       }
     }
   }
+  return acc;
 }
 
-inline PjRtCopyFuture transfer_h2d_async(
+inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_async(
     const nb::object& src_arr, const nb::object& dst_arr,
     const nb::list& src_offsets_major_dim = nb::list(),
     const nb::list& dst_offsets_major_dim = nb::list(),
     const nb::list& copy_sizes_major_dim = nb::list()) {
-  PjRtCopyFuture acc;
-  transfer_h2d_internal(src_arr, dst_arr, src_offsets_major_dim,
-                        dst_offsets_major_dim, copy_sizes_major_dim, acc);
-  return acc;
+  return transfer_h2d_internal(src_arr, dst_arr, src_offsets_major_dim,
+                               dst_offsets_major_dim, copy_sizes_major_dim);
 }
 
 inline PjRtCopyFuture transfer_h2d_batch_async_naive(
@@ -1180,15 +866,16 @@ inline PjRtCopyFuture transfer_h2d_batch_async_naive(
     throw std::runtime_error("Lengths of src_arrs and dst_arrs must match");
   }
   size_t n = nb::len(src_arrs);
-  PjRtCopyFuture acc;
+  PjRtCopyFuture acc({});
   for (size_t i = 0; i < n; ++i) {
-    transfer_h2d_internal(src_arrs[i], dst_arrs[i], src_offsets_major_dim,
-                          dst_offsets_major_dim, copy_sizes_major_dim, acc);
+    acc.Append(ValueOrThrow(
+        transfer_h2d_internal(src_arrs[i], dst_arrs[i], src_offsets_major_dim,
+                              dst_offsets_major_dim, copy_sizes_major_dim)));
   }
   return acc;
 }
 
-inline PjRtCopyFuture transfer_h2d_batch_async_impl(
+inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async_impl(
     const nb::list& src_arrs, const nb::list& dst_arrs,
     const nb::list& src_offsets_major_dim = nb::list(),
     const nb::list& dst_offsets_major_dim = nb::list(),
@@ -1197,7 +884,7 @@ inline PjRtCopyFuture transfer_h2d_batch_async_impl(
     throw std::runtime_error("Lengths of src_arrs and dst_arrs must match");
   }
   size_t n = nb::len(src_arrs);
-  PjRtCopyFuture acc;
+  PjRtCopyFuture acc({});
   if (n == 0) return acc;
 
   nb::object first_src_arr = src_arrs[0];
@@ -1270,10 +957,10 @@ inline PjRtCopyFuture transfer_h2d_batch_async_impl(
             jax::GetIfrtArrayFromPyObject(dst.ptr());
 
         auto* src_compat_arr =
-            dynamic_cast<xla::ifrt::PjRtCompatibleArray*>(
+            llvm::dyn_cast_or_null<xla::ifrt::PjRtCompatibleArray>(
                 src_ifrt_array);
         auto* dst_compat_arr =
-            dynamic_cast<xla::ifrt::PjRtCompatibleArray*>(
+            llvm::dyn_cast_or_null<xla::ifrt::PjRtCompatibleArray>(
                 dst_ifrt_array);
 
         if (src_compat_arr == nullptr || dst_compat_arr == nullptr) {
@@ -1344,10 +1031,10 @@ inline PjRtCopyFuture transfer_h2d_batch_async_impl(
             jax::GetIfrtArrayFromPyObject(dst.ptr());
 
         auto* src_compat_arr =
-            dynamic_cast<xla::ifrt::PjRtCompatibleArray*>(
+            llvm::dyn_cast_or_null<xla::ifrt::PjRtCompatibleArray>(
                 src_ifrt_array);
         auto* dst_compat_arr =
-            dynamic_cast<xla::ifrt::PjRtCompatibleArray*>(
+            llvm::dyn_cast_or_null<xla::ifrt::PjRtCompatibleArray>(
                 dst_ifrt_array);
 
         if (src_compat_arr == nullptr || dst_compat_arr == nullptr) {
@@ -1422,47 +1109,12 @@ inline PjRtCopyFuture transfer_h2d_batch_async_impl(
     }
   }
 
-  int64_t itemsize =
-      xla::ShapeUtil::ByteSizeOfPrimitiveType(shape.element_type());
-  int64_t stride = 1;
-  if (shape.dimensions_size() == 1) {
-    stride = shape.dimensions(0);
-  } else {
-    for (int i = 1; i < shape.dimensions_size(); ++i) {
-      stride *= shape.dimensions(i);
-    }
-  }
+  int64_t slice_byte_size = GetMajorSliceByteSize(first_buffer);
 
-  if ((stride * itemsize) % 4096 != 0) {
+  if (slice_byte_size % 4096 != 0) {
     throw std::runtime_error(
-        "Unsupported shape: product of non-major dimensions must be a multiple "
+        "Unsupported shape: slice byte size must be a multiple "
         "of tile size (4KB)");
-  }
-
-  auto pjrt_layout = first_buffer->layout();
-  const xla::Layout* xla_layout = nullptr;
-  if (pjrt_layout) {
-    xla_layout = &pjrt_layout->xla_layout();
-  }
-
-  int64_t size_per_major_dim = 0;
-  if (xla_layout && !xla_layout->tiles().empty()) {
-    const xla::Tile& tile = xla_layout->tiles()[0];
-    auto tile_dims = tile.dimensions();
-    if (tile_dims.size() != 2) {
-      throw std::runtime_error("Only 2D tiling supported for now");
-    }
-    int64_t tH = tile_dims[0];
-    int64_t tW = tile_dims[1];
-    int64_t rank = shape.dimensions_size();
-    int64_t H = shape.dimensions(rank - 2);
-    int64_t W = shape.dimensions(rank - 1);
-    int64_t num_tiles_H = (H + tH - 1) / tH;
-    int64_t num_tiles_W = (W + tW - 1) / tW;
-    size_per_major_dim = num_tiles_H * num_tiles_W * tH * tW * itemsize;
-    for (int i = 1; i < rank - 2; ++i) {
-      size_per_major_dim *= shape.dimensions(i);
-    }
   }
 
   for (size_t layer_idx = 0; layer_idx < n; ++layer_idx) {
@@ -1472,52 +1124,33 @@ inline PjRtCopyFuture transfer_h2d_batch_async_impl(
     xla::ifrt::Array* src_ifrt_array = jax::GetIfrtArrayFromPyObject(src.ptr());
     xla::ifrt::Array* dst_ifrt_array = jax::GetIfrtArrayFromPyObject(dst.ptr());
 
-    auto status_or_src_shards =
-        src_ifrt_array->DisassembleIntoSingleDeviceArrays(
-            xla::ifrt::ArrayCopySemantics::kReuseInput,
-            xla::ifrt::SingleDeviceShardSemantics::kAddressableShards);
-    auto status_or_dst_shards =
-        dst_ifrt_array->DisassembleIntoSingleDeviceArrays(
-            xla::ifrt::ArrayCopySemantics::kReuseInput,
-            xla::ifrt::SingleDeviceShardSemantics::kAddressableShards);
+    auto* src_compat_arr =
+        llvm::dyn_cast_or_null<xla::ifrt::PjRtCompatibleArray>(src_ifrt_array);
+    auto* dst_compat_arr =
+        llvm::dyn_cast_or_null<xla::ifrt::PjRtCompatibleArray>(dst_ifrt_array);
 
-    if (!status_or_src_shards.ok() || !status_or_dst_shards.ok()) {
-      throw std::runtime_error("Failed to disassemble arrays");
+    if (src_compat_arr == nullptr || dst_compat_arr == nullptr) {
+      throw std::runtime_error("Not a PjRt compatible array");
     }
 
-    const std::vector<xla::ifrt::ArrayRef>& src_shards =
-        status_or_src_shards.value();
-    const std::vector<xla::ifrt::ArrayRef>& dst_shards =
-        status_or_dst_shards.value();
+    auto src_buffers = src_compat_arr->pjrt_buffers();
+    auto dst_buffers = dst_compat_arr->pjrt_buffers();
 
-    if (src_shards.size() != num_shards || dst_shards.size() != num_shards) {
+    if (src_buffers.size() != num_shards || dst_buffers.size() != num_shards) {
       throw std::runtime_error("Number of shards mismatch");
     }
 
     for (size_t i = 0; i < num_shards; ++i) {
-      xla::ifrt::Array* src_shard = src_shards[i].get();
-      xla::ifrt::Array* dst_shard = dst_shards[i].get();
+      PjRtBuffer* src_buffer = src_buffers[i].get();
+      PjRtBuffer* dst_buffer = dst_buffers[i].get();
 
-      auto* src_compat_arr =
-          dynamic_cast<xla::ifrt::PjRtCompatibleArray*>(src_shard);
-      auto* dst_compat_arr =
-          dynamic_cast<xla::ifrt::PjRtCompatibleArray*>(dst_shard);
-
-      if (src_compat_arr == nullptr || dst_compat_arr == nullptr) {
-        throw std::runtime_error("Not a PjRt compatible array shard");
+      auto status_or_ptr =
+          src_buffer->client()->UnsafeBufferPointer(src_buffer);
+      if (!status_or_ptr.ok()) {
+        throw std::runtime_error("Failed to get unsafe buffer pointer for src");
       }
-
-      PjRtBuffer* src_buffer = src_compat_arr->pjrt_buffers().front().get();
-      PjRtBuffer* dst_buffer = dst_compat_arr->pjrt_buffers().front().get();
-
-      auto status_or_ext = src_buffer->AcquireExternalReference();
-      if (!status_or_ext.ok()) {
-        throw std::runtime_error(
-            "Failed to acquire external reference for src");
-      }
-      const void* src_ptr =
-          status_or_ext.value()->OpaqueDeviceMemoryDataPointer();
-      const uint8_t* src_data = reinterpret_cast<const uint8_t*>(src_ptr);
+      const uint8_t* src_data =
+          reinterpret_cast<const uint8_t*>(status_or_ptr.value());
 
       size_t src_size = src_buffer->GetOnDeviceSizeInBytes().value();
 
@@ -1562,55 +1195,29 @@ inline PjRtCopyFuture transfer_h2d_batch_async_impl(
             nb::cast<int64_t>(dst_offsets_major_dim[j]);
         int64_t major_dim_size = nb::cast<int64_t>(copy_sizes_major_dim[j]);
 
-        if (xla_layout && !xla_layout->tiles().empty() &&
-            shape.dimensions_size() >= 1) {
-          int64_t physical_offset = dst_major_dim_offset * size_per_major_dim;
-          int64_t size_to_copy = major_dim_size * size_per_major_dim;
-          int64_t src_offset = src_major_dim_offset * size_per_major_dim;
+        int64_t physical_offset = dst_major_dim_offset * slice_byte_size;
+        int64_t size_to_copy = major_dim_size * slice_byte_size;
+        int64_t src_offset = src_major_dim_offset * slice_byte_size;
 
-          if (src_offset + size_to_copy > src_size) {
-            throw std::runtime_error("Copy range exceeds source buffer size");
-          }
-          if (physical_offset + size_to_copy > physical_size) {
-            throw std::runtime_error(
-                "Copy range exceeds destination buffer size");
-          }
-          const uint8_t* src_ptr = src_data + src_offset;
+        if (src_offset + size_to_copy > src_size) {
+          throw std::runtime_error("Copy range exceeds source buffer size");
+        }
+        if (physical_offset + size_to_copy > physical_size) {
+          throw std::runtime_error(
+              "Copy range exceeds destination buffer size");
+        }
+        const uint8_t* src_ptr = src_data + src_offset;
 
-          xla::Future<> future;
-          if (common_buffer) {
-            future = raw_buffer->CopyRawHostToDevice(src_ptr, physical_offset,
-                                                     size_to_copy);
-            acc.Append({std::move(future)}, c_api_hold, shared_hold);
-          } else if (capi_buffer) {
-            future = pjrt::PjRtCApiRawBuffer_CopyRawHostToDevice(
-                c_api, extension, c_raw_buffer, src_ptr, physical_offset,
-                size_to_copy);
-            acc.Append({std::move(future)}, c_api_hold, nullptr);
-          }
-        } else {
-          int64_t src_offset = src_major_dim_offset * stride * itemsize;
-          int64_t dst_offset = dst_major_dim_offset * stride * itemsize;
-          int64_t size = major_dim_size * stride * itemsize;
-
-          if (src_offset + size > src_size) {
-            throw std::runtime_error("Copy range exceeds source buffer size");
-          }
-          if (dst_offset + size > physical_size) {
-            throw std::runtime_error(
-                "Copy range exceeds destination buffer size");
-          }
-          const uint8_t* src_ptr = src_data + src_offset;
-
-          xla::Future<> future;
-          if (common_buffer) {
-            future = raw_buffer->CopyRawHostToDevice(src_ptr, dst_offset, size);
-            acc.Append({std::move(future)}, c_api_hold, shared_hold);
-          } else if (capi_buffer) {
-            future = pjrt::PjRtCApiRawBuffer_CopyRawHostToDevice(
-                c_api, extension, c_raw_buffer, src_ptr, dst_offset, size);
-            acc.Append({std::move(future)}, c_api_hold, nullptr);
-          }
+        xla::Future<> future;
+        if (common_buffer) {
+          future = raw_buffer->CopyRawHostToDevice(src_ptr, physical_offset,
+                                                   size_to_copy);
+          acc.Append({std::move(future)}, c_api_hold, shared_hold);
+        } else if (capi_buffer) {
+          future = pjrt::PjRtCApiRawBuffer_CopyRawHostToDevice(
+              c_api, extension, c_raw_buffer, src_ptr, physical_offset,
+              size_to_copy);
+          acc.Append({std::move(future)}, c_api_hold, nullptr);
         }
       }
     }
@@ -1622,33 +1229,54 @@ inline void transfer_d2h(const nb::object& src_arr, const nb::object& dst_arr,
                          const nb::list& src_offsets_major_dim = nb::list(),
                          const nb::list& dst_offsets_major_dim = nb::list(),
                          const nb::list& copy_sizes_major_dim = nb::list()) {
-  transfer_d2h_async(src_arr, dst_arr, src_offsets_major_dim,
-                     dst_offsets_major_dim, copy_sizes_major_dim)
-      .Await();
+  auto future = ValueOrThrow(
+      transfer_d2h_async(src_arr, dst_arr, src_offsets_major_dim,
+                         dst_offsets_major_dim, copy_sizes_major_dim));
+  nb::gil_scoped_release release;
+  future.Await();
 }
 
 inline void transfer_h2d(const nb::object& src_arr, const nb::object& dst_arr,
                          const nb::list& src_offsets_major_dim = nb::list(),
                          const nb::list& dst_offsets_major_dim = nb::list(),
                          const nb::list& copy_sizes_major_dim = nb::list()) {
-  transfer_h2d_async(src_arr, dst_arr, src_offsets_major_dim,
-                     dst_offsets_major_dim, copy_sizes_major_dim)
-      .Await();
+  auto future = ValueOrThrow(
+      transfer_h2d_async(src_arr, dst_arr, src_offsets_major_dim,
+                         dst_offsets_major_dim, copy_sizes_major_dim));
+  nb::gil_scoped_release release;
+  future.Await();
 }
 
 inline void await_all(const nb::object& future_obj) {
   if (nb::isinstance<PjRtCopyFuture>(future_obj)) {
-    nb::cast<PjRtCopyFuture&>(future_obj).Await();
+    PjRtCopyFuture& future = nb::cast<PjRtCopyFuture&>(future_obj);
+    nb::gil_scoped_release release;
+    future.Await();
   } else if (nb::isinstance<nb::list>(future_obj)) {
     nb::list futures = nb::cast<nb::list>(future_obj);
     for (size_t i = 0; i < futures.size(); ++i) {
-      nb::cast<PjRtCopyFuture&>(futures[i]).Await();
+      PjRtCopyFuture& future = nb::cast<PjRtCopyFuture&>(futures[i]);
+      nb::gil_scoped_release release;
+      future.Await();
     }
   }
 }
 
-void BuildRawTransferAPI(nanobind::module_& m);
+inline bool is_ready(const nb::object& future_obj) {
+  if (nb::isinstance<PjRtCopyFuture>(future_obj)) {
+    return nb::cast<const PjRtCopyFuture&>(future_obj).IsReady();
+  } else if (nb::isinstance<nb::list>(future_obj)) {
+    nb::list futures = nb::cast<nb::list>(future_obj);
+    for (size_t i = 0; i < futures.size(); ++i) {
+      if (!nb::cast<const PjRtCopyFuture&>(futures[i]).IsReady()) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return true;
+}
 
-}  // namespace jax
+}  // namespace raiden
 
-#endif  // JAXLIB_PY_RAW_TRANSFER_IMPL_H_
+#endif  // THIRD_PARTY_TPU_RAIDEN_RAIDEN_LIB_RAW_TRANSFER_RAW_TRANSFER_IMPL_H_
