@@ -20,7 +20,7 @@ import numpy as np
 import torch
 import torch_tpu
 
-from raiden_lib.raw_transfer import torch_raw_transfer
+from raiden_lib.raw_transfer.torch import torch_raw_transfer
 
 os.environ["TORCH_TPU_TOPOLOGY"] = "1x1"
 

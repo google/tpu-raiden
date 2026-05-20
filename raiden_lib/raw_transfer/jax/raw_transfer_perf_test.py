@@ -21,9 +21,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from google3.perftools.accelerators.xprof.api.python import traceme
-from raiden_lib.raw_transfer import raw_transfer
-from raiden_lib.raw_transfer import raw_transfer_profiled
-from raiden_lib.raw_transfer import utils
+from raiden_lib.raw_transfer.jax import raw_transfer
+from raiden_lib.raw_transfer.jax import raw_transfer_profiled
+from raiden_lib.raw_transfer.jax import utils
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 

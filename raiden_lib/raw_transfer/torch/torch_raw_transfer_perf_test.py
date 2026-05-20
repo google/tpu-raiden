@@ -28,7 +28,7 @@ from torch_tpu._internal.utils import hardware
 from torch_tpu.tests.distributed import distributed_utils
 
 from google3.pyglib.contrib.g3_multiprocessing import g3_multiprocessing
-from raiden_lib.raw_transfer import torch_raw_transfer
+from raiden_lib.raw_transfer.torch import torch_raw_transfer
 
 SUPPORTED_DTYPES = {
     torch.float8_e4m3fn: "fp8",

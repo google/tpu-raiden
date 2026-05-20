@@ -968,7 +968,7 @@ void KVCacheManager::H2hReadWorker(int stream_idx, const std::string& peer,
 
 NB_MODULE(kv_cache_manager, m) {
   nb::module_::import_(
-      "google3.third_party.tpu_raiden.raiden_lib.raw_transfer.raw_transfer");
+      "google3.third_party.tpu_raiden.raiden_lib.raw_transfer.jax.raw_transfer");
   nb::class_<tpu_raiden::kv_cache::KVCacheManager>(m, "KVCacheManager")
       .def(nb::init<nb::list, int, std::optional<int>, int, bool, int>(),
            nb::arg("device_arrays"), nb::arg("block_size") = 1,
