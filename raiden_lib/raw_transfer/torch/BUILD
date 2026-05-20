@@ -13,7 +13,8 @@
 # limitations under the License.
 
 load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
-load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@rules_python//python:defs.bzl", "py_test")
+load("//devtools/python/blaze:strict.bzl", "py_strict_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -40,10 +41,10 @@ nanobind_extension(
         "//third_party/py/torch_tpu/eager:structured_log_buffer",
         "//third_party/py/torch_tpu/eager:tensor_to_buffer",
         "//third_party/pybind11",
-        "//third_party/tensorflow/compiler/xla:future",
-        "//third_party/tensorflow/compiler/xla:shape_util",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@xla//xla:future",
+        "@xla//xla:shape_util",
         "@xla//xla/pjrt:common_pjrt_client",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:pjrt_layout",
@@ -54,7 +55,7 @@ nanobind_extension(
     ],
 )
 
-py_library(
+py_strict_library(
     name = "torch_raw_transfer",
     srcs = ["torch_raw_transfer.py"],
     deps = [

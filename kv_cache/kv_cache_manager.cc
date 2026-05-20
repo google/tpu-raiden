@@ -43,9 +43,9 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
 #include "absl/synchronization/mutex.h"
-#include "nanobind/include/nanobind/nanobind.h"
-#include "nanobind/include/nanobind/stl/optional.h"
-#include "nanobind/include/nanobind/stl/string.h"
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
+#include <nanobind/stl/string.h>
 #include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/status_casters.h"
@@ -401,14 +401,15 @@ KVCacheManager::KVCacheManager(nb::list device_arrays, int block_size,
                                std::optional<int> local_port,
                                int host_blocks_to_allocate,
                                bool unsafe_skip_buffer_lock, int parallelism)
-    : device_arrays_(std::move(device_arrays)), parallelism_(parallelism) {
-  num_layers_ = nb::len(device_arrays_);
+    : device_arrays_(std::move(device_arrays)),
+      parallelism_(parallelism) {
+  num_layers_ = nb::len(*device_arrays_);
 
   if (num_layers_ == 0) {
     return;
   }
 
-  nb::object first_dst_arr = device_arrays_[0];
+  nb::object first_dst_arr = (*device_arrays_)[0];
   nb::tuple global_shape = nb::cast<nb::tuple>(first_dst_arr.attr("shape"));
   int64_t global_major_dim = nb::cast<int64_t>(global_shape[0]);
 
@@ -464,7 +465,7 @@ KVCacheManager::KVCacheManager(nb::list device_arrays, int block_size,
   // Extract all layer and shard pointers
   layers_.reserve(num_layers_);
   for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
-    nb::object dst = device_arrays_[layer_idx];
+    nb::object dst = (*device_arrays_)[layer_idx];
     xla::ifrt::Array* dst_ifrt_array = jax::GetIfrtArrayFromPyObject(dst.ptr());
     auto* dst_compat_arr =
         llvm::dyn_cast_or_null<xla::ifrt::PjRtCompatibleArray>(dst_ifrt_array);
@@ -529,6 +530,70 @@ KVCacheManager::KVCacheManager(nb::list device_arrays, int block_size,
     server_ = std::make_unique<BlockTransportServer>(this, local_port.value());
   }
 }
+
+KVCacheManager::KVCacheManager(size_t num_layers, size_t num_shards,
+                               size_t slice_byte_size, int block_size,
+                               std::optional<int> local_port,
+                               std::optional<int> host_blocks_to_allocate,
+                               int parallelism)
+    : num_layers_(num_layers),
+      num_shards_(num_shards),
+      slice_byte_size_(slice_byte_size),
+      block_size_(block_size),
+      parallelism_(parallelism) {
+  shard_factor_ = 1;
+
+  if (block_size_ <= 0) {
+    throw std::invalid_argument("Block size must be greater than 0");
+  }
+
+  int total_blocks = host_blocks_to_allocate.value_or(0);
+  block_manager_ = std::make_unique<LogicalBlockManager>(total_blocks);
+
+  layers_.reserve(num_layers_);
+  for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
+    LayerInfo layer_info;
+    layer_info.shards.reserve(num_shards_);
+
+    for (size_t i = 0; i < num_shards_; ++i) {
+      ShardBufferInfo shard_info;
+
+      int num_host_blocks = host_blocks_to_allocate.value_or(0);
+      size_t alloc_size = num_host_blocks * block_size_ * slice_byte_size_;
+      void* ptr = nullptr;
+      if (alloc_size > 0) {
+        if (posix_memalign(&ptr, 64, alloc_size) != 0) {
+          throw std::runtime_error("Failed to allocate host buffer");
+        }
+        std::memset(ptr, 0, alloc_size);
+      }
+      shard_info.owned_host_buffer =
+          std::unique_ptr<uint8_t[], void (*)(void*)>(
+              static_cast<uint8_t*>(ptr), [](void* p) { free(p); });
+      shard_info.host_ptr = shard_info.owned_host_buffer.get();
+      shard_info.host_size = alloc_size;
+
+      shard_info.buffer = nullptr;
+
+      layer_info.shards.push_back(std::move(shard_info));
+    }
+    layers_.push_back(std::move(layer_info));
+  }
+
+  if (local_port.has_value()) {
+    server_ = std::make_unique<BlockTransportServer>(this, local_port.value());
+  }
+}
+
+const uint8_t* KVCacheManager::GetHostPointer(size_t layer_idx,
+                                              size_t shard_idx) const {
+  if (layer_idx >= num_layers_ || shard_idx >= num_shards_) {
+    return nullptr;
+  }
+  return layers_[layer_idx].shards[shard_idx].host_ptr;
+}
+
+KVCacheManager::~KVCacheManager() = default;
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::H2d(
     nb::list src_offsets_major_dim, nb::list dst_offsets_major_dim,
@@ -599,24 +664,23 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::H2d(
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::DispatchD2hChunks(
     const std::vector<int64_t>& src_offsets,
     const std::vector<int64_t>& dst_offsets,
-    const std::vector<int64_t>& copy_sizes) {
+    const std::vector<int64_t>& copy_sizes, int64_t device_id) {
   bool is_partial = !src_offsets.empty();
   raiden::PjRtCopyFuture acc({});
 
   for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
     const auto& layer_info = layers_[layer_idx];
     for (size_t i = 0; i < num_shards_; ++i) {
+      if (device_id >= 0 && static_cast<int64_t>(i) != device_id) {
+        continue;
+      }
       const auto& shard_info = layer_info.shards[i];
       uint8_t* dst_host_ptr = const_cast<uint8_t*>(shard_info.host_ptr);
 
       std::vector<xla::Future<>> shard_futures;
       if (!is_partial) {
-        xla::Future<> future;
-        {
-          nb::gil_scoped_release release;
-          future =
-              shard_info.CopyRawDeviceToHost(dst_host_ptr, 0, physical_size_);
-        }
+        xla::Future<> future =
+            shard_info.CopyRawDeviceToHost(dst_host_ptr, 0, physical_size_);
         shard_futures.push_back(std::move(future));
       } else {
         shard_futures.reserve(src_offsets.size());
@@ -640,12 +704,8 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::DispatchD2hChunks(
 
           uint8_t* dst_ptr = dst_host_ptr + dst_offset;
 
-          xla::Future<> future;
-          {
-            nb::gil_scoped_release release;
-            future = shard_info.CopyRawDeviceToHost(dst_ptr, src_offset,
-                                                    size_to_copy);
-          }
+          xla::Future<> future =
+              shard_info.CopyRawDeviceToHost(dst_ptr, src_offset, size_to_copy);
           shard_futures.push_back(std::move(future));
         }
       }
@@ -961,6 +1021,258 @@ void KVCacheManager::H2hReadWorker(int stream_idx, const std::string& peer,
       }
     }
   }
+}
+
+absl::Status KVCacheManager::H2dDirect(
+    stream_executor::Stream* stream,
+    const std::vector<uint8_t*>& device_buffers,
+    const std::vector<int64_t>& src_offsets,
+    const std::vector<int64_t>& dst_offsets,
+    const std::vector<int64_t>& copy_sizes) {
+  if (src_offsets.size() != dst_offsets.size() ||
+      src_offsets.size() != copy_sizes.size()) {
+    return absl::InvalidArgumentError(
+        "Lengths of offset and size vectors must match");
+  }
+  if (device_buffers.size() != num_layers_) {
+    return absl::InvalidArgumentError(
+        "Number of device buffers must match layer count");
+  }
+
+  int64_t block_byte_size = block_size_ * slice_byte_size_;
+  int64_t num_chunks = src_offsets.size();
+
+  for (size_t l = 0; l < num_layers_; ++l) {
+    const auto& layer_info = layers_[l];
+    const auto& shard_info = layer_info.shards[0];
+    const uint8_t* h_base = shard_info.host_ptr;
+    uint8_t* d_base = device_buffers[l];
+
+    for (int64_t i = 0; i < num_chunks; ++i) {
+      int64_t copy_size = copy_sizes[i];
+      if (copy_size == 0) continue;
+
+      int64_t s_offset = src_offsets[i] * block_byte_size;
+      int64_t d_offset = dst_offsets[i] * block_byte_size;
+      size_t size_bytes = copy_size * block_byte_size;
+
+      const uint8_t* src_ptr = h_base + s_offset;
+      uint8_t* dst_ptr = d_base + d_offset;
+
+      stream_executor::DeviceAddressBase device_addr(dst_ptr, size_bytes);
+      TF_RETURN_IF_ERROR(stream->Memcpy(&device_addr, src_ptr, size_bytes));
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::Status KVCacheManager::D2hDirect(
+    stream_executor::Stream* stream,
+    const std::vector<uint8_t*>& device_buffers,
+    const std::vector<int64_t>& src_offsets,
+    const std::vector<int64_t>& dst_offsets,
+    const std::vector<int64_t>& copy_sizes) {
+  if (src_offsets.size() != dst_offsets.size() ||
+      src_offsets.size() != copy_sizes.size()) {
+    return absl::InvalidArgumentError(
+        "Lengths of offset and size vectors must match");
+  }
+  if (device_buffers.size() != num_layers_) {
+    return absl::InvalidArgumentError(
+        "Number of device buffers must match layer count");
+  }
+
+  int64_t block_byte_size = block_size_ * slice_byte_size_;
+  int64_t num_chunks = src_offsets.size();
+
+  for (size_t l = 0; l < num_layers_; ++l) {
+    const auto& layer_info = layers_[l];
+    const auto& shard_info = layer_info.shards[0];
+    uint8_t* h_base = const_cast<uint8_t*>(shard_info.host_ptr);
+    const uint8_t* d_base = device_buffers[l];
+
+    for (int64_t i = 0; i < num_chunks; ++i) {
+      int64_t copy_size = copy_sizes[i];
+      if (copy_size == 0) continue;
+
+      int64_t s_offset = src_offsets[i] * block_byte_size;
+      int64_t d_offset = dst_offsets[i] * block_byte_size;
+      size_t size_bytes = copy_size * block_byte_size;
+
+      const uint8_t* src_ptr = d_base + s_offset;
+      uint8_t* dst_ptr = h_base + d_offset;
+
+      stream_executor::DeviceAddressBase src_addr(const_cast<uint8_t*>(src_ptr),
+                                                  size_bytes);
+      TF_RETURN_IF_ERROR(stream->Memcpy(dst_ptr, src_addr, size_bytes));
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<std::vector<int>> KVCacheManager::H2hWriteDirect(
+    const std::string& peer, const std::vector<int32_t>& src_block_ids,
+    int64_t entity_id) {
+  size_t num_blocks = src_block_ids.size();
+  if (num_blocks == 0) {
+    return absl::InvalidArgumentError("Block list cannot be empty");
+  }
+
+  int P = parallelism_;
+  if (static_cast<int>(num_blocks) < P) P = num_blocks;
+
+  if (num_blocks % P != 0) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Block count (", num_blocks,
+                     ") must be fully divisible by parallelism (", P, ")"));
+  }
+
+  nb::list src_block_ids_list;
+  for (int id : src_block_ids) {
+    src_block_ids_list.append(id);
+  }
+
+  size_t blocks_per_stream = num_blocks / P;
+  std::vector<int> allocated_ids(num_blocks, 0);
+  std::vector<std::thread> threads;
+  std::vector<absl::Status> statuses(P, absl::OkStatus());
+
+  threads.reserve(P);
+  for (int i = 0; i < P; ++i) {
+    threads.push_back(std::thread(&KVCacheManager::H2hWriteWorker, this, i,
+                                  peer, blocks_per_stream,
+                                  std::ref(src_block_ids_list),
+                                  std::ref(allocated_ids), std::ref(statuses)));
+  }
+
+  for (auto& t : threads) {
+    if (t.joinable()) t.join();
+  }
+
+  for (int i = 0; i < P; ++i) {
+    if (!statuses[i].ok()) return statuses[i];
+  }
+
+  return allocated_ids;
+}
+
+absl::StatusOr<std::vector<int>> KVCacheManager::H2hReadDirect(
+    const std::string& peer, const std::vector<int32_t>& src_block_ids,
+    int64_t entity_id) {
+  size_t num_blocks = src_block_ids.size();
+  if (num_blocks == 0) {
+    return absl::InvalidArgumentError("Block list cannot be empty");
+  }
+
+  size_t local_blocks = num_blocks / shard_factor_;
+  TF_ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
+                      block_manager_->Allocate(local_blocks, entity_id, true));
+
+  int P = parallelism_;
+  if (static_cast<int>(local_blocks) < P) P = local_blocks;
+
+  if (local_blocks % P != 0) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Local block count (", local_blocks,
+                     ") must be fully divisible by parallelism (", P, ")"));
+  }
+
+  nb::list src_block_ids_list;
+  for (int id : src_block_ids) {
+    src_block_ids_list.append(id);
+  }
+
+  size_t blocks_per_stream = local_blocks / P;
+  size_t remote_blocks_per_stream = num_blocks / P;
+  int base_remote_id = src_block_ids[0];
+
+  std::vector<std::thread> threads;
+  std::vector<absl::Status> statuses(P, absl::OkStatus());
+
+  threads.reserve(P);
+  for (int i = 0; i < P; ++i) {
+    threads.push_back(std::thread(&KVCacheManager::H2hReadWorker, this, i, peer,
+                                  blocks_per_stream, remote_blocks_per_stream,
+                                  base_remote_id, std::ref(allocated_ids),
+                                  std::ref(statuses)));
+  }
+
+  for (auto& t : threads) {
+    if (t.joinable()) t.join();
+  }
+
+  for (int i = 0; i < P; ++i) {
+    if (!statuses[i].ok()) return statuses[i];
+  }
+
+  return allocated_ids;
+}
+
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::H2dDirect(
+    const std::vector<int64_t>& src_offsets,
+    const std::vector<int64_t>& dst_offsets,
+    const std::vector<int64_t>& copy_sizes, int64_t device_id) {
+  bool is_partial = !src_offsets.empty();
+  if (is_partial) {
+    if (src_offsets.size() != dst_offsets.size() ||
+        src_offsets.size() != copy_sizes.size()) {
+      return absl::InvalidArgumentError(
+          "Lengths of offset and size vectors must match");
+    }
+  }
+
+  raiden::PjRtCopyFuture acc({});
+  for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
+    const auto& layer_info = layers_[layer_idx];
+    for (size_t i = 0; i < num_shards_; ++i) {
+      if (device_id >= 0 && static_cast<int64_t>(i) != device_id) {
+        continue;
+      }
+      const auto& shard_info = layer_info.shards[i];
+
+      std::vector<xla::Future<>> shard_futures;
+      if (!is_partial) {
+        xla::Future<> future = shard_info.CopyRawHostToDevice(
+            shard_info.host_ptr, 0, physical_size_);
+        shard_futures.push_back(std::move(future));
+      } else {
+        for (size_t j = 0; j < src_offsets.size(); ++j) {
+          int64_t src_major_dim_offset = src_offsets[j];
+          int64_t dst_major_dim_offset = dst_offsets[j];
+          int64_t major_dim_size = copy_sizes[j];
+
+          int64_t src_offset = src_major_dim_offset * slice_byte_size_;
+          int64_t dst_offset = dst_major_dim_offset * slice_byte_size_;
+          int64_t size_to_copy = major_dim_size * slice_byte_size_;
+
+          if (src_offset + size_to_copy > shard_info.host_size) {
+            return absl::InvalidArgumentError(
+                "Copy range exceeds source host buffer size");
+          }
+          if (dst_offset + size_to_copy > shard_info.device_size) {
+            return absl::InvalidArgumentError(
+                "Copy range exceeds destination device buffer size");
+          }
+
+          const uint8_t* src_ptr = shard_info.host_ptr + src_offset;
+
+          xla::Future<> future =
+              shard_info.CopyRawHostToDevice(src_ptr, dst_offset, size_to_copy);
+          shard_futures.push_back(std::move(future));
+        }
+      }
+      acc.Append(std::move(shard_futures), shard_info);
+    }
+  }
+
+  return acc;
+}
+
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::D2hDirect(
+    const std::vector<int64_t>& src_offsets,
+    const std::vector<int64_t>& dst_offsets,
+    const std::vector<int64_t>& copy_sizes, int64_t device_id) {
+  return DispatchD2hChunks(src_offsets, dst_offsets, copy_sizes, device_id);
 }
 
 }  // namespace kv_cache

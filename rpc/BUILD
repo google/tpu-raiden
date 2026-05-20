@@ -17,7 +17,7 @@ load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_python//python:defs.bzl", "py_library")
 load("@rules_python//python:proto.bzl", "py_proto_library")
 
-package(default_visibility = ["//third_party/tpu_raiden:internal"])
+package(default_visibility = ["//visibility:public"])
 
 proto_library(
     name = "coordination_proto",

@@ -16,7 +16,7 @@ load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load("@rules_python//python:defs.bzl", "py_test")
 
-package(default_visibility = ["//third_party/tpu_raiden:internal"])
+package(default_visibility = ["//visibility:public"])
 
 cc_library(
     name = "logical_block_manager",
@@ -42,6 +42,37 @@ cc_test(
     ],
 )
 
+cc_library(
+    name = "kv_cache_manager_cc_lib",
+    srcs = ["kv_cache_manager.cc"],
+    hdrs = ["kv_cache_manager.h"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":logical_block_manager",
+        "//raiden_lib/raw_transfer:raw_transfer_impl",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/cleanup",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
+        "@nanobind",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/pjrt:status_casters",
+        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
+        "@xla//xla/stream_executor:stream",
+        "@xla//xla/tsl/platform:errors",
+        "@xla//xla/tsl/platform:statusor",
+    ],
+)
+
 nanobind_extension(
     name = "kv_cache_manager",
     srcs = [
@@ -53,7 +84,6 @@ nanobind_extension(
         "-fexceptions",
     ],
     features = ["-use_header_modules"],
-    pytype_srcs = ["kv_cache_manager.pyi"],
     deps = [
         ":logical_block_manager",
         "//raiden_lib/raw_transfer:raw_transfer_impl",
@@ -69,43 +99,7 @@ nanobind_extension(
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:status_casters",
         "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
-        "@xla//xla/tsl/platform:errors",
-        "@xla//xla/tsl/platform:statusor",
-    ],
-)
-
-cc_test(
-    name = "kv_cache_manager_test",
-    srcs = [
-        "kv_cache_manager.cc",
-        "kv_cache_manager.h",
-        "kv_cache_manager_test.cc",
-    ],
-    copts = [
-        "-fno-strict-aliasing",
-        "-fexceptions",
-        "-Wno-unused-variable",
-    ],
-    features = ["-use_header_modules"],
-    deps = [
-        ":logical_block_manager",
-        "//raiden_lib/raw_transfer:raw_transfer_impl",
-        "//third_party/python_runtime:embedded_interpreter",
-        "@com_google_absl//absl/base:core_headers",
-        "@com_google_absl//absl/cleanup",
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/synchronization",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-        "@nanobind",
-        "@rules_python//python/cc:current_py_cc_headers",
-        "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt:status_casters",
-        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
+        "@xla//xla/stream_executor:stream",
         "@xla//xla/tsl/platform:errors",
         "@xla//xla/tsl/platform:statusor",
     ],

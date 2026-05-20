@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_python//python:defs.bzl", "py_library")
+load("//devtools/python/blaze:strict.bzl", "py_strict_library")
 
 package(default_visibility = ["//visibility:public"])
 
-py_library(
+py_strict_library(
     name = "raiden_lib",
     srcs = ["__init__.py"],
     deps = [

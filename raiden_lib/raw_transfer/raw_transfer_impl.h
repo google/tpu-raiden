@@ -31,9 +31,9 @@
 #endif
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "nanobind/include/nanobind/nanobind.h"
-#include "nanobind/include/nanobind/ndarray.h"
-#include "third_party/py/jax/jaxlib/py_array.h"
+#include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
+#include "jaxlib/py_array.h"
 #include "xla/pjrt/abstract_tracked_device_buffer.h"
 #include "xla/pjrt/c/pjrt_c_api_raw_buffer_external.h"
 #include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
