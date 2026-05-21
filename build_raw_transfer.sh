@@ -28,6 +28,7 @@ cd "${WORKSPACE_DIR}"
 
 echo "=== Building raw_transfer and kv_cache_manager with Bazel ==="
 bazel build -c opt --check_visibility=false --verbose_failures --experimental_repo_remote_exec --incompatible_disallow_empty_glob=false \
+  --repo_env=HERMETIC_PYTHON_VERSION=${HERMETIC_PYTHON_VERSION:-3.12} \
   //raiden_lib/raw_transfer/jax:raw_transfer \
   //kv_cache:kv_cache_manager \
   --disk_cache=${BAZEL_DISK_CACHE} \
