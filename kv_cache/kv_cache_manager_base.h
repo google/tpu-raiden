@@ -27,13 +27,14 @@
 #include "absl/status/statusor.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/stream_executor/stream.h"
+#include "core/raiden_manager_base.h"
 #include "kv_cache/logical_block_manager.h"
 #include "raiden_lib/raw_transfer/raw_transfer_impl.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
 
-class KVCacheManagerBase {
+class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
  public:
   // Core C++ Constructor wrapping raw PJRT buffers directly (used by JAX and
   // PyTorch E2E)
@@ -52,7 +53,7 @@ class KVCacheManagerBase {
                      std::optional<int> host_blocks_to_allocate = std::nullopt,
                      int parallelism = 1);
 
-  virtual ~KVCacheManagerBase();
+  ~KVCacheManagerBase() override;
 
   // Async on-chip H2D offloads returning PJRT copy future E2E
   absl::StatusOr<raiden::PjRtCopyFuture> H2d(
@@ -82,16 +83,6 @@ class KVCacheManagerBase {
       std::string peer, const std::vector<int>& src_block_ids,
       int64_t entity_id = 0);
 
-  // Direct C++ H2H network write (Push)
-  absl::StatusOr<std::vector<int>> H2hWriteDirect(
-      const std::string& peer, const std::vector<int>& src_block_ids,
-      int64_t entity_id = 0);
-
-  // Direct C++ H2H network read (Pull)
-  absl::StatusOr<std::vector<int>> H2hReadDirect(
-      const std::string& peer, const std::vector<int>& src_block_ids,
-      int64_t entity_id = 0);
-
   // Pure StreamExecutor H2D copy using raw C++ device pointers
   absl::Status H2dDirect(stream_executor::Stream* stream,
                          const std::vector<uint8_t*>& device_buffers,
@@ -119,64 +110,26 @@ class KVCacheManagerBase {
   void SetExternalHostBuffer(
       const std::vector<raiden::BufferHoldAndAlias>& buffer_holds);
 
-  std::optional<int> local_port() const;
-
-  const uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) const;
-
-  void SetExternalHostPointers(const std::vector<const uint8_t*>& host_ptrs,
-                               const std::vector<size_t>& host_sizes);
-
-  size_t num_layers() const { return num_layers_; }
-  size_t num_shards() const { return num_shards_; }
-  size_t slice_byte_size() const { return slice_byte_size_; }
-
  protected:
-  struct ShardBufferInfoBase : public raiden::BufferHoldAndAlias {
-    const uint8_t* host_ptr = nullptr;
-    size_t host_size = 0;
-    size_t device_size = 0;
-    std::unique_ptr<uint8_t[], void (*)(void*)> owned_host_buffer = {
-        nullptr, [](void*) {}};
-  };
-
-  struct LayerInfoBase {
-    std::vector<ShardBufferInfoBase> shards;
-  };
-
-  size_t num_layers_ = 0;
-  size_t num_shards_ = 0;
-  size_t slice_byte_size_ = 0;
-  int block_size_ = 1;
-  int parallelism_ = 1;
-  size_t shard_factor_ = 1;
-  int64_t major_dim_size_ = 0;
-
   const PJRT_Api* c_api_ = nullptr;
   const PJRT_RawBuffer_Extension* extension_ = nullptr;
   size_t physical_size_ = 0;
 
   std::unique_ptr<LogicalBlockManager> block_manager_;
 
-  struct BlockTransportServer;
-  std::unique_ptr<BlockTransportServer> server_;
+  // Separate PJRT active holds matrix to protect subclass scoping E2E!
+  std::vector<std::vector<raiden::BufferHoldAndAlias>> buffer_holds_;
 
-  std::vector<LayerInfoBase> layers_;
+  // Override parent AllocateBlocks using our dynamic block manager!
+  absl::StatusOr<std::vector<int>> AllocateBlocks(size_t num_blocks,
+                                                  int64_t entity_id) override {
+    return block_manager_->Allocate(num_blocks, entity_id, /*lock=*/true);
+  }
 
   absl::StatusOr<raiden::PjRtCopyFuture> DispatchD2hChunks(
       const std::vector<int64_t>& src_offsets,
       const std::vector<int64_t>& dst_offsets,
       const std::vector<int64_t>& copy_sizes, int64_t device_id = -1);
-
-  void H2hWriteWorker(int stream_idx, const std::string& peer,
-                      size_t blocks_per_stream,
-                      const std::vector<int>& src_block_ids,
-                      std::vector<int>& allocated_ids,
-                      std::vector<absl::Status>& statuses);
-
-  void H2hReadWorker(int stream_idx, const std::string& peer,
-                     size_t blocks_per_stream, size_t remote_blocks_per_stream,
-                     int base_remote_id, const std::vector<int>& allocated_ids,
-                     std::vector<absl::Status>& statuses);
 };
 
 }  // namespace kv_cache
