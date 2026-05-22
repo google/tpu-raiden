@@ -17,6 +17,7 @@
 
 #include <Python.h>
 
+#include <memory>
 #include <optional>
 #include <typeinfo>
 #include <vector>
@@ -48,11 +49,20 @@ namespace jax {
 
 inline xla::ifrt::PjRtCompatibleArray* CastToPjRtCompatibleArray(
     xla::ifrt::Array* ifrt_array) {
-  if (ifrt_array == nullptr) return nullptr;
-  if (ifrt_array->client()->runtime_type() == "pjrt_ifrt") {
-    return static_cast<xla::ifrt::PjRtCompatibleArray*>(ifrt_array);
+  return llvm::dyn_cast_or_null<xla::ifrt::PjRtCompatibleArray>(ifrt_array);
+}
+
+inline absl::Span<const std::shared_ptr<xla::PjRtBuffer>>
+GetPjrtBuffersFromIfrtArray(xla::ifrt::Array* ifrt_array) {
+  auto* arr = CastToPjRtCompatibleArray(ifrt_array);
+  if (arr != nullptr) {
+    return arr->pjrt_buffers();
   }
-  return nullptr;
+  if (ifrt_array->client()->runtime_type() == "pjrt_ifrt") {
+    auto* pjrt_array = static_cast<xla::ifrt::PjRtArray*>(ifrt_array);
+    return pjrt_array->xla::ifrt::PjRtArray::pjrt_buffers();
+  }
+  throw std::runtime_error("Not a PjRt compatible array");
 }
 
 struct PyArrayObject {
@@ -79,11 +89,7 @@ inline xla::PjRtBuffer* GetPjrtBufferFromPyObject(PyObject* obj) {
   auto* storage = GetPyArrayStorageFromObject(py_array_obj);
   xla::ifrt::Array* ifrt_array = storage->ifrt_array.get();
 
-  auto* arr = CastToPjRtCompatibleArray(ifrt_array);
-  if (arr == nullptr) {
-    throw std::runtime_error("Not a PjRt compatible array");
-  }
-  return arr->pjrt_buffers().front().get();
+  return GetPjrtBuffersFromIfrtArray(ifrt_array).front().get();
 }
 
 inline xla::ifrt::Array* GetIfrtArrayFromPyObject(PyObject* obj) {
@@ -175,7 +181,7 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_internal(
   const PJRT_RawBuffer_Extension* extension =
       GetRawBufferExtension(first_src_buffer, &c_api);
   PjRtCApiBuffer* first_capi_buffer =
-      dynamic_cast<PjRtCApiBuffer*>(first_src_buffer);
+      AsPjRtCApiBuffer(first_src_buffer);
 
   if (first_capi_buffer && !extension) {
     throw std::runtime_error("RawBuffer extension not found in PjRtCApiClient");
@@ -204,8 +210,8 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_internal(
     std::vector<xla::Future<>> shard_futures;
 
     CommonPjRtBuffer* common_buffer =
-        dynamic_cast<CommonPjRtBuffer*>(src_buffer);
-    PjRtCApiBuffer* capi_buffer = dynamic_cast<PjRtCApiBuffer*>(src_buffer);
+        AsCommonPjRtBuffer(src_buffer);
+    PjRtCApiBuffer* capi_buffer = AsPjRtCApiBuffer(src_buffer);
 
     std::optional<CommonPjRtBuffer::ScopedHold> hold;
     tsl::RCReference<CommonPjRtRawBuffer> raw_buffer;
@@ -366,14 +372,14 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async_impl(
   const PJRT_RawBuffer_Extension* extension =
       GetRawBufferExtension(first_buffer, &c_api);
   PjRtCApiBuffer* first_capi_buffer =
-      dynamic_cast<PjRtCApiBuffer*>(first_buffer);
+      AsPjRtCApiBuffer(first_buffer);
 
   if (first_capi_buffer && !extension) {
     throw std::runtime_error("RawBuffer extension not found in PjRtCApiClient");
   }
 
   bool is_common_buffer =
-      (dynamic_cast<CommonPjRtBuffer*>(first_buffer) != nullptr);
+      (AsCommonPjRtBuffer(first_buffer) != nullptr);
 
   // Fast Path for Full Array Copy!
   if (!is_partial) {
@@ -393,15 +399,9 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async_impl(
         xla::ifrt::Array* dst_ifrt_array =
             jax::GetIfrtArrayFromPyObject(dst.ptr());
 
-        auto* src_compat_arr = jax::CastToPjRtCompatibleArray(src_ifrt_array);
-        auto* dst_compat_arr = jax::CastToPjRtCompatibleArray(dst_ifrt_array);
+        auto src_buffers = jax::GetPjrtBuffersFromIfrtArray(src_ifrt_array);
 
-        if (src_compat_arr == nullptr || dst_compat_arr == nullptr) {
-          throw std::runtime_error("Not a PjRt compatible array");
-        }
-
-        auto src_buffers = src_compat_arr->pjrt_buffers();
-        auto dst_buffers = dst_compat_arr->pjrt_buffers();
+        auto dst_buffers = jax::GetPjrtBuffersFromIfrtArray(dst_ifrt_array);
 
         if (src_buffers.size() != num_shards ||
             dst_buffers.size() != num_shards) {
@@ -423,7 +423,7 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async_impl(
           }
 
           CommonPjRtBuffer* common_buffer =
-              static_cast<CommonPjRtBuffer*>(src_buffer);
+              AsCommonPjRtBuffer(src_buffer);
 
           auto hold = common_buffer->GetBufferWithHold(
               CommonPjRtBuffer::ScopedHold::kUsage);
@@ -453,15 +453,9 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async_impl(
         xla::ifrt::Array* dst_ifrt_array =
             jax::GetIfrtArrayFromPyObject(dst.ptr());
 
-        auto* src_compat_arr = jax::CastToPjRtCompatibleArray(src_ifrt_array);
-        auto* dst_compat_arr = jax::CastToPjRtCompatibleArray(dst_ifrt_array);
+        auto src_buffers = jax::GetPjrtBuffersFromIfrtArray(src_ifrt_array);
 
-        if (src_compat_arr == nullptr || dst_compat_arr == nullptr) {
-          throw std::runtime_error("Not a PjRt compatible array");
-        }
-
-        auto src_buffers = src_compat_arr->pjrt_buffers();
-        auto dst_buffers = dst_compat_arr->pjrt_buffers();
+        auto dst_buffers = jax::GetPjrtBuffersFromIfrtArray(dst_ifrt_array);
 
         if (src_buffers.size() != num_shards ||
             dst_buffers.size() != num_shards) {
@@ -482,7 +476,7 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async_impl(
                 "Destination buffer too small for raw tiled copy");
           }
           PjRtCApiBuffer* capi_buffer =
-              static_cast<PjRtCApiBuffer*>(src_buffer);
+              AsPjRtCApiBuffer(src_buffer);
 
           auto status_or_raw = pjrt::PjRtCApiBuffer_CreateRawAliasOfBuffer(
               c_api, extension, capi_buffer->c_buffer());
@@ -537,15 +531,9 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async_impl(
     xla::ifrt::Array* src_ifrt_array = jax::GetIfrtArrayFromPyObject(src.ptr());
     xla::ifrt::Array* dst_ifrt_array = jax::GetIfrtArrayFromPyObject(dst.ptr());
 
-    auto* src_compat_arr = jax::CastToPjRtCompatibleArray(src_ifrt_array);
-    auto* dst_compat_arr = jax::CastToPjRtCompatibleArray(dst_ifrt_array);
+    auto src_buffers = jax::GetPjrtBuffersFromIfrtArray(src_ifrt_array);
 
-    if (src_compat_arr == nullptr || dst_compat_arr == nullptr) {
-      throw std::runtime_error("Not a PjRt compatible array");
-    }
-
-    auto src_buffers = src_compat_arr->pjrt_buffers();
-    auto dst_buffers = dst_compat_arr->pjrt_buffers();
+    auto dst_buffers = jax::GetPjrtBuffersFromIfrtArray(dst_ifrt_array);
 
     if (src_buffers.size() != num_shards || dst_buffers.size() != num_shards) {
       throw std::runtime_error("Number of shards mismatch");
@@ -565,8 +553,8 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async_impl(
       std::vector<xla::Future<>> shard_futures;
 
       CommonPjRtBuffer* common_buffer =
-          dynamic_cast<CommonPjRtBuffer*>(src_buffer);
-      PjRtCApiBuffer* capi_buffer = dynamic_cast<PjRtCApiBuffer*>(src_buffer);
+          AsCommonPjRtBuffer(src_buffer);
+      PjRtCApiBuffer* capi_buffer = AsPjRtCApiBuffer(src_buffer);
 
       std::optional<CommonPjRtBuffer::ScopedHold> hold;
       PJRT_RawBuffer* c_raw_buffer = nullptr;
@@ -711,7 +699,7 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_internal(
   const PJRT_RawBuffer_Extension* extension =
       GetRawBufferExtension(first_dst_buffer, &c_api);
   PjRtCApiBuffer* first_capi_buffer =
-      dynamic_cast<PjRtCApiBuffer*>(first_dst_buffer);
+      AsPjRtCApiBuffer(first_dst_buffer);
 
   if (first_capi_buffer && !extension) {
     throw std::runtime_error("RawBuffer extension not found in PjRtCApiClient");
@@ -739,8 +727,8 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_internal(
     PjRtBuffer* dst_buffer = jax::GetPjrtBufferFromPyObject(shard_data.ptr());
 
     CommonPjRtBuffer* common_buffer =
-        dynamic_cast<CommonPjRtBuffer*>(dst_buffer);
-    PjRtCApiBuffer* capi_buffer = dynamic_cast<PjRtCApiBuffer*>(dst_buffer);
+        AsCommonPjRtBuffer(dst_buffer);
+    PjRtCApiBuffer* capi_buffer = AsPjRtCApiBuffer(dst_buffer);
 
     std::optional<CommonPjRtBuffer::ScopedHold> hold;
     tsl::RCReference<CommonPjRtRawBuffer> raw_buffer;
@@ -911,16 +899,12 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async_impl(
   int64_t physical_size = status_or_dst_size.value();
 
   const PJRT_Api* c_api = nullptr;
-  const PJRT_RawBuffer_Extension* extension = nullptr;
+  const PJRT_RawBuffer_Extension* extension =
+      GetRawBufferExtension(first_buffer, &c_api);
   PjRtCApiBuffer* first_capi_buffer =
-      dynamic_cast<PjRtCApiBuffer*>(first_buffer);
+      AsPjRtCApiBuffer(first_buffer);
 
   if (first_capi_buffer) {
-    c_api = first_capi_buffer->pjrt_c_api();
-    PjRtCApiClient* capi_client =
-        dynamic_cast<PjRtCApiClient*>(first_capi_buffer->client());
-    extension = capi_client->FindExtension<PJRT_RawBuffer_Extension>(
-        PJRT_Extension_Type::PJRT_Extension_Type_RawBuffer);
     if (!extension) {
       throw std::runtime_error(
           "RawBuffer extension not found in PjRtCApiClient");
@@ -928,7 +912,7 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async_impl(
   }
 
   bool is_common_buffer =
-      (dynamic_cast<CommonPjRtBuffer*>(first_buffer) != nullptr);
+      (AsCommonPjRtBuffer(first_buffer) != nullptr);
 
   // Fast path for full array copies
   if (!is_partial) {
@@ -948,15 +932,9 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async_impl(
         xla::ifrt::Array* dst_ifrt_array =
             jax::GetIfrtArrayFromPyObject(dst.ptr());
 
-        auto* src_compat_arr = jax::CastToPjRtCompatibleArray(src_ifrt_array);
-        auto* dst_compat_arr = jax::CastToPjRtCompatibleArray(dst_ifrt_array);
+        auto src_buffers = jax::GetPjrtBuffersFromIfrtArray(src_ifrt_array);
 
-        if (src_compat_arr == nullptr || dst_compat_arr == nullptr) {
-          throw std::runtime_error("Not a PjRt compatible array");
-        }
-
-        auto src_buffers = src_compat_arr->pjrt_buffers();
-        auto dst_buffers = dst_compat_arr->pjrt_buffers();
+        auto dst_buffers = jax::GetPjrtBuffersFromIfrtArray(dst_ifrt_array);
 
         if (src_buffers.size() != num_shards ||
             dst_buffers.size() != num_shards) {
@@ -984,7 +962,7 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async_impl(
           }
 
           CommonPjRtBuffer* common_buffer =
-              static_cast<CommonPjRtBuffer*>(dst_buffer);
+              AsCommonPjRtBuffer(dst_buffer);
 
           auto hold = common_buffer->GetBufferWithHold(
               CommonPjRtBuffer::ScopedHold::kUsage);
@@ -1018,15 +996,9 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async_impl(
         xla::ifrt::Array* dst_ifrt_array =
             jax::GetIfrtArrayFromPyObject(dst.ptr());
 
-        auto* src_compat_arr = jax::CastToPjRtCompatibleArray(src_ifrt_array);
-        auto* dst_compat_arr = jax::CastToPjRtCompatibleArray(dst_ifrt_array);
+        auto src_buffers = jax::GetPjrtBuffersFromIfrtArray(src_ifrt_array);
 
-        if (src_compat_arr == nullptr || dst_compat_arr == nullptr) {
-          throw std::runtime_error("Not a PjRt compatible array");
-        }
-
-        auto src_buffers = src_compat_arr->pjrt_buffers();
-        auto dst_buffers = dst_compat_arr->pjrt_buffers();
+        auto dst_buffers = jax::GetPjrtBuffersFromIfrtArray(dst_ifrt_array);
 
         if (src_buffers.size() != num_shards ||
             dst_buffers.size() != num_shards) {
@@ -1053,7 +1025,7 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async_impl(
                 "Source buffer too small for raw tiled copy");
           }
           PjRtCApiBuffer* capi_buffer =
-              static_cast<PjRtCApiBuffer*>(dst_buffer);
+              AsPjRtCApiBuffer(dst_buffer);
 
           auto status_or_raw = pjrt::PjRtCApiBuffer_CreateRawAliasOfBuffer(
               c_api, extension, capi_buffer->c_buffer());
@@ -1108,15 +1080,9 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async_impl(
     xla::ifrt::Array* src_ifrt_array = jax::GetIfrtArrayFromPyObject(src.ptr());
     xla::ifrt::Array* dst_ifrt_array = jax::GetIfrtArrayFromPyObject(dst.ptr());
 
-    auto* src_compat_arr = jax::CastToPjRtCompatibleArray(src_ifrt_array);
-    auto* dst_compat_arr = jax::CastToPjRtCompatibleArray(dst_ifrt_array);
+    auto src_buffers = jax::GetPjrtBuffersFromIfrtArray(src_ifrt_array);
 
-    if (src_compat_arr == nullptr || dst_compat_arr == nullptr) {
-      throw std::runtime_error("Not a PjRt compatible array");
-    }
-
-    auto src_buffers = src_compat_arr->pjrt_buffers();
-    auto dst_buffers = dst_compat_arr->pjrt_buffers();
+    auto dst_buffers = jax::GetPjrtBuffersFromIfrtArray(dst_ifrt_array);
 
     if (src_buffers.size() != num_shards || dst_buffers.size() != num_shards) {
       throw std::runtime_error("Number of shards mismatch");
@@ -1137,8 +1103,8 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async_impl(
       size_t src_size = src_buffer->GetOnDeviceSizeInBytes().value();
 
       CommonPjRtBuffer* common_buffer =
-          dynamic_cast<CommonPjRtBuffer*>(dst_buffer);
-      PjRtCApiBuffer* capi_buffer = dynamic_cast<PjRtCApiBuffer*>(dst_buffer);
+          AsCommonPjRtBuffer(dst_buffer);
+      PjRtCApiBuffer* capi_buffer = AsPjRtCApiBuffer(dst_buffer);
 
       std::optional<CommonPjRtBuffer::ScopedHold> hold;
       tsl::RCReference<CommonPjRtRawBuffer> raw_buffer;

@@ -56,13 +56,38 @@ struct RawBufferHolder {
 inline const PJRT_RawBuffer_Extension* GetRawBufferExtension(
     const xla::PjRtBuffer* buffer, const PJRT_Api** out_c_api = nullptr) {
   auto* capi_buffer = dynamic_cast<const xla::PjRtCApiBuffer*>(buffer);
-  if (!capi_buffer) return nullptr;
-  if (out_c_api) *out_c_api = capi_buffer->pjrt_c_api();
-  auto* capi_client = dynamic_cast<xla::PjRtCApiClient*>(
-      const_cast<xla::PjRtClient*>(capi_buffer->client()));
-  if (!capi_client) return nullptr;
-  return capi_client->FindExtension<PJRT_RawBuffer_Extension>(
-      PJRT_Extension_Type::PJRT_Extension_Type_RawBuffer);
+  if (!capi_buffer && buffer->client()->plugin_attributes().has_value()) {
+    capi_buffer = static_cast<const xla::PjRtCApiBuffer*>(buffer);
+  }
+  if (!capi_buffer) {
+    return nullptr;
+  }
+  const PJRT_Api* c_api = capi_buffer->pjrt_c_api();
+  if (out_c_api) {
+    *out_c_api = c_api;
+  }
+  for (PJRT_Extension_Base* ext = c_api->extension_start; ext != nullptr;
+       ext = ext->next) {
+    if (ext->type == PJRT_Extension_Type::PJRT_Extension_Type_RawBuffer) {
+      return reinterpret_cast<const PJRT_RawBuffer_Extension*>(ext);
+    }
+  }
+  return nullptr;
+}
+
+inline xla::PjRtCApiBuffer* AsPjRtCApiBuffer(xla::PjRtBuffer* buffer) {
+  auto* capi_buffer = dynamic_cast<xla::PjRtCApiBuffer*>(buffer);
+  if (capi_buffer) {
+    return capi_buffer;
+  }
+  if (buffer->client()->plugin_attributes().has_value()) {
+    return static_cast<xla::PjRtCApiBuffer*>(buffer);
+  }
+  return nullptr;
+}
+
+inline xla::CommonPjRtBuffer* AsCommonPjRtBuffer(xla::PjRtBuffer* buffer) {
+  return dynamic_cast<xla::CommonPjRtBuffer*>(buffer);
 }
 
 inline int64_t GetMajorSliceByteSize(const xla::PjRtBuffer* buffer) {
@@ -135,8 +160,8 @@ struct BufferHoldAndAlias {
       bool unsafe_skip_buffer_lock = false) {
     BufferHoldAndAlias result;
     result.buffer = buf;
-    auto* common_buf = dynamic_cast<xla::CommonPjRtBuffer*>(buf);
-    auto* capi_buf = dynamic_cast<xla::PjRtCApiBuffer*>(buf);
+    auto* common_buf = AsCommonPjRtBuffer(buf);
+    auto* capi_buf = AsPjRtCApiBuffer(buf);
 
     if (common_buf) {
       result.is_common_buffer = true;

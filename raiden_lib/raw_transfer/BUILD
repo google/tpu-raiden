@@ -13,6 +13,7 @@
 # limitations under the License.
 
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//raiden_lib/raw_transfer:header_only_cc_info.bzl", "header_only_cc_info")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -52,4 +53,9 @@ cc_library(
         "@xla//xla/tsl/platform:logging",
         "@xla//xla/tsl/platform:statusor",
     ],
+)
+
+header_only_cc_info(
+    name = "raw_transfer_impl_headers",
+    deps = [":raw_transfer_impl"],
 )

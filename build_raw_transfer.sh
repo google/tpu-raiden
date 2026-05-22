@@ -19,7 +19,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 DEFAULT_WORKSPACE_DIR="$SCRIPT_DIR"
 WORKSPACE_DIR="${WORKSPACE_DIR:-${DEFAULT_WORKSPACE_DIR}}"
-BAZEL_CACHE_BASE="${BAZEL_CACHE_DIR:-${HOME}/.bazel_cache}"
+BAZEL_CACHE_BASE="/mnt/disk"
 BAZEL_DISK_CACHE="${BAZEL_CACHE_BASE}/disk_cache"
 BAZEL_REPO_CACHE="${BAZEL_CACHE_BASE}/repo_cache"
 
@@ -31,6 +31,8 @@ bazel build -c opt --check_visibility=false --verbose_failures --experimental_re
   --repo_env=HERMETIC_PYTHON_VERSION=${HERMETIC_PYTHON_VERSION:-3.12} \
   //raiden_lib/raw_transfer/jax:raw_transfer \
   //kv_cache:kv_cache_manager \
+  //kv_cache:kv_cache_store \
+  //raiden_lib/raw_transfer/torch:_torch_raw_transfer.so \
   --disk_cache=${BAZEL_DISK_CACHE} \
   --repository_cache=${BAZEL_REPO_CACHE}
 
@@ -38,6 +40,8 @@ bazel build -c opt --check_visibility=false --verbose_failures --experimental_re
 echo "=== Copying compiled shared libraries to source directory ==="
 cp -f "${WORKSPACE_DIR}/bazel-bin/raiden_lib/raw_transfer/jax/raw_transfer.so" "${WORKSPACE_DIR}/raiden_lib/raw_transfer/jax/"
 cp -f "${WORKSPACE_DIR}/bazel-bin/kv_cache/kv_cache_manager.so" "${WORKSPACE_DIR}/kv_cache/"
+cp -f "${WORKSPACE_DIR}/bazel-bin/kv_cache/kv_cache_store.so" "${WORKSPACE_DIR}/kv_cache/"
+cp -f "${WORKSPACE_DIR}/bazel-bin/raiden_lib/raw_transfer/torch/_torch_raw_transfer.so" "${WORKSPACE_DIR}/raiden_lib/raw_transfer/torch/"
 
 
 echo "=== Build Complete! ==="

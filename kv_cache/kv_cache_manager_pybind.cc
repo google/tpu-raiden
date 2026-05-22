@@ -29,9 +29,14 @@
 namespace nb = nanobind;
 
 NB_MODULE(kv_cache_manager, m) {
-  nb::module_::import_(
-      "google3.third_party.tpu_raiden.raiden_lib.raw_transfer.jax.raw_"
-      "transfer");
+  nb::class_<raiden::PjRtCopyFuture>(m, "PjRtCopyFuture")
+      .def("Await",
+           [](raiden::PjRtCopyFuture& future) {
+             nb::gil_scoped_release release;
+             future.Await();
+           })
+      .def("IsReady", &raiden::PjRtCopyFuture::IsReady);
+
   nb::class_<tpu_raiden::kv_cache::KVCacheManager>(m, "KVCacheManager")
       .def(
           "__init__",

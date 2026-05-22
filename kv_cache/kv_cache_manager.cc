@@ -435,7 +435,7 @@ KVCacheManager::KVCacheManager(
 
   extension_ = raiden::GetRawBufferExtension(first_buffer, &c_api_);
   xla::PjRtCApiBuffer* first_capi_buffer =
-      dynamic_cast<xla::PjRtCApiBuffer*>(first_buffer);
+      raiden::AsPjRtCApiBuffer(first_buffer);
 
   if (first_capi_buffer) {
     if (!extension_) {
@@ -445,7 +445,7 @@ KVCacheManager::KVCacheManager(
     is_common_buffer_ = false;
   } else {
     is_common_buffer_ =
-        (dynamic_cast<xla::CommonPjRtBuffer*>(first_buffer) != nullptr);
+        (raiden::AsCommonPjRtBuffer(first_buffer) != nullptr);
     if (!is_common_buffer_) {
       throw std::runtime_error("Unsupported PjRtBuffer type");
     }
@@ -483,16 +483,7 @@ KVCacheManager::KVCacheManager(
     nb::object dst = (*device_arrays_)[layer_idx];
     xla::ifrt::Array* dst_ifrt_array = jax::GetIfrtArrayFromPyObject(dst.ptr());
 
-    // Statically resolve the underlying dynamic IFRT array reference into
-    // its PJRT-compatible structure using JAX static API cast hooks. This
-    // isolates compiler templates target overrides under BCR Bazel layouts.
-    auto* dst_compat_arr = jax::CastToPjRtCompatibleArray(dst_ifrt_array);
-
-    if (dst_compat_arr == nullptr) {
-      throw std::runtime_error("Not a PjRt compatible array");
-    }
-
-    auto dst_buffers = dst_compat_arr->pjrt_buffers();
+    auto dst_buffers = jax::GetPjrtBuffersFromIfrtArray(dst_ifrt_array);
     if (dst_buffers.size() != num_shards_) {
       throw std::runtime_error("Number of shards mismatch across layers");
     }

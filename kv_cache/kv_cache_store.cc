@@ -183,9 +183,14 @@ absl::Status KVCacheStore::Insert(
 }
 
 NB_MODULE(kv_cache_store, m) {
-  nanobind::module_::import_(
-      "google3.third_party.tpu_raiden.raiden_lib.raw_transfer.jax.raw_"
-      "transfer");
+  nanobind::class_<raiden::PjRtCopyFuture>(m, "PjRtCopyFuture")
+      .def("Await",
+           [](raiden::PjRtCopyFuture& future) {
+             nanobind::gil_scoped_release release;
+             future.Await();
+           })
+      .def("IsReady", &raiden::PjRtCopyFuture::IsReady);
+
   nanobind::class_<tpu_raiden::kv_cache::KVCacheStore>(m, "KVCacheStore")
       .def(nanobind::init<int, int>(), nanobind::arg("block_size"),
            nanobind::arg("capacity"))

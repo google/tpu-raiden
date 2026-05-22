@@ -12,36 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
+load("@rules_cc//cc:defs.bzl", "cc_binary")
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("//raiden_lib/raw_transfer:header_only_cc_info.bzl", "header_only_cc_info")
 
 package(default_visibility = ["//visibility:public"])
 
 licenses(["notice"])
 
-nanobind_extension(
-    name = "_torch_raw_transfer",
-    srcs = [
-        "torch_raw_transfer.cc",
-    ],
-    copts = [
-        "-fno-strict-aliasing",
-        "-fexceptions",
-    ],
-    features = ["-use_header_modules"],
+header_only_cc_info(
+    name = "xla_stablehlo_headers",
     deps = [
-        "//raiden_lib/raw_transfer:raw_transfer_impl",
-        "//third_party/py/torch:aten_headers",
-        "//third_party/py/torch:torch_headers",
-        "//third_party/py/torch/c10/core:base_headers",
-        "//third_party/py/torch/torch/headeronly:torch_headeronly",
-        "//third_party/py/torch_tpu/eager:device_buffer",
-        "//third_party/py/torch_tpu/eager:materialize",
-        "//third_party/py/torch_tpu/eager:structured_log_buffer",
-        "//third_party/py/torch_tpu/eager:tensor_to_buffer",
-        "//third_party/pybind11",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
+        "@stablehlo//:attr_type_builder_util",
+        "@stablehlo//:chlo_builder",
+        "@stablehlo//:mlir_builder",
+        "@stablehlo//:stablehlo_builder",
         "@xla//xla:future",
         "@xla//xla:shape_util",
         "@xla//xla/pjrt:common_pjrt_client",
@@ -54,14 +39,43 @@ nanobind_extension(
     ],
 )
 
+cc_binary(
+    name = "_torch_raw_transfer.so",
+    srcs = [
+        "torch_raw_transfer.cc",
+    ],
+    copts = [
+        "-std=c++20",
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    linkopts = [
+        "-Wl,--unresolved-symbols=ignore-all",
+    ],
+    linkshared = True,
+    deps = [
+        "//raiden_lib/raw_transfer:raw_transfer_impl_headers",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@local_torch_headers//:torch_headers",
+        "@local_torch_tpu_headers//:headers",
+        "@pybind11//:pybind11",
+        ":xla_stablehlo_headers",
+    ],
+)
+
+alias(
+    name = "_torch_raw_transfer",
+    actual = ":_torch_raw_transfer.so",
+)
+
 py_library(
     name = "torch_raw_transfer",
     srcs = ["torch_raw_transfer.py"],
-    deps = [
-        ":_torch_raw_transfer",
-        "//third_party/py/torch:pytorch",
-        "//third_party/py/torch_tpu",
-        "//third_party/py/torch_tpu:_loader",
+    data = [
+        ":_torch_raw_transfer.so",
+        "torch_raw_transfer.pyi",
     ],
 )
 

@@ -53,6 +53,42 @@ third_party = use_extension("@xla//third_party/extensions:third_party.bzl", "thi
 use_repo(
     third_party,
     "nanobind",
+    "stablehlo",
+)
+
+new_local_repository = use_repo_rule(
+    "@bazel_tools//tools/build_defs/repo:local.bzl",
+    "new_local_repository",
+)
+
+new_local_repository(
+    name = "local_torch_headers",
+    build_file_content = """
+cc_library(
+    name = "torch_headers",
+    hdrs = glob([
+        "include/**/*.h",
+        "include/**/*.hpp",
+    ]),
+    includes = [
+        "include",
+        "include/torch/csrc/api/include",
+    ],
+    visibility = ["//visibility:public"],
+)
+""",
+    path = "/home/sixiang_google_com/torchtpu-env/lib/python3.12/site-packages/torch",
+)
+
+local_headers_repository = use_repo_rule(
+    "//:third_party/local_headers_repo.bzl",
+    "local_headers_repository",
+)
+
+local_headers_repository(
+    name = "local_torch_tpu_headers",
+    include_root = "torch_tpu",
+    path = "/home/sixiang_google_com/torchtpu-dev/torch_tpu",
 )
 
 bazel_dep(name = "abseil-cpp", version = "20260107.1", repo_name = "com_google_absl")
