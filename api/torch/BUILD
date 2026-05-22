@@ -14,7 +14,7 @@
 
 load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
 load("@rules_cc//cc:defs.bzl", "cc_library")
-load("@rules_python//python:defs.bzl", "py_library")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -78,5 +78,25 @@ py_library(
         ":_kv_cache_manager",
         "//third_party/py/torch:pytorch",
         "//third_party/py/torch_tpu",
+    ],
+)
+
+py_test(
+    name = "kv_cache_manager_test",
+    srcs = ["kv_cache_manager_test.py"],
+    tags = [
+        "cpu:8",
+        "notap",
+        "requires-accel-hbm",
+        "requires-ghostlite:8",
+        "requires-net:external",
+    ],
+    deps = [
+        ":kv_cache_manager_torch_py",
+        "//third_party/py/torch:pytorch",
+        "//third_party/py/torch_tpu",
+        "@com_google_absl_py//absl/testing:absltest",
+        "@com_google_absl_py//absl/testing:parameterized",
+        "@numpy//numpy",
     ],
 )

@@ -31,6 +31,8 @@ class KVCacheManager:
       block_size: int = 1,
       local_port: Optional[int] = None,
       host_blocks_to_allocate: Optional[int] = None,
+      external_host_ptrs: Optional[List[int]] = None,
+      unsafe_skip_buffer_lock: bool = False,
       parallelism: int = 1,
   ):
     """Instantiates the PyTorch KV Cache Manager shims.
@@ -41,6 +43,8 @@ class KVCacheManager:
       block_size: Physical tokens count per allocation page block.
       local_port: TCP socket server port for remote pulls/pushes coordinates.
       host_blocks_to_allocate: Max host blocks staging cache size.
+      external_host_ptrs: Pinned external CPU host memory addresses list.
+      unsafe_skip_buffer_lock: Skip dynamic safety locking.
       parallelism: Parallel TCP sockets workers count.
     """
     self._impl = _kv_cache_manager.KVCacheManager(
@@ -48,30 +52,61 @@ class KVCacheManager:
         block_size,
         local_port,
         host_blocks_to_allocate,
+        external_host_ptrs,
+        unsafe_skip_buffer_lock,
         parallelism,
     )
 
   def h2d(
       self,
-      stream_idx: int,
-      peer: str,
-      src_block_ids: List[int],
-      dst_block_ids: List[int],
-      entity_id: int = 0,
-  ) -> None:
-    """Asynchronously offloads host CPU staging pages to remote TPU devices."""
-    self._impl.H2d(stream_idx, peer, src_block_ids, dst_block_ids, entity_id)
+      src_offsets_major_dim: List[int] = [],
+      dst_offsets_major_dim: List[int] = [],
+      copy_sizes_major_dim: List[int] = [],
+  ) -> any:
+    """Triggers host-to-device copy of cache slices."""
+    return self._impl.H2d(
+        src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim
+    )
 
   def d2h(
       self,
-      stream_idx: int,
+      src_offsets_major_dim: List[int] = [],
+      dst_offsets_major_dim: List[int] = [],
+      copy_sizes_major_dim: List[int] = [],
+  ) -> any:
+    """Triggers device-to-host copy of cache slices."""
+    return self._impl.D2h(
+        src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim
+    )
+
+  def d2h_auto_allocate(
+      self,
+      src_offsets_major_dim: List[int] = [],
+      copy_sizes_major_dim: List[int] = [],
+      entity_id: int = 0,
+  ) -> any:
+    """Triggers device-to-host copy with automatic host buffer allocation."""
+    return self._impl.D2hAutoAllocate(
+        src_offsets_major_dim, copy_sizes_major_dim, entity_id
+    )
+
+  def h2h_write(
+      self,
       peer: str,
       src_block_ids: List[int],
-      dst_block_ids: List[int],
       entity_id: int = 0,
-  ) -> None:
-    """Asynchronously fetches remote TPU device pages into local host CPU staging."""
-    self._impl.D2h(stream_idx, peer, src_block_ids, dst_block_ids, entity_id)
+  ) -> any:
+    """Trainer pushes cache pages to a remote peer."""
+    return self._impl.H2hWrite(peer, src_block_ids, entity_id)
+
+  def h2h_read(
+      self,
+      peer: str,
+      src_block_ids: List[int],
+      entity_id: int = 0,
+  ) -> any:
+    """Inference pulls cache pages from a remote peer."""
+    return self._impl.H2hRead(peer, src_block_ids, entity_id)
 
   @property
   def local_port(self) -> Optional[int]:

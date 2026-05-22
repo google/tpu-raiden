@@ -85,16 +85,28 @@ std::vector<std::vector<xla::PjRtBuffer*>> UnpackTorchTensors(
   return layer_buffers;
 }
 
+std::optional<std::vector<const uint8_t*>> CastExternalPointers(
+    const std::optional<std::vector<uintptr_t>>& external_host_ptrs) {
+  if (!external_host_ptrs.has_value()) return std::nullopt;
+  std::vector<const uint8_t*> cast_ptrs;
+  cast_ptrs.reserve(external_host_ptrs->size());
+  for (uintptr_t addr : *external_host_ptrs) {
+    cast_ptrs.push_back(reinterpret_cast<const uint8_t*>(addr));
+  }
+  return cast_ptrs;
+}
+
 }  // namespace
 
 KVCacheManager::KVCacheManager(
     const std::vector<std::vector<at::Tensor>>& device_tensors, int block_size,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
-    int parallelism)
+    std::optional<std::vector<uintptr_t>> external_host_ptrs,
+    bool unsafe_skip_buffer_lock, int parallelism)
     : kv_cache::KVCacheManagerBase(
           UnpackTorchTensors(device_tensors), block_size, local_port,
-          host_blocks_to_allocate, /*unsafe_skip_buffer_lock=*/true,
-          parallelism) {}
+          host_blocks_to_allocate, CastExternalPointers(external_host_ptrs),
+          unsafe_skip_buffer_lock, parallelism) {}
 
 KVCacheManager::~KVCacheManager() = default;
 

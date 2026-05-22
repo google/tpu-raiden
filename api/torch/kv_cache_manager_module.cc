@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pybind11/gil.h"
@@ -23,6 +24,7 @@
 #include "absl/status/statusor.h"
 #include "api/torch/kv_cache_manager.h"
 #include "raiden_lib/raw_transfer/raw_transfer_core.h"
+#include "torch/extension.h"
 
 namespace py = pybind11;
 
@@ -32,40 +34,99 @@ using ::tpu_raiden::torch::KVCacheManager;
 PYBIND11_MODULE(_kv_cache_manager, m) {
   py::class_<KVCacheManager>(m, "KVCacheManager")
       .def(py::init<const std::vector<std::vector<at::Tensor>>&, int,
-                    std::optional<int>, std::optional<int>, int>(),
+                    std::optional<int>, std::optional<int>,
+                    std::optional<std::vector<uintptr_t>>, bool, int>(),
            py::arg("device_tensors"), py::arg("block_size") = 1,
            py::arg("local_port") = py::none(),
            py::arg("host_blocks_to_allocate") = py::none(),
+           py::arg("external_host_ptrs") = py::none(),
+           py::arg("unsafe_skip_buffer_lock") = false,
            py::arg("parallelism") = 1)
       .def(
           "H2d",
-          [](KVCacheManager& self, int stream_idx, const std::string& peer,
-             const std::vector<int>& src_block_ids,
-             const std::vector<int>& dst_block_ids, int64_t entity_id) {
-            absl::Status s = self.H2d(stream_idx, peer, src_block_ids,
-                                      dst_block_ids, entity_id);
-            if (!s.ok()) {
-              throw std::runtime_error("KVCacheManager H2d failed: " +
-                                       std::string(s.message()));
+          [](KVCacheManager& self,
+             const std::vector<int64_t>& src_offsets_major_dim,
+             const std::vector<int64_t>& dst_offsets_major_dim,
+             const std::vector<int64_t>& copy_sizes_major_dim) {
+            auto status_or =
+                self.H2d(src_offsets_major_dim, dst_offsets_major_dim,
+                         copy_sizes_major_dim);
+            if (!status_or.ok()) {
+              throw std::runtime_error(
+                  "KVCacheManager H2d failed: " +
+                  std::string(status_or.status().message()));
             }
+            return status_or.value();
           },
-          py::arg("stream_idx"), py::arg("peer"), py::arg("src_block_ids"),
-          py::arg("dst_block_ids"), py::arg("entity_id") = 0,
-          py::call_guard<py::gil_scoped_release>())
+          py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+          py::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
+          py::arg("copy_sizes_major_dim") = std::vector<int64_t>{})
       .def(
           "D2h",
-          [](KVCacheManager& self, int stream_idx, const std::string& peer,
-             const std::vector<int>& src_block_ids,
-             const std::vector<int>& dst_block_ids, int64_t entity_id) {
-            absl::Status s = self.D2h(stream_idx, peer, src_block_ids,
-                                      dst_block_ids, entity_id);
-            if (!s.ok()) {
-              throw std::runtime_error("KVCacheManager D2h failed: " +
-                                       std::string(s.message()));
+          [](KVCacheManager& self,
+             const std::vector<int64_t>& src_offsets_major_dim,
+             const std::vector<int64_t>& dst_offsets_major_dim,
+             const std::vector<int64_t>& copy_sizes_major_dim) {
+            auto status_or =
+                self.D2h(src_offsets_major_dim, dst_offsets_major_dim,
+                         copy_sizes_major_dim);
+            if (!status_or.ok()) {
+              throw std::runtime_error(
+                  "KVCacheManager D2h failed: " +
+                  std::string(status_or.status().message()));
             }
+            return status_or.value();
           },
-          py::arg("stream_idx"), py::arg("peer"), py::arg("src_block_ids"),
-          py::arg("dst_block_ids"), py::arg("entity_id") = 0,
+          py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+          py::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
+          py::arg("copy_sizes_major_dim") = std::vector<int64_t>{})
+      .def(
+          "D2hAutoAllocate",
+          [](KVCacheManager& self,
+             const std::vector<int64_t>& src_offsets_major_dim,
+             const std::vector<int64_t>& copy_sizes_major_dim,
+             int64_t entity_id) {
+            auto status_or = self.D2hAutoAllocate(
+                src_offsets_major_dim, copy_sizes_major_dim, entity_id);
+            if (!status_or.ok()) {
+              throw std::runtime_error(
+                  "KVCacheManager D2hAutoAllocate failed: " +
+                  std::string(status_or.status().message()));
+            }
+            return status_or.value();
+          },
+          py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+          py::arg("copy_sizes_major_dim") = std::vector<int64_t>{},
+          py::arg("entity_id") = 0)
+      .def(
+          "H2hWrite",
+          [](KVCacheManager& self, std::string peer,
+             const std::vector<int>& src_block_ids, int64_t entity_id) {
+            auto status_or =
+                self.H2hWrite(std::move(peer), src_block_ids, entity_id);
+            if (!status_or.ok()) {
+              throw std::runtime_error(
+                  "KVCacheManager H2hWrite failed: " +
+                  std::string(status_or.status().message()));
+            }
+            return status_or.value();
+          },
+          py::arg("peer"), py::arg("src_block_ids"), py::arg("entity_id") = 0,
+          py::call_guard<py::gil_scoped_release>())
+      .def(
+          "H2hRead",
+          [](KVCacheManager& self, std::string peer,
+             const std::vector<int>& src_block_ids, int64_t entity_id) {
+            auto status_or =
+                self.H2hRead(std::move(peer), src_block_ids, entity_id);
+            if (!status_or.ok()) {
+              throw std::runtime_error(
+                  "KVCacheManager H2hRead failed: " +
+                  std::string(status_or.status().message()));
+            }
+            return status_or.value();
+          },
+          py::arg("peer"), py::arg("src_block_ids"), py::arg("entity_id") = 0,
           py::call_guard<py::gil_scoped_release>())
       .def_property_readonly("local_port", &KVCacheManager::local_port)
       .def_property_readonly("num_layers", &KVCacheManager::num_layers)
