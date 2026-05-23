@@ -26,13 +26,13 @@ BAZEL_REPO_CACHE="${BAZEL_CACHE_BASE}/repo_cache"
 echo "=== Navigating to workspace directory ==="
 cd "${WORKSPACE_DIR}"
 
-echo "=== Building raw_transfer and kv_cache_manager with Bazel ==="
+echo "=== Building raw_transfer, kv_cache_manager, and Raiden transfer engine with Bazel ==="
 bazel build -c opt --check_visibility=false --verbose_failures --experimental_repo_remote_exec --incompatible_disallow_empty_glob=false \
   --repo_env=HERMETIC_PYTHON_VERSION=${HERMETIC_PYTHON_VERSION:-3.12} \
   //raiden_lib/raw_transfer/jax:raw_transfer \
   //kv_cache:kv_cache_manager \
   //kv_cache:kv_cache_store \
-  //raiden_lib/raw_transfer/torch:_torch_raw_transfer.so \
+  //kv_cache:_raiden_transfer_engine.so \
   --disk_cache=${BAZEL_DISK_CACHE} \
   --repository_cache=${BAZEL_REPO_CACHE}
 
@@ -41,7 +41,7 @@ echo "=== Copying compiled shared libraries to source directory ==="
 cp -f "${WORKSPACE_DIR}/bazel-bin/raiden_lib/raw_transfer/jax/raw_transfer.so" "${WORKSPACE_DIR}/raiden_lib/raw_transfer/jax/"
 cp -f "${WORKSPACE_DIR}/bazel-bin/kv_cache/kv_cache_manager.so" "${WORKSPACE_DIR}/kv_cache/"
 cp -f "${WORKSPACE_DIR}/bazel-bin/kv_cache/kv_cache_store.so" "${WORKSPACE_DIR}/kv_cache/"
-cp -f "${WORKSPACE_DIR}/bazel-bin/raiden_lib/raw_transfer/torch/_torch_raw_transfer.so" "${WORKSPACE_DIR}/raiden_lib/raw_transfer/torch/"
+cp -f "${WORKSPACE_DIR}/bazel-bin/kv_cache/_raiden_transfer_engine.so" "${WORKSPACE_DIR}/kv_cache/"
 
 
 echo "=== Build Complete! ==="

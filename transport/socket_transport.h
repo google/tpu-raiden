@@ -30,8 +30,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
-#include "third_party/mlcl/src/api/transport.h"
-#include "third_party/mlcl/src/api/types.h"
+#include "transport/mlcl_types.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -78,6 +77,10 @@ class SocketTransport final : public mlcl::Transport {
   absl::StatusOr<int> GetOrCreateConnection(mlcl::Endpoint peer)
       ABSL_LOCKS_EXCLUDED(conn_mu_);
 
+  // Removes a cached connection after a transport error.
+  void CloseConnection(mlcl::Endpoint peer, int fd)
+      ABSL_LOCKS_EXCLUDED(conn_mu_);
+
   // Background listener loop accepting incoming connection sockets.
   void ListenerLoop();
 
@@ -103,6 +106,10 @@ class SocketTransport final : public mlcl::Transport {
   absl::Mutex conn_mu_;
   absl::flat_hash_map<std::string, int> connection_pool_
       ABSL_GUARDED_BY(conn_mu_);
+
+  // The current socket protocol is request/response over a shared stream. Keep
+  // posts serialized so response payloads cannot interleave on a pooled fd.
+  absl::Mutex post_mu_;
 
   std::thread listener_thread_;
   std::vector<std::thread> worker_threads_;

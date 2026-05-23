@@ -187,6 +187,16 @@ absl::StatusOr<int> SocketTransport::GetOrCreateConnection(
   return sock_fd;
 }
 
+void SocketTransport::CloseConnection(mlcl::Endpoint peer, int fd) {
+  std::string peer_str(peer);
+  absl::MutexLock _(&conn_mu_);
+  auto it = connection_pool_.find(peer_str);
+  if (it != connection_pool_.end() && it->second == fd) {
+    close(it->second);
+    connection_pool_.erase(it);
+  }
+}
+
 absl::StatusOr<mlcl::Handle> SocketTransport::Post(
     mlcl::Endpoint peer, const mlcl::Request& request) {
   if (!request.IsValid()) {
@@ -208,13 +218,17 @@ absl::StatusOr<mlcl::Handle> SocketTransport::Post(
   }
 
   absl::Status op_status;
-  if (request.op == mlcl::Op::kWrite) {
-    op_status = DispatchWrite(fd, request);
-  } else if (request.op == mlcl::Op::kRead) {
-    op_status = DispatchReadRequest(fd, request);
-  } else {
-    op_status = absl::InternalError("Unsupported transport operation");
+  {
+    absl::MutexLock _(&post_mu_);
+    if (request.op == mlcl::Op::kWrite) {
+      op_status = DispatchWrite(fd, request);
+    } else if (request.op == mlcl::Op::kRead) {
+      op_status = DispatchReadRequest(fd, request);
+    } else {
+      op_status = absl::InternalError("Unsupported transport operation");
+    }
   }
+  if (!op_status.ok()) CloseConnection(peer, fd);
 
   absl::MutexLock _(&mu_);
   if (op_status.ok()) {

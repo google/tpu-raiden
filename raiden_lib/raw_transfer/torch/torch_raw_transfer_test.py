@@ -220,6 +220,36 @@ class TorchRawTransferTest(parameterized.TestCase):
 
     torch.testing.assert_close(dst_tpu_arr.cpu(), ref_arr)
 
+  def test_prepared_partial_external_host_transfer(self):
+    dtype = torch.bfloat16
+    ref_arr = torch.randn(self.shape).to(dtype)
+    tpu_arr = ref_arr.to(self.device)
+    torch.tpu.synchronize()
+
+    prepared_src = torch_raw_transfer.PreparedTorchRawTransfer(tpu_arr)
+
+    dst_d2h = torch.zeros_like(ref_arr)
+    prepared_src.d2h_to(
+        dst_d2h,
+        src_offsets_major_dim=[2, 0],
+        dst_offsets_major_dim=[0, 1],
+        copy_sizes_major_dim=[1, 1],
+    )
+
+    dst_tpu_arr = torch.zeros_like(ref_arr).to(self.device)
+    prepared_dst = torch_raw_transfer.PreparedTorchRawTransfer(dst_tpu_arr)
+    prepared_dst.h2d_from(
+        dst_d2h,
+        src_offsets_major_dim=[0, 1],
+        dst_offsets_major_dim=[3, 1],
+        copy_sizes_major_dim=[1, 1],
+    )
+    torch.tpu.synchronize()
+
+    dst_ref = dst_tpu_arr.cpu()
+    torch.testing.assert_close(dst_ref[3:4], ref_arr[2:3])
+    torch.testing.assert_close(dst_ref[1:2], ref_arr[0:1])
+
   def test_perf_compare(self):
     import time
     import gc

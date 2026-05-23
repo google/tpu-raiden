@@ -411,17 +411,28 @@ class PreparedTorchRawTransfer
     if (!host_buffer_) {
       throw std::invalid_argument("host_buffer must not be None");
     }
-    ValidateTpuTensor(tpu_tensor_, "TPU tensor");
-    buffer_ref_ = GetMaterializedBufferRef(tpu_tensor_);
-    pjrt_buffer_ = GetPjRtBuffer(*buffer_ref_);
+    Initialize(unsafe_skip_buffer_lock);
     host_buffer_->EnsureBoundToDevice(pjrt_buffer_->device());
-    physical_size_ = static_cast<size_t>(
-        ValueOrThrow("Failed to get TPU physical buffer size",
-                     pjrt_buffer_->GetOnDeviceSizeInBytes()));
     if (host_buffer_->SizeBytes() < physical_size_) {
       throw std::invalid_argument(
           "RawHostBuffer is smaller than TPU physical size");
     }
+  }
+
+  PreparedTorchRawTransfer(const at::Tensor& tpu_tensor,
+                           bool unsafe_skip_buffer_lock)
+      : tpu_tensor_(tpu_tensor) {
+    Initialize(unsafe_skip_buffer_lock);
+  }
+
+  void Initialize(bool unsafe_skip_buffer_lock) {
+    ValidateTpuTensor(tpu_tensor_, "TPU tensor");
+    buffer_ref_ = GetMaterializedBufferRef(tpu_tensor_);
+    pjrt_buffer_ = GetPjRtBuffer(*buffer_ref_);
+    physical_size_ = static_cast<size_t>(
+        ValueOrThrow("Failed to get TPU physical buffer size",
+                     pjrt_buffer_->GetOnDeviceSizeInBytes()));
+    slice_byte_size_ = static_cast<size_t>(GetMajorSliceByteSize(pjrt_buffer_));
     auto hold_or = BufferHoldAndAlias::Acquire(pjrt_buffer_, nullptr, nullptr,
                                                unsafe_skip_buffer_lock);
     if (!hold_or.ok()) {
@@ -435,6 +446,10 @@ class PreparedTorchRawTransfer
   std::shared_ptr<RawHostBuffer> HostBuffer() const { return host_buffer_; }
 
   std::shared_ptr<PjRtCopyFuture> D2HAsync() {
+    if (!host_buffer_) {
+      throw std::invalid_argument(
+          "PreparedTorchRawTransfer has no RawHostBuffer; use d2h_to_async");
+    }
     auto future =
         std::make_shared<PjRtCopyFuture>(std::vector<xla::Future<>>{});
     xla::Future<> copy_future;
@@ -451,6 +466,10 @@ class PreparedTorchRawTransfer
   }
 
   std::shared_ptr<PjRtCopyFuture> H2DAsync() {
+    if (!host_buffer_) {
+      throw std::invalid_argument(
+          "PreparedTorchRawTransfer has no RawHostBuffer; use h2d_from_async");
+    }
     auto future =
         std::make_shared<PjRtCopyFuture>(std::vector<xla::Future<>>{});
     xla::Future<> copy_future;
@@ -478,12 +497,170 @@ class PreparedTorchRawTransfer
     future->Await();
   }
 
+  std::shared_ptr<PjRtCopyFuture> D2HToAsync(
+      const at::Tensor& dst_arr,
+      const std::vector<int64_t>& src_offsets_major_dim,
+      const std::vector<int64_t>& dst_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim) {
+    ValidateCpuTensor(dst_arr, "Destination");
+    ValidatePartialSpec(src_offsets_major_dim, dst_offsets_major_dim,
+                        copy_sizes_major_dim);
+    auto future =
+        std::make_shared<PjRtCopyFuture>(std::vector<xla::Future<>>{});
+    IssueD2HTo(future, reinterpret_cast<uint8_t*>(dst_arr.data_ptr()),
+               dst_arr.nbytes(), src_offsets_major_dim, dst_offsets_major_dim,
+               copy_sizes_major_dim);
+    KeepTensorAlive(future, dst_arr);
+    future->AddUserHold(shared_from_this());
+    return future;
+  }
+
+  std::shared_ptr<PjRtCopyFuture> H2DFromAsync(
+      const at::Tensor& src_arr,
+      const std::vector<int64_t>& src_offsets_major_dim,
+      const std::vector<int64_t>& dst_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim) {
+    ValidateCpuTensor(src_arr, "Source");
+    ValidatePartialSpec(src_offsets_major_dim, dst_offsets_major_dim,
+                        copy_sizes_major_dim);
+    auto future =
+        std::make_shared<PjRtCopyFuture>(std::vector<xla::Future<>>{});
+    IssueH2DFrom(future, reinterpret_cast<const uint8_t*>(src_arr.data_ptr()),
+                 src_arr.nbytes(), src_offsets_major_dim,
+                 dst_offsets_major_dim, copy_sizes_major_dim);
+    KeepTensorAlive(future, src_arr);
+    future->AddUserHold(shared_from_this());
+    return future;
+  }
+
+  void D2HTo(const at::Tensor& dst_arr,
+             const std::vector<int64_t>& src_offsets_major_dim,
+             const std::vector<int64_t>& dst_offsets_major_dim,
+             const std::vector<int64_t>& copy_sizes_major_dim) {
+    auto future = D2HToAsync(dst_arr, src_offsets_major_dim,
+                             dst_offsets_major_dim, copy_sizes_major_dim);
+    py::gil_scoped_release release;
+    future->Await();
+  }
+
+  void H2DFrom(const at::Tensor& src_arr,
+               const std::vector<int64_t>& src_offsets_major_dim,
+               const std::vector<int64_t>& dst_offsets_major_dim,
+               const std::vector<int64_t>& copy_sizes_major_dim) {
+    auto future = H2DFromAsync(src_arr, src_offsets_major_dim,
+                               dst_offsets_major_dim, copy_sizes_major_dim);
+    py::gil_scoped_release release;
+    future->Await();
+  }
+
  private:
+  bool IsPartialPrepared(
+      const std::vector<int64_t>& src_offsets_major_dim,
+      const std::vector<int64_t>& dst_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim) const {
+    return IsPartial(pjrt_buffer_->on_device_shape(), src_offsets_major_dim,
+                     dst_offsets_major_dim, copy_sizes_major_dim);
+  }
+
+  void ValidatePreparedPartial(bool is_partial) const {
+    if (!is_partial) {
+      return;
+    }
+    if (pjrt_buffer_->on_device_shape().dimensions_size() < 3) {
+      throw std::invalid_argument(
+          "Only rank >= 3 TPU tensors support partial raw copies");
+    }
+    if (slice_byte_size_ % 4096 != 0) {
+      throw std::invalid_argument(
+          "Partial raw copies require a major-dimension slice size aligned to "
+          "4096 bytes");
+    }
+  }
+
+  void IssueD2HTo(const std::shared_ptr<PjRtCopyFuture>& future,
+                  uint8_t* dst_data, size_t dst_size,
+                  const std::vector<int64_t>& src_offsets_major_dim,
+                  const std::vector<int64_t>& dst_offsets_major_dim,
+                  const std::vector<int64_t>& copy_sizes_major_dim) const {
+    const bool is_partial = IsPartialPrepared(
+        src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim);
+    ValidatePreparedPartial(is_partial);
+
+    std::vector<xla::Future<>> futures;
+    if (!is_partial) {
+      if (dst_size < physical_size_) {
+        throw std::invalid_argument("Destination CPU tensor is too small");
+      }
+      py::gil_scoped_release release;
+      futures.push_back(hold_.CopyRawDeviceToHost(dst_data, 0, physical_size_));
+    } else {
+      for (size_t i = 0; i < src_offsets_major_dim.size(); ++i) {
+        const int64_t src_offset =
+            src_offsets_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
+        const int64_t dst_offset =
+            dst_offsets_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
+        const int64_t size_to_copy =
+            copy_sizes_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
+        if (src_offset + size_to_copy > static_cast<int64_t>(physical_size_)) {
+          throw std::invalid_argument("Copy range exceeds source TPU buffer");
+        }
+        if (dst_offset + size_to_copy > static_cast<int64_t>(dst_size)) {
+          throw std::invalid_argument(
+              "Copy range exceeds destination CPU tensor");
+        }
+        py::gil_scoped_release release;
+        futures.push_back(hold_.CopyRawDeviceToHost(dst_data + dst_offset,
+                                                    src_offset, size_to_copy));
+      }
+    }
+    future->Append(std::move(futures));
+  }
+
+  void IssueH2DFrom(const std::shared_ptr<PjRtCopyFuture>& future,
+                    const uint8_t* src_data, size_t src_size,
+                    const std::vector<int64_t>& src_offsets_major_dim,
+                    const std::vector<int64_t>& dst_offsets_major_dim,
+                    const std::vector<int64_t>& copy_sizes_major_dim) const {
+    const bool is_partial = IsPartialPrepared(
+        src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim);
+    ValidatePreparedPartial(is_partial);
+
+    std::vector<xla::Future<>> futures;
+    if (!is_partial) {
+      if (src_size < physical_size_) {
+        throw std::invalid_argument("Source CPU tensor is too small");
+      }
+      py::gil_scoped_release release;
+      futures.push_back(hold_.CopyRawHostToDevice(src_data, 0, physical_size_));
+    } else {
+      for (size_t i = 0; i < src_offsets_major_dim.size(); ++i) {
+        const int64_t src_offset =
+            src_offsets_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
+        const int64_t dst_offset =
+            dst_offsets_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
+        const int64_t size_to_copy =
+            copy_sizes_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
+        if (src_offset + size_to_copy > static_cast<int64_t>(src_size)) {
+          throw std::invalid_argument("Copy range exceeds source CPU tensor");
+        }
+        if (dst_offset + size_to_copy > static_cast<int64_t>(physical_size_)) {
+          throw std::invalid_argument(
+              "Copy range exceeds destination TPU buffer");
+        }
+        py::gil_scoped_release release;
+        futures.push_back(hold_.CopyRawHostToDevice(src_data + src_offset,
+                                                    dst_offset, size_to_copy));
+      }
+    }
+    future->Append(std::move(futures));
+  }
+
   at::Tensor tpu_tensor_;
   std::shared_ptr<RawHostBuffer> host_buffer_;
   std::optional<torch_tpu::DeviceBufferRef> buffer_ref_;
   xla::PjRtBuffer* pjrt_buffer_ = nullptr;
   size_t physical_size_ = 0;
+  size_t slice_byte_size_ = 0;
   BufferHoldAndAlias hold_;
 };
 
@@ -537,6 +714,8 @@ PYBIND11_MODULE(_torch_raw_transfer, m) {
       .def(py::init<const at::Tensor&, std::shared_ptr<RawHostBuffer>, bool>(),
            py::arg("tpu_tensor"), py::arg("host_buffer"),
            py::arg("unsafe_skip_buffer_lock") = true)
+      .def(py::init<const at::Tensor&, bool>(), py::arg("tpu_tensor"),
+           py::arg("unsafe_skip_buffer_lock") = true)
       .def_property_readonly("physical_size_bytes",
                              &PreparedTorchRawTransfer::PhysicalSizeBytes)
       .def_property_readonly("host_buffer",
@@ -544,7 +723,27 @@ PYBIND11_MODULE(_torch_raw_transfer, m) {
       .def("d2h_async", &PreparedTorchRawTransfer::D2HAsync)
       .def("h2d_async", &PreparedTorchRawTransfer::H2DAsync)
       .def("d2h", &PreparedTorchRawTransfer::D2H)
-      .def("h2d", &PreparedTorchRawTransfer::H2D);
+      .def("h2d", &PreparedTorchRawTransfer::H2D)
+      .def("d2h_to_async", &PreparedTorchRawTransfer::D2HToAsync,
+           py::arg("dst_arr"), py::kw_only(),
+           py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+           py::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
+           py::arg("copy_sizes_major_dim") = std::vector<int64_t>{})
+      .def("h2d_from_async", &PreparedTorchRawTransfer::H2DFromAsync,
+           py::arg("src_arr"), py::kw_only(),
+           py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+           py::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
+           py::arg("copy_sizes_major_dim") = std::vector<int64_t>{})
+      .def("d2h_to", &PreparedTorchRawTransfer::D2HTo, py::arg("dst_arr"),
+           py::kw_only(),
+           py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+           py::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
+           py::arg("copy_sizes_major_dim") = std::vector<int64_t>{})
+      .def("h2d_from", &PreparedTorchRawTransfer::H2DFrom, py::arg("src_arr"),
+           py::kw_only(),
+           py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+           py::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
+           py::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
 
   m.def("await_all", &AwaitAll, py::arg("futures"));
   m.def("is_ready", &IsReady, py::arg("futures"));

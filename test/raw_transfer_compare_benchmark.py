@@ -165,7 +165,7 @@ def _torch_synchronize(torch_mod: Any) -> None:
 
 def _torch_backend_ops(backend: str) -> tuple[Any, Any]:
   if backend == "raiden_torch":
-    from raiden_lib.raw_transfer import torch_raw_transfer
+    from raiden_lib.raw_transfer.torch import torch_raw_transfer
 
     def d2h(src: Any, dst: Any) -> Any:
       return torch_raw_transfer.transfer_d2h_async(src, dst)
@@ -207,7 +207,7 @@ def _run_torch_worker(args: argparse.Namespace) -> None:
     device = torch.device("tpu")
     tpu_buf = torch.empty(numel, dtype=torch.float32, device=device)
     if args.backend in PREPARED_TORCH_BACKENDS:
-      from raiden_lib.raw_transfer import torch_raw_transfer
+      from raiden_lib.raw_transfer.torch import torch_raw_transfer
 
       host_stage = torch_raw_transfer.RawHostBuffer(
           size_bytes + args.host_padding_bytes
@@ -769,7 +769,7 @@ def _build_parser() -> argparse.ArgumentParser:
   parser.add_argument("--sync-dir", default="")
   parser.add_argument(
       "--jax-raw-module",
-      default="raiden_lib.raw_transfer.raw_transfer",
+      default="raiden_lib.raw_transfer.jax.raw_transfer",
       help="Import path for the JAX Raiden raw transfer module.",
   )
   parser.add_argument("--timeout-s", type=int, default=1800)

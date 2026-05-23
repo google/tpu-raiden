@@ -13,8 +13,8 @@
 # limitations under the License.
 
 load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -147,6 +147,94 @@ nanobind_extension(
         "@com_google_absl//absl/synchronization",
         "@nanobind",
         "@xla//xla/pjrt:status_casters",
+    ],
+)
+
+cc_binary(
+    name = "_raiden_transfer_engine.so",
+    srcs = ["raiden_transfer_engine.cc"],
+    copts = [
+        "-std=c++20",
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    linkopts = [
+        "-Wl,--unresolved-symbols=ignore-all",
+    ],
+    linkshared = True,
+    deps = [
+        "//raiden_lib/raw_transfer:raw_transfer_impl_headers",
+        "//raiden_lib/raw_transfer/torch:xla_stablehlo_headers",
+        "//transport:socket_transport",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@local_torch_headers//:torch_headers",
+        "@local_torch_tpu_headers//:headers",
+        "@pybind11//:pybind11",
+    ],
+)
+
+alias(
+    name = "_raiden_transfer_engine",
+    actual = ":_raiden_transfer_engine.so",
+)
+
+py_library(
+    name = "raiden_transfer_engine",
+    srcs = ["raiden_transfer_engine.py"],
+    data = [
+        ":_raiden_transfer_engine.so",
+        "raiden_transfer_engine.pyi",
+    ],
+)
+
+py_test(
+    name = "raiden_transfer_engine_test_gf",
+    timeout = "long",
+    srcs = ["raiden_transfer_engine_test.py"],
+    main = "raiden_transfer_engine_test.py",
+    tags = [
+        "cpu:8",
+        "notap",
+        "requires-accel-hbm",
+        "requires-ghostfish:4",
+        "requires-net:external",
+    ],
+    deps = [
+        ":raiden_transfer_engine",
+        "//third_party/py/torch:pytorch",
+        "//third_party/py/torch_tpu",
+        "@com_google_absl_py//absl/testing:absltest",
+    ],
+)
+
+py_test(
+    name = "raiden_transfer_engine_test_gl",
+    timeout = "long",
+    srcs = ["raiden_transfer_engine_test.py"],
+    main = "raiden_transfer_engine_test.py",
+    tags = [
+        "cpu:8",
+        "notap",
+        "requires-accel-hbm",
+        "requires-ghostlite:8",
+        "requires-net:external",
+    ],
+    deps = [
+        ":raiden_transfer_engine",
+        "//third_party/py/torch:pytorch",
+        "//third_party/py/torch_tpu",
+        "@com_google_absl_py//absl/testing:absltest",
+    ],
+)
+
+test_suite(
+    name = "raiden_transfer_engine_test",
+    tests = [
+        ":raiden_transfer_engine_test_gf",
+        ":raiden_transfer_engine_test_gl",
     ],
 )
 

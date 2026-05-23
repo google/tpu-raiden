@@ -1,0 +1,1583 @@
+// Copyright 2026 Google LLC.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "raiden_lib/raw_transfer/raw_transfer_core.h"
+
+#include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <cstring>
+#include <deque>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+#include "ATen/core/TensorBody.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "pybind11/gil.h"
+#include "pybind11/pybind11.h"
+#include "pybind11/stl.h"
+#include "transport/socket_transport.h"
+#include "torch/extension.h"  // IWYU pragma: keep
+#include "torch/headeronly/core/DeviceType.h"
+#include "torch_tpu/eager/device_buffer.h"
+#include "torch_tpu/eager/materialize.h"
+#include "torch_tpu/eager/tensor_to_buffer.h"
+#include "xla/pjrt/pjrt_client.h"
+
+namespace py = pybind11;
+
+namespace tpu_raiden::kv_cache {
+namespace {
+
+using TensorList = std::vector<at::Tensor>;
+
+[[noreturn]] void ThrowStatus(const std::string& context,
+                              const absl::Status& status) {
+  throw std::runtime_error(context + ": " + std::string(status.message()));
+}
+
+void CheckStatus(const std::string& context, const absl::Status& status) {
+  if (!status.ok()) {
+    ThrowStatus(context, status);
+  }
+}
+
+void EmitTimingLog(const std::string& message) {
+  LOG(INFO) << message;
+  std::cerr << message << std::endl;
+}
+
+template <typename T>
+T ValueOrThrow(const std::string& context, absl::StatusOr<T> value_or) {
+  if (!value_or.ok()) {
+    ThrowStatus(context, value_or.status());
+  }
+  return std::move(value_or).value();
+}
+
+absl::Status WriteExact(int fd, const void* buffer, size_t length) {
+  const uint8_t* ptr = static_cast<const uint8_t*>(buffer);
+  size_t remaining = length;
+  while (remaining > 0) {
+    ssize_t written = write(fd, ptr, remaining);
+    if (written < 0) {
+      if (errno == EINTR) continue;
+      return absl::InternalError(
+          "socket write failed: " + std::string(std::strerror(errno)));
+    }
+    if (written == 0) {
+      return absl::InternalError("socket closed during write");
+    }
+    ptr += written;
+    remaining -= written;
+  }
+  return absl::OkStatus();
+}
+
+absl::Status ReadExact(int fd, void* buffer, size_t length) {
+  uint8_t* ptr = static_cast<uint8_t*>(buffer);
+  size_t remaining = length;
+  while (remaining > 0) {
+    ssize_t bytes_read = read(fd, ptr, remaining);
+    if (bytes_read < 0) {
+      if (errno == EINTR) continue;
+      return absl::InternalError(
+          "socket read failed: " + std::string(std::strerror(errno)));
+    }
+    if (bytes_read == 0) {
+      return absl::InternalError("socket closed during read");
+    }
+    ptr += bytes_read;
+    remaining -= bytes_read;
+  }
+  return absl::OkStatus();
+}
+
+std::pair<std::string, int> SplitEndpoint(const std::string& endpoint) {
+  const size_t colon = endpoint.rfind(':');
+  if (colon == std::string::npos) {
+    throw std::invalid_argument("endpoint must be host:port");
+  }
+  return {endpoint.substr(0, colon), std::stoi(endpoint.substr(colon + 1))};
+}
+
+int ConnectTcp(const std::string& endpoint) {
+  auto [host, port] = SplitEndpoint(endpoint);
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
+    throw std::runtime_error("socket() failed: " + std::string(std::strerror(errno)));
+  }
+  int opt = 1;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+
+  sockaddr_in addr;
+  std::memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+    close(fd);
+    throw std::runtime_error("invalid IPv4 endpoint host: " + host);
+  }
+  if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+    std::string err = std::strerror(errno);
+    close(fd);
+    throw std::runtime_error("connect(" + endpoint + ") failed: " + err);
+  }
+  return fd;
+}
+
+class MaybeGilRelease {
+ public:
+  MaybeGilRelease() {
+    if (PyGILState_Check()) {
+      release_.emplace();
+    }
+  }
+
+ private:
+  std::optional<py::gil_scoped_release> release_;
+};
+
+void ValidatePartialSpec(const std::vector<int64_t>& src_offsets_major_dim,
+                         const std::vector<int64_t>& dst_offsets_major_dim,
+                         const std::vector<int64_t>& copy_sizes_major_dim) {
+  const bool present = !src_offsets_major_dim.empty() ||
+                       !dst_offsets_major_dim.empty() ||
+                       !copy_sizes_major_dim.empty();
+  if (present &&
+      (src_offsets_major_dim.size() != dst_offsets_major_dim.size() ||
+       src_offsets_major_dim.size() != copy_sizes_major_dim.size())) {
+    throw std::invalid_argument(
+        "src_offsets_major_dim, dst_offsets_major_dim, and "
+        "copy_sizes_major_dim must have the same length");
+  }
+  for (size_t i = 0; i < src_offsets_major_dim.size(); ++i) {
+    if (src_offsets_major_dim[i] < 0 || dst_offsets_major_dim[i] < 0 ||
+        copy_sizes_major_dim[i] < 0) {
+      throw std::invalid_argument(
+          "raw copy offsets and sizes must be non-negative");
+    }
+  }
+}
+
+bool IsPartial(const xla::Shape& shape,
+               const std::vector<int64_t>& src_offsets_major_dim,
+               const std::vector<int64_t>& dst_offsets_major_dim,
+               const std::vector<int64_t>& copy_sizes_major_dim) {
+  if (src_offsets_major_dim.empty()) return false;
+  if (shape.dimensions_size() == 0) return true;
+  const int64_t full_major_dim = shape.dimensions(0);
+  for (size_t i = 0; i < src_offsets_major_dim.size(); ++i) {
+    if (src_offsets_major_dim[i] != 0 || dst_offsets_major_dim[i] != 0 ||
+        copy_sizes_major_dim[i] != full_major_dim) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void ValidateCpuTensor(const at::Tensor& tensor, const char* role) {
+  if (!tensor.device().is_cpu()) {
+    throw std::invalid_argument(std::string(role) + " must be a CPU tensor");
+  }
+  if (!tensor.is_contiguous()) {
+    throw std::invalid_argument(std::string(role) + " must be contiguous");
+  }
+}
+
+void ValidateTpuTensor(const at::Tensor& tensor, const char* role) {
+  if (tensor.device().type() != at::DeviceType::PrivateUse1) {
+    throw std::invalid_argument(std::string(role) + " must be a TPU tensor");
+  }
+  if (!tensor.is_contiguous()) {
+    throw std::invalid_argument(std::string(role) + " must be contiguous");
+  }
+}
+
+torch_tpu::DeviceBufferRef GetMaterializedBufferRef(const at::Tensor& tensor) {
+  return ValueOrThrow(
+      "Failed to materialize TPU tensor",
+      torch_tpu::GetMaterialized(
+          tensor, torch_tpu::MaterializationReason::kCpuTransfer));
+}
+
+xla::PjRtBuffer* GetPjRtBuffer(const torch_tpu::DeviceBufferRef& buffer_ref) {
+  return ValueOrThrow("Failed to get PjRtBuffer",
+                      buffer_ref.GetOrMaterializeBuffer());
+}
+
+void KeepTensorAlive(const std::shared_ptr<raiden::PjRtCopyFuture>& future,
+                     const at::Tensor& tensor) {
+  future->AddUserHold(std::make_shared<at::Tensor>(tensor));
+}
+
+class PreparedTpuBuffer : public std::enable_shared_from_this<PreparedTpuBuffer> {
+ public:
+  PreparedTpuBuffer(const at::Tensor& tpu_tensor, bool unsafe_skip_buffer_lock)
+      : tpu_tensor_(tpu_tensor) {
+    ValidateTpuTensor(tpu_tensor_, "TPU tensor");
+    buffer_ref_ = GetMaterializedBufferRef(tpu_tensor_);
+    pjrt_buffer_ = GetPjRtBuffer(*buffer_ref_);
+    physical_size_ = static_cast<size_t>(
+        ValueOrThrow("Failed to get TPU physical buffer size",
+                     pjrt_buffer_->GetOnDeviceSizeInBytes()));
+    slice_byte_size_ = static_cast<size_t>(raiden::GetMajorSliceByteSize(pjrt_buffer_));
+    auto hold_or = raiden::BufferHoldAndAlias::Acquire(
+        pjrt_buffer_, nullptr, nullptr, unsafe_skip_buffer_lock);
+    if (!hold_or.ok()) {
+      ThrowStatus("Failed to acquire cached raw buffer", hold_or.status());
+    }
+    hold_ = std::move(hold_or.value());
+  }
+
+  std::shared_ptr<raiden::PjRtCopyFuture> D2HToAsync(
+      const at::Tensor& dst_arr,
+      const std::vector<int64_t>& src_offsets_major_dim,
+      const std::vector<int64_t>& dst_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim) {
+    ValidateCpuTensor(dst_arr, "Destination");
+    ValidatePartialSpec(src_offsets_major_dim, dst_offsets_major_dim,
+                        copy_sizes_major_dim);
+    auto future =
+        std::make_shared<raiden::PjRtCopyFuture>(std::vector<xla::Future<>>{});
+    IssueD2HTo(future, reinterpret_cast<uint8_t*>(dst_arr.data_ptr()),
+               dst_arr.nbytes(), src_offsets_major_dim, dst_offsets_major_dim,
+               copy_sizes_major_dim);
+    KeepTensorAlive(future, dst_arr);
+    future->AddUserHold(shared_from_this());
+    return future;
+  }
+
+  std::shared_ptr<raiden::PjRtCopyFuture> H2DFromAsync(
+      const at::Tensor& src_arr,
+      const std::vector<int64_t>& src_offsets_major_dim,
+      const std::vector<int64_t>& dst_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim) {
+    ValidateCpuTensor(src_arr, "Source");
+    ValidatePartialSpec(src_offsets_major_dim, dst_offsets_major_dim,
+                        copy_sizes_major_dim);
+    auto future =
+        std::make_shared<raiden::PjRtCopyFuture>(std::vector<xla::Future<>>{});
+    IssueH2DFrom(future, reinterpret_cast<const uint8_t*>(src_arr.data_ptr()),
+                 src_arr.nbytes(), src_offsets_major_dim,
+                 dst_offsets_major_dim, copy_sizes_major_dim);
+    KeepTensorAlive(future, src_arr);
+    future->AddUserHold(shared_from_this());
+    return future;
+  }
+
+ private:
+  bool IsPartialPrepared(
+      const std::vector<int64_t>& src_offsets_major_dim,
+      const std::vector<int64_t>& dst_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim) const {
+    return IsPartial(pjrt_buffer_->on_device_shape(), src_offsets_major_dim,
+                     dst_offsets_major_dim, copy_sizes_major_dim);
+  }
+
+  void ValidatePreparedPartial(bool is_partial) const {
+    if (!is_partial) {
+      return;
+    }
+    if (pjrt_buffer_->on_device_shape().dimensions_size() < 3) {
+      throw std::invalid_argument(
+          "Only rank >= 3 TPU tensors support partial raw copies");
+    }
+    if (slice_byte_size_ % 4096 != 0) {
+      throw std::invalid_argument(
+          "Partial raw copies require a major-dimension slice size aligned to "
+          "4096 bytes");
+    }
+  }
+
+  void IssueD2HTo(const std::shared_ptr<raiden::PjRtCopyFuture>& future,
+                  uint8_t* dst_data, size_t dst_size,
+                  const std::vector<int64_t>& src_offsets_major_dim,
+                  const std::vector<int64_t>& dst_offsets_major_dim,
+                  const std::vector<int64_t>& copy_sizes_major_dim) const {
+    const bool is_partial = IsPartialPrepared(
+        src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim);
+    ValidatePreparedPartial(is_partial);
+
+    std::vector<xla::Future<>> futures;
+    if (!is_partial) {
+      if (dst_size < physical_size_) {
+        throw std::invalid_argument("Destination CPU tensor is too small");
+      }
+      MaybeGilRelease release;
+      futures.push_back(hold_.CopyRawDeviceToHost(dst_data, 0, physical_size_));
+    } else {
+      for (size_t i = 0; i < src_offsets_major_dim.size(); ++i) {
+        const int64_t src_offset =
+            src_offsets_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
+        const int64_t dst_offset =
+            dst_offsets_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
+        const int64_t size_to_copy =
+            copy_sizes_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
+        if (src_offset + size_to_copy > static_cast<int64_t>(physical_size_)) {
+          throw std::invalid_argument("Copy range exceeds source TPU buffer");
+        }
+        if (dst_offset + size_to_copy > static_cast<int64_t>(dst_size)) {
+          throw std::invalid_argument(
+              "Copy range exceeds destination CPU tensor");
+        }
+        MaybeGilRelease release;
+        futures.push_back(hold_.CopyRawDeviceToHost(dst_data + dst_offset,
+                                                    src_offset, size_to_copy));
+      }
+    }
+    future->Append(std::move(futures));
+  }
+
+  void IssueH2DFrom(const std::shared_ptr<raiden::PjRtCopyFuture>& future,
+                    const uint8_t* src_data, size_t src_size,
+                    const std::vector<int64_t>& src_offsets_major_dim,
+                    const std::vector<int64_t>& dst_offsets_major_dim,
+                    const std::vector<int64_t>& copy_sizes_major_dim) const {
+    const bool is_partial = IsPartialPrepared(
+        src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim);
+    ValidatePreparedPartial(is_partial);
+
+    std::vector<xla::Future<>> futures;
+    if (!is_partial) {
+      if (src_size < physical_size_) {
+        throw std::invalid_argument("Source CPU tensor is too small");
+      }
+      MaybeGilRelease release;
+      futures.push_back(hold_.CopyRawHostToDevice(src_data, 0, physical_size_));
+    } else {
+      for (size_t i = 0; i < src_offsets_major_dim.size(); ++i) {
+        const int64_t src_offset =
+            src_offsets_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
+        const int64_t dst_offset =
+            dst_offsets_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
+        const int64_t size_to_copy =
+            copy_sizes_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
+        if (src_offset + size_to_copy > static_cast<int64_t>(src_size)) {
+          throw std::invalid_argument("Copy range exceeds source CPU tensor");
+        }
+        if (dst_offset + size_to_copy > static_cast<int64_t>(physical_size_)) {
+          throw std::invalid_argument(
+              "Copy range exceeds destination TPU buffer");
+        }
+        MaybeGilRelease release;
+        futures.push_back(hold_.CopyRawHostToDevice(src_data + src_offset,
+                                                    dst_offset, size_to_copy));
+      }
+    }
+    future->Append(std::move(futures));
+  }
+
+  at::Tensor tpu_tensor_;
+  std::optional<torch_tpu::DeviceBufferRef> buffer_ref_;
+  xla::PjRtBuffer* pjrt_buffer_ = nullptr;
+  size_t physical_size_ = 0;
+  size_t slice_byte_size_ = 0;
+  raiden::BufferHoldAndAlias hold_;
+};
+
+class RaidenTransferFuture {
+ public:
+  explicit RaidenTransferFuture(
+      std::vector<std::shared_ptr<raiden::PjRtCopyFuture>> futures = {})
+      : futures_(std::move(futures)) {}
+
+  void Add(std::shared_ptr<raiden::PjRtCopyFuture> future) {
+    futures_.push_back(std::move(future));
+  }
+
+  void AddAll(const std::shared_ptr<RaidenTransferFuture>& other) {
+    futures_.insert(futures_.end(), other->futures_.begin(),
+                    other->futures_.end());
+  }
+
+  void Await() {
+    MaybeGilRelease release;
+    for (const auto& future : futures_) {
+      if (future) {
+        future->Await();
+      }
+    }
+    futures_.clear();
+  }
+
+  bool IsReady() const {
+    for (const auto& future : futures_) {
+      if (future && !future->IsReady()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+ private:
+  std::vector<std::shared_ptr<raiden::PjRtCopyFuture>> futures_;
+};
+
+struct RaidenStageResult {
+  std::shared_ptr<RaidenTransferFuture> future;
+  TensorList host_views;
+  int64_t total_bytes = 0;
+  int64_t copy_segments = 0;
+};
+
+class RaidenTransferEngine {
+ public:
+  RaidenTransferEngine(const TensorList& kv_caches, int64_t tp_rank,
+                       int64_t local_control_port, int64_t max_blocks,
+                       int64_t num_slots, double timeout_s,
+                       bool unsafe_skip_buffer_lock)
+      : tp_rank_(tp_rank),
+        local_control_port_(static_cast<int>(local_control_port)),
+        local_data_port_(static_cast<int>(local_control_port) + 1),
+        max_blocks_(max_blocks),
+        timeout_s_(timeout_s),
+        unsafe_skip_buffer_lock_(unsafe_skip_buffer_lock) {
+    if (max_blocks_ <= 0) {
+      throw std::invalid_argument("max_blocks must be positive");
+    }
+    if (num_slots <= 0) {
+      throw std::invalid_argument("num_slots must be positive");
+    }
+    RegisterKvCache(kv_caches);
+    AllocateHostSlots(num_slots);
+    transport_ = std::make_unique<tpu_raiden::transport::SocketTransport>(
+        local_data_port_);
+    StartControlServer();
+  }
+
+  ~RaidenTransferEngine() { StopControlServer(); }
+
+  std::vector<int64_t> RegisterKvCache(const TensorList& kv_caches) {
+    kv_caches_ = kv_caches;
+    prepared_.clear();
+    std::vector<int64_t> region_ids;
+    region_ids.reserve(kv_caches_.size());
+    for (size_t i = 0; i < kv_caches_.size(); ++i) {
+      prepared_.push_back(std::make_shared<PreparedTpuBuffer>(
+          kv_caches_[i], unsafe_skip_buffer_lock_));
+      region_ids.push_back(static_cast<int64_t>(i));
+    }
+    return region_ids;
+  }
+
+  void RegisterHostBuffers(py::object /*host_pool*/, int64_t tp_rank) {
+    tp_rank_ = tp_rank;
+  }
+
+  bool UsesPreparedTpuBuffers() const { return true; }
+
+  py::tuple StageD2H(int64_t slot_idx, int64_t num_blocks,
+                     const std::vector<int64_t>& block_ids) {
+    RaidenStageResult result = IssueD2H(slot_idx, num_blocks, block_ids);
+    return py::make_tuple(result.future, kv_caches_, result.host_views,
+                          result.total_bytes);
+  }
+
+  void StageD2HSync(int64_t slot_idx, int64_t num_blocks,
+                    const std::vector<int64_t>& block_ids) {
+    RaidenStageResult result = IssueD2H(slot_idx, num_blocks, block_ids);
+    result.future->Await();
+  }
+
+  py::tuple CommitH2D(int64_t slot_idx, int64_t num_blocks,
+                      const std::vector<int64_t>& local_block_ids) {
+    if (num_blocks != static_cast<int64_t>(local_block_ids.size())) {
+      throw std::invalid_argument("num_blocks must match len(local_block_ids)");
+    }
+    auto t0 = std::chrono::steady_clock::now();
+    RaidenStageResult result = IssueH2D(slot_idx, num_blocks, local_block_ids);
+    auto t_issued = std::chrono::steady_clock::now();
+    result.future->Await();
+    auto t_done = std::chrono::steady_clock::now();
+    return py::make_tuple(DurationMs(t0, t_issued),
+                          DurationMs(t_issued, t_done), DurationMs(t0, t_done),
+                          result.total_bytes);
+  }
+
+  py::object RankLayerViews(int64_t slot_idx, int64_t rank,
+                            int64_t num_blocks) {
+    if (rank != tp_rank_) {
+      throw std::invalid_argument("Raiden internal slots are per-rank only");
+    }
+    py::list views;
+    for (const auto& view : LayerViews(slot_idx, num_blocks)) {
+      views.append(view);
+    }
+    return views;
+  }
+
+  void UnpackRankLayers(int64_t slot_idx, int64_t rank, int64_t num_blocks,
+                        py::object layer_buffers) {
+    if (rank != tp_rank_) {
+      throw std::invalid_argument("Raiden internal slots are per-rank only");
+    }
+    TensorList views = LayerViews(slot_idx, num_blocks);
+    size_t idx = 0;
+    for (py::handle item : layer_buffers) {
+      if (idx >= views.size()) {
+        throw std::invalid_argument("too many layer buffers");
+      }
+      py::buffer source = py::reinterpret_borrow<py::buffer>(item);
+      py::buffer_info info = source.request();
+      if (static_cast<int64_t>(info.size * info.itemsize) != views[idx].nbytes()) {
+        throw std::invalid_argument("layer buffer size mismatch");
+      }
+      std::memcpy(views[idx].data_ptr(), info.ptr, views[idx].nbytes());
+      ++idx;
+    }
+    if (idx != views.size()) {
+      throw std::invalid_argument("too few layer buffers");
+    }
+  }
+
+  int64_t SubmitD2H(int64_t slot_idx, int64_t num_blocks,
+                    const std::vector<int64_t>& block_ids) {
+    PendingOperation op;
+    op.future = IssueD2H(slot_idx, num_blocks, block_ids).future;
+    return StorePending(std::move(op));
+  }
+
+  int64_t SubmitH2D(int64_t slot_idx, int64_t num_blocks,
+                    const std::vector<int64_t>& local_block_ids) {
+    PendingOperation op;
+    op.future = IssueH2D(slot_idx, num_blocks, local_block_ids).future;
+    return StorePending(std::move(op));
+  }
+
+  int64_t RegisterSend(const std::string& req_id, uint64_t uuid,
+                       const std::vector<int64_t>& block_ids) {
+    const auto register_start = std::chrono::steady_clock::now();
+    if (block_ids.empty()) {
+      return 0;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (pending_acks_.erase(uuid) > 0) {
+        done_sending_.insert(req_id);
+        return 0;
+      }
+    }
+
+    auto entry = std::make_shared<SendEntry>();
+    entry->req_id = req_id;
+    entry->uuid = uuid;
+    entry->num_blocks = static_cast<int64_t>(block_ids.size());
+    entry->deadline = DeadlineFromNow();
+    entry->register_start = register_start;
+
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      send_entries_[uuid] = entry;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(worker_threads_mu_);
+      worker_threads_.emplace_back([this, uuid, entry, block_ids]() {
+        bool failed = false;
+        int64_t slot_idx = -1;
+        try {
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            auto it = send_entries_.find(uuid);
+            if (it == send_entries_.end() || it->second->cancelled) {
+              return;
+            }
+          }
+
+          slot_idx = AcquireSlot();
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            auto it = send_entries_.find(uuid);
+            if (it == send_entries_.end() || it->second->cancelled) {
+              ReleaseSlotLocked(slot_idx);
+              entry->slot_released = true;
+              return;
+            }
+            entry->slot_idx = slot_idx;
+            entry->stage_issue_started = true;
+            entry->d2h_issue_start = std::chrono::steady_clock::now();
+          }
+
+          RaidenStageResult d2h =
+              IssueD2H(slot_idx, entry->num_blocks, block_ids);
+
+          std::shared_ptr<RaidenTransferFuture> future = std::move(d2h.future);
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            entry->d2h_issue_done = std::chrono::steady_clock::now();
+            entry->total_bytes = d2h.total_bytes;
+            entry->copy_segments = d2h.copy_segments;
+            entry->future = future;
+          }
+          future->Await();
+        } catch (const std::exception& e) {
+          failed = true;
+          LOG(ERROR) << "Raiden D2H stage failed for uuid=" << uuid << ": "
+                     << e.what();
+        } catch (...) {
+          failed = true;
+          LOG(ERROR) << "Raiden D2H stage failed for uuid=" << uuid;
+        }
+        const auto d2h_done = std::chrono::steady_clock::now();
+        bool cancelled = false;
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          auto it = send_entries_.find(uuid);
+          if (it == send_entries_.end()) {
+            if (slot_idx >= 0 && !entry->slot_released) {
+              ReleaseSlotLocked(slot_idx);
+              entry->slot_released = true;
+            }
+            return;
+          }
+          if (it->second->d2h_issue_start ==
+              std::chrono::steady_clock::time_point()) {
+            it->second->d2h_issue_start = d2h_done;
+          }
+          if (it->second->d2h_issue_done ==
+              std::chrono::steady_clock::time_point()) {
+            it->second->d2h_issue_done = d2h_done;
+          }
+          it->second->stage_done = true;
+          it->second->failed = failed;
+          it->second->d2h_done = d2h_done;
+          cancelled = it->second->cancelled;
+          if (cancelled) {
+            done_sending_.insert(it->second->req_id);
+            ReleaseEntrySlotLocked(it->second);
+            send_entries_.erase(it);
+          }
+        }
+        cv_.notify_all();
+        std::ostringstream timing;
+        timing << "RAIDEN_TIMING event=producer_stage"
+               << " req_id=" << entry->req_id
+               << " uuid=" << entry->uuid
+               << " rank=" << tp_rank_
+               << " blocks=" << entry->num_blocks
+               << " bytes=" << entry->total_bytes
+               << " copy_segments=" << entry->copy_segments
+               << " d2h_issue_ms="
+               << DurationMs(entry->d2h_issue_start, entry->d2h_issue_done)
+               << " d2h_wait_ms="
+               << DurationMs(entry->d2h_issue_done, d2h_done)
+               << " d2h_total_ms="
+               << DurationMs(entry->d2h_issue_start, d2h_done)
+               << " register_to_stage_ms="
+               << DurationMs(entry->register_start, d2h_done)
+               << " cancelled=" << (cancelled ? 1 : 0)
+               << " failed=" << (failed ? 1 : 0);
+        EmitTimingLog(timing.str());
+      });
+    }
+    std::ostringstream timing;
+    timing << "RAIDEN_TIMING event=producer_register"
+           << " req_id=" << req_id << " uuid=" << uuid
+           << " rank=" << tp_rank_ << " blocks=" << block_ids.size()
+           << " enqueue_ms="
+           << DurationMs(register_start, std::chrono::steady_clock::now())
+           << " failed=0";
+    EmitTimingLog(timing.str());
+    return uuid;
+  }
+
+  int64_t SubmitLoad(const std::string& req_id, uint64_t uuid,
+                     const std::string& remote_endpoint,
+                     const std::vector<int64_t>& remote_block_ids,
+                     const std::vector<int64_t>& local_block_ids) {
+    const int64_t op_id = next_op_id_++;
+    const auto submit_start = std::chrono::steady_clock::now();
+    {
+      std::lock_guard<std::mutex> lock(worker_threads_mu_);
+      worker_threads_.emplace_back([this, req_id, uuid, remote_endpoint,
+                                    submit_start,
+                                    remote_block_ids, local_block_ids]() {
+        const auto worker_start = std::chrono::steady_clock::now();
+        bool failed = false;
+        bool report_recv_done = true;
+        bool release_only = false;
+        int64_t slot_idx = -1;
+        int64_t h2h_bytes = 0;
+        int64_t h2d_segments = 0;
+        size_t h2h_layers = 0;
+        double slot_ms = 0.0;
+        double control_ms = 0.0;
+        double h2h_ms = 0.0;
+        double h2d_issue_ms = 0.0;
+        double h2d_wait_ms = 0.0;
+        double h2d_total_ms = 0.0;
+        double ack_ms = 0.0;
+        try {
+          if (remote_block_ids.empty() && local_block_ids.empty()) {
+            report_recv_done = false;
+            release_only = true;
+            const auto ack_start = std::chrono::steady_clock::now();
+            AckRemote(remote_endpoint, uuid);
+            ack_ms = DurationMs(ack_start, std::chrono::steady_clock::now());
+          } else {
+            if (remote_block_ids.size() != local_block_ids.size()) {
+              throw std::invalid_argument(
+                  "remote_block_ids and local_block_ids must have same length");
+            }
+            const auto slot_start = std::chrono::steady_clock::now();
+            slot_idx = AcquireSlot();
+            slot_ms = DurationMs(slot_start, std::chrono::steady_clock::now());
+            const auto control_start = std::chrono::steady_clock::now();
+            PullResponse response =
+                FetchPullDescriptors(remote_endpoint, uuid,
+                                     static_cast<int64_t>(remote_block_ids.size()));
+            control_ms =
+                DurationMs(control_start, std::chrono::steady_clock::now());
+            const std::string data_endpoint =
+                EndpointWithPort(remote_endpoint, response.data_port);
+            TensorList local_views =
+                LayerViews(slot_idx, static_cast<int64_t>(local_block_ids.size()));
+            if (response.layers.size() != local_views.size()) {
+              throw std::runtime_error("remote layer descriptor count mismatch");
+            }
+            h2h_layers = response.layers.size();
+            h2h_bytes = BytesFromLayers(response.layers);
+            const auto h2h_start = std::chrono::steady_clock::now();
+            for (size_t i = 0; i < local_views.size(); ++i) {
+              mlcl::Request request;
+              request.op = mlcl::Op::kRead;
+              request.laddr =
+                  reinterpret_cast<uint8_t*>(local_views[i].data_ptr());
+              request.raddr =
+                  reinterpret_cast<uint8_t*>(response.layers[i].addr);
+              request.len = response.layers[i].len;
+              auto handle_or = transport_->Post(data_endpoint, request);
+              if (!handle_or.ok()) {
+                ThrowStatus("SocketTransport read failed", handle_or.status());
+              }
+              auto status_or = transport_->Poll(handle_or.value());
+              if (!status_or.ok() || status_or.value() != mlcl::Status::kSuccess) {
+                throw std::runtime_error("SocketTransport read did not succeed");
+              }
+            }
+            h2h_ms = DurationMs(h2h_start, std::chrono::steady_clock::now());
+            const auto h2d_issue_start = std::chrono::steady_clock::now();
+            RaidenStageResult h2d = IssueH2D(
+                slot_idx, static_cast<int64_t>(local_block_ids.size()),
+                local_block_ids);
+            h2d_segments = h2d.copy_segments;
+            const auto h2d_issue_done = std::chrono::steady_clock::now();
+            h2d_issue_ms = DurationMs(h2d_issue_start, h2d_issue_done);
+            h2d.future->Await();
+            const auto h2d_done = std::chrono::steady_clock::now();
+            h2d_wait_ms = DurationMs(h2d_issue_done, h2d_done);
+            h2d_total_ms = DurationMs(h2d_issue_start, h2d_done);
+            const auto ack_start = std::chrono::steady_clock::now();
+            AckRemote(remote_endpoint, uuid);
+            ack_ms = DurationMs(ack_start, std::chrono::steady_clock::now());
+          }
+        } catch (const std::exception& e) {
+          failed = true;
+          LOG(ERROR) << "Raiden load failed for req=" << req_id
+                     << " uuid=" << uuid << ": " << e.what();
+        } catch (...) {
+          failed = true;
+          LOG(ERROR) << "Raiden load failed for req=" << req_id
+                     << " uuid=" << uuid;
+        }
+        if (slot_idx >= 0) {
+          std::lock_guard<std::mutex> lock(mu_);
+          ReleaseSlotLocked(slot_idx);
+        }
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          if (report_recv_done) {
+            done_recving_.insert(req_id);
+            if (failed) failed_recving_.insert(req_id);
+          }
+        }
+        const auto done = std::chrono::steady_clock::now();
+        std::ostringstream timing;
+        timing << "RAIDEN_TIMING event=consumer_load"
+               << " req_id=" << req_id
+               << " uuid=" << uuid
+               << " rank=" << tp_rank_
+               << " endpoint=" << remote_endpoint
+               << " blocks=" << local_block_ids.size()
+               << " layers=" << h2h_layers
+               << " bytes=" << h2h_bytes
+               << " h2d_segments=" << h2d_segments
+               << " queue_delay_ms=" << DurationMs(submit_start, worker_start)
+               << " slot_ms=" << slot_ms
+               << " control_ms=" << control_ms
+               << " h2h_ms=" << h2h_ms
+               << " h2d_issue_ms=" << h2d_issue_ms
+               << " h2d_wait_ms=" << h2d_wait_ms
+               << " h2d_total_ms=" << h2d_total_ms
+               << " ack_ms=" << ack_ms
+               << " total_ms=" << DurationMs(submit_start, done)
+               << " release_only=" << (release_only ? 1 : 0)
+               << " failed=" << (failed ? 1 : 0);
+        EmitTimingLog(timing.str());
+      });
+    }
+    return op_id;
+  }
+
+  py::tuple PollFinished() {
+    std::vector<std::string> done_sending;
+    std::vector<std::string> done_recving;
+    std::vector<std::string> failed_recving;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      const auto now = std::chrono::steady_clock::now();
+      for (auto it = send_entries_.begin(); it != send_entries_.end();) {
+        const auto& entry = it->second;
+        if (entry->deadline <= now) {
+          if (entry->stage_issue_started && !entry->stage_done) {
+            entry->cancelled = true;
+            ++it;
+            continue;
+          }
+          done_sending_.insert(entry->req_id);
+          ReleaseEntrySlotLocked(entry);
+          it = send_entries_.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      done_sending.assign(done_sending_.begin(), done_sending_.end());
+      done_recving.assign(done_recving_.begin(), done_recving_.end());
+      failed_recving.assign(failed_recving_.begin(), failed_recving_.end());
+      done_sending_.clear();
+      done_recving_.clear();
+      failed_recving_.clear();
+    }
+    return py::make_tuple(done_sending, done_recving, failed_recving);
+  }
+
+  std::vector<int64_t> PollTransferOps() {
+    std::vector<int64_t> done;
+    for (auto it = pending_.begin(); it != pending_.end();) {
+      if (!it->second.future || it->second.future->IsReady()) {
+        if (it->second.future) {
+          it->second.future->Await();
+        }
+        done.push_back(it->first);
+        it = pending_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    return done;
+  }
+
+  void WaitTransfer(int64_t op_id) {
+    auto it = pending_.find(op_id);
+    if (it == pending_.end()) {
+      throw std::invalid_argument("unknown Raiden transfer op id");
+    }
+    if (it->second.future) {
+      it->second.future->Await();
+    }
+    pending_.erase(it);
+  }
+
+  int local_control_port() const { return local_control_port_; }
+  int local_data_port() const { return local_data_port_; }
+
+  int64_t CountCopySegmentsForTesting(
+      const std::vector<int64_t>& block_ids) const {
+    return static_cast<int64_t>(
+        Offsets(block_ids, /*source_is_compact=*/false).sizes.size());
+  }
+
+ private:
+  struct CopySpec {
+    std::vector<int64_t> src_offsets;
+    std::vector<int64_t> dst_offsets;
+    std::vector<int64_t> sizes;
+  };
+
+  struct PendingOperation {
+    std::string remote_endpoint;
+    std::shared_ptr<RaidenTransferFuture> future;
+  };
+
+  struct HostSlot {
+    TensorList layers;
+  };
+
+  struct SendEntry {
+    std::string req_id;
+    uint64_t uuid = 0;
+    int64_t slot_idx = -1;
+    int64_t num_blocks = 0;
+    int64_t total_bytes = 0;
+    int64_t copy_segments = 0;
+    std::chrono::steady_clock::time_point register_start;
+    std::chrono::steady_clock::time_point d2h_issue_start;
+    std::chrono::steady_clock::time_point d2h_issue_done;
+    std::chrono::steady_clock::time_point d2h_done;
+    std::shared_ptr<RaidenTransferFuture> future;
+    bool stage_issue_started = false;
+    bool stage_done = false;
+    bool failed = false;
+    bool cancelled = false;
+    bool slot_released = false;
+    std::chrono::steady_clock::time_point deadline;
+  };
+
+  void ReleaseEntrySlotLocked(const std::shared_ptr<SendEntry>& entry) {
+    if (!entry || entry->slot_idx < 0 || entry->slot_released) return;
+    ReleaseSlotLocked(entry->slot_idx);
+    entry->slot_released = true;
+  }
+
+  struct PullLayerDescriptor {
+    uint64_t addr = 0;
+    uint64_t len = 0;
+  };
+
+  struct PullResponse {
+    int data_port = 0;
+    std::vector<PullLayerDescriptor> layers;
+  };
+
+  struct alignas(8) ControlRequestHeader {
+    uint32_t magic = 0x52414944;  // "RAID"
+    uint32_t op = 0;
+    uint64_t uuid = 0;
+    uint64_t num_blocks = 0;
+  };
+
+  struct alignas(8) ControlResponseHeader {
+    uint32_t magic = 0x44494152;  // "DIAR"
+    int32_t status = 0;
+    uint32_t num_layers = 0;
+    uint32_t data_port = 0;
+    uint64_t message_len = 0;
+  };
+
+  static constexpr uint32_t kControlMagic = 0x52414944;
+  static constexpr uint32_t kResponseMagic = 0x44494152;
+  static constexpr uint32_t kOpPull = 1;
+  static constexpr uint32_t kOpAck = 2;
+
+  static double DurationMs(std::chrono::steady_clock::time_point start,
+                           std::chrono::steady_clock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+  }
+
+  static int64_t BytesFromLayers(const std::vector<PullLayerDescriptor>& layers) {
+    int64_t total = 0;
+    for (const auto& layer : layers) {
+      total += static_cast<int64_t>(layer.len);
+    }
+    return total;
+  }
+
+  static CopySpec Offsets(const std::vector<int64_t>& block_ids,
+                          bool source_is_compact) {
+    const int64_t n = static_cast<int64_t>(block_ids.size());
+    CopySpec spec;
+    spec.src_offsets.reserve(block_ids.size());
+    spec.dst_offsets.reserve(block_ids.size());
+    spec.sizes.reserve(block_ids.size());
+    for (int64_t start = 0; start < n;) {
+      int64_t end = start + 1;
+      while (end < n && block_ids[end] == block_ids[end - 1] + 1) {
+        ++end;
+      }
+      const int64_t run_size = end - start;
+      if (source_is_compact) {
+        spec.src_offsets.push_back(start);
+        spec.dst_offsets.push_back(block_ids[start]);
+      } else {
+        spec.src_offsets.push_back(block_ids[start]);
+        spec.dst_offsets.push_back(start);
+      }
+      spec.sizes.push_back(run_size);
+      start = end;
+    }
+    return spec;
+  }
+
+  TensorList LayerViews(int64_t slot_idx, int64_t num_blocks) {
+    if (slot_idx < 0 || slot_idx >= static_cast<int64_t>(host_slots_.size())) {
+      throw std::out_of_range("slot_idx out of range");
+    }
+    if (num_blocks < 0 || num_blocks > max_blocks_) {
+      throw std::out_of_range("num_blocks out of range");
+    }
+    TensorList host_views;
+    host_views.reserve(kv_caches_.size());
+    for (size_t layer_idx = 0; layer_idx < host_slots_[slot_idx].layers.size();
+         ++layer_idx) {
+      at::Tensor tensor =
+          host_slots_[slot_idx].layers[layer_idx].narrow(0, 0, num_blocks);
+      ValidateCpuTensor(tensor, "Host staging view");
+      host_views.push_back(std::move(tensor));
+    }
+    return host_views;
+  }
+
+  RaidenStageResult IssueD2H(int64_t slot_idx, int64_t num_blocks,
+                             const std::vector<int64_t>& block_ids) {
+    if (num_blocks != static_cast<int64_t>(block_ids.size())) {
+      throw std::invalid_argument("num_blocks must match len(block_ids)");
+    }
+    CopySpec copy_spec = Offsets(block_ids, /*source_is_compact=*/false);
+    TensorList host_views = LayerViews(slot_idx, num_blocks);
+    auto future = std::make_shared<RaidenTransferFuture>();
+    int64_t total_bytes = 0;
+    for (size_t i = 0; i < prepared_.size(); ++i) {
+      total_bytes += static_cast<int64_t>(host_views[i].nbytes());
+      future->Add(prepared_[i]->D2HToAsync(host_views[i], copy_spec.src_offsets,
+                                           copy_spec.dst_offsets,
+                                           copy_spec.sizes));
+    }
+    return {.future = std::move(future),
+            .host_views = std::move(host_views),
+            .total_bytes = total_bytes,
+            .copy_segments = static_cast<int64_t>(copy_spec.sizes.size())};
+  }
+
+  RaidenStageResult IssueH2D(int64_t slot_idx, int64_t num_blocks,
+                             const std::vector<int64_t>& local_block_ids) {
+    if (num_blocks != static_cast<int64_t>(local_block_ids.size())) {
+      throw std::invalid_argument("num_blocks must match len(local_block_ids)");
+    }
+    CopySpec copy_spec = Offsets(local_block_ids, /*source_is_compact=*/true);
+    TensorList host_views = LayerViews(slot_idx, num_blocks);
+    auto future = std::make_shared<RaidenTransferFuture>();
+    int64_t total_bytes = 0;
+    for (size_t i = 0; i < prepared_.size(); ++i) {
+      total_bytes += static_cast<int64_t>(host_views[i].nbytes());
+      future->Add(prepared_[i]->H2DFromAsync(host_views[i], copy_spec.src_offsets,
+                                             copy_spec.dst_offsets,
+                                             copy_spec.sizes));
+    }
+    return {.future = std::move(future),
+            .host_views = std::move(host_views),
+            .total_bytes = total_bytes,
+            .copy_segments = static_cast<int64_t>(copy_spec.sizes.size())};
+  }
+
+  int64_t StorePending(PendingOperation op) {
+    const int64_t op_id = next_op_id_++;
+    pending_[op_id] = std::move(op);
+    return op_id;
+  }
+
+  std::chrono::steady_clock::time_point DeadlineFromNow() const {
+    return std::chrono::steady_clock::now() +
+           std::chrono::milliseconds(static_cast<int64_t>(timeout_s_ * 1000.0));
+  }
+
+  void AllocateHostSlots(int64_t num_slots) {
+    if (kv_caches_.empty()) return;
+    host_slots_.clear();
+    host_slots_.reserve(num_slots);
+    for (int64_t slot = 0; slot < num_slots; ++slot) {
+      HostSlot host_slot;
+      host_slot.layers.reserve(kv_caches_.size());
+      for (const auto& kv : kv_caches_) {
+        std::vector<int64_t> shape;
+        shape.reserve(kv.dim());
+        shape.push_back(max_blocks_);
+        for (int64_t d = 1; d < kv.dim(); ++d) {
+          shape.push_back(kv.size(d));
+        }
+        at::Tensor host = at::empty(
+            shape,
+            kv.options().device(c10::Device(c10::kCPU)).pinned_memory(true));
+        ValidateCpuTensor(host, "Host staging allocation");
+        host_slot.layers.push_back(std::move(host));
+      }
+      host_slots_.push_back(std::move(host_slot));
+      free_slots_.push_back(slot);
+    }
+  }
+
+  int64_t AcquireSlot() {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (free_slots_.empty()) {
+      throw std::runtime_error("Raiden host slot pool exhausted");
+    }
+    int64_t slot = free_slots_.front();
+    free_slots_.pop_front();
+    return slot;
+  }
+
+  void ReleaseSlotLocked(int64_t slot_idx) {
+    if (slot_idx < 0) return;
+    free_slots_.push_back(slot_idx);
+  }
+
+  std::string EndpointWithPort(const std::string& endpoint, int port) const {
+    auto [host, ignored_port] = SplitEndpoint(endpoint);
+    (void)ignored_port;
+    return host + ":" + std::to_string(port);
+  }
+
+  std::vector<PullLayerDescriptor> LayerDescriptors(int64_t slot_idx,
+                                                    int64_t num_blocks) {
+    TensorList views = LayerViews(slot_idx, num_blocks);
+    std::vector<PullLayerDescriptor> out;
+    out.reserve(views.size());
+    for (const auto& view : views) {
+      out.push_back({reinterpret_cast<uint64_t>(view.data_ptr()),
+                     static_cast<uint64_t>(view.nbytes())});
+    }
+    return out;
+  }
+
+  void StartControlServer() {
+    control_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (control_fd_ < 0) {
+      throw std::runtime_error("failed to create Raiden control socket");
+    }
+    int opt = 1;
+    setsockopt(control_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(control_fd_, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+
+    sockaddr_in addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(local_control_port_);
+    if (bind(control_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+      std::string err = std::strerror(errno);
+      close(control_fd_);
+      control_fd_ = -1;
+      throw std::runtime_error("bind Raiden control socket failed: " + err);
+    }
+    if (listen(control_fd_, 128) < 0) {
+      std::string err = std::strerror(errno);
+      close(control_fd_);
+      control_fd_ = -1;
+      throw std::runtime_error("listen Raiden control socket failed: " + err);
+    }
+    control_thread_ = std::thread([this]() { ControlLoop(); });
+  }
+
+  void StopControlServer() {
+    stopping_ = true;
+    if (control_fd_ >= 0) {
+      shutdown(control_fd_, SHUT_RDWR);
+      close(control_fd_);
+      control_fd_ = -1;
+    }
+    if (control_thread_.joinable()) {
+      control_thread_.join();
+    }
+    {
+      std::lock_guard<std::mutex> lock(control_workers_mu_);
+      for (auto& thread : control_workers_) {
+        if (thread.joinable()) thread.join();
+      }
+      control_workers_.clear();
+    }
+    {
+      std::lock_guard<std::mutex> lock(worker_threads_mu_);
+      for (auto& thread : worker_threads_) {
+        if (thread.joinable()) thread.join();
+      }
+      worker_threads_.clear();
+    }
+  }
+
+  void ControlLoop() {
+    while (!stopping_) {
+      pollfd pfd;
+      pfd.fd = control_fd_;
+      pfd.events = POLLIN;
+      int ret = poll(&pfd, 1, 50);
+      if (ret <= 0) continue;
+      sockaddr_in client_addr;
+      socklen_t len = sizeof(client_addr);
+      int client_fd =
+          accept(control_fd_, reinterpret_cast<sockaddr*>(&client_addr), &len);
+      if (client_fd < 0) continue;
+      int opt = 1;
+      setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+      std::lock_guard<std::mutex> lock(control_workers_mu_);
+      control_workers_.emplace_back([this, client_fd]() {
+        HandleControlConnection(client_fd);
+      });
+    }
+  }
+
+  void HandleControlConnection(int fd) {
+    while (!stopping_) {
+      ControlRequestHeader request;
+      absl::Status s = ReadExact(fd, &request, sizeof(request));
+      if (!s.ok()) break;
+      if (request.magic != kControlMagic) {
+        WriteControlError(fd, "bad control magic");
+        break;
+      }
+      if (request.op == kOpPull) {
+        HandlePullRequest(fd, request);
+      } else if (request.op == kOpAck) {
+        AckSend(request.uuid);
+        WriteControlOk(fd, {});
+      } else {
+        WriteControlError(fd, "unknown control op");
+      }
+    }
+    close(fd);
+  }
+
+  void WriteControlOk(int fd, const std::vector<PullLayerDescriptor>& layers) {
+    ControlResponseHeader response;
+    response.magic = kResponseMagic;
+    response.status = 0;
+    response.num_layers = static_cast<uint32_t>(layers.size());
+    response.data_port = static_cast<uint32_t>(local_data_port_);
+    response.message_len = 0;
+    absl::Status s = WriteExact(fd, &response, sizeof(response));
+    if (!s.ok()) return;
+    if (!layers.empty()) {
+      WriteExact(fd, layers.data(), layers.size() * sizeof(PullLayerDescriptor));
+    }
+  }
+
+  void WriteControlError(int fd, const std::string& message) {
+    ControlResponseHeader response;
+    response.magic = kResponseMagic;
+    response.status = 1;
+    response.num_layers = 0;
+    response.data_port = static_cast<uint32_t>(local_data_port_);
+    response.message_len = message.size();
+    absl::Status s = WriteExact(fd, &response, sizeof(response));
+    if (!s.ok()) return;
+    if (!message.empty()) {
+      WriteExact(fd, message.data(), message.size());
+    }
+  }
+
+  void HandlePullRequest(int fd, const ControlRequestHeader& request) {
+    const auto request_start = std::chrono::steady_clock::now();
+    std::shared_ptr<SendEntry> entry;
+    {
+      std::unique_lock<std::mutex> lock(mu_);
+      const auto deadline = DeadlineFromNow();
+      cv_.wait_until(lock, deadline, [&]() {
+        auto it = send_entries_.find(request.uuid);
+        return it != send_entries_.end() &&
+               (it->second->stage_done || it->second->cancelled);
+      });
+      const auto wait_done = std::chrono::steady_clock::now();
+      auto it = send_entries_.find(request.uuid);
+      if (it == send_entries_.end() || !it->second->stage_done) {
+        const bool cancelled =
+            (it != send_entries_.end() && it->second->cancelled);
+        const char* reason = cancelled ? "cancelled" : "stage_timeout";
+        std::ostringstream timing;
+        timing << "RAIDEN_TIMING event=producer_pull"
+               << " uuid=" << request.uuid
+               << " rank=" << tp_rank_
+               << " blocks=" << request.num_blocks
+               << " wait_stage_ms=" << DurationMs(request_start, wait_done)
+               << " failed=1 reason=" << reason;
+        EmitTimingLog(timing.str());
+        WriteControlError(fd, cancelled ? "uuid cancelled before staging"
+                                        : "uuid not staged before timeout");
+        return;
+      }
+      entry = it->second;
+      entry->deadline = DeadlineFromNow();
+    }
+    if (entry->failed) {
+      WriteControlError(fd, "producer stage failed");
+      return;
+    }
+    if (request.num_blocks != static_cast<uint64_t>(entry->num_blocks)) {
+      WriteControlError(fd, "num_blocks mismatch");
+      return;
+    }
+    const auto descriptor_start = std::chrono::steady_clock::now();
+    WriteControlOk(fd, LayerDescriptors(entry->slot_idx, entry->num_blocks));
+    const auto descriptor_done = std::chrono::steady_clock::now();
+    std::ostringstream timing;
+    timing << "RAIDEN_TIMING event=producer_pull"
+           << " req_id=" << entry->req_id
+           << " uuid=" << entry->uuid
+           << " rank=" << tp_rank_
+           << " blocks=" << entry->num_blocks
+           << " bytes=" << entry->total_bytes
+           << " wait_stage_ms=" << DurationMs(request_start, descriptor_start)
+           << " descriptor_ms=" << DurationMs(descriptor_start, descriptor_done)
+           << " register_to_pull_ms="
+           << DurationMs(entry->register_start, descriptor_start)
+           << " stage_to_pull_ms="
+           << DurationMs(entry->d2h_done, descriptor_start)
+           << " failed=0";
+    EmitTimingLog(timing.str());
+  }
+
+  PullResponse FetchPullDescriptors(const std::string& remote_endpoint,
+                                    uint64_t uuid, int64_t num_blocks) {
+    int fd = ConnectTcp(remote_endpoint);
+    auto cleanup = std::unique_ptr<int, void (*)(int*)>(
+        &fd, [](int* p) {
+          if (p && *p >= 0) close(*p);
+        });
+    ControlRequestHeader request;
+    request.magic = kControlMagic;
+    request.op = kOpPull;
+    request.uuid = uuid;
+    request.num_blocks = static_cast<uint64_t>(num_blocks);
+    CheckStatus("control pull write", WriteExact(fd, &request, sizeof(request)));
+    return ReadPullResponse(fd);
+  }
+
+  void AckRemote(const std::string& remote_endpoint, uint64_t uuid) {
+    int fd = ConnectTcp(remote_endpoint);
+    auto cleanup = std::unique_ptr<int, void (*)(int*)>(
+        &fd, [](int* p) {
+          if (p && *p >= 0) close(*p);
+        });
+    ControlRequestHeader request;
+    request.magic = kControlMagic;
+    request.op = kOpAck;
+    request.uuid = uuid;
+    request.num_blocks = 0;
+    CheckStatus("control ack write", WriteExact(fd, &request, sizeof(request)));
+    (void)ReadPullResponse(fd);
+  }
+
+  PullResponse ReadPullResponse(int fd) {
+    ControlResponseHeader response;
+    CheckStatus("control response read",
+                ReadExact(fd, &response, sizeof(response)));
+    if (response.magic != kResponseMagic) {
+      throw std::runtime_error("bad control response magic");
+    }
+    if (response.status != 0) {
+      std::string message(response.message_len, '\0');
+      if (response.message_len > 0) {
+        CheckStatus("control error body read",
+                    ReadExact(fd, message.data(), message.size()));
+      }
+      throw std::runtime_error("remote Raiden control error: " + message);
+    }
+    PullResponse out;
+    out.data_port = static_cast<int>(response.data_port);
+    out.layers.resize(response.num_layers);
+    if (!out.layers.empty()) {
+      CheckStatus("control layer descriptors read",
+                  ReadExact(fd, out.layers.data(),
+                            out.layers.size() * sizeof(PullLayerDescriptor)));
+    }
+    return out;
+  }
+
+  void AckSend(uint64_t uuid) {
+    std::shared_ptr<SendEntry> entry;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = send_entries_.find(uuid);
+      if (it == send_entries_.end()) {
+        pending_acks_.insert(uuid);
+        return;
+      }
+      entry = it->second;
+      if (!entry->stage_done) {
+        entry->cancelled = true;
+        if (!entry->stage_issue_started) {
+          ReleaseEntrySlotLocked(entry);
+          done_sending_.insert(entry->req_id);
+          send_entries_.erase(it);
+        }
+        cv_.notify_all();
+        return;
+      }
+      done_sending_.insert(entry->req_id);
+      ReleaseEntrySlotLocked(entry);
+      send_entries_.erase(it);
+    }
+    const auto ack_done = std::chrono::steady_clock::now();
+    std::ostringstream timing;
+    timing << "RAIDEN_TIMING event=producer_ack"
+           << " req_id=" << entry->req_id
+           << " uuid=" << entry->uuid
+           << " rank=" << tp_rank_
+           << " blocks=" << entry->num_blocks
+           << " bytes=" << entry->total_bytes
+           << " stage_to_ack_ms=" << DurationMs(entry->d2h_done, ack_done)
+           << " register_to_ack_ms="
+           << DurationMs(entry->register_start, ack_done)
+           << " failed=" << (entry->failed ? 1 : 0);
+    EmitTimingLog(timing.str());
+  }
+
+  TensorList kv_caches_;
+  std::vector<std::shared_ptr<PreparedTpuBuffer>> prepared_;
+  int64_t tp_rank_ = 0;
+  int local_control_port_ = 0;
+  int local_data_port_ = 0;
+  int64_t max_blocks_ = 0;
+  double timeout_s_ = 120.0;
+  bool unsafe_skip_buffer_lock_ = true;
+  int64_t next_op_id_ = 1;
+  std::map<int64_t, PendingOperation> pending_;
+  std::vector<HostSlot> host_slots_;
+  std::deque<int64_t> free_slots_;
+  std::map<uint64_t, std::shared_ptr<SendEntry>> send_entries_;
+  std::set<uint64_t> pending_acks_;
+  std::set<std::string> done_sending_;
+  std::set<std::string> done_recving_;
+  std::set<std::string> failed_recving_;
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::unique_ptr<tpu_raiden::transport::SocketTransport> transport_;
+  int control_fd_ = -1;
+  std::atomic<bool> stopping_{false};
+  std::thread control_thread_;
+  std::mutex control_workers_mu_;
+  std::vector<std::thread> control_workers_;
+  std::mutex worker_threads_mu_;
+  std::vector<std::thread> worker_threads_;
+};
+
+void AwaitAll(py::object futures) {
+  if (py::isinstance<RaidenTransferFuture>(futures)) {
+    auto future = futures.cast<std::shared_ptr<RaidenTransferFuture>>();
+    future->Await();
+    return;
+  }
+  if (py::isinstance<raiden::PjRtCopyFuture>(futures)) {
+    auto future = futures.cast<std::shared_ptr<raiden::PjRtCopyFuture>>();
+    MaybeGilRelease release;
+    future->Await();
+    return;
+  }
+  for (py::handle item : futures) {
+    if (py::isinstance<RaidenTransferFuture>(item)) {
+      auto future = item.cast<std::shared_ptr<RaidenTransferFuture>>();
+      future->Await();
+      continue;
+    }
+    auto future = item.cast<std::shared_ptr<raiden::PjRtCopyFuture>>();
+    MaybeGilRelease release;
+    future->Await();
+  }
+}
+
+bool IsReady(py::object futures) {
+  if (py::isinstance<RaidenTransferFuture>(futures)) {
+    return futures.cast<std::shared_ptr<RaidenTransferFuture>>()->IsReady();
+  }
+  if (py::isinstance<raiden::PjRtCopyFuture>(futures)) {
+    return futures.cast<std::shared_ptr<raiden::PjRtCopyFuture>>()->IsReady();
+  }
+  for (py::handle item : futures) {
+    if (py::isinstance<RaidenTransferFuture>(item)) {
+      if (!item.cast<std::shared_ptr<RaidenTransferFuture>>()->IsReady()) {
+        return false;
+      }
+      continue;
+    }
+    if (!item.cast<std::shared_ptr<raiden::PjRtCopyFuture>>()->IsReady()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+PYBIND11_MODULE(_raiden_transfer_engine, m) {
+  py::class_<RaidenTransferFuture, std::shared_ptr<RaidenTransferFuture>>(
+      m, "RaidenTransferFuture")
+      .def("Await", &RaidenTransferFuture::Await)
+      .def("wait", &RaidenTransferFuture::Await)
+      .def("IsReady", &RaidenTransferFuture::IsReady)
+      .def("is_ready", &RaidenTransferFuture::IsReady);
+
+  py::class_<RaidenTransferEngine, std::shared_ptr<RaidenTransferEngine>>(
+      m, "RaidenTransferEngine")
+      .def(py::init<const TensorList&, int64_t, int64_t, int64_t, int64_t,
+                    double, bool>(),
+           py::arg("kv_caches"), py::arg("tp_rank"),
+           py::arg("local_control_port"), py::arg("max_blocks"),
+           py::arg("num_slots"), py::arg("timeout_s") = 120.0,
+           py::arg("unsafe_skip_buffer_lock") = true)
+      .def_property_readonly("uses_prepared_tpu_buffers",
+                             &RaidenTransferEngine::UsesPreparedTpuBuffers)
+      .def_property_readonly("local_control_port",
+                             &RaidenTransferEngine::local_control_port)
+      .def_property_readonly("local_data_port",
+                             &RaidenTransferEngine::local_data_port)
+      .def("register_kv_cache", &RaidenTransferEngine::RegisterKvCache,
+           py::arg("kv_caches"))
+      .def("register_host_buffers", &RaidenTransferEngine::RegisterHostBuffers,
+           py::arg("host_pool"), py::arg("tp_rank"))
+      .def("register_send", &RaidenTransferEngine::RegisterSend,
+           py::arg("req_id"), py::arg("uuid"), py::arg("block_ids"))
+      .def("submit_load", &RaidenTransferEngine::SubmitLoad, py::arg("req_id"),
+           py::arg("uuid"), py::arg("remote_endpoint"),
+           py::arg("remote_block_ids"), py::arg("local_block_ids"))
+      .def("stage_d2h", &RaidenTransferEngine::StageD2H, py::kw_only(),
+           py::arg("slot_idx"), py::arg("num_blocks"), py::arg("block_ids"))
+      .def("stage_d2h_sync", &RaidenTransferEngine::StageD2HSync,
+           py::kw_only(), py::arg("slot_idx"), py::arg("num_blocks"),
+           py::arg("block_ids"))
+      .def("commit_h2d", &RaidenTransferEngine::CommitH2D, py::kw_only(),
+           py::arg("slot_idx"), py::arg("num_blocks"),
+           py::arg("local_block_ids"))
+      .def("rank_layer_views", &RaidenTransferEngine::RankLayerViews,
+           py::arg("slot_idx"), py::arg("rank"), py::arg("num_blocks"))
+      .def("unpack_rank_layers", &RaidenTransferEngine::UnpackRankLayers,
+           py::arg("slot_idx"), py::arg("rank"), py::arg("num_blocks"),
+           py::arg("layer_buffers"))
+      .def("submit_d2h", &RaidenTransferEngine::SubmitD2H, py::kw_only(),
+           py::arg("slot_idx"), py::arg("num_blocks"), py::arg("block_ids"))
+      .def("submit_h2d", &RaidenTransferEngine::SubmitH2D, py::kw_only(),
+           py::arg("slot_idx"), py::arg("num_blocks"),
+           py::arg("local_block_ids"))
+      .def("poll_finished", &RaidenTransferEngine::PollFinished)
+      .def("poll_transfer_ops", &RaidenTransferEngine::PollTransferOps)
+      .def("wait_transfer", &RaidenTransferEngine::WaitTransfer,
+           py::arg("op_id"))
+      .def("_count_copy_segments_for_testing",
+           &RaidenTransferEngine::CountCopySegmentsForTesting,
+           py::arg("block_ids"));
+
+  m.def("await_all", &AwaitAll, py::arg("futures"));
+  m.def("is_ready", &IsReady, py::arg("futures"));
+}
+
+}  // namespace tpu_raiden::kv_cache
