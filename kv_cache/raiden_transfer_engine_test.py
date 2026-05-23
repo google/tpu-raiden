@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import socket
 import time
 
 from absl.testing import absltest
@@ -28,9 +29,23 @@ _PORT_OFFSET = 0
 
 def _ports():
   global _PORT_OFFSET
-  base = 24000 + (os.getpid() % 1000) * 16 + _PORT_OFFSET
-  _PORT_OFFSET += 4
-  return base, base + 2
+  for _ in range(1000):
+    base = 24000 + (os.getpid() % 1000) * 32 + _PORT_OFFSET
+    _PORT_OFFSET += 4
+    ports = (base, base + 1, base + 2, base + 3)
+    if all(_port_available(port) for port in ports):
+      return base, base + 2
+  raise RuntimeError("failed to find free Raiden test ports")
+
+
+def _port_available(port):
+  with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+      sock.bind(("0.0.0.0", port))
+    except OSError:
+      return False
+  return True
 
 
 class RaidenTransferEngineTest(absltest.TestCase):
@@ -54,6 +69,18 @@ class RaidenTransferEngineTest(absltest.TestCase):
     self.assertEqual(engine.register_kv_cache(src), [0, 1])
     self.assertEqual(engine._count_copy_segments_for_testing([0, 1, 2, 6, 7, 9]),
                      3)
+    self.assertEqual(
+        engine._count_canonical_send_copy_segments_for_testing(
+            [3, 2, 1, 0, 7, 6]
+        ),
+        2,
+    )
+    self.assertEqual(
+        engine._count_canonical_load_copy_segments_for_testing(
+            [3, 2, 1, 0, 7, 6], [13, 12, 11, 10, 23, 22]
+        ),
+        2,
+    )
 
     future, src_refs, host_views, total_bytes = engine.stage_d2h(
         slot_idx=0, num_blocks=2, block_ids=[3, 1]
