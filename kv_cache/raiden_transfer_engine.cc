@@ -285,17 +285,27 @@ class PreparedTpuBuffer : public std::enable_shared_from_this<PreparedTpuBuffer>
       const std::vector<int64_t>& src_offsets_major_dim,
       const std::vector<int64_t>& dst_offsets_major_dim,
       const std::vector<int64_t>& copy_sizes_major_dim) {
+    auto future =
+        std::make_shared<raiden::PjRtCopyFuture>(std::vector<xla::Future<>>{});
+    AppendD2HTo(future, dst_arr, src_offsets_major_dim, dst_offsets_major_dim,
+                copy_sizes_major_dim);
+    return future;
+  }
+
+  void AppendD2HTo(
+      const std::shared_ptr<raiden::PjRtCopyFuture>& future,
+      const at::Tensor& dst_arr,
+      const std::vector<int64_t>& src_offsets_major_dim,
+      const std::vector<int64_t>& dst_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim) {
     ValidateCpuTensor(dst_arr, "Destination");
     ValidatePartialSpec(src_offsets_major_dim, dst_offsets_major_dim,
                         copy_sizes_major_dim);
-    auto future =
-        std::make_shared<raiden::PjRtCopyFuture>(std::vector<xla::Future<>>{});
     IssueD2HTo(future, reinterpret_cast<uint8_t*>(dst_arr.data_ptr()),
                dst_arr.nbytes(), src_offsets_major_dim, dst_offsets_major_dim,
                copy_sizes_major_dim);
     KeepTensorAlive(future, dst_arr);
     future->AddUserHold(shared_from_this());
-    return future;
   }
 
   std::shared_ptr<raiden::PjRtCopyFuture> H2DFromAsync(
@@ -303,17 +313,27 @@ class PreparedTpuBuffer : public std::enable_shared_from_this<PreparedTpuBuffer>
       const std::vector<int64_t>& src_offsets_major_dim,
       const std::vector<int64_t>& dst_offsets_major_dim,
       const std::vector<int64_t>& copy_sizes_major_dim) {
+    auto future =
+        std::make_shared<raiden::PjRtCopyFuture>(std::vector<xla::Future<>>{});
+    AppendH2DFrom(future, src_arr, src_offsets_major_dim, dst_offsets_major_dim,
+                  copy_sizes_major_dim);
+    return future;
+  }
+
+  void AppendH2DFrom(
+      const std::shared_ptr<raiden::PjRtCopyFuture>& future,
+      const at::Tensor& src_arr,
+      const std::vector<int64_t>& src_offsets_major_dim,
+      const std::vector<int64_t>& dst_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim) {
     ValidateCpuTensor(src_arr, "Source");
     ValidatePartialSpec(src_offsets_major_dim, dst_offsets_major_dim,
                         copy_sizes_major_dim);
-    auto future =
-        std::make_shared<raiden::PjRtCopyFuture>(std::vector<xla::Future<>>{});
     IssueH2DFrom(future, reinterpret_cast<const uint8_t*>(src_arr.data_ptr()),
                  src_arr.nbytes(), src_offsets_major_dim,
                  dst_offsets_major_dim, copy_sizes_major_dim);
     KeepTensorAlive(future, src_arr);
     future->AddUserHold(shared_from_this());
-    return future;
   }
 
  private:
@@ -486,6 +506,9 @@ class RaidenTransferEngine {
     h2d_issue_threads_ =
         EnvInt("RAIDEN_H2D_ISSUE_THREADS", 4, /*min_value=*/1,
                /*max_value=*/16);
+    h2d_batch_max_layers_ =
+        EnvInt("RAIDEN_H2D_BATCH_MAX_LAYERS", 4, /*min_value=*/1,
+               /*max_value=*/256);
     if (max_blocks_ <= 0) {
       throw std::invalid_argument("max_blocks must be positive");
     }
@@ -619,7 +642,7 @@ class RaidenTransferEngine {
     entry->num_blocks = static_cast<int64_t>(block_ids.size());
     entry->deadline = DeadlineFromNow();
     entry->register_start = register_start;
-    std::vector<int64_t> stage_block_ids = CanonicalSendBlockIds(block_ids);
+    CopyPlan send_plan = BuildProducerCopyPlan(block_ids);
 
     {
       std::lock_guard<std::mutex> lock(mu_);
@@ -629,7 +652,7 @@ class RaidenTransferEngine {
     {
       std::lock_guard<std::mutex> lock(worker_threads_mu_);
       worker_threads_.emplace_back([this, uuid, entry,
-                                    block_ids = std::move(stage_block_ids)]() {
+                                    send_plan = std::move(send_plan)]() {
         bool failed = false;
         int64_t slot_idx = -1;
         try {
@@ -655,7 +678,6 @@ class RaidenTransferEngine {
             entry->d2h_issue_start = std::chrono::steady_clock::now();
           }
 
-          CopySpec copy_spec = Offsets(block_ids, /*source_is_compact=*/false);
           TensorList host_views = LayerViews(slot_idx, entry->num_blocks);
           auto future = std::make_shared<RaidenTransferFuture>();
           std::vector<std::shared_ptr<raiden::PjRtCopyFuture>> layer_futures;
@@ -664,8 +686,8 @@ class RaidenTransferEngine {
           for (size_t i = 0; i < prepared_.size(); ++i) {
             total_bytes += static_cast<int64_t>(host_views[i].nbytes());
             auto layer_future = prepared_[i]->D2HToAsync(
-                host_views[i], copy_spec.src_offsets, copy_spec.dst_offsets,
-                copy_spec.sizes);
+                host_views[i], send_plan.d2h_copy.src_offsets,
+                send_plan.d2h_copy.dst_offsets, send_plan.d2h_copy.sizes);
             layer_futures.push_back(layer_future);
             future->Add(std::move(layer_future));
           }
@@ -674,7 +696,8 @@ class RaidenTransferEngine {
             std::lock_guard<std::mutex> lock(mu_);
             entry->d2h_issue_done = std::chrono::steady_clock::now();
             entry->total_bytes = total_bytes;
-            entry->copy_segments = static_cast<int64_t>(copy_spec.sizes.size());
+            entry->copy_segments =
+                static_cast<int64_t>(send_plan.d2h_copy.sizes.size());
             entry->layer_ready.assign(layer_futures.size(), false);
             entry->layers_ready = 0;
             entry->future = future;
@@ -777,29 +800,12 @@ class RaidenTransferEngine {
                      const std::vector<int64_t>& local_block_ids) {
     const int64_t op_id = next_op_id_++;
     const auto submit_start = std::chrono::steady_clock::now();
-    std::vector<int64_t> ordered_remote_block_ids;
-    std::vector<int64_t> ordered_local_block_ids;
-    std::vector<size_t> host_dst_to_src;
-    if (remote_block_ids.empty() && local_block_ids.empty()) {
-      ordered_remote_block_ids = remote_block_ids;
-      ordered_local_block_ids = local_block_ids;
-    } else {
-      LoadBlockPlan plan =
-          CanonicalLoadBlockPlan(remote_block_ids, local_block_ids);
-      ordered_remote_block_ids = std::move(plan.producer_remote_block_ids);
-      ordered_local_block_ids = std::move(plan.h2d_local_block_ids);
-      host_dst_to_src = std::move(plan.host_dst_to_src);
-    }
+    CopyPlan load_plan = BuildLoadCopyPlan(remote_block_ids, local_block_ids);
     {
       std::lock_guard<std::mutex> lock(worker_threads_mu_);
       worker_threads_.emplace_back([this, req_id, uuid, remote_endpoint,
                                     submit_start,
-                                    remote_block_ids =
-                                        std::move(ordered_remote_block_ids),
-                                    local_block_ids =
-                                        std::move(ordered_local_block_ids),
-                                    host_dst_to_src =
-                                        std::move(host_dst_to_src)]() {
+                                    load_plan = std::move(load_plan)]() {
         const auto worker_start = std::chrono::steady_clock::now();
         bool failed = false;
         bool report_recv_done = true;
@@ -821,17 +827,13 @@ class RaidenTransferEngine {
         double pipeline_ms = 0.0;
         double ack_ms = 0.0;
         try {
-          if (remote_block_ids.empty() && local_block_ids.empty()) {
+          if (load_plan.num_blocks == 0) {
             report_recv_done = false;
             release_only = true;
             const auto ack_start = std::chrono::steady_clock::now();
             AckRemote(remote_endpoint, uuid);
             ack_ms = DurationMs(ack_start, std::chrono::steady_clock::now());
           } else {
-            if (remote_block_ids.size() != local_block_ids.size()) {
-              throw std::invalid_argument(
-                  "remote_block_ids and local_block_ids must have same length");
-            }
             const auto slot_start = std::chrono::steady_clock::now();
             slot_idx = AcquireSlot();
             slot_ms = DurationMs(slot_start, std::chrono::steady_clock::now());
@@ -846,7 +848,7 @@ class RaidenTransferEngine {
             stream_request.op = kOpPullStream;
             stream_request.uuid = uuid;
             stream_request.num_blocks =
-                static_cast<uint64_t>(remote_block_ids.size());
+                static_cast<uint64_t>(load_plan.num_blocks);
             CheckStatus("control pull stream write",
                         WriteExact(control_fd, &stream_request,
                                    sizeof(stream_request)));
@@ -859,13 +861,12 @@ class RaidenTransferEngine {
                 EndpointWithPort(remote_endpoint, response.data_port);
             TensorList local_views =
                 LayerViews(slot_idx,
-                           static_cast<int64_t>(local_block_ids.size()));
+                           static_cast<int64_t>(load_plan.num_blocks));
             if (response.num_layers != local_views.size()) {
               throw std::runtime_error("remote layer descriptor count mismatch");
             }
-            CopySpec h2d_copy_spec =
-                Offsets(local_block_ids, /*source_is_compact=*/true);
-            h2d_segments = static_cast<int64_t>(h2d_copy_spec.sizes.size());
+            h2d_segments =
+                static_cast<int64_t>(load_plan.h2d_copy.sizes.size());
             bool h2d_started = false;
             std::chrono::steady_clock::time_point h2d_first_issue_start;
             std::chrono::steady_clock::time_point h2d_last_issue_done;
@@ -875,18 +876,13 @@ class RaidenTransferEngine {
             bool h2d_input_done = false;
             std::exception_ptr h2d_exception;
             std::mutex h2d_state_mu;
-            std::vector<std::shared_ptr<raiden::PjRtCopyFuture>>
-                h2d_layer_futures;
-            h2d_layer_futures.reserve(local_views.size());
-            const int h2d_issue_threads =
-                h2d_segments > 1
-                    ? std::min<int>(h2d_issue_threads_,
-                                    static_cast<int>(local_views.size()))
-                    : 1;
-            auto issue_h2d_layers = [&]() {
+            std::vector<std::shared_ptr<RaidenTransferFuture>>
+                h2d_batch_futures;
+            h2d_batch_futures.reserve(local_views.size());
+            auto issue_h2d_ready_windows = [&]() {
               try {
                 while (true) {
-                  size_t layer_idx = 0;
+                  std::vector<size_t> ready_layers;
                   {
                     std::unique_lock<std::mutex> lock(h2d_ready_mu);
                     h2d_ready_cv.wait(lock, [&]() {
@@ -896,32 +892,35 @@ class RaidenTransferEngine {
                       if (h2d_input_done) break;
                       continue;
                     }
-                    layer_idx = h2d_ready_layers.front();
-                    h2d_ready_layers.pop_front();
+                    const size_t batch_layers = std::min<size_t>(
+                        h2d_ready_layers.size(),
+                        static_cast<size_t>(h2d_batch_max_layers_));
+                    ready_layers.reserve(batch_layers);
+                    while (!h2d_ready_layers.empty() &&
+                           ready_layers.size() < batch_layers) {
+                      ready_layers.push_back(h2d_ready_layers.front());
+                      h2d_ready_layers.pop_front();
+                    }
                   }
 
-                  const auto h2d_issue_start =
-                      std::chrono::steady_clock::now();
-                  auto layer_future = prepared_[layer_idx]->H2DFromAsync(
-                      local_views[layer_idx], h2d_copy_spec.src_offsets,
-                      h2d_copy_spec.dst_offsets, h2d_copy_spec.sizes);
-                  const auto h2d_issue_done =
-                      std::chrono::steady_clock::now();
+                  H2DBatchIssueResult batch = IssueH2DBatch(
+                      local_views, load_plan.h2d_copy, ready_layers);
                   {
                     std::lock_guard<std::mutex> lock(h2d_state_mu);
-                    h2d_layer_futures.push_back(std::move(layer_future));
-                    if (!h2d_started ||
-                        h2d_issue_start < h2d_first_issue_start) {
-                      h2d_first_issue_start = h2d_issue_start;
+                    h2d_batch_futures.push_back(std::move(batch.future));
+                    if (batch.issued &&
+                        (!h2d_started ||
+                         batch.first_issue_start < h2d_first_issue_start)) {
+                      h2d_first_issue_start = batch.first_issue_start;
                       h2d_started = true;
                     }
-                    if (h2d_last_issue_done ==
+                    if (batch.issued &&
+                        (h2d_last_issue_done ==
                             std::chrono::steady_clock::time_point() ||
-                        h2d_issue_done > h2d_last_issue_done) {
-                      h2d_last_issue_done = h2d_issue_done;
+                         batch.last_issue_done > h2d_last_issue_done)) {
+                      h2d_last_issue_done = batch.last_issue_done;
                     }
-                    h2d_issue_ms +=
-                        DurationMs(h2d_issue_start, h2d_issue_done);
+                    h2d_issue_ms += batch.issue_ms;
                   }
                 }
               } catch (...) {
@@ -931,11 +930,7 @@ class RaidenTransferEngine {
                 }
               }
             };
-            std::vector<std::thread> h2d_issue_workers;
-            h2d_issue_workers.reserve(h2d_issue_threads);
-            for (int i = 0; i < h2d_issue_threads; ++i) {
-              h2d_issue_workers.emplace_back(issue_h2d_layers);
-            }
+            std::thread h2d_issue_worker(issue_h2d_ready_windows);
             std::exception_ptr pipeline_exception;
             const auto pipeline_start = std::chrono::steady_clock::now();
             try {
@@ -976,10 +971,11 @@ class RaidenTransferEngine {
                 }
                 h2h_ms +=
                     DurationMs(h2h_start, std::chrono::steady_clock::now());
-                if (!host_dst_to_src.empty()) {
+                if (load_plan.RequiresHostReorder()) {
                   const auto reorder_start =
                       std::chrono::steady_clock::now();
-                  ReorderCompactBlocks(local_views[i], host_dst_to_src);
+                  ReorderCompactBlocks(local_views[i],
+                                       load_plan.host_dst_to_src);
                   host_reorder_ms += DurationMs(
                       reorder_start, std::chrono::steady_clock::now());
                 }
@@ -997,8 +993,8 @@ class RaidenTransferEngine {
               h2d_input_done = true;
             }
             h2d_ready_cv.notify_all();
-            for (auto& worker : h2d_issue_workers) {
-              worker.join();
+            if (h2d_issue_worker.joinable()) {
+              h2d_issue_worker.join();
             }
             if (h2d_exception) {
               std::rethrow_exception(h2d_exception);
@@ -1007,8 +1003,8 @@ class RaidenTransferEngine {
               std::rethrow_exception(pipeline_exception);
             }
             auto h2d_future = std::make_shared<RaidenTransferFuture>();
-            for (auto& layer_future : h2d_layer_futures) {
-              h2d_future->Add(std::move(layer_future));
+            for (auto& batch_future : h2d_batch_futures) {
+              h2d_future->AddAll(batch_future);
             }
             const auto h2d_issue_done =
                 h2d_started ? h2d_last_issue_done
@@ -1054,7 +1050,7 @@ class RaidenTransferEngine {
                << " uuid=" << uuid
                << " rank=" << tp_rank_
                << " endpoint=" << remote_endpoint
-               << " blocks=" << local_block_ids.size()
+               << " blocks=" << load_plan.num_blocks
                << " layers=" << h2h_layers
                << " bytes=" << h2h_bytes
                << " h2d_segments=" << h2d_segments
@@ -1158,11 +1154,18 @@ class RaidenTransferEngine {
   int64_t CountCanonicalLoadCopySegmentsForTesting(
       const std::vector<int64_t>& remote_block_ids,
       const std::vector<int64_t>& local_block_ids) const {
-    LoadBlockPlan ordered =
-        CanonicalLoadBlockPlan(remote_block_ids, local_block_ids);
-    return static_cast<int64_t>(
-        Offsets(ordered.h2d_local_block_ids, /*source_is_compact=*/true)
-            .sizes.size());
+    CopyPlan plan = BuildLoadCopyPlan(remote_block_ids, local_block_ids);
+    return static_cast<int64_t>(plan.h2d_copy.sizes.size());
+  }
+
+  py::dict SendCopyPlanForTesting(const std::vector<int64_t>& block_ids) const {
+    return CopyPlanToDict(BuildProducerCopyPlan(block_ids));
+  }
+
+  py::dict LoadCopyPlanForTesting(
+      const std::vector<int64_t>& remote_block_ids,
+      const std::vector<int64_t>& local_block_ids) const {
+    return CopyPlanToDict(BuildLoadCopyPlan(remote_block_ids, local_block_ids));
   }
 
  private:
@@ -1172,15 +1175,31 @@ class RaidenTransferEngine {
     std::vector<int64_t> sizes;
   };
 
-  struct PendingOperation {
-    std::string remote_endpoint;
-    std::shared_ptr<RaidenTransferFuture> future;
-  };
-
-  struct LoadBlockPlan {
+  struct CopyPlan {
+    int64_t num_blocks = 0;
+    std::vector<int64_t> requested_remote_block_ids;
+    std::vector<int64_t> requested_local_block_ids;
     std::vector<int64_t> producer_remote_block_ids;
     std::vector<int64_t> h2d_local_block_ids;
     std::vector<size_t> host_dst_to_src;
+    CopySpec d2h_copy;
+    CopySpec h2d_copy;
+
+    bool RequiresHostReorder() const { return !host_dst_to_src.empty(); }
+  };
+
+  struct H2DBatchIssueResult {
+    std::shared_ptr<RaidenTransferFuture> future;
+    bool issued = false;
+    std::chrono::steady_clock::time_point first_issue_start;
+    std::chrono::steady_clock::time_point last_issue_done;
+    double issue_ms = 0.0;
+    size_t layers = 0;
+  };
+
+  struct PendingOperation {
+    std::string remote_endpoint;
+    std::shared_ptr<RaidenTransferFuture> future;
   };
 
   struct HostSlot {
@@ -1285,6 +1304,28 @@ class RaidenTransferEngine {
     return spec;
   }
 
+  static py::dict CopySpecToDict(const CopySpec& spec) {
+    py::dict out;
+    out["src_offsets"] = spec.src_offsets;
+    out["dst_offsets"] = spec.dst_offsets;
+    out["sizes"] = spec.sizes;
+    return out;
+  }
+
+  static py::dict CopyPlanToDict(const CopyPlan& plan) {
+    py::dict out;
+    out["num_blocks"] = plan.num_blocks;
+    out["requested_remote_block_ids"] = plan.requested_remote_block_ids;
+    out["requested_local_block_ids"] = plan.requested_local_block_ids;
+    out["producer_remote_block_ids"] = plan.producer_remote_block_ids;
+    out["h2d_local_block_ids"] = plan.h2d_local_block_ids;
+    out["host_dst_to_src"] = plan.host_dst_to_src;
+    out["requires_host_reorder"] = plan.RequiresHostReorder();
+    out["d2h_copy"] = CopySpecToDict(plan.d2h_copy);
+    out["h2d_copy"] = CopySpecToDict(plan.h2d_copy);
+    return out;
+  }
+
   static std::vector<int64_t> CanonicalSendBlockIds(
       const std::vector<int64_t>& block_ids) {
     std::vector<int64_t> ordered = block_ids;
@@ -1292,12 +1333,30 @@ class RaidenTransferEngine {
     return ordered;
   }
 
-  static LoadBlockPlan CanonicalLoadBlockPlan(
+  static CopyPlan BuildProducerCopyPlan(
+      const std::vector<int64_t>& block_ids) {
+    CopyPlan plan;
+    plan.num_blocks = static_cast<int64_t>(block_ids.size());
+    plan.requested_remote_block_ids = block_ids;
+    plan.producer_remote_block_ids = CanonicalSendBlockIds(block_ids);
+    plan.d2h_copy =
+        Offsets(plan.producer_remote_block_ids, /*source_is_compact=*/false);
+    return plan;
+  }
+
+  static CopyPlan BuildLoadCopyPlan(
       const std::vector<int64_t>& remote_block_ids,
       const std::vector<int64_t>& local_block_ids) {
     if (remote_block_ids.size() != local_block_ids.size()) {
       throw std::invalid_argument(
           "remote_block_ids and local_block_ids must have same length");
+    }
+    CopyPlan plan;
+    plan.num_blocks = static_cast<int64_t>(remote_block_ids.size());
+    plan.requested_remote_block_ids = remote_block_ids;
+    plan.requested_local_block_ids = local_block_ids;
+    if (remote_block_ids.empty()) {
+      return plan;
     }
     std::vector<size_t> remote_order(remote_block_ids.size());
     std::vector<size_t> local_order(local_block_ids.size());
@@ -1312,7 +1371,6 @@ class RaidenTransferEngine {
         local_order.begin(), local_order.end(),
         [&](size_t a, size_t b) { return local_block_ids[a] < local_block_ids[b]; });
 
-    LoadBlockPlan plan;
     plan.producer_remote_block_ids.reserve(remote_order.size());
     plan.h2d_local_block_ids.reserve(local_order.size());
     plan.host_dst_to_src.reserve(local_order.size());
@@ -1333,6 +1391,8 @@ class RaidenTransferEngine {
     if (identity_reorder) {
       plan.host_dst_to_src.clear();
     }
+    plan.h2d_copy = Offsets(plan.h2d_local_block_ids,
+                            /*source_is_compact=*/true);
     return plan;
   }
 
@@ -1399,6 +1459,94 @@ class RaidenTransferEngine {
             .copy_segments = static_cast<int64_t>(copy_spec.sizes.size())};
   }
 
+  H2DBatchIssueResult IssueH2DBatch(
+      const TensorList& host_views, const CopySpec& copy_spec,
+      const std::vector<size_t>& layer_indices) {
+    H2DBatchIssueResult result;
+    result.future = std::make_shared<RaidenTransferFuture>();
+    result.layers = layer_indices.size();
+    if (layer_indices.empty()) {
+      return result;
+    }
+    for (size_t layer_idx : layer_indices) {
+      if (layer_idx >= prepared_.size() || layer_idx >= host_views.size()) {
+        throw std::out_of_range("H2D batch layer index out of range");
+      }
+    }
+
+    const int issue_threads =
+        (copy_spec.sizes.size() > 1 && layer_indices.size() > 1)
+            ? std::min<int>(h2d_issue_threads_,
+                            static_cast<int>(layer_indices.size()))
+            : 1;
+    result.issued = true;
+    result.first_issue_start = std::chrono::steady_clock::now();
+    if (issue_threads <= 1) {
+      auto raw_future =
+          std::make_shared<raiden::PjRtCopyFuture>(std::vector<xla::Future<>>{});
+      for (size_t layer_idx : layer_indices) {
+        prepared_[layer_idx]->AppendH2DFrom(
+            raw_future, host_views[layer_idx], copy_spec.src_offsets,
+            copy_spec.dst_offsets, copy_spec.sizes);
+      }
+      result.last_issue_done = std::chrono::steady_clock::now();
+      result.issue_ms =
+          DurationMs(result.first_issue_start, result.last_issue_done);
+      result.future->Add(std::move(raw_future));
+      return result;
+    }
+
+    std::atomic<size_t> next_layer{0};
+    std::vector<std::shared_ptr<raiden::PjRtCopyFuture>> worker_futures(
+        issue_threads);
+    std::vector<std::exception_ptr> exceptions(issue_threads);
+    std::vector<double> worker_issue_ms(issue_threads, 0.0);
+    std::vector<size_t> worker_layers(issue_threads, 0);
+    std::vector<std::thread> workers;
+    workers.reserve(issue_threads);
+    for (int worker_idx = 0; worker_idx < issue_threads; ++worker_idx) {
+      workers.emplace_back([&, worker_idx]() {
+        try {
+          auto raw_future = std::make_shared<raiden::PjRtCopyFuture>(
+              std::vector<xla::Future<>>{});
+          const auto worker_start = std::chrono::steady_clock::now();
+          while (true) {
+            const size_t batch_pos = next_layer.fetch_add(1);
+            if (batch_pos >= layer_indices.size()) {
+              break;
+            }
+            const size_t layer_idx = layer_indices[batch_pos];
+            prepared_[layer_idx]->AppendH2DFrom(
+                raw_future, host_views[layer_idx], copy_spec.src_offsets,
+                copy_spec.dst_offsets, copy_spec.sizes);
+            ++worker_layers[worker_idx];
+          }
+          const auto worker_done = std::chrono::steady_clock::now();
+          worker_issue_ms[worker_idx] = DurationMs(worker_start, worker_done);
+          worker_futures[worker_idx] = std::move(raw_future);
+        } catch (...) {
+          exceptions[worker_idx] = std::current_exception();
+        }
+      });
+    }
+    for (auto& worker : workers) {
+      worker.join();
+    }
+    result.last_issue_done = std::chrono::steady_clock::now();
+    for (const auto& exception : exceptions) {
+      if (exception) {
+        std::rethrow_exception(exception);
+      }
+    }
+    for (int worker_idx = 0; worker_idx < issue_threads; ++worker_idx) {
+      result.issue_ms += worker_issue_ms[worker_idx];
+      if (worker_layers[worker_idx] > 0) {
+        result.future->Add(std::move(worker_futures[worker_idx]));
+      }
+    }
+    return result;
+  }
+
   RaidenStageResult IssueH2D(int64_t slot_idx, int64_t num_blocks,
                              const std::vector<int64_t>& local_block_ids) {
     if (num_blocks != static_cast<int64_t>(local_block_ids.size())) {
@@ -1412,53 +1560,14 @@ class RaidenTransferEngine {
       total_bytes += static_cast<int64_t>(view.nbytes());
     }
 
-    const int issue_threads =
-        copy_spec.sizes.size() > 1
-            ? std::min<int>(h2d_issue_threads_,
-                            static_cast<int>(prepared_.size()))
-            : 1;
-    if (issue_threads <= 1) {
-      for (size_t i = 0; i < prepared_.size(); ++i) {
-        future->Add(prepared_[i]->H2DFromAsync(
-            host_views[i], copy_spec.src_offsets, copy_spec.dst_offsets,
-            copy_spec.sizes));
-      }
-    } else {
-      std::atomic<size_t> next_layer{0};
-      std::vector<std::shared_ptr<raiden::PjRtCopyFuture>> layer_futures(
-          prepared_.size());
-      std::vector<std::exception_ptr> exceptions(issue_threads);
-      std::vector<std::thread> workers;
-      workers.reserve(issue_threads);
-      for (int worker_idx = 0; worker_idx < issue_threads; ++worker_idx) {
-        workers.emplace_back([&, worker_idx]() {
-          try {
-            while (true) {
-              const size_t i = next_layer.fetch_add(1);
-              if (i >= prepared_.size()) {
-                break;
-              }
-              layer_futures[i] = prepared_[i]->H2DFromAsync(
-                  host_views[i], copy_spec.src_offsets, copy_spec.dst_offsets,
-                  copy_spec.sizes);
-            }
-          } catch (...) {
-            exceptions[worker_idx] = std::current_exception();
-          }
-        });
-      }
-      for (auto& worker : workers) {
-        worker.join();
-      }
-      for (const auto& exception : exceptions) {
-        if (exception) {
-          std::rethrow_exception(exception);
-        }
-      }
-      for (auto& layer_future : layer_futures) {
-        future->Add(std::move(layer_future));
-      }
+    std::vector<size_t> layer_indices;
+    layer_indices.reserve(prepared_.size());
+    for (size_t i = 0; i < prepared_.size(); ++i) {
+      layer_indices.push_back(i);
     }
+    H2DBatchIssueResult batch =
+        IssueH2DBatch(host_views, copy_spec, layer_indices);
+    future->AddAll(batch.future);
     return {.future = std::move(future),
             .host_views = std::move(host_views),
             .total_bytes = total_bytes,
@@ -1945,6 +2054,7 @@ class RaidenTransferEngine {
   double timeout_s_ = 120.0;
   bool unsafe_skip_buffer_lock_ = true;
   int h2d_issue_threads_ = 1;
+  int h2d_batch_max_layers_ = 4;
   int64_t next_op_id_ = 1;
   std::map<int64_t, PendingOperation> pending_;
   std::vector<HostSlot> host_slots_;
@@ -2074,6 +2184,11 @@ PYBIND11_MODULE(_raiden_transfer_engine, m) {
            py::arg("block_ids"))
       .def("_count_canonical_load_copy_segments_for_testing",
            &RaidenTransferEngine::CountCanonicalLoadCopySegmentsForTesting,
+           py::arg("remote_block_ids"), py::arg("local_block_ids"))
+      .def("_send_copy_plan_for_testing",
+           &RaidenTransferEngine::SendCopyPlanForTesting, py::arg("block_ids"))
+      .def("_load_copy_plan_for_testing",
+           &RaidenTransferEngine::LoadCopyPlanForTesting,
            py::arg("remote_block_ids"), py::arg("local_block_ids"));
 
   m.def("await_all", &AwaitAll, py::arg("futures"));

@@ -81,6 +81,20 @@ class RaidenTransferEngineTest(absltest.TestCase):
         ),
         2,
     )
+    send_plan = engine._send_copy_plan_for_testing([3, 2, 1, 0, 7, 6])
+    self.assertEqual(send_plan["producer_remote_block_ids"], [0, 1, 2, 3, 6, 7])
+    self.assertEqual(send_plan["d2h_copy"]["src_offsets"], [0, 6])
+    self.assertEqual(send_plan["d2h_copy"]["dst_offsets"], [0, 4])
+    self.assertEqual(send_plan["d2h_copy"]["sizes"], [4, 2])
+
+    load_plan = engine._load_copy_plan_for_testing([3, 1], [0, 2])
+    self.assertEqual(load_plan["producer_remote_block_ids"], [1, 3])
+    self.assertEqual(load_plan["h2d_local_block_ids"], [0, 2])
+    self.assertEqual(load_plan["host_dst_to_src"], [1, 0])
+    self.assertTrue(load_plan["requires_host_reorder"])
+    self.assertEqual(load_plan["h2d_copy"]["src_offsets"], [0, 1])
+    self.assertEqual(load_plan["h2d_copy"]["dst_offsets"], [0, 2])
+    self.assertEqual(load_plan["h2d_copy"]["sizes"], [1, 1])
 
     future, src_refs, host_views, total_bytes = engine.stage_d2h(
         slot_idx=0, num_blocks=2, block_ids=[3, 1]
