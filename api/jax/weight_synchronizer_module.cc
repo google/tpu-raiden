@@ -32,9 +32,10 @@ using ::tpu_raiden::jax::WeightSynchronizer;
 // Exported Nanobind python module definition E2E!
 NB_MODULE(_weight_synchronizer, m) {
   nb::class_<WeightSynchronizer>(m, "WeightSynchronizer")
-      .def(nb::init<const nb::list&, std::optional<int>, int>(),
+      .def(nb::init<const nb::list&, std::optional<int>, int, bool>(),
            nb::arg("jax_arrays"), nb::arg("local_port") = nb::none(),
-           nb::arg("parallelism") = 1)
+           nb::arg("parallelism") = 1,
+           nb::arg("unsafe_skip_buffer_lock") = false)
       .def(
           "PushWeights",
           [](WeightSynchronizer& self, const std::vector<std::string>& peers) {

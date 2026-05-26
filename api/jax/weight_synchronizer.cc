@@ -78,11 +78,12 @@ std::vector<std::vector<xla::PjRtBuffer*>> UnpackJaxWeights(
 
 WeightSynchronizer::WeightSynchronizer(const nb::list& jax_arrays,
                                        std::optional<int> local_port,
-                                       int parallelism)
+                                       int parallelism,
+                                       bool unsafe_skip_buffer_lock)
     : weight_sync::WeightSynchronizerBase(
           UnpackJaxWeights(jax_arrays), local_port,
-          /*external_host_ptrs=*/std::nullopt,
-          /*unsafe_skip_buffer_lock=*/false, parallelism) {}
+          /*external_host_ptrs=*/std::nullopt, unsafe_skip_buffer_lock,
+          parallelism) {}
 
 WeightSynchronizer::~WeightSynchronizer() = default;
 

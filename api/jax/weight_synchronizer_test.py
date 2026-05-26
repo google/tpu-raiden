@@ -12,79 +12,114 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests and usage examples for JAX WeightSynchronizer Python API."""
+"""Integration tests for JAX WeightSynchronizer Python API."""
 
-from unittest import mock
+import os
 
-from absl.testing import absltest
+os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
+
+from absl.testing import absltest  # pylint: disable=g-import-not-at-top
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from api.jax.weight_synchronizer import WeightSynchronizer
+from api.jax import weight_synchronizer
+
+WeightSynchronizer = weight_synchronizer.WeightSynchronizer
 
 
-class WeightSynchronizerPythonApiTest(absltest.TestCase):
+class WeightSynchronizerIntegrationTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
-    # Set up a local JAX CPU mesh for array sharding representation E2E
-    devices = jax.devices("cpu")
-    self.mesh = jax.sharding.Mesh(np.array(devices), ("data",))
+    self.devices = jax.devices("cpu")
+    self.mesh = jax.sharding.Mesh(np.array(self.devices), ("data",))
     self.sharding = jax.sharding.NamedSharding(
         self.mesh, jax.sharding.PartitionSpec("data")
     )
+    self.shape = (8, 128)
+    self.dtype = jnp.float32
 
-  @mock.patch(
-      "api.jax._weight_synchronizer.WeightSynchronizer",
-      autospec=True,
-  )
-  def test_weight_synchronizer_api_usage_e2e(self, mock_impl):
-    # Mock properties behavior cleanly for the FFI layer!
-    mock_instance = mock_impl.return_value
-    mock_instance.local_port = 43121
-    mock_instance.num_layers = 1
-    mock_instance.num_shards = 1
-    mock_instance.slice_byte_size = 16384
+  def test_push_synchronization(self):
+    src_arrs = [
+        jax.device_put(
+            jnp.ones(self.shape, dtype=self.dtype) * 5.0, self.sharding
+        )
+    ]
+    dst1_arrs = [
+        jax.device_put(jnp.zeros(self.shape, dtype=self.dtype), self.sharding)
+    ]
+    dst2_arrs = [
+        jax.device_put(jnp.zeros(self.shape, dtype=self.dtype), self.sharding)
+    ]
 
-    # 1. Prepare JAX weight arrays sharded over local devices E2E!
-    shape = (64, 64)
-    dtype = jnp.float32
-    sharded_weights = jax.device_put(
-        jnp.ones(shape, dtype=dtype), self.sharding
+    for arr in src_arrs:
+      arr.block_until_ready()
+    for arr in dst1_arrs:
+      arr.block_until_ready()
+    for arr in dst2_arrs:
+      arr.block_until_ready()
+
+    ws_source = WeightSynchronizer(
+        jax_arrays=src_arrs, local_port=0, unsafe_skip_buffer_lock=True
+    )
+    ws_dest1 = WeightSynchronizer(
+        jax_arrays=dst1_arrs, local_port=0, unsafe_skip_buffer_lock=True
+    )
+    ws_dest2 = WeightSynchronizer(
+        jax_arrays=dst2_arrs, local_port=0, unsafe_skip_buffer_lock=True
     )
 
-    # 2. Instantiate the high-level WeightSynchronizer wrapper (documentation usage!)
-    ws = WeightSynchronizer(
-        jax_arrays=[sharded_weights], local_port=None, parallelism=1
+    ws_source.push_weights([
+        f"127.0.0.1:{ws_dest1.local_port}",
+        f"127.0.0.1:{ws_dest2.local_port}",
+    ])
+
+    for arr in dst1_arrs:
+      np.testing.assert_array_equal(np.asarray(arr), 5.0)
+    for arr in dst2_arrs:
+      np.testing.assert_array_equal(np.asarray(arr), 5.0)
+
+  def test_pull_synchronization(self):
+    src_arrs = [
+        jax.device_put(
+            jnp.ones(self.shape, dtype=self.dtype) * 10.0, self.sharding
+        )
+    ]
+    dst1_arrs = [
+        jax.device_put(jnp.zeros(self.shape, dtype=self.dtype), self.sharding)
+    ]
+    dst2_arrs = [
+        jax.device_put(jnp.zeros(self.shape, dtype=self.dtype), self.sharding)
+    ]
+
+    for arr in src_arrs:
+      arr.block_until_ready()
+    for arr in dst1_arrs:
+      arr.block_until_ready()
+    for arr in dst2_arrs:
+      arr.block_until_ready()
+
+    ws_source = WeightSynchronizer(
+        jax_arrays=src_arrs, local_port=0, unsafe_skip_buffer_lock=True
+    )
+    ws_dest1 = WeightSynchronizer(
+        jax_arrays=dst1_arrs, local_port=0, unsafe_skip_buffer_lock=True
+    )
+    ws_dest2 = WeightSynchronizer(
+        jax_arrays=dst2_arrs, local_port=0, unsafe_skip_buffer_lock=True
     )
 
-    # Verify wrapper correctly forwards parameters to Nanobind constructor
-    mock_impl.assert_called_once_with([sharded_weights], None, 1)
+    # Self-push to populate ws_source's host buffer with current device weights
+    ws_source.push_weights([f"127.0.0.1:{ws_source.local_port}"])
 
-    # Assert properties exposed from the FFI layer
-    self.assertEqual(ws.local_port, 43121)
-    self.assertEqual(ws.num_layers, 1)
-    self.assertEqual(ws.num_shards, 1)
-    self.assertEqual(ws.slice_byte_size, 16384)
+    ws_dest1.pull_weights(f"127.0.0.1:{ws_source.local_port}")
+    ws_dest2.pull_weights(f"127.0.0.1:{ws_source.local_port}")
 
-    # ==========================================================================
-    # Example A: Trainer pushing weights to peer inference servers E2E!
-    # ==========================================================================
-    peers = ["localhost:38219", "localhost:34359"]
-    ws.push_weights(peers)
-
-    # Verify underlying Nanobind PushWeights was triggered correctly
-    mock_instance.PushWeights.assert_called_once_with(peers)
-
-    # ==========================================================================
-    # Example B: Inference server pulling weights from a source peer E2E!
-    # ==========================================================================
-    source_coordinate = "localhost:43121"
-    ws.pull_weights(source_coordinate)
-
-    # Verify underlying Nanobind PullWeights was triggered correctly
-    mock_instance.PullWeights.assert_called_once_with(source_coordinate)
+    for arr in dst1_arrs:
+      np.testing.assert_array_equal(np.asarray(arr), 10.0)
+    for arr in dst2_arrs:
+      np.testing.assert_array_equal(np.asarray(arr), 10.0)
 
 
 if __name__ == "__main__":

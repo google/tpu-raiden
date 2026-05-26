@@ -28,6 +28,7 @@ class WeightSynchronizer:
       jax_arrays: List[any],
       local_port: Optional[int] = None,
       parallelism: int = 1,
+      unsafe_skip_buffer_lock: bool = False,
   ):
     """Instantiates the Weight Synchronizer on a JAX weights list.
 
@@ -35,9 +36,10 @@ class WeightSynchronizer:
       jax_arrays: A list of JAX arrays representing the sharded model weights.
       local_port: Sockets server port for incoming pulls (inference mode).
       parallelism: Number of parallel network stream TCP sockets workers.
+      unsafe_skip_buffer_lock: Skip PJRT buffer locks during weights unpack.
     """
     self._impl = _weight_synchronizer.WeightSynchronizer(
-        jax_arrays, local_port, parallelism
+        jax_arrays, local_port, parallelism, unsafe_skip_buffer_lock
     )
 
   def push_weights(self, peers: List[str]) -> None:
