@@ -15,6 +15,7 @@
 load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("//third_party/bazel_rules/rules_python/python:py_binary.bzl", "py_binary")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -243,5 +244,38 @@ py_test(
         "@com_google_absl_py//absl/testing:absltest",
         "@jax//jax",
         "@numpy//numpy",
+    ],
+)
+
+py_library(
+    name = "mc_jax_ffi_test_main_lib",
+    srcs = ["mc_jax_ffi_test_main.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":kv_cache_manager_ffi_py",
+        "//learning/brain/research/jax:tpu_support",
+        "//third_party/py/absl:app",
+        "//third_party/py/absl/flags",
+        "@jax//jax",
+        "@numpy//numpy",
+    ],
+)
+
+py_binary(
+    name = "mc_jax_ffi_test_main",
+    srcs = ["mc_jax_ffi_test_main.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":mc_jax_ffi_test_main_lib",
+    ],
+)
+
+py_test(
+    name = "mc_jax_ffi_test_main_test",
+    srcs = ["mc_jax_ffi_test_main_test.py"],
+    deps = [
+        ":mc_jax_ffi_test_main_lib",
+        "@com_google_absl_py//absl/testing:absltest",
+        "@jax//jax",
     ],
 )
