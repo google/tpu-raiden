@@ -164,6 +164,51 @@ class RaidenTransferEngineTest(absltest.TestCase):
       torch.testing.assert_close(got[0:1], refs[layer_idx][3:4])
       torch.testing.assert_close(got[2:3], refs[layer_idx][1:2])
 
+  def test_socket_transport_loads_registered_subset(self):
+    device = torch.device("tpu:0")
+    dtype = torch.bfloat16
+    shape = (4, 128, 8, 2, 128)
+    num_layers = 2
+    refs = [torch.randn(shape).to(dtype) + layer for layer in range(num_layers)]
+    src = [ref.to(device) for ref in refs]
+    dst = [torch.zeros_like(ref, device="cpu").to(device) for ref in refs]
+    torch.tpu.synchronize()
+
+    producer_port, consumer_port = _ports()
+    producer = raiden_transfer_engine.RaidenTransferEngine(
+        src, 0, producer_port, 2, 2, 30.0
+    )
+    consumer = raiden_transfer_engine.RaidenTransferEngine(
+        dst, 0, consumer_port, 2, 2, 30.0
+    )
+
+    uuid = 223344
+    producer.register_send("prefill-req", uuid, [0, 1, 2, 3])
+    consumer.submit_load("decode-req", uuid, f"127.0.0.1:{producer_port}",
+                         [3], [1])
+
+    deadline = time.time() + 30
+    done_recv = set()
+    done_send = set()
+    while time.time() < deadline:
+      sent, _, _ = producer.poll_finished()
+      _, recv, failed = consumer.poll_finished()
+      self.assertEmpty(failed)
+      done_send.update(sent)
+      done_recv.update(recv)
+      if "prefill-req" in done_send and "decode-req" in done_recv:
+        break
+      time.sleep(0.05)
+    self.assertIn("prefill-req", done_send)
+    self.assertIn("decode-req", done_recv)
+
+    torch.tpu.synchronize()
+    for layer_idx in range(num_layers):
+      got = dst[layer_idx].cpu()
+      torch.testing.assert_close(got[1:2], refs[layer_idx][3:4])
+      torch.testing.assert_close(got[0:1], torch.zeros_like(got[0:1]))
+      torch.testing.assert_close(got[2:3], torch.zeros_like(got[2:3]))
+
   def test_empty_submit_load_ack_does_not_report_recv_done(self):
     device = torch.device("tpu:0")
     shape = (4, 128, 8, 2, 128)

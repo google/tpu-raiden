@@ -25,6 +25,7 @@
 #include <deque>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -640,149 +641,19 @@ class RaidenTransferEngine {
     entry->req_id = req_id;
     entry->uuid = uuid;
     entry->num_blocks = static_cast<int64_t>(block_ids.size());
+    entry->registered_num_blocks = static_cast<int64_t>(block_ids.size());
+    entry->registered_block_ids = block_ids;
+    for (int64_t block_id : block_ids) {
+      entry->registered_block_set.insert(block_id);
+    }
     entry->deadline = DeadlineFromNow();
     entry->register_start = register_start;
-    CopyPlan send_plan = BuildProducerCopyPlan(block_ids);
 
     {
       std::lock_guard<std::mutex> lock(mu_);
       send_entries_[uuid] = entry;
     }
 
-    {
-      std::lock_guard<std::mutex> lock(worker_threads_mu_);
-      worker_threads_.emplace_back([this, uuid, entry,
-                                    send_plan = std::move(send_plan)]() {
-        bool failed = false;
-        int64_t slot_idx = -1;
-        try {
-          {
-            std::lock_guard<std::mutex> lock(mu_);
-            auto it = send_entries_.find(uuid);
-            if (it == send_entries_.end() || it->second->cancelled) {
-              return;
-            }
-          }
-
-          slot_idx = AcquireSlot();
-          {
-            std::lock_guard<std::mutex> lock(mu_);
-            auto it = send_entries_.find(uuid);
-            if (it == send_entries_.end() || it->second->cancelled) {
-              ReleaseSlotLocked(slot_idx);
-              entry->slot_released = true;
-              return;
-            }
-            entry->slot_idx = slot_idx;
-            entry->stage_issue_started = true;
-            entry->d2h_issue_start = std::chrono::steady_clock::now();
-          }
-
-          TensorList host_views = LayerViews(slot_idx, entry->num_blocks);
-          auto future = std::make_shared<RaidenTransferFuture>();
-          std::vector<std::shared_ptr<raiden::PjRtCopyFuture>> layer_futures;
-          layer_futures.reserve(prepared_.size());
-          int64_t total_bytes = 0;
-          for (size_t i = 0; i < prepared_.size(); ++i) {
-            total_bytes += static_cast<int64_t>(host_views[i].nbytes());
-            auto layer_future = prepared_[i]->D2HToAsync(
-                host_views[i], send_plan.d2h_copy.src_offsets,
-                send_plan.d2h_copy.dst_offsets, send_plan.d2h_copy.sizes);
-            layer_futures.push_back(layer_future);
-            future->Add(std::move(layer_future));
-          }
-
-          {
-            std::lock_guard<std::mutex> lock(mu_);
-            entry->d2h_issue_done = std::chrono::steady_clock::now();
-            entry->total_bytes = total_bytes;
-            entry->copy_segments =
-                static_cast<int64_t>(send_plan.d2h_copy.sizes.size());
-            entry->layer_ready.assign(layer_futures.size(), false);
-            entry->layers_ready = 0;
-            entry->future = future;
-          }
-          cv_.notify_all();
-          for (size_t i = 0; i < layer_futures.size(); ++i) {
-            layer_futures[i]->Await();
-            {
-              std::lock_guard<std::mutex> lock(mu_);
-              auto it = send_entries_.find(uuid);
-              if (it == send_entries_.end()) {
-                if (slot_idx >= 0 && !entry->slot_released) {
-                  ReleaseSlotLocked(slot_idx);
-                  entry->slot_released = true;
-                }
-                return;
-              }
-              if (i < it->second->layer_ready.size() &&
-                  !it->second->layer_ready[i]) {
-                it->second->layer_ready[i] = true;
-                ++it->second->layers_ready;
-              }
-            }
-            cv_.notify_all();
-          }
-        } catch (const std::exception& e) {
-          failed = true;
-          LOG(ERROR) << "Raiden D2H stage failed for uuid=" << uuid << ": "
-                     << e.what();
-        } catch (...) {
-          failed = true;
-          LOG(ERROR) << "Raiden D2H stage failed for uuid=" << uuid;
-        }
-        const auto d2h_done = std::chrono::steady_clock::now();
-        bool cancelled = false;
-        {
-          std::lock_guard<std::mutex> lock(mu_);
-          auto it = send_entries_.find(uuid);
-          if (it == send_entries_.end()) {
-            if (slot_idx >= 0 && !entry->slot_released) {
-              ReleaseSlotLocked(slot_idx);
-              entry->slot_released = true;
-            }
-            return;
-          }
-          if (it->second->d2h_issue_start ==
-              std::chrono::steady_clock::time_point()) {
-            it->second->d2h_issue_start = d2h_done;
-          }
-          if (it->second->d2h_issue_done ==
-              std::chrono::steady_clock::time_point()) {
-            it->second->d2h_issue_done = d2h_done;
-          }
-          it->second->stage_done = true;
-          it->second->failed = failed;
-          it->second->d2h_done = d2h_done;
-          cancelled = it->second->cancelled;
-          if (cancelled) {
-            done_sending_.insert(it->second->req_id);
-            ReleaseEntrySlotLocked(it->second);
-            send_entries_.erase(it);
-          }
-        }
-        cv_.notify_all();
-        std::ostringstream timing;
-        timing << "RAIDEN_TIMING event=producer_stage"
-               << " req_id=" << entry->req_id
-               << " uuid=" << entry->uuid
-               << " rank=" << tp_rank_
-               << " blocks=" << entry->num_blocks
-               << " bytes=" << entry->total_bytes
-               << " copy_segments=" << entry->copy_segments
-               << " d2h_issue_ms="
-               << DurationMs(entry->d2h_issue_start, entry->d2h_issue_done)
-               << " d2h_wait_ms="
-               << DurationMs(entry->d2h_issue_done, d2h_done)
-               << " d2h_total_ms="
-               << DurationMs(entry->d2h_issue_start, d2h_done)
-               << " register_to_stage_ms="
-               << DurationMs(entry->register_start, d2h_done)
-               << " cancelled=" << (cancelled ? 1 : 0)
-               << " failed=" << (failed ? 1 : 0);
-        EmitTimingLog(timing.str());
-      });
-    }
     std::ostringstream timing;
     timing << "RAIDEN_TIMING event=producer_register"
            << " req_id=" << req_id << " uuid=" << uuid
@@ -852,6 +723,7 @@ class RaidenTransferEngine {
             CheckStatus("control pull stream write",
                         WriteExact(control_fd, &stream_request,
                                    sizeof(stream_request)));
+            WriteBlockIds(control_fd, load_plan.producer_remote_block_ids);
             ControlResponseHeader response =
                 ReadControlResponseHeader(control_fd);
             control_setup_ms =
@@ -1211,9 +1083,12 @@ class RaidenTransferEngine {
     uint64_t uuid = 0;
     int64_t slot_idx = -1;
     int64_t num_blocks = 0;
+    int64_t registered_num_blocks = 0;
     int64_t total_bytes = 0;
     int64_t copy_segments = 0;
     int64_t layers_ready = 0;
+    std::vector<int64_t> registered_block_ids;
+    std::set<int64_t> registered_block_set;
     std::vector<bool> layer_ready;
     std::chrono::steady_clock::time_point register_start;
     std::chrono::steady_clock::time_point d2h_issue_start;
@@ -1224,6 +1099,7 @@ class RaidenTransferEngine {
     bool stage_done = false;
     bool failed = false;
     bool cancelled = false;
+    bool pull_started = false;
     bool slot_released = false;
     std::chrono::steady_clock::time_point deadline;
   };
@@ -1276,6 +1152,26 @@ class RaidenTransferEngine {
       total += static_cast<int64_t>(layer.len);
     }
     return total;
+  }
+
+  static void WriteBlockIds(int fd, const std::vector<int64_t>& block_ids) {
+    if (block_ids.empty()) return;
+    CheckStatus("control block ids write",
+                WriteExact(fd, block_ids.data(),
+                           block_ids.size() * sizeof(int64_t)));
+  }
+
+  static std::vector<int64_t> ReadBlockIds(int fd, uint64_t num_blocks) {
+    if (num_blocks == 0) return {};
+    if (num_blocks > static_cast<uint64_t>(
+                         std::numeric_limits<int64_t>::max())) {
+      throw std::invalid_argument("num_blocks is too large");
+    }
+    std::vector<int64_t> block_ids(static_cast<size_t>(num_blocks));
+    CheckStatus("control block ids read",
+                ReadExact(fd, block_ids.data(),
+                          block_ids.size() * sizeof(int64_t)));
+    return block_ids;
   }
 
   static CopySpec Offsets(const std::vector<int64_t>& block_ids,
@@ -1331,6 +1227,26 @@ class RaidenTransferEngine {
     std::vector<int64_t> ordered = block_ids;
     std::stable_sort(ordered.begin(), ordered.end());
     return ordered;
+  }
+
+  static void ValidateRequestedBlocks(
+      const SendEntry& entry, const std::vector<int64_t>& requested_block_ids) {
+    if (requested_block_ids.empty()) {
+      throw std::invalid_argument(
+          "pull stream requested no blocks; use ack-only path");
+    }
+    std::set<int64_t> seen;
+    for (int64_t block_id : requested_block_ids) {
+      if (entry.registered_block_set.find(block_id) ==
+          entry.registered_block_set.end()) {
+        throw std::invalid_argument(
+            "pull stream requested block not registered by producer");
+      }
+      if (!seen.insert(block_id).second) {
+        throw std::invalid_argument(
+            "pull stream requested duplicate producer block id");
+      }
+    }
   }
 
   static CopyPlan BuildProducerCopyPlan(
@@ -1612,6 +1528,10 @@ class RaidenTransferEngine {
 
   int64_t AcquireSlot() {
     std::lock_guard<std::mutex> lock(mu_);
+    return AcquireSlotLocked();
+  }
+
+  int64_t AcquireSlotLocked() {
     if (free_slots_.empty()) {
       throw std::runtime_error("Raiden host slot pool exhausted");
     }
@@ -1858,88 +1778,221 @@ class RaidenTransferEngine {
   void HandlePullStreamRequest(int fd, const ControlRequestHeader& request) {
     const auto request_start = std::chrono::steady_clock::now();
     std::shared_ptr<SendEntry> entry;
-    size_t num_layers = 0;
-    bool missing_entry = false;
-    {
-      std::unique_lock<std::mutex> lock(mu_);
-      const auto deadline = DeadlineFromNow();
-      cv_.wait_until(lock, deadline, [&]() {
-        auto it = send_entries_.find(request.uuid);
-        return it != send_entries_.end() &&
-               (!it->second->layer_ready.empty() || it->second->stage_done ||
-                it->second->cancelled);
-      });
-      auto it = send_entries_.find(request.uuid);
-      if (it == send_entries_.end() || it->second->slot_idx < 0) {
-        missing_entry = true;
-      } else {
-        entry = it->second;
-        entry->deadline = DeadlineFromNow();
-        num_layers = entry->layer_ready.size();
+    std::vector<int64_t> requested_block_ids;
+    try {
+      if (request.num_blocks > static_cast<uint64_t>(max_blocks_)) {
+        throw std::invalid_argument("requested block count exceeds max_blocks");
       }
-    }
-    if (missing_entry) {
-      WriteControlError(fd, "uuid not allocated before timeout");
+      requested_block_ids = ReadBlockIds(fd, request.num_blocks);
+    } catch (const std::exception& e) {
+      WriteControlError(fd, e.what());
       return;
     }
-    if (entry->failed) {
-      WriteControlError(fd, "producer stage failed");
-      return;
-    }
-    if (entry->cancelled) {
-      WriteControlError(fd, "uuid cancelled before stream");
-      return;
-    }
-    if (request.num_blocks != static_cast<uint64_t>(entry->num_blocks)) {
-      WriteControlError(fd, "num_blocks mismatch");
-      return;
-    }
-    const auto header_start = std::chrono::steady_clock::now();
-    WriteControlStreamHeader(fd, num_layers);
-    const auto header_done = std::chrono::steady_clock::now();
+
+    const auto requested_plan = BuildProducerCopyPlan(requested_block_ids);
+    int64_t slot_idx = -1;
     bool failed = false;
+    bool cancelled = false;
+    bool header_sent = false;
+    std::string failure_reason;
+    size_t num_layers = 0;
     size_t layers_sent = 0;
-    for (size_t layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
+    std::chrono::steady_clock::time_point header_start;
+    std::chrono::steady_clock::time_point header_done;
+    try {
       {
         std::unique_lock<std::mutex> lock(mu_);
         const auto deadline = DeadlineFromNow();
         cv_.wait_until(lock, deadline, [&]() {
-          return entry->failed || entry->cancelled ||
-                 (layer_idx < entry->layer_ready.size() &&
-                  entry->layer_ready[layer_idx]);
+          return stopping_ || send_entries_.find(request.uuid) != send_entries_.end();
         });
-        if (entry->failed || entry->cancelled ||
-            layer_idx >= entry->layer_ready.size() ||
-            !entry->layer_ready[layer_idx]) {
-          failed = true;
-          break;
+        auto it = send_entries_.find(request.uuid);
+        if (it == send_entries_.end()) {
+          throw std::runtime_error("uuid not registered before timeout");
         }
+        entry = it->second;
+        if (entry->failed) {
+          throw std::runtime_error("producer stage failed");
+        }
+        if (entry->cancelled) {
+          throw std::runtime_error("uuid cancelled before stream");
+        }
+        if (entry->pull_started) {
+          throw std::runtime_error("uuid already has an active pull");
+        }
+        ValidateRequestedBlocks(*entry, requested_plan.producer_remote_block_ids);
+        slot_idx = AcquireSlotLocked();
+        entry->slot_idx = slot_idx;
+        entry->slot_released = false;
+        entry->pull_started = true;
+        entry->num_blocks = requested_plan.num_blocks;
+        entry->stage_issue_started = true;
+        entry->stage_done = false;
+        entry->failed = false;
+        entry->d2h_issue_start = std::chrono::steady_clock::now();
         entry->deadline = DeadlineFromNow();
       }
-      PullLayerDescriptor descriptor =
-          LayerDescriptor(entry->slot_idx, entry->num_blocks, layer_idx);
-      absl::Status s = WriteExact(fd, &descriptor, sizeof(descriptor));
-      if (!s.ok()) {
-        failed = true;
-        break;
+
+      TensorList host_views = LayerViews(slot_idx, requested_plan.num_blocks);
+      auto future = std::make_shared<RaidenTransferFuture>();
+      std::vector<std::shared_ptr<raiden::PjRtCopyFuture>> layer_futures;
+      layer_futures.reserve(prepared_.size());
+      int64_t total_bytes = 0;
+      for (size_t i = 0; i < prepared_.size(); ++i) {
+        total_bytes += static_cast<int64_t>(host_views[i].nbytes());
+        auto layer_future = prepared_[i]->D2HToAsync(
+            host_views[i], requested_plan.d2h_copy.src_offsets,
+            requested_plan.d2h_copy.dst_offsets, requested_plan.d2h_copy.sizes);
+        layer_futures.push_back(layer_future);
+        future->Add(std::move(layer_future));
       }
-      ++layers_sent;
+
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = send_entries_.find(request.uuid);
+        if (it == send_entries_.end()) {
+          if (slot_idx >= 0) {
+            ReleaseSlotLocked(slot_idx);
+            slot_idx = -1;
+          }
+          return;
+        }
+        entry = it->second;
+        entry->d2h_issue_done = std::chrono::steady_clock::now();
+        entry->total_bytes = total_bytes;
+        entry->copy_segments =
+            static_cast<int64_t>(requested_plan.d2h_copy.sizes.size());
+        entry->layer_ready.assign(layer_futures.size(), false);
+        entry->layers_ready = 0;
+        entry->future = future;
+        num_layers = layer_futures.size();
+      }
+      cv_.notify_all();
+
+      header_start = std::chrono::steady_clock::now();
+      WriteControlStreamHeader(fd, num_layers);
+      header_done = std::chrono::steady_clock::now();
+      header_sent = true;
+
+      for (size_t layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
+        layer_futures[layer_idx]->Await();
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          auto it = send_entries_.find(request.uuid);
+          if (it == send_entries_.end()) {
+            if (slot_idx >= 0 && !entry->slot_released) {
+              ReleaseSlotLocked(slot_idx);
+              entry->slot_released = true;
+            }
+            return;
+          }
+          entry = it->second;
+          if (entry->failed || entry->cancelled) {
+            throw std::runtime_error(entry->cancelled
+                                         ? "uuid cancelled during stream"
+                                         : "producer stage failed");
+          }
+          if (layer_idx < entry->layer_ready.size() &&
+              !entry->layer_ready[layer_idx]) {
+            entry->layer_ready[layer_idx] = true;
+            ++entry->layers_ready;
+          }
+          entry->deadline = DeadlineFromNow();
+        }
+        cv_.notify_all();
+        PullLayerDescriptor descriptor =
+            LayerDescriptor(slot_idx, requested_plan.num_blocks, layer_idx);
+        CheckStatus("control stream layer descriptor write",
+                    WriteExact(fd, &descriptor, sizeof(descriptor)));
+        ++layers_sent;
+      }
+    } catch (const std::exception& e) {
+      failed = true;
+      failure_reason = e.what();
+      LOG(ERROR) << "Raiden pull stream failed for uuid=" << request.uuid
+                 << ": " << failure_reason;
+      if (!header_sent) {
+        WriteControlError(fd, failure_reason);
+      }
+    } catch (...) {
+      failed = true;
+      failure_reason = "unknown error";
+      LOG(ERROR) << "Raiden pull stream failed for uuid=" << request.uuid;
+      if (!header_sent) {
+        WriteControlError(fd, failure_reason);
+      }
     }
     const auto done = std::chrono::steady_clock::now();
+    if (!header_sent) {
+      header_start = done;
+      header_done = done;
+    }
+    if (entry) {
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = send_entries_.find(request.uuid);
+        if (it != send_entries_.end()) {
+          if (it->second->d2h_issue_start ==
+              std::chrono::steady_clock::time_point()) {
+            it->second->d2h_issue_start = done;
+          }
+          if (it->second->d2h_issue_done ==
+              std::chrono::steady_clock::time_point()) {
+            it->second->d2h_issue_done = done;
+          }
+          it->second->stage_done = true;
+          it->second->failed = failed;
+          it->second->d2h_done = done;
+          cancelled = it->second->cancelled;
+          if (cancelled) {
+            done_sending_.insert(it->second->req_id);
+            ReleaseEntrySlotLocked(it->second);
+            send_entries_.erase(it);
+          }
+        } else if (slot_idx >= 0 && entry && !entry->slot_released) {
+          ReleaseSlotLocked(slot_idx);
+          entry->slot_released = true;
+        }
+      }
+      cv_.notify_all();
+      std::ostringstream stage_timing;
+      stage_timing << "RAIDEN_TIMING event=producer_stage"
+                   << " req_id=" << entry->req_id
+                   << " uuid=" << entry->uuid
+                   << " rank=" << tp_rank_
+                   << " registered_blocks=" << entry->registered_num_blocks
+                   << " blocks=" << entry->num_blocks
+                   << " bytes=" << entry->total_bytes
+                   << " copy_segments=" << entry->copy_segments
+                   << " d2h_issue_ms="
+                   << DurationMs(entry->d2h_issue_start, entry->d2h_issue_done)
+                   << " d2h_wait_ms="
+                   << DurationMs(entry->d2h_issue_done, done)
+                   << " d2h_total_ms="
+                   << DurationMs(entry->d2h_issue_start, done)
+                   << " register_to_stage_ms="
+                   << DurationMs(entry->register_start, done)
+                   << " cancelled=" << (cancelled ? 1 : 0)
+                   << " failed=" << (failed ? 1 : 0);
+      EmitTimingLog(stage_timing.str());
+    }
     std::ostringstream timing;
     timing << "RAIDEN_TIMING event=producer_pull_stream"
-           << " req_id=" << entry->req_id
-           << " uuid=" << entry->uuid
+           << " req_id=" << (entry ? entry->req_id : "")
+           << " uuid=" << request.uuid
            << " rank=" << tp_rank_
-           << " blocks=" << entry->num_blocks
+           << " registered_blocks="
+           << (entry ? entry->registered_num_blocks : 0)
+           << " blocks=" << requested_plan.num_blocks
            << " layers=" << num_layers
            << " layers_sent=" << layers_sent
-           << " bytes=" << entry->total_bytes
+           << " bytes=" << (entry ? entry->total_bytes : 0)
            << " wait_slot_ms=" << DurationMs(request_start, header_start)
            << " header_ms=" << DurationMs(header_start, header_done)
            << " stream_ms=" << DurationMs(header_done, done)
            << " register_to_stream_done_ms="
-           << DurationMs(entry->register_start, done)
+           << (entry ? DurationMs(entry->register_start, done) : 0.0)
+           << " reason=" << failure_reason
            << " failed=" << (failed ? 1 : 0);
     EmitTimingLog(timing.str());
   }

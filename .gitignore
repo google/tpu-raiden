@@ -86,3 +86,6 @@ MODULE.bazel.lock
 # Custom ignores
 /jax/
 /xla/
+
+# pycache
+**/__pycache__/
