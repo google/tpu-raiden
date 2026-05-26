@@ -61,7 +61,6 @@ nanobind_extension(
         "//kv_cache:kv_cache_manager_base",
         "//raiden_lib/raw_transfer:raw_transfer_impl",
         "@nanobind",
-        "@nanobind_abseil:statusor",
     ],
 )
 

@@ -17,7 +17,7 @@
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
-#include "nanobind_abseil/statusor.h"
+#include "api/jax/nb_status.h"
 #include "api/jax/kv_cache_manager.h"
 #include "raiden_lib/raw_transfer/raw_transfer_core.h"
 
