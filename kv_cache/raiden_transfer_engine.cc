@@ -18,6 +18,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <iostream>
@@ -74,6 +75,21 @@ void CheckStatus(const std::string& context, const absl::Status& status) {
 void EmitTimingLog(const std::string& message) {
   LOG(INFO) << message;
   std::cerr << message << std::endl;
+}
+
+int EnvInt(const char* name, int default_value, int min_value, int max_value) {
+  const char* raw = std::getenv(name);
+  if (raw == nullptr || raw[0] == '\0') {
+    return default_value;
+  }
+  char* end = nullptr;
+  const long parsed = std::strtol(raw, &end, 10);
+  if (end == raw || *end != '\0') {
+    LOG(WARNING) << "Ignoring invalid " << name << "=" << raw;
+    return default_value;
+  }
+  return static_cast<int>(
+      std::max<long>(min_value, std::min<long>(max_value, parsed)));
 }
 
 template <typename T>
@@ -234,6 +250,12 @@ class RaidenTransferEngine {
         max_blocks_(max_blocks),
         timeout_s_(timeout_s),
         unsafe_skip_buffer_lock_(unsafe_skip_buffer_lock) {
+    h2d_issue_threads_ =
+        EnvInt("RAIDEN_H2D_ISSUE_THREADS", 4, /*min_value=*/1,
+               /*max_value=*/16);
+    h2d_batch_max_layers_ =
+        EnvInt("RAIDEN_H2D_BATCH_MAX_LAYERS", 4, /*min_value=*/1,
+               /*max_value=*/256);
     if (max_blocks_ <= 0) {
       throw std::invalid_argument("max_blocks must be positive");
     }
@@ -673,6 +695,15 @@ class RaidenTransferEngine {
     std::shared_ptr<RaidenTransferFuture> future;
   };
 
+  struct H2DBatchIssueResult {
+    std::shared_ptr<RaidenTransferFuture> future;
+    bool issued = false;
+    std::chrono::steady_clock::time_point first_issue_start;
+    std::chrono::steady_clock::time_point last_issue_done;
+    double issue_ms = 0.0;
+    size_t layers = 0;
+  };
+
   struct HostSlot {
     TensorList layers;
   };
@@ -962,6 +993,96 @@ class RaidenTransferEngine {
             .copy_segments = static_cast<int64_t>(copy_spec.sizes.size())};
   }
 
+  H2DBatchIssueResult IssueH2DBatch(
+      const TensorList& host_views, const CopySpec& copy_spec,
+      const std::vector<size_t>& layer_indices) {
+    H2DBatchIssueResult result;
+    result.future = std::make_shared<RaidenTransferFuture>();
+    result.layers = layer_indices.size();
+    if (layer_indices.empty()) {
+      return result;
+    }
+    for (size_t layer_idx : layer_indices) {
+      if (layer_idx >= kv_transfer_->num_layers() ||
+          layer_idx >= host_views.size()) {
+        throw std::out_of_range("H2D batch layer index out of range");
+      }
+    }
+    KVCacheCopySpec transfer_spec = ToKVCacheCopySpec(copy_spec);
+    const int issue_threads =
+        (copy_spec.sizes.size() > 1 && layer_indices.size() > 1)
+            ? std::min<int>(h2d_issue_threads_,
+                            static_cast<int>(layer_indices.size()))
+            : 1;
+    result.issued = true;
+    result.first_issue_start = std::chrono::steady_clock::now();
+    if (issue_threads <= 1) {
+      for (size_t layer_idx : layer_indices) {
+        result.future->Add(ValueOrThrow(
+            "Failed to issue H2D transfer",
+            kv_transfer_->H2dFrom(layer_idx, host_views[layer_idx].data_ptr(),
+                                  host_views[layer_idx].nbytes(),
+                                  transfer_spec)));
+      }
+      result.last_issue_done = std::chrono::steady_clock::now();
+      result.issue_ms =
+          DurationMs(result.first_issue_start, result.last_issue_done);
+      return result;
+    }
+
+    std::atomic<size_t> next_layer{0};
+    std::vector<std::shared_ptr<RaidenTransferFuture>> worker_futures(
+        issue_threads);
+    std::vector<std::exception_ptr> exceptions(issue_threads);
+    std::vector<double> worker_issue_ms(issue_threads, 0.0);
+    std::vector<size_t> worker_layers(issue_threads, 0);
+    std::vector<std::thread> workers;
+    workers.reserve(issue_threads);
+    for (int worker_idx = 0; worker_idx < issue_threads; ++worker_idx) {
+      workers.emplace_back([&, worker_idx]() {
+        try {
+          auto worker_future = std::make_shared<RaidenTransferFuture>();
+          const auto worker_start = std::chrono::steady_clock::now();
+          while (true) {
+            const size_t batch_pos = next_layer.fetch_add(1);
+            if (batch_pos >= layer_indices.size()) {
+              break;
+            }
+            const size_t layer_idx = layer_indices[batch_pos];
+            worker_future->Add(ValueOrThrow(
+                "Failed to issue H2D transfer",
+                kv_transfer_->H2dFrom(layer_idx,
+                                      host_views[layer_idx].data_ptr(),
+                                      host_views[layer_idx].nbytes(),
+                                      transfer_spec)));
+            ++worker_layers[worker_idx];
+          }
+          const auto worker_done = std::chrono::steady_clock::now();
+          worker_issue_ms[worker_idx] = DurationMs(worker_start, worker_done);
+          worker_futures[worker_idx] = std::move(worker_future);
+        } catch (...) {
+          exceptions[worker_idx] = std::current_exception();
+        }
+      });
+    }
+    for (auto& worker : workers) {
+      worker.join();
+    }
+    result.last_issue_done = std::chrono::steady_clock::now();
+    for (const auto& exception : exceptions) {
+      if (exception) {
+        std::rethrow_exception(exception);
+      }
+    }
+    for (int worker_idx = 0; worker_idx < issue_threads; ++worker_idx) {
+      result.issue_ms += worker_issue_ms[worker_idx];
+      if (worker_layers[worker_idx] > 0) {
+        result.future->AddAll(worker_futures[worker_idx]);
+      }
+    }
+    return result;
+  }
+
   RaidenStageResult IssueH2D(int64_t slot_idx, int64_t num_blocks,
                              const std::vector<int64_t>& local_block_ids) {
     if (num_blocks != static_cast<int64_t>(local_block_ids.size())) {
@@ -969,16 +1090,27 @@ class RaidenTransferEngine {
           "num_blocks must match len(local_block_ids)");
     }
     CopySpec copy_spec = Offsets(local_block_ids, /*source_is_compact=*/true);
-    KVCacheCopySpec transfer_spec = ToKVCacheCopySpec(copy_spec);
     TensorList host_views = LayerViews(slot_idx, num_blocks);
     auto future = std::make_shared<RaidenTransferFuture>();
     int64_t total_bytes = 0;
+    for (const auto& view : host_views) {
+      total_bytes += static_cast<int64_t>(view.nbytes());
+    }
+    std::vector<size_t> layer_indices;
+    layer_indices.reserve(kv_transfer_->num_layers());
     for (size_t i = 0; i < kv_transfer_->num_layers(); ++i) {
-      total_bytes += static_cast<int64_t>(host_views[i].nbytes());
-      future->Add(ValueOrThrow("Failed to issue H2D transfer",
-                               kv_transfer_->H2dFrom(
-                                   i, host_views[i].data_ptr(),
-                                   host_views[i].nbytes(), transfer_spec)));
+      layer_indices.push_back(i);
+    }
+    for (size_t start = 0; start < layer_indices.size();) {
+      const size_t end =
+          std::min(layer_indices.size(),
+                   start + static_cast<size_t>(h2d_batch_max_layers_));
+      std::vector<size_t> batch_layers(layer_indices.begin() + start,
+                                       layer_indices.begin() + end);
+      H2DBatchIssueResult batch =
+          IssueH2DBatch(host_views, copy_spec, batch_layers);
+      future->AddAll(batch.future);
+      start = end;
     }
     return {.future = std::move(future),
             .host_views = std::move(host_views),
@@ -1397,6 +1529,8 @@ class RaidenTransferEngine {
   int64_t max_blocks_ = 0;
   double timeout_s_ = 120.0;
   bool unsafe_skip_buffer_lock_ = true;
+  int h2d_issue_threads_ = 1;
+  int h2d_batch_max_layers_ = 4;
   int64_t next_op_id_ = 1;
   std::map<int64_t, PendingOperation> pending_;
   std::vector<HostSlot> host_slots_;
