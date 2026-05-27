@@ -16,6 +16,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -31,6 +33,41 @@
 
 namespace tpu_raiden {
 namespace kv_cache {
+namespace {
+
+absl::Status ValidateCopySpecStatus(const KVCacheCopySpec& copy_spec) {
+  const bool present = !copy_spec.src_offsets.empty() ||
+                       !copy_spec.dst_offsets.empty() ||
+                       !copy_spec.sizes.empty();
+  if (present &&
+      (copy_spec.src_offsets.size() != copy_spec.dst_offsets.size() ||
+       copy_spec.src_offsets.size() != copy_spec.sizes.size())) {
+    return absl::InvalidArgumentError(
+        "src_offsets, dst_offsets, and sizes must have the same length");
+  }
+  for (size_t i = 0; i < copy_spec.src_offsets.size(); ++i) {
+    if (copy_spec.src_offsets[i] < 0 || copy_spec.dst_offsets[i] < 0 ||
+        copy_spec.sizes[i] < 0) {
+      return absl::InvalidArgumentError(
+          "copy offsets and sizes must be non-negative");
+    }
+  }
+  return absl::OkStatus();
+}
+
+bool IsPartialCopy(const KVCacheCopySpec& copy_spec, int64_t major_dim_size) {
+  if (copy_spec.src_offsets.empty()) return false;
+  if (major_dim_size <= 0) return true;
+  for (size_t i = 0; i < copy_spec.src_offsets.size(); ++i) {
+    if (copy_spec.src_offsets[i] != 0 || copy_spec.dst_offsets[i] != 0 ||
+        copy_spec.sizes[i] != major_dim_size) {
+      return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace
 
 KVCacheManagerBase::KVCacheManagerBase(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
@@ -540,6 +577,112 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hDirect(
     const std::vector<int64_t>& dst_offsets,
     const std::vector<int64_t>& copy_sizes, int64_t device_id) {
   return DispatchD2hChunks(src_offsets, dst_offsets, copy_sizes, device_id);
+}
+
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hTo(
+    size_t layer_idx, void* dst_host_ptr, size_t dst_size,
+    const KVCacheCopySpec& copy_spec, size_t shard_idx) {
+  TF_RETURN_IF_ERROR(ValidateCopySpecStatus(copy_spec));
+  if (layer_idx >= layers_.size() ||
+      shard_idx >= layers_[layer_idx].shards.size()) {
+    return absl::OutOfRangeError("D2H layer or shard index out of range");
+  }
+  if (layer_idx >= buffer_holds_.size() ||
+      shard_idx >= buffer_holds_[layer_idx].size()) {
+    return absl::FailedPreconditionError(
+        "D2H requires a device-backed KVCacheManagerBase");
+  }
+  if (dst_size > 0 && dst_host_ptr == nullptr) {
+    return absl::InvalidArgumentError("Destination host pointer is null");
+  }
+
+  const auto& shard_info = layers_[layer_idx].shards[shard_idx];
+  const auto& shard_hold = buffer_holds_[layer_idx][shard_idx];
+  const bool is_partial = IsPartialCopy(copy_spec, major_dim_size_);
+  std::vector<xla::Future<>> futures;
+  if (!is_partial) {
+    if (dst_size < physical_size_) {
+      return absl::InvalidArgumentError("Destination host buffer is too small");
+    }
+    futures.push_back(
+        shard_hold.CopyRawDeviceToHost(dst_host_ptr, 0, physical_size_));
+  } else {
+    futures.reserve(copy_spec.src_offsets.size());
+    uint8_t* dst = static_cast<uint8_t*>(dst_host_ptr);
+    for (size_t i = 0; i < copy_spec.src_offsets.size(); ++i) {
+      const int64_t src_offset = copy_spec.src_offsets[i] * slice_byte_size_;
+      const int64_t dst_offset = copy_spec.dst_offsets[i] * slice_byte_size_;
+      const int64_t size_to_copy = copy_spec.sizes[i] * slice_byte_size_;
+      if (src_offset + size_to_copy >
+          static_cast<int64_t>(shard_info.device_size)) {
+        return absl::InvalidArgumentError(
+            "Copy range exceeds source device buffer size");
+      }
+      if (dst_offset + size_to_copy > static_cast<int64_t>(dst_size)) {
+        return absl::InvalidArgumentError(
+            "Copy range exceeds destination host buffer size");
+      }
+      futures.push_back(shard_hold.CopyRawDeviceToHost(
+          dst + dst_offset, src_offset, size_to_copy));
+    }
+  }
+
+  raiden::PjRtCopyFuture future({});
+  future.Append(std::move(futures), shard_hold);
+  return future;
+}
+
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dFrom(
+    size_t layer_idx, const void* src_host_ptr, size_t src_size,
+    const KVCacheCopySpec& copy_spec, size_t shard_idx) {
+  TF_RETURN_IF_ERROR(ValidateCopySpecStatus(copy_spec));
+  if (layer_idx >= layers_.size() ||
+      shard_idx >= layers_[layer_idx].shards.size()) {
+    return absl::OutOfRangeError("H2D layer or shard index out of range");
+  }
+  if (layer_idx >= buffer_holds_.size() ||
+      shard_idx >= buffer_holds_[layer_idx].size()) {
+    return absl::FailedPreconditionError(
+        "H2D requires a device-backed KVCacheManagerBase");
+  }
+  if (src_size > 0 && src_host_ptr == nullptr) {
+    return absl::InvalidArgumentError("Source host pointer is null");
+  }
+
+  const auto& shard_info = layers_[layer_idx].shards[shard_idx];
+  const auto& shard_hold = buffer_holds_[layer_idx][shard_idx];
+  const bool is_partial = IsPartialCopy(copy_spec, major_dim_size_);
+  std::vector<xla::Future<>> futures;
+  if (!is_partial) {
+    if (src_size < physical_size_) {
+      return absl::InvalidArgumentError("Source host buffer is too small");
+    }
+    futures.push_back(
+        shard_hold.CopyRawHostToDevice(src_host_ptr, 0, physical_size_));
+  } else {
+    futures.reserve(copy_spec.src_offsets.size());
+    const uint8_t* src = static_cast<const uint8_t*>(src_host_ptr);
+    for (size_t i = 0; i < copy_spec.src_offsets.size(); ++i) {
+      const int64_t src_offset = copy_spec.src_offsets[i] * slice_byte_size_;
+      const int64_t dst_offset = copy_spec.dst_offsets[i] * slice_byte_size_;
+      const int64_t size_to_copy = copy_spec.sizes[i] * slice_byte_size_;
+      if (src_offset + size_to_copy > static_cast<int64_t>(src_size)) {
+        return absl::InvalidArgumentError(
+            "Copy range exceeds source host buffer size");
+      }
+      if (dst_offset + size_to_copy >
+          static_cast<int64_t>(shard_info.device_size)) {
+        return absl::InvalidArgumentError(
+            "Copy range exceeds destination device buffer size");
+      }
+      futures.push_back(shard_hold.CopyRawHostToDevice(
+          src + src_offset, dst_offset, size_to_copy));
+    }
+  }
+
+  raiden::PjRtCopyFuture future({});
+  future.Append(std::move(futures), shard_hold);
+  return future;
 }
 
 }  // namespace kv_cache

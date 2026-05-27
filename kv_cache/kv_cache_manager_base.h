@@ -34,6 +34,12 @@
 namespace tpu_raiden {
 namespace kv_cache {
 
+struct KVCacheCopySpec {
+  std::vector<int64_t> src_offsets;
+  std::vector<int64_t> dst_offsets;
+  std::vector<int64_t> sizes;
+};
+
 class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
  public:
   // Core C++ Constructor wrapping raw PJRT buffers directly (used by JAX and
@@ -106,6 +112,17 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       const std::vector<int64_t>& src_offsets = {},
       const std::vector<int64_t>& dst_offsets = {},
       const std::vector<int64_t>& copy_sizes = {}, int64_t device_id = -1);
+
+  // Layer-wise copies using caller-owned host buffers. The raw copy operation
+  // captures the supplied address when issued, so independent calls can overlap
+  // across layers.
+  absl::StatusOr<raiden::PjRtCopyFuture> D2hTo(
+      size_t layer_idx, void* dst_host_ptr, size_t dst_size,
+      const KVCacheCopySpec& copy_spec, size_t shard_idx = 0);
+
+  absl::StatusOr<raiden::PjRtCopyFuture> H2dFrom(
+      size_t layer_idx, const void* src_host_ptr, size_t src_size,
+      const KVCacheCopySpec& copy_spec, size_t shard_idx = 0);
 
   void SetExternalHostBuffer(
       const std::vector<raiden::BufferHoldAndAlias>& buffer_holds);
