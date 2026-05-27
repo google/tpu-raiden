@@ -1,0 +1,5 @@
+startup --output_user_root=/mnt/disk/bazel-output-user-root
+
+common --repository_cache=/mnt/disk/bazel-repo-cache
+build --disk_cache=/mnt/disk/bazel-disk-cache
+test --disk_cache=/mnt/disk/bazel-disk-cache
