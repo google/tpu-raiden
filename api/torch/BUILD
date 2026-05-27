@@ -15,8 +15,22 @@
 load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("//raiden_lib/raw_transfer:header_only_cc_info.bzl", "header_only_cc_info")
 
 package(default_visibility = ["//visibility:public"])
+
+header_only_cc_info(
+    name = "torch_tpu_stablehlo_headers",
+    deps = [
+        "@stablehlo//:attr_type_builder_util",
+        "@stablehlo//:chlo_builder",
+        "@stablehlo//:chlo_ops",
+        "@stablehlo//:func_builder",
+        "@stablehlo//:mlir_builder",
+        "@stablehlo//:stablehlo_builder",
+        "@stablehlo//:stablehlo_ops",
+    ],
+)
 
 cc_library(
     name = "kv_cache_manager_torch",
@@ -42,16 +56,10 @@ cc_library(
         "@torch_tpu//shims/torch/c10/core:base_headers",
         "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
         "@torch_tpu_headers//:headers",
-        "@stablehlo//:attr_type_builder_util",
-        "@stablehlo//:chlo_builder",
-        "@stablehlo//:chlo_ops",
-        "@stablehlo//:func_builder",
-        "@stablehlo//:mlir_builder",
-        "@stablehlo//:stablehlo_builder",
-        "@stablehlo//:stablehlo_ops",
+        ":torch_tpu_stablehlo_headers",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        "@xla//xla/pjrt:pjrt_client",
+        "//raiden_lib/raw_transfer:xla_raw_transfer_headers",
     ],
 )
 

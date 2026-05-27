@@ -13,7 +13,8 @@
 # limitations under the License.
 
 load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+load("@rules_python//python:defs.bzl", "py_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -58,14 +59,11 @@ cc_library(
     deps = [
         ":logical_block_manager",
         "//core:raiden_manager_base",
-        "//raiden_lib/raw_transfer:raw_transfer_impl",
+        "//raiden_lib/raw_transfer:raw_transfer_core",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/stream_executor:stream",
-        "@xla//xla/tsl/platform:errors",
-        "@xla//xla/tsl/platform:statusor",
+        "//raiden_lib/raw_transfer:xla_raw_transfer_headers",
     ],
     alwayslink = 1,
 )
@@ -110,6 +108,54 @@ nanobind_extension(
         "@com_google_absl//absl/synchronization",
         "@nanobind",
         "@xla//xla/pjrt:status_casters",
+    ],
+)
+
+cc_binary(
+    name = "_raiden_transfer_engine.so",
+    srcs = ["raiden_transfer_engine.cc"],
+    copts = [
+        "-std=c++20",
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    linkopts = [
+        "-Wl,--allow-shlib-undefined",
+        "-Wl,--unresolved-symbols=ignore-all",
+    ],
+    linkshared = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        "//api/torch:kv_cache_manager_torch",
+        "//kv_cache:kv_cache_manager_base",
+        "//raiden_lib/raw_transfer:raw_transfer_core",
+        "//transport:socket_transport",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@pybind11//:pybind11",
+        "@torch_tpu//shims/torch:torch_headers",
+    ],
+)
+
+alias(
+    name = "_raiden_transfer_engine",
+    actual = ":_raiden_transfer_engine.so",
+)
+
+py_library(
+    name = "raiden_transfer_engine",
+    srcs = ["raiden_transfer_engine.py"],
+    data = [
+        ":_raiden_transfer_engine.so",
+        "raiden_transfer_engine.pyi",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@torch_tpu//shims/torch:pytorch",
+        "@torch_tpu//torch_tpu:_loader",
+        "@torch_tpu//torch_tpu:torch_tpu",
     ],
 )
 

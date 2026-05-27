@@ -13,10 +13,49 @@
 # limitations under the License.
 
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load(":header_only_cc_info.bzl", "header_only_cc_info")
 
 package(default_visibility = ["//visibility:public"])
 
 licenses(["notice"])
+
+header_only_cc_info(
+    name = "xla_raw_transfer_headers",
+    deps = [
+        "@xla//xla:future",
+        "@xla//xla:shape_util",
+        "@xla//xla/pjrt:common_pjrt_client",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/pjrt:pjrt_layout",
+        "@xla//xla/pjrt:raw_buffer",
+        "@xla//xla/pjrt:status_casters",
+        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
+        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
+        "@xla//xla/python/ifrt",
+        "@xla//xla/python/pjrt_ifrt",
+        "@xla//xla/stream_executor:stream",
+        "@xla//xla/tsl/concurrency:ref_count",
+        "@xla//xla/tsl/platform:errors",
+        "@xla//xla/tsl/platform:logging",
+        "@xla//xla/tsl/platform:statusor",
+    ],
+)
+
+cc_library(
+    name = "raw_transfer_core",
+    hdrs = ["raw_transfer_core.h"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+        "-Wno-unused-variable",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":xla_raw_transfer_headers",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+    ],
+)
 
 cc_library(
     name = "raw_transfer_impl",

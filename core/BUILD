@@ -13,8 +13,17 @@
 # limitations under the License.
 
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//raiden_lib/raw_transfer:header_only_cc_info.bzl", "header_only_cc_info")
 
 package(default_visibility = ["//visibility:public"])
+
+header_only_cc_info(
+    name = "tsl_platform_headers",
+    deps = [
+        "@xla//xla/tsl/platform:errors",
+        "@xla//xla/tsl/platform:statusor",
+    ],
+)
 
 cc_library(
     name = "raiden_manager_base",
@@ -39,8 +48,7 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
-        "@xla//xla/tsl/platform:errors",
-        "@xla//xla/tsl/platform:statusor",
+        ":tsl_platform_headers",
     ],
     alwayslink = 1,
 )

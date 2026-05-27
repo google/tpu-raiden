@@ -29,7 +29,7 @@
 #include "xla/stream_executor/stream.h"
 #include "core/raiden_manager_base.h"
 #include "kv_cache/logical_block_manager.h"
-#include "raiden_lib/raw_transfer/raw_transfer_impl.h"
+#include "raiden_lib/raw_transfer/raw_transfer_core.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
