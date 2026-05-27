@@ -42,6 +42,23 @@ git_override(
 )
 
 bazel_dep(name = "rules_python", version = "1.8.5")
+bazel_dep(name = "torch_tpu", version = "0.1.1", dev_dependency = True)
+
+local_path_override(
+    module_name = "torch_tpu",
+    path = "../torch_tpu",
+)
+
+torch_tpu_headers_repository = use_repo_rule(
+    "//third_party/torch_tpu_headers:repository.bzl",
+    "torch_tpu_headers_repository",
+)
+
+torch_tpu_headers_repository(
+    name = "torch_tpu_headers",
+    path = "../torch_tpu/torch_tpu",
+)
+
 single_version_override(
     module_name = "rules_python",
     patch_strip = 1,
@@ -65,6 +82,7 @@ third_party = use_extension("@xla//third_party/extensions:third_party.bzl", "thi
 use_repo(
     third_party,
     "nanobind",
+    "stablehlo",
 )
 
 bazel_dep(name = "abseil-cpp", version = "20260107.1", repo_name = "com_google_absl")
