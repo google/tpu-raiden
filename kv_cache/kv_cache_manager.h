@@ -25,19 +25,54 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include <nanobind/nanobind.h>
-#include "xla/stream_executor/stream.h"
-#include "kv_cache/logical_block_manager.h"
-#include "raiden_lib/raw_transfer/raw_transfer_impl.h"
+#include "ATen/core/TensorBody.h"
+#include "nanobind/nanobind.h"
+
+namespace stream_executor {
+class Stream;
+}  // namespace stream_executor
 
 namespace tpu_raiden {
 namespace kv_cache {
+
+class LogicalBlockManager;
+
+struct KVCacheCopySpec {
+  std::vector<int64_t> src_offsets;
+  std::vector<int64_t> dst_offsets;
+  std::vector<int64_t> sizes;
+};
+
+class KVCacheTransferFuture {
+ public:
+  KVCacheTransferFuture();
+  ~KVCacheTransferFuture();
+
+  KVCacheTransferFuture(const KVCacheTransferFuture&) = default;
+  KVCacheTransferFuture& operator=(const KVCacheTransferFuture&) = default;
+  KVCacheTransferFuture(KVCacheTransferFuture&&) noexcept = default;
+  KVCacheTransferFuture& operator=(KVCacheTransferFuture&&) noexcept = default;
+
+  void Await();
+  bool IsReady() const;
+  void Append(KVCacheTransferFuture other);
+
+ private:
+  struct Impl;
+  explicit KVCacheTransferFuture(std::shared_ptr<Impl> impl);
+
+  std::shared_ptr<Impl> impl_;
+
+  friend class KVCacheManager;
+};
 
 // Manages fast chunked transfers from CPU host memory to TPU device memory
 // for key-value cache layers. Pre-extracts layout metadata and raw buffer
 // handles to avoid Python overheads during execution.
 class KVCacheManager {
  public:
+  using TensorList = std::vector<at::Tensor>;
+
   // Constructs a KVCacheManager wrapping lists of host and device JAX arrays.
   // Both lists must have identical lengths. Pre-extracts raw buffer handles,
   // memory access holds, and physical slice dimensions.
@@ -56,19 +91,28 @@ class KVCacheManager {
                  std::optional<int> host_blocks_to_allocate = std::nullopt,
                  int parallelism = 1);
 
+  // Constructs a KVCacheManager wrapping Torch TPU tensors. This constructor is
+  // used by the Raiden transfer engine, where host buffers are provided as raw
+  // addresses at copy issue time.
+  KVCacheManager(const TensorList& device_tensors,
+                 bool unsafe_skip_buffer_lock = false);
+
   // Explicit destructor to resolve unique_ptr incomplete type compilation
   // errors
   ~KVCacheManager();
 
   // Asynchronously copies chunks from host arrays to device arrays.
-  // Returns a handle (raiden::PjRtCopyFuture) to await completion.
-  absl::StatusOr<raiden::PjRtCopyFuture> H2d(
-      const std::vector<int64_t>& src_offsets_major_dim = {},
-      const std::vector<int64_t>& dst_offsets_major_dim = {},
-      const std::vector<int64_t>& copy_sizes_major_dim = {});
+  // Returns an opaque handle to await completion.
+  absl::StatusOr<KVCacheTransferFuture> H2d(
+      const KVCacheCopySpec& copy_spec = {});
+
+  absl::StatusOr<KVCacheTransferFuture> H2d(
+      const std::vector<int64_t>& src_offsets_major_dim,
+      const std::vector<int64_t>& dst_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim);
 
   // Overloaded H2d accepting standard C++ vectors directly
-  __attribute__((visibility("default"))) absl::StatusOr<raiden::PjRtCopyFuture>
+  __attribute__((visibility("default"))) absl::StatusOr<KVCacheTransferFuture>
   H2dDirect(const std::vector<int64_t>& src_offsets = {},
             const std::vector<int64_t>& dst_offsets = {},
             const std::vector<int64_t>& copy_sizes = {},
@@ -82,14 +126,17 @@ class KVCacheManager {
                          const std::vector<int64_t>& copy_sizes);
 
   // Asynchronously copies chunks from device arrays to host arrays.
-  // Returns a handle (raiden::PjRtCopyFuture) to await completion.
-  absl::StatusOr<raiden::PjRtCopyFuture> D2h(
-      const std::vector<int64_t>& src_offsets_major_dim = {},
-      const std::vector<int64_t>& dst_offsets_major_dim = {},
-      const std::vector<int64_t>& copy_sizes_major_dim = {});
+  // Returns an opaque handle to await completion.
+  absl::StatusOr<KVCacheTransferFuture> D2h(
+      const KVCacheCopySpec& copy_spec = {});
+
+  absl::StatusOr<KVCacheTransferFuture> D2h(
+      const std::vector<int64_t>& src_offsets_major_dim,
+      const std::vector<int64_t>& dst_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim);
 
   // Overloaded D2h accepting standard C++ vectors directly
-  __attribute__((visibility("default"))) absl::StatusOr<raiden::PjRtCopyFuture>
+  __attribute__((visibility("default"))) absl::StatusOr<KVCacheTransferFuture>
   D2hDirect(const std::vector<int64_t>& src_offsets = {},
             const std::vector<int64_t>& dst_offsets = {},
             const std::vector<int64_t>& copy_sizes = {},
@@ -99,14 +146,25 @@ class KVCacheManager {
   absl::Status D2hDirect(stream_executor::Stream* stream,
                          const std::vector<uint8_t*>& device_buffers,
                          const std::vector<int64_t>& src_offsets,
-                         const std::vector<int64_t>& dst_offsets,
-                         const std::vector<int64_t>& copy_sizes);
+      const std::vector<int64_t>& dst_offsets,
+      const std::vector<int64_t>& copy_sizes);
+
+  // Layer-wise copies using caller-owned host buffers. The raw copy operation
+  // captures the supplied address when issued, so independent calls can be
+  // overlapped across layers.
+  absl::StatusOr<KVCacheTransferFuture> D2hTo(
+      size_t layer_idx, void* dst_host_ptr, size_t dst_size,
+      const KVCacheCopySpec& copy_spec, size_t shard_idx = 0);
+
+  absl::StatusOr<KVCacheTransferFuture> H2dFrom(
+      size_t layer_idx, const void* src_host_ptr, size_t src_size,
+      const KVCacheCopySpec& copy_spec, size_t shard_idx = 0);
 
   // Dynamically allocates host memory blocks via LogicalBlockManager and copies
   // sub-region chunks from device arrays into the newly allocated blocks.
   // Returns a pair containing the vector of allocated block IDs and the future
   // handle to await completion.
-  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
+  absl::StatusOr<std::pair<std::vector<int>, KVCacheTransferFuture>>
   D2hAutoAllocate(const std::vector<int64_t>& src_offsets_major_dim = {},
                   const std::vector<int64_t>& copy_sizes_major_dim = {},
                   int64_t entity_id = 0);
@@ -126,16 +184,16 @@ class KVCacheManager {
   // KVCacheManager peer. Returns a pair containing the vector of successfully
   // allocated target remote block IDs and the future handle to await local push
   // completion.
-  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hWrite(
-      std::string peer, const std::vector<int>& src_block_ids,
-      int64_t entity_id = 0);
+  absl::StatusOr<std::pair<std::vector<int>, KVCacheTransferFuture>>
+  H2hWrite(std::string peer, const std::vector<int>& src_block_ids,
+           int64_t entity_id = 0);
 
   // Pulls logical block chunks symmetrically across all layers from a remote
   // KVCacheManager peer over network streams directly into corresponding local
   // host memory block structures. Returns a pair containing the vector of
   // successfully allocated local block IDs and the future handle to await
   // network pull completion.
-  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hRead(
+  absl::StatusOr<std::pair<std::vector<int>, KVCacheTransferFuture>> H2hRead(
       std::string peer, const std::vector<int>& src_block_ids,
       int64_t entity_id = 0);
 
@@ -147,9 +205,6 @@ class KVCacheManager {
   // and shard.
   const uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) const;
 
-  void SetExternalHostBuffer(
-      const std::vector<raiden::BufferHoldAndAlias>& buffer_holds);
-
   void SetExternalHostPointers(const std::vector<const uint8_t*>& host_ptrs,
                                const std::vector<size_t>& host_sizes);
 
@@ -158,7 +213,12 @@ class KVCacheManager {
   size_t slice_byte_size() const { return slice_byte_size_; }
 
  private:
-  struct ShardBufferInfo : public raiden::BufferHoldAndAlias {
+  struct RawBufferHandle;
+  struct TorchTensorHold;
+
+  struct ShardBufferInfo {
+    std::shared_ptr<RawBufferHandle> raw;
+    std::shared_ptr<TorchTensorHold> torch_tensor;
     const uint8_t* host_ptr = nullptr;
     size_t host_size = 0;
     size_t device_size = 0;
@@ -176,13 +236,11 @@ class KVCacheManager {
   size_t num_shards_ = 0;
   bool is_common_buffer_ = false;
 
-  const PJRT_Api* c_api_ = nullptr;
-  const PJRT_RawBuffer_Extension* extension_ = nullptr;
-
   size_t physical_size_ = 0;
   size_t slice_byte_size_ = 0;
 
   int64_t major_dim_size_ = 0;
+  int device_rank_ = 0;
   size_t shard_factor_ = 1;
   int block_size_ = 1;
   int parallelism_ = 1;
@@ -193,10 +251,8 @@ class KVCacheManager {
 
   std::vector<LayerInfo> layers_;
 
-  absl::StatusOr<raiden::PjRtCopyFuture> DispatchD2hChunks(
-      const std::vector<int64_t>& src_offsets,
-      const std::vector<int64_t>& dst_offsets,
-      const std::vector<int64_t>& copy_sizes, int64_t device_id = -1);
+  absl::StatusOr<KVCacheTransferFuture> DispatchD2hChunks(
+      const KVCacheCopySpec& copy_spec, int64_t device_id = -1);
 
   void H2hWriteWorker(int stream_idx, const std::string& peer,
                       size_t blocks_per_stream,

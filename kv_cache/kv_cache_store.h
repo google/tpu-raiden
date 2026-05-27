@@ -27,7 +27,6 @@
 #include "absl/synchronization/mutex.h"
 #include <nanobind/nanobind.h>
 #include "kv_cache/kv_cache_manager.h"
-#include "raiden_lib/raw_transfer/raw_transfer_impl.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
@@ -36,7 +35,7 @@ class KVCacheStore {
  public:
   KVCacheStore(int block_size, int capacity);
 
-  absl::StatusOr<std::pair<std::vector<bool>, raiden::PjRtCopyFuture>>
+  absl::StatusOr<std::pair<std::vector<bool>, KVCacheTransferFuture>>
   LookupAndFetch(const std::vector<uint64_t>& block_hashes,
                  nanobind::list device_arrays,
                  const std::vector<int>& dst_offsets_major_dim,
@@ -52,7 +51,7 @@ class KVCacheStore {
     uint64_t block_hash;
     std::vector<int> internal_block_ids;
     std::shared_ptr<std::vector<std::vector<uint8_t>>> host_buffers;
-    std::shared_ptr<raiden::PjRtCopyFuture> insert_future;
+    std::shared_ptr<KVCacheTransferFuture> insert_future;
   };
 
   absl::Mutex mutex_;

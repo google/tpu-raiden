@@ -13,29 +13,43 @@
 // limitations under the License.
 
 #include <optional>
+#include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
-#include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
-#include "xla/pjrt/pjrt_client.h"
-#include "xla/pjrt/status_casters.h"
-#include "xla/tsl/platform/errors.h"
 #include "kv_cache/kv_cache_manager.h"
 
 namespace nb = nanobind;
 
+namespace {
+
+template <typename T>
+T ValueOrThrow(absl::StatusOr<T> value_or) {
+  if (!value_or.ok()) {
+    throw std::runtime_error(std::string(value_or.status().message()));
+  }
+  return std::move(value_or).value();
+}
+
+}  // namespace
+
 NB_MODULE(kv_cache_manager, m) {
-  nb::class_<raiden::PjRtCopyFuture>(m, "PjRtCopyFuture")
+  nb::class_<tpu_raiden::kv_cache::KVCacheTransferFuture>(m, "PjRtCopyFuture")
       .def("Await",
-           [](raiden::PjRtCopyFuture& future) {
+           [](tpu_raiden::kv_cache::KVCacheTransferFuture& future) {
              nb::gil_scoped_release release;
              future.Await();
            })
-      .def("IsReady", &raiden::PjRtCopyFuture::IsReady);
+      .def("IsReady",
+           &tpu_raiden::kv_cache::KVCacheTransferFuture::IsReady);
 
   nb::class_<tpu_raiden::kv_cache::KVCacheManager>(m, "KVCacheManager")
       .def(
@@ -70,8 +84,7 @@ NB_MODULE(kv_cache_manager, m) {
              const std::vector<int64_t>& src_offsets,
              const std::vector<int64_t>& dst_offsets,
              const std::vector<int64_t>& copy_sizes) {
-            return xla::ValueOrThrow(
-                self.H2d(src_offsets, dst_offsets, copy_sizes));
+            return ValueOrThrow(self.H2d(src_offsets, dst_offsets, copy_sizes));
           },
           nb::arg("src_offsets_major_dim") = std::vector<int64_t>(),
           nb::arg("dst_offsets_major_dim") = std::vector<int64_t>(),
@@ -82,8 +95,7 @@ NB_MODULE(kv_cache_manager, m) {
              const std::vector<int64_t>& src_offsets,
              const std::vector<int64_t>& dst_offsets,
              const std::vector<int64_t>& copy_sizes) {
-            return xla::ValueOrThrow(
-                self.D2h(src_offsets, dst_offsets, copy_sizes));
+            return ValueOrThrow(self.D2h(src_offsets, dst_offsets, copy_sizes));
           },
           nb::arg("src_offsets_major_dim") = std::vector<int64_t>(),
           nb::arg("dst_offsets_major_dim") = std::vector<int64_t>(),
@@ -93,7 +105,7 @@ NB_MODULE(kv_cache_manager, m) {
           [](tpu_raiden::kv_cache::KVCacheManager& self,
              const std::vector<int64_t>& src_offsets,
              const std::vector<int64_t>& copy_sizes, int64_t entity_id) {
-            return xla::ValueOrThrow(
+            return ValueOrThrow(
                 self.D2hAutoAllocate(src_offsets, copy_sizes, entity_id));
           },
           nb::arg("src_offsets_major_dim") = std::vector<int64_t>(),
@@ -103,7 +115,7 @@ NB_MODULE(kv_cache_manager, m) {
           "h2h_write",
           [](tpu_raiden::kv_cache::KVCacheManager& self, std::string peer,
              const std::vector<int>& src_block_ids, int64_t entity_id) {
-            return xla::ValueOrThrow(
+            return ValueOrThrow(
                 self.H2hWrite(peer, src_block_ids, entity_id));
           },
           nb::arg("peer"), nb::arg("src_block_ids"), nb::arg("entity_id") = 0)
@@ -111,8 +123,7 @@ NB_MODULE(kv_cache_manager, m) {
           "h2h_read",
           [](tpu_raiden::kv_cache::KVCacheManager& self, std::string peer,
              const std::vector<int>& src_block_ids, int64_t entity_id) {
-            return xla::ValueOrThrow(
-                self.H2hRead(peer, src_block_ids, entity_id));
+            return ValueOrThrow(self.H2hRead(peer, src_block_ids, entity_id));
           },
           nb::arg("peer"), nb::arg("src_block_ids"), nb::arg("entity_id") = 0)
       .def("local_port", &tpu_raiden::kv_cache::KVCacheManager::local_port);

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "raiden_lib/raw_transfer/raw_transfer_core.h"
+#include "kv_cache/kv_cache_manager.h"
 
 #include <algorithm>
 #include <atomic>
@@ -29,7 +29,6 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -49,16 +48,10 @@
 #include "ATen/core/TensorBody.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "pybind11/gil.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/stl.h"
 #include "transport/socket_transport.h"
 #include "torch/extension.h"  // IWYU pragma: keep
-#include "torch/headeronly/core/DeviceType.h"
-#include "torch_tpu/eager/device_buffer.h"
-#include "torch_tpu/eager/materialize.h"
-#include "torch_tpu/eager/tensor_to_buffer.h"
-#include "xla/pjrt/pjrt_client.h"
 
 namespace py = pybind11;
 
@@ -177,56 +170,6 @@ int ConnectTcp(const std::string& endpoint) {
   return fd;
 }
 
-class MaybeGilRelease {
- public:
-  MaybeGilRelease() {
-    if (PyGILState_Check()) {
-      release_.emplace();
-    }
-  }
-
- private:
-  std::optional<py::gil_scoped_release> release_;
-};
-
-void ValidatePartialSpec(const std::vector<int64_t>& src_offsets_major_dim,
-                         const std::vector<int64_t>& dst_offsets_major_dim,
-                         const std::vector<int64_t>& copy_sizes_major_dim) {
-  const bool present = !src_offsets_major_dim.empty() ||
-                       !dst_offsets_major_dim.empty() ||
-                       !copy_sizes_major_dim.empty();
-  if (present &&
-      (src_offsets_major_dim.size() != dst_offsets_major_dim.size() ||
-       src_offsets_major_dim.size() != copy_sizes_major_dim.size())) {
-    throw std::invalid_argument(
-        "src_offsets_major_dim, dst_offsets_major_dim, and "
-        "copy_sizes_major_dim must have the same length");
-  }
-  for (size_t i = 0; i < src_offsets_major_dim.size(); ++i) {
-    if (src_offsets_major_dim[i] < 0 || dst_offsets_major_dim[i] < 0 ||
-        copy_sizes_major_dim[i] < 0) {
-      throw std::invalid_argument(
-          "raw copy offsets and sizes must be non-negative");
-    }
-  }
-}
-
-bool IsPartial(const xla::Shape& shape,
-               const std::vector<int64_t>& src_offsets_major_dim,
-               const std::vector<int64_t>& dst_offsets_major_dim,
-               const std::vector<int64_t>& copy_sizes_major_dim) {
-  if (src_offsets_major_dim.empty()) return false;
-  if (shape.dimensions_size() == 0) return true;
-  const int64_t full_major_dim = shape.dimensions(0);
-  for (size_t i = 0; i < src_offsets_major_dim.size(); ++i) {
-    if (src_offsets_major_dim[i] != 0 || dst_offsets_major_dim[i] != 0 ||
-        copy_sizes_major_dim[i] != full_major_dim) {
-      return true;
-    }
-  }
-  return false;
-}
-
 void ValidateCpuTensor(const at::Tensor& tensor, const char* role) {
   if (!tensor.device().is_cpu()) {
     throw std::invalid_argument(std::string(role) + " must be a CPU tensor");
@@ -236,224 +179,13 @@ void ValidateCpuTensor(const at::Tensor& tensor, const char* role) {
   }
 }
 
-void ValidateTpuTensor(const at::Tensor& tensor, const char* role) {
-  if (tensor.device().type() != at::DeviceType::PrivateUse1) {
-    throw std::invalid_argument(std::string(role) + " must be a TPU tensor");
-  }
-  if (!tensor.is_contiguous()) {
-    throw std::invalid_argument(std::string(role) + " must be contiguous");
-  }
-}
-
-torch_tpu::DeviceBufferRef GetMaterializedBufferRef(const at::Tensor& tensor) {
-  return ValueOrThrow(
-      "Failed to materialize TPU tensor",
-      torch_tpu::GetMaterialized(
-          tensor, torch_tpu::MaterializationReason::kCpuTransfer));
-}
-
-xla::PjRtBuffer* GetPjRtBuffer(const torch_tpu::DeviceBufferRef& buffer_ref) {
-  return ValueOrThrow("Failed to get PjRtBuffer",
-                      buffer_ref.GetOrMaterializeBuffer());
-}
-
-void KeepTensorAlive(const std::shared_ptr<raiden::PjRtCopyFuture>& future,
-                     const at::Tensor& tensor) {
-  future->AddUserHold(std::make_shared<at::Tensor>(tensor));
-}
-
-class PreparedTpuBuffer : public std::enable_shared_from_this<PreparedTpuBuffer> {
- public:
-  PreparedTpuBuffer(const at::Tensor& tpu_tensor, bool unsafe_skip_buffer_lock)
-      : tpu_tensor_(tpu_tensor) {
-    ValidateTpuTensor(tpu_tensor_, "TPU tensor");
-    buffer_ref_ = GetMaterializedBufferRef(tpu_tensor_);
-    pjrt_buffer_ = GetPjRtBuffer(*buffer_ref_);
-    physical_size_ = static_cast<size_t>(
-        ValueOrThrow("Failed to get TPU physical buffer size",
-                     pjrt_buffer_->GetOnDeviceSizeInBytes()));
-    slice_byte_size_ = static_cast<size_t>(raiden::GetMajorSliceByteSize(pjrt_buffer_));
-    auto hold_or = raiden::BufferHoldAndAlias::Acquire(
-        pjrt_buffer_, nullptr, nullptr, unsafe_skip_buffer_lock);
-    if (!hold_or.ok()) {
-      ThrowStatus("Failed to acquire cached raw buffer", hold_or.status());
-    }
-    hold_ = std::move(hold_or.value());
-  }
-
-  std::shared_ptr<raiden::PjRtCopyFuture> D2HToAsync(
-      const at::Tensor& dst_arr,
-      const std::vector<int64_t>& src_offsets_major_dim,
-      const std::vector<int64_t>& dst_offsets_major_dim,
-      const std::vector<int64_t>& copy_sizes_major_dim) {
-    auto future =
-        std::make_shared<raiden::PjRtCopyFuture>(std::vector<xla::Future<>>{});
-    AppendD2HTo(future, dst_arr, src_offsets_major_dim, dst_offsets_major_dim,
-                copy_sizes_major_dim);
-    return future;
-  }
-
-  void AppendD2HTo(
-      const std::shared_ptr<raiden::PjRtCopyFuture>& future,
-      const at::Tensor& dst_arr,
-      const std::vector<int64_t>& src_offsets_major_dim,
-      const std::vector<int64_t>& dst_offsets_major_dim,
-      const std::vector<int64_t>& copy_sizes_major_dim) {
-    ValidateCpuTensor(dst_arr, "Destination");
-    ValidatePartialSpec(src_offsets_major_dim, dst_offsets_major_dim,
-                        copy_sizes_major_dim);
-    IssueD2HTo(future, reinterpret_cast<uint8_t*>(dst_arr.data_ptr()),
-               dst_arr.nbytes(), src_offsets_major_dim, dst_offsets_major_dim,
-               copy_sizes_major_dim);
-    KeepTensorAlive(future, dst_arr);
-    future->AddUserHold(shared_from_this());
-  }
-
-  std::shared_ptr<raiden::PjRtCopyFuture> H2DFromAsync(
-      const at::Tensor& src_arr,
-      const std::vector<int64_t>& src_offsets_major_dim,
-      const std::vector<int64_t>& dst_offsets_major_dim,
-      const std::vector<int64_t>& copy_sizes_major_dim) {
-    auto future =
-        std::make_shared<raiden::PjRtCopyFuture>(std::vector<xla::Future<>>{});
-    AppendH2DFrom(future, src_arr, src_offsets_major_dim, dst_offsets_major_dim,
-                  copy_sizes_major_dim);
-    return future;
-  }
-
-  void AppendH2DFrom(
-      const std::shared_ptr<raiden::PjRtCopyFuture>& future,
-      const at::Tensor& src_arr,
-      const std::vector<int64_t>& src_offsets_major_dim,
-      const std::vector<int64_t>& dst_offsets_major_dim,
-      const std::vector<int64_t>& copy_sizes_major_dim) {
-    ValidateCpuTensor(src_arr, "Source");
-    ValidatePartialSpec(src_offsets_major_dim, dst_offsets_major_dim,
-                        copy_sizes_major_dim);
-    IssueH2DFrom(future, reinterpret_cast<const uint8_t*>(src_arr.data_ptr()),
-                 src_arr.nbytes(), src_offsets_major_dim,
-                 dst_offsets_major_dim, copy_sizes_major_dim);
-    KeepTensorAlive(future, src_arr);
-    future->AddUserHold(shared_from_this());
-  }
-
- private:
-  bool IsPartialPrepared(
-      const std::vector<int64_t>& src_offsets_major_dim,
-      const std::vector<int64_t>& dst_offsets_major_dim,
-      const std::vector<int64_t>& copy_sizes_major_dim) const {
-    return IsPartial(pjrt_buffer_->on_device_shape(), src_offsets_major_dim,
-                     dst_offsets_major_dim, copy_sizes_major_dim);
-  }
-
-  void ValidatePreparedPartial(bool is_partial) const {
-    if (!is_partial) {
-      return;
-    }
-    if (pjrt_buffer_->on_device_shape().dimensions_size() < 3) {
-      throw std::invalid_argument(
-          "Only rank >= 3 TPU tensors support partial raw copies");
-    }
-    if (slice_byte_size_ % 4096 != 0) {
-      throw std::invalid_argument(
-          "Partial raw copies require a major-dimension slice size aligned to "
-          "4096 bytes");
-    }
-  }
-
-  void IssueD2HTo(const std::shared_ptr<raiden::PjRtCopyFuture>& future,
-                  uint8_t* dst_data, size_t dst_size,
-                  const std::vector<int64_t>& src_offsets_major_dim,
-                  const std::vector<int64_t>& dst_offsets_major_dim,
-                  const std::vector<int64_t>& copy_sizes_major_dim) const {
-    const bool is_partial = IsPartialPrepared(
-        src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim);
-    ValidatePreparedPartial(is_partial);
-
-    std::vector<xla::Future<>> futures;
-    if (!is_partial) {
-      if (dst_size < physical_size_) {
-        throw std::invalid_argument("Destination CPU tensor is too small");
-      }
-      MaybeGilRelease release;
-      futures.push_back(hold_.CopyRawDeviceToHost(dst_data, 0, physical_size_));
-    } else {
-      for (size_t i = 0; i < src_offsets_major_dim.size(); ++i) {
-        const int64_t src_offset =
-            src_offsets_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
-        const int64_t dst_offset =
-            dst_offsets_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
-        const int64_t size_to_copy =
-            copy_sizes_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
-        if (src_offset + size_to_copy > static_cast<int64_t>(physical_size_)) {
-          throw std::invalid_argument("Copy range exceeds source TPU buffer");
-        }
-        if (dst_offset + size_to_copy > static_cast<int64_t>(dst_size)) {
-          throw std::invalid_argument(
-              "Copy range exceeds destination CPU tensor");
-        }
-        MaybeGilRelease release;
-        futures.push_back(hold_.CopyRawDeviceToHost(dst_data + dst_offset,
-                                                    src_offset, size_to_copy));
-      }
-    }
-    future->Append(std::move(futures));
-  }
-
-  void IssueH2DFrom(const std::shared_ptr<raiden::PjRtCopyFuture>& future,
-                    const uint8_t* src_data, size_t src_size,
-                    const std::vector<int64_t>& src_offsets_major_dim,
-                    const std::vector<int64_t>& dst_offsets_major_dim,
-                    const std::vector<int64_t>& copy_sizes_major_dim) const {
-    const bool is_partial = IsPartialPrepared(
-        src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim);
-    ValidatePreparedPartial(is_partial);
-
-    std::vector<xla::Future<>> futures;
-    if (!is_partial) {
-      if (src_size < physical_size_) {
-        throw std::invalid_argument("Source CPU tensor is too small");
-      }
-      MaybeGilRelease release;
-      futures.push_back(hold_.CopyRawHostToDevice(src_data, 0, physical_size_));
-    } else {
-      for (size_t i = 0; i < src_offsets_major_dim.size(); ++i) {
-        const int64_t src_offset =
-            src_offsets_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
-        const int64_t dst_offset =
-            dst_offsets_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
-        const int64_t size_to_copy =
-            copy_sizes_major_dim[i] * static_cast<int64_t>(slice_byte_size_);
-        if (src_offset + size_to_copy > static_cast<int64_t>(src_size)) {
-          throw std::invalid_argument("Copy range exceeds source CPU tensor");
-        }
-        if (dst_offset + size_to_copy > static_cast<int64_t>(physical_size_)) {
-          throw std::invalid_argument(
-              "Copy range exceeds destination TPU buffer");
-        }
-        MaybeGilRelease release;
-        futures.push_back(hold_.CopyRawHostToDevice(src_data + src_offset,
-                                                    dst_offset, size_to_copy));
-      }
-    }
-    future->Append(std::move(futures));
-  }
-
-  at::Tensor tpu_tensor_;
-  std::optional<torch_tpu::DeviceBufferRef> buffer_ref_;
-  xla::PjRtBuffer* pjrt_buffer_ = nullptr;
-  size_t physical_size_ = 0;
-  size_t slice_byte_size_ = 0;
-  raiden::BufferHoldAndAlias hold_;
-};
-
 class RaidenTransferFuture {
  public:
   explicit RaidenTransferFuture(
-      std::vector<std::shared_ptr<raiden::PjRtCopyFuture>> futures = {})
+      std::vector<std::shared_ptr<KVCacheTransferFuture>> futures = {})
       : futures_(std::move(futures)) {}
 
-  void Add(std::shared_ptr<raiden::PjRtCopyFuture> future) {
+  void Add(std::shared_ptr<KVCacheTransferFuture> future) {
     futures_.push_back(std::move(future));
   }
 
@@ -463,7 +195,6 @@ class RaidenTransferFuture {
   }
 
   void Await() {
-    MaybeGilRelease release;
     for (const auto& future : futures_) {
       if (future) {
         future->Await();
@@ -482,7 +213,7 @@ class RaidenTransferFuture {
   }
 
  private:
-  std::vector<std::shared_ptr<raiden::PjRtCopyFuture>> futures_;
+  std::vector<std::shared_ptr<KVCacheTransferFuture>> futures_;
 };
 
 struct RaidenStageResult {
@@ -527,12 +258,21 @@ class RaidenTransferEngine {
 
   std::vector<int64_t> RegisterKvCache(const TensorList& kv_caches) {
     kv_caches_ = kv_caches;
-    prepared_.clear();
+    if (!kv_transfer_) {
+      kv_transfer_ =
+          std::make_unique<KVCacheManager>(kv_caches_, unsafe_skip_buffer_lock_);
+      std::vector<int64_t> region_ids;
+      region_ids.reserve(kv_caches_.size());
+      for (size_t i = 0; i < kv_caches_.size(); ++i) {
+        region_ids.push_back(static_cast<int64_t>(i));
+      }
+      return region_ids;
+    }
+    kv_transfer_ =
+        std::make_unique<KVCacheManager>(kv_caches_, unsafe_skip_buffer_lock_);
     std::vector<int64_t> region_ids;
     region_ids.reserve(kv_caches_.size());
     for (size_t i = 0; i < kv_caches_.size(); ++i) {
-      prepared_.push_back(std::make_shared<PreparedTpuBuffer>(
-          kv_caches_[i], unsafe_skip_buffer_lock_));
       region_ids.push_back(static_cast<int64_t>(i));
     }
     return region_ids;
@@ -542,7 +282,9 @@ class RaidenTransferEngine {
     tp_rank_ = tp_rank;
   }
 
-  bool UsesPreparedTpuBuffers() const { return true; }
+  bool UsesPreparedTpuBuffers() const {
+    return kv_transfer_ != nullptr;
+  }
 
   py::tuple StageD2H(int64_t slot_idx, int64_t num_blocks,
                      const std::vector<int64_t>& block_ids) {
@@ -1047,6 +789,12 @@ class RaidenTransferEngine {
     std::vector<int64_t> sizes;
   };
 
+  static KVCacheCopySpec ToKVCacheCopySpec(const CopySpec& spec) {
+    return {.src_offsets = spec.src_offsets,
+            .dst_offsets = spec.dst_offsets,
+            .sizes = spec.sizes};
+  }
+
   struct CopyPlan {
     int64_t num_blocks = 0;
     std::vector<int64_t> requested_remote_block_ids;
@@ -1360,14 +1108,16 @@ class RaidenTransferEngine {
       throw std::invalid_argument("num_blocks must match len(block_ids)");
     }
     CopySpec copy_spec = Offsets(block_ids, /*source_is_compact=*/false);
+    KVCacheCopySpec transfer_spec = ToKVCacheCopySpec(copy_spec);
     TensorList host_views = LayerViews(slot_idx, num_blocks);
     auto future = std::make_shared<RaidenTransferFuture>();
     int64_t total_bytes = 0;
-    for (size_t i = 0; i < prepared_.size(); ++i) {
+    for (size_t i = 0; i < kv_transfer_->num_layers(); ++i) {
       total_bytes += static_cast<int64_t>(host_views[i].nbytes());
-      future->Add(prepared_[i]->D2HToAsync(host_views[i], copy_spec.src_offsets,
-                                           copy_spec.dst_offsets,
-                                           copy_spec.sizes));
+      future->Add(std::make_shared<KVCacheTransferFuture>(ValueOrThrow(
+          "Failed to issue D2H transfer",
+          kv_transfer_->D2hTo(i, host_views[i].data_ptr(),
+                              host_views[i].nbytes(), transfer_spec))));
     }
     return {.future = std::move(future),
             .host_views = std::move(host_views),
@@ -1385,10 +1135,12 @@ class RaidenTransferEngine {
       return result;
     }
     for (size_t layer_idx : layer_indices) {
-      if (layer_idx >= prepared_.size() || layer_idx >= host_views.size()) {
+      if (layer_idx >= kv_transfer_->num_layers() ||
+          layer_idx >= host_views.size()) {
         throw std::out_of_range("H2D batch layer index out of range");
       }
     }
+    KVCacheCopySpec transfer_spec = ToKVCacheCopySpec(copy_spec);
 
     const int issue_threads =
         (copy_spec.sizes.size() > 1 && layer_indices.size() > 1)
@@ -1398,22 +1150,21 @@ class RaidenTransferEngine {
     result.issued = true;
     result.first_issue_start = std::chrono::steady_clock::now();
     if (issue_threads <= 1) {
-      auto raw_future =
-          std::make_shared<raiden::PjRtCopyFuture>(std::vector<xla::Future<>>{});
       for (size_t layer_idx : layer_indices) {
-        prepared_[layer_idx]->AppendH2DFrom(
-            raw_future, host_views[layer_idx], copy_spec.src_offsets,
-            copy_spec.dst_offsets, copy_spec.sizes);
+        result.future->Add(std::make_shared<KVCacheTransferFuture>(
+            ValueOrThrow("Failed to issue H2D transfer",
+                         kv_transfer_->H2dFrom(
+                             layer_idx, host_views[layer_idx].data_ptr(),
+                             host_views[layer_idx].nbytes(), transfer_spec))));
       }
       result.last_issue_done = std::chrono::steady_clock::now();
       result.issue_ms =
           DurationMs(result.first_issue_start, result.last_issue_done);
-      result.future->Add(std::move(raw_future));
       return result;
     }
 
     std::atomic<size_t> next_layer{0};
-    std::vector<std::shared_ptr<raiden::PjRtCopyFuture>> worker_futures(
+    std::vector<std::shared_ptr<RaidenTransferFuture>> worker_futures(
         issue_threads);
     std::vector<std::exception_ptr> exceptions(issue_threads);
     std::vector<double> worker_issue_ms(issue_threads, 0.0);
@@ -1423,8 +1174,7 @@ class RaidenTransferEngine {
     for (int worker_idx = 0; worker_idx < issue_threads; ++worker_idx) {
       workers.emplace_back([&, worker_idx]() {
         try {
-          auto raw_future = std::make_shared<raiden::PjRtCopyFuture>(
-              std::vector<xla::Future<>>{});
+          auto worker_future = std::make_shared<RaidenTransferFuture>();
           const auto worker_start = std::chrono::steady_clock::now();
           while (true) {
             const size_t batch_pos = next_layer.fetch_add(1);
@@ -1432,14 +1182,17 @@ class RaidenTransferEngine {
               break;
             }
             const size_t layer_idx = layer_indices[batch_pos];
-            prepared_[layer_idx]->AppendH2DFrom(
-                raw_future, host_views[layer_idx], copy_spec.src_offsets,
-                copy_spec.dst_offsets, copy_spec.sizes);
+            worker_future->Add(std::make_shared<KVCacheTransferFuture>(
+                ValueOrThrow("Failed to issue H2D transfer",
+                             kv_transfer_->H2dFrom(
+                                 layer_idx, host_views[layer_idx].data_ptr(),
+                                 host_views[layer_idx].nbytes(),
+                                 transfer_spec))));
             ++worker_layers[worker_idx];
           }
           const auto worker_done = std::chrono::steady_clock::now();
           worker_issue_ms[worker_idx] = DurationMs(worker_start, worker_done);
-          worker_futures[worker_idx] = std::move(raw_future);
+          worker_futures[worker_idx] = std::move(worker_future);
         } catch (...) {
           exceptions[worker_idx] = std::current_exception();
         }
@@ -1457,7 +1210,7 @@ class RaidenTransferEngine {
     for (int worker_idx = 0; worker_idx < issue_threads; ++worker_idx) {
       result.issue_ms += worker_issue_ms[worker_idx];
       if (worker_layers[worker_idx] > 0) {
-        result.future->Add(std::move(worker_futures[worker_idx]));
+        result.future->AddAll(worker_futures[worker_idx]);
       }
     }
     return result;
@@ -1477,8 +1230,8 @@ class RaidenTransferEngine {
     }
 
     std::vector<size_t> layer_indices;
-    layer_indices.reserve(prepared_.size());
-    for (size_t i = 0; i < prepared_.size(); ++i) {
+    layer_indices.reserve(kv_transfer_->num_layers());
+    for (size_t i = 0; i < kv_transfer_->num_layers(); ++i) {
       layer_indices.push_back(i);
     }
     H2DBatchIssueResult batch =
@@ -1835,14 +1588,18 @@ class RaidenTransferEngine {
 
       TensorList host_views = LayerViews(slot_idx, requested_plan.num_blocks);
       auto future = std::make_shared<RaidenTransferFuture>();
-      std::vector<std::shared_ptr<raiden::PjRtCopyFuture>> layer_futures;
-      layer_futures.reserve(prepared_.size());
+      std::vector<std::shared_ptr<KVCacheTransferFuture>> layer_futures;
+      layer_futures.reserve(kv_transfer_->num_layers());
       int64_t total_bytes = 0;
-      for (size_t i = 0; i < prepared_.size(); ++i) {
+      KVCacheCopySpec transfer_spec =
+          ToKVCacheCopySpec(requested_plan.d2h_copy);
+      for (size_t i = 0; i < kv_transfer_->num_layers(); ++i) {
         total_bytes += static_cast<int64_t>(host_views[i].nbytes());
-        auto layer_future = prepared_[i]->D2HToAsync(
-            host_views[i], requested_plan.d2h_copy.src_offsets,
-            requested_plan.d2h_copy.dst_offsets, requested_plan.d2h_copy.sizes);
+        auto layer_future = std::make_shared<KVCacheTransferFuture>(
+            ValueOrThrow("Failed to issue D2H transfer",
+                         kv_transfer_->D2hTo(i, host_views[i].data_ptr(),
+                                             host_views[i].nbytes(),
+                                             transfer_spec)));
         layer_futures.push_back(layer_future);
         future->Add(std::move(layer_future));
       }
@@ -2099,7 +1856,7 @@ class RaidenTransferEngine {
   }
 
   TensorList kv_caches_;
-  std::vector<std::shared_ptr<PreparedTpuBuffer>> prepared_;
+  std::unique_ptr<KVCacheManager> kv_transfer_;
   int64_t tp_rank_ = 0;
   int local_control_port_ = 0;
   int local_data_port_ = 0;
@@ -2135,20 +1892,8 @@ void AwaitAll(py::object futures) {
     future->Await();
     return;
   }
-  if (py::isinstance<raiden::PjRtCopyFuture>(futures)) {
-    auto future = futures.cast<std::shared_ptr<raiden::PjRtCopyFuture>>();
-    MaybeGilRelease release;
-    future->Await();
-    return;
-  }
   for (py::handle item : futures) {
-    if (py::isinstance<RaidenTransferFuture>(item)) {
-      auto future = item.cast<std::shared_ptr<RaidenTransferFuture>>();
-      future->Await();
-      continue;
-    }
-    auto future = item.cast<std::shared_ptr<raiden::PjRtCopyFuture>>();
-    MaybeGilRelease release;
+    auto future = item.cast<std::shared_ptr<RaidenTransferFuture>>();
     future->Await();
   }
 }
@@ -2157,17 +1902,8 @@ bool IsReady(py::object futures) {
   if (py::isinstance<RaidenTransferFuture>(futures)) {
     return futures.cast<std::shared_ptr<RaidenTransferFuture>>()->IsReady();
   }
-  if (py::isinstance<raiden::PjRtCopyFuture>(futures)) {
-    return futures.cast<std::shared_ptr<raiden::PjRtCopyFuture>>()->IsReady();
-  }
   for (py::handle item : futures) {
-    if (py::isinstance<RaidenTransferFuture>(item)) {
-      if (!item.cast<std::shared_ptr<RaidenTransferFuture>>()->IsReady()) {
-        return false;
-      }
-      continue;
-    }
-    if (!item.cast<std::shared_ptr<raiden::PjRtCopyFuture>>()->IsReady()) {
+    if (!item.cast<std::shared_ptr<RaidenTransferFuture>>()->IsReady()) {
       return false;
     }
   }

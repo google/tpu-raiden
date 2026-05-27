@@ -16,19 +16,37 @@
 
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/vector.h>
-#include "xla/pjrt/status_casters.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
+namespace {
+
+template <typename T>
+T ValueOrThrow(absl::StatusOr<T> value_or) {
+  if (!value_or.ok()) {
+    throw std::runtime_error(std::string(value_or.status().message()));
+  }
+  return std::move(value_or).value();
+}
+
+void ThrowIfError(const absl::Status& status) {
+  if (!status.ok()) {
+    throw std::runtime_error(std::string(status.message()));
+  }
+}
+
+}  // namespace
 
 KVCacheStore::KVCacheStore(int block_size, int capacity)
     : block_size_(block_size), capacity_(capacity) {}
 
-absl::StatusOr<std::pair<std::vector<bool>, raiden::PjRtCopyFuture>>
+absl::StatusOr<std::pair<std::vector<bool>, KVCacheTransferFuture>>
 KVCacheStore::LookupAndFetch(const std::vector<uint64_t>& block_hashes,
                              nanobind::list device_arrays,
                              const std::vector<int>& dst_offsets_major_dim,
@@ -40,13 +58,13 @@ KVCacheStore::LookupAndFetch(const std::vector<uint64_t>& block_hashes,
   }
 
   std::vector<bool> hits(num_chunks, false);
-  raiden::PjRtCopyFuture acc({});
+  KVCacheTransferFuture acc;
 
   for (size_t i = 0; i < num_chunks; ++i) {
     uint64_t hash = block_hashes[i];
     std::shared_ptr<std::vector<std::vector<uint8_t>>> host_buffers;
     std::vector<int> host_block_ids;
-    std::shared_ptr<raiden::PjRtCopyFuture> insert_future;
+    std::shared_ptr<KVCacheTransferFuture> insert_future;
     {
       absl::MutexLock lock(&mutex_);
       auto it = cache_map_.find(hash);
@@ -99,8 +117,8 @@ KVCacheStore::LookupAndFetch(const std::vector<uint64_t>& block_hashes,
     }
   }
 
-  return std::pair<std::vector<bool>, raiden::PjRtCopyFuture>{std::move(hits),
-                                                              std::move(acc)};
+  return std::pair<std::vector<bool>, KVCacheTransferFuture>{std::move(hits),
+                                                             std::move(acc)};
 }
 
 absl::Status KVCacheStore::Insert(
@@ -149,7 +167,7 @@ absl::Status KVCacheStore::Insert(
 
   auto [allocated_block_ids, future] = fut_or.value();
   auto insert_future =
-      std::make_shared<raiden::PjRtCopyFuture>(std::move(future));
+      std::make_shared<KVCacheTransferFuture>(std::move(future));
 
   size_t block_idx = 0;
   for (size_t i = 0; i < num_chunks; ++i) {
@@ -183,13 +201,13 @@ absl::Status KVCacheStore::Insert(
 }
 
 NB_MODULE(kv_cache_store, m) {
-  nanobind::class_<raiden::PjRtCopyFuture>(m, "PjRtCopyFuture")
+  nanobind::class_<KVCacheTransferFuture>(m, "PjRtCopyFuture")
       .def("Await",
-           [](raiden::PjRtCopyFuture& future) {
+           [](KVCacheTransferFuture& future) {
              nanobind::gil_scoped_release release;
              future.Await();
            })
-      .def("IsReady", &raiden::PjRtCopyFuture::IsReady);
+      .def("IsReady", &KVCacheTransferFuture::IsReady);
 
   nanobind::class_<tpu_raiden::kv_cache::KVCacheStore>(m, "KVCacheStore")
       .def(nanobind::init<int, int>(), nanobind::arg("block_size"),
@@ -200,7 +218,7 @@ NB_MODULE(kv_cache_store, m) {
              const std::vector<uint64_t>& block_hashes,
              nanobind::list device_arrays, const std::vector<int>& dst_offsets,
              const std::vector<int>& copy_sizes) {
-            return xla::ValueOrThrow(self.LookupAndFetch(
+            return ValueOrThrow(self.LookupAndFetch(
                 block_hashes, device_arrays, dst_offsets, copy_sizes));
           },
           nanobind::arg("block_hashes"), nanobind::arg("device_arrays"),
@@ -212,8 +230,8 @@ NB_MODULE(kv_cache_store, m) {
              const std::vector<uint64_t>& block_hashes,
              nanobind::list device_arrays, const std::vector<int>& src_offsets,
              const std::vector<int>& copy_sizes) {
-            xla::ThrowIfError(self.Insert(block_hashes, device_arrays,
-                                          src_offsets, copy_sizes));
+            ThrowIfError(self.Insert(block_hashes, device_arrays, src_offsets,
+                                     copy_sizes));
           },
           nanobind::arg("block_hashes"), nanobind::arg("device_arrays"),
           nanobind::arg("src_offsets_major_dim"),
