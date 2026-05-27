@@ -13,21 +13,36 @@
 // limitations under the License.
 
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include "ATen/core/TensorBody.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "api/torch/kv_cache_manager.h"
@@ -35,6 +50,7 @@
 #include "pybind11/pybind11.h"
 #include "pybind11/stl.h"
 #include "raiden_lib/raw_transfer/raw_transfer_core.h"
+#include "transport/socket_transport.h"
 #include "torch/extension.h"  // IWYU pragma: keep
 
 namespace py = pybind11;
@@ -49,12 +65,95 @@ using TensorList = std::vector<at::Tensor>;
   throw std::runtime_error(context + ": " + std::string(status.message()));
 }
 
+void CheckStatus(const std::string& context, const absl::Status& status) {
+  if (!status.ok()) {
+    ThrowStatus(context, status);
+  }
+}
+
+void EmitTimingLog(const std::string& message) {
+  LOG(INFO) << message;
+  std::cerr << message << std::endl;
+}
+
 template <typename T>
 T ValueOrThrow(const std::string& context, absl::StatusOr<T> value_or) {
   if (!value_or.ok()) {
     ThrowStatus(context, value_or.status());
   }
   return std::move(value_or).value();
+}
+
+absl::Status WriteExact(int fd, const void* buffer, size_t length) {
+  const uint8_t* ptr = static_cast<const uint8_t*>(buffer);
+  size_t remaining = length;
+  while (remaining > 0) {
+    ssize_t written = write(fd, ptr, remaining);
+    if (written < 0) {
+      if (errno == EINTR) continue;
+      return absl::InternalError("socket write failed: " +
+                                 std::string(std::strerror(errno)));
+    }
+    if (written == 0) {
+      return absl::InternalError("socket closed during write");
+    }
+    ptr += written;
+    remaining -= written;
+  }
+  return absl::OkStatus();
+}
+
+absl::Status ReadExact(int fd, void* buffer, size_t length) {
+  uint8_t* ptr = static_cast<uint8_t*>(buffer);
+  size_t remaining = length;
+  while (remaining > 0) {
+    ssize_t bytes_read = read(fd, ptr, remaining);
+    if (bytes_read < 0) {
+      if (errno == EINTR) continue;
+      return absl::InternalError("socket read failed: " +
+                                 std::string(std::strerror(errno)));
+    }
+    if (bytes_read == 0) {
+      return absl::InternalError("socket closed during read");
+    }
+    ptr += bytes_read;
+    remaining -= bytes_read;
+  }
+  return absl::OkStatus();
+}
+
+std::pair<std::string, int> SplitEndpoint(const std::string& endpoint) {
+  const size_t colon = endpoint.rfind(':');
+  if (colon == std::string::npos) {
+    throw std::invalid_argument("endpoint must be host:port");
+  }
+  return {endpoint.substr(0, colon), std::stoi(endpoint.substr(colon + 1))};
+}
+
+int ConnectTcp(const std::string& endpoint) {
+  auto [host, port] = SplitEndpoint(endpoint);
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
+    throw std::runtime_error("socket() failed: " +
+                             std::string(std::strerror(errno)));
+  }
+  int opt = 1;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+
+  sockaddr_in addr;
+  std::memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+    close(fd);
+    throw std::runtime_error("invalid IPv4 endpoint host: " + host);
+  }
+  if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+    std::string err = std::strerror(errno);
+    close(fd);
+    throw std::runtime_error("connect(" + endpoint + ") failed: " + err);
+  }
+  return fd;
 }
 
 void ValidateCpuTensor(const at::Tensor& tensor, const char* role) {
@@ -143,9 +242,12 @@ class RaidenTransferEngine {
     }
     RegisterKvCache(kv_caches);
     AllocateHostSlots(num_slots);
+    transport_ = std::make_unique<tpu_raiden::transport::SocketTransport>(
+        local_data_port_);
+    StartControlServer();
   }
 
-  ~RaidenTransferEngine() = default;
+  ~RaidenTransferEngine() { StopControlServer(); }
 
   std::vector<int64_t> RegisterKvCache(const TensorList& kv_caches) {
     kv_caches_ = kv_caches;
@@ -249,8 +351,17 @@ class RaidenTransferEngine {
 
   int64_t RegisterSend(const std::string& req_id, uint64_t uuid,
                        const std::vector<int64_t>& block_ids) {
+    const auto register_start = std::chrono::steady_clock::now();
     if (block_ids.empty()) {
       return 0;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (pending_acks_.erase(uuid) > 0) {
+        done_sending_.insert(req_id);
+        return 0;
+      }
     }
 
     auto entry = std::make_shared<SendEntry>();
@@ -261,9 +372,23 @@ class RaidenTransferEngine {
     for (int64_t block_id : block_ids) {
       entry->registered_block_set.insert(block_id);
     }
+    entry->deadline = DeadlineFromNow();
+    entry->register_start = register_start;
 
-    std::lock_guard<std::mutex> lock(mu_);
-    send_entries_[uuid] = std::move(entry);
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      send_entries_[uuid] = entry;
+    }
+    cv_.notify_all();
+
+    std::ostringstream timing;
+    timing << "RAIDEN_TIMING event=producer_register"
+           << " req_id=" << req_id << " uuid=" << uuid
+           << " rank=" << tp_rank_ << " blocks=" << block_ids.size()
+           << " enqueue_ms="
+           << DurationMs(register_start, std::chrono::steady_clock::now())
+           << " failed=0";
+    EmitTimingLog(timing.str());
     return static_cast<int64_t>(uuid);
   }
 
@@ -271,16 +396,178 @@ class RaidenTransferEngine {
                      const std::string& remote_endpoint,
                      const std::vector<int64_t>& remote_block_ids,
                      const std::vector<int64_t>& local_block_ids) {
-    (void)req_id;
-    (void)uuid;
-    (void)remote_endpoint;
-    CopyPlan load_plan = BuildLoadCopyPlan(remote_block_ids, local_block_ids);
     const int64_t op_id = next_op_id_++;
-    if (load_plan.num_blocks == 0) {
-      return op_id;
+    const auto submit_start = std::chrono::steady_clock::now();
+    CopyPlan load_plan = BuildLoadCopyPlan(remote_block_ids, local_block_ids);
+    {
+      std::lock_guard<std::mutex> lock(worker_threads_mu_);
+      worker_threads_.emplace_back([this, req_id, uuid, remote_endpoint,
+                                    submit_start,
+                                    load_plan = std::move(load_plan)]() {
+        const auto worker_start = std::chrono::steady_clock::now();
+        bool failed = false;
+        bool report_recv_done = true;
+        bool release_only = false;
+        int64_t slot_idx = -1;
+        int64_t h2h_bytes = 0;
+        int64_t h2d_bytes = 0;
+        int64_t h2d_segments = 0;
+        size_t h2h_layers = 0;
+        double slot_ms = 0.0;
+        double control_setup_ms = 0.0;
+        double descriptor_ms = 0.0;
+        double h2h_ms = 0.0;
+        double host_reorder_ms = 0.0;
+        double h2d_issue_ms = 0.0;
+        double h2d_wait_ms = 0.0;
+        double h2d_total_ms = 0.0;
+        double ack_ms = 0.0;
+        try {
+          if (load_plan.num_blocks == 0) {
+            report_recv_done = false;
+            release_only = true;
+            const auto ack_start = std::chrono::steady_clock::now();
+            AckRemote(remote_endpoint, uuid);
+            ack_ms = DurationMs(ack_start, std::chrono::steady_clock::now());
+          } else {
+            const auto slot_start = std::chrono::steady_clock::now();
+            slot_idx = AcquireSlot();
+            slot_ms = DurationMs(slot_start, std::chrono::steady_clock::now());
+
+            const auto control_start = std::chrono::steady_clock::now();
+            int control_fd = ConnectTcp(remote_endpoint);
+            auto control_cleanup = std::unique_ptr<int, void (*)(int*)>(
+                &control_fd, [](int* p) {
+                  if (p && *p >= 0) close(*p);
+                });
+            ControlRequestHeader stream_request;
+            stream_request.magic = kControlMagic;
+            stream_request.op = kOpPullStream;
+            stream_request.uuid = uuid;
+            stream_request.num_blocks =
+                static_cast<uint64_t>(load_plan.num_blocks);
+            CheckStatus("control pull stream write",
+                        WriteExact(control_fd, &stream_request,
+                                   sizeof(stream_request)));
+            WriteBlockIds(control_fd, load_plan.producer_remote_block_ids);
+            ControlResponseHeader response =
+                ReadControlResponseHeader(control_fd);
+            control_setup_ms =
+                DurationMs(control_start, std::chrono::steady_clock::now());
+
+            TensorList local_views =
+                LayerViews(slot_idx,
+                           static_cast<int64_t>(load_plan.num_blocks));
+            if (response.num_layers != local_views.size()) {
+              throw std::runtime_error("remote layer descriptor count mismatch");
+            }
+            for (size_t i = 0; i < local_views.size(); ++i) {
+              PullLayerDescriptor layer;
+              const auto descriptor_start = std::chrono::steady_clock::now();
+              CheckStatus("control stream layer descriptor read",
+                          ReadExact(control_fd, &layer, sizeof(layer)));
+              descriptor_ms += DurationMs(
+                  descriptor_start, std::chrono::steady_clock::now());
+              if (layer.len !=
+                  static_cast<uint64_t>(local_views[i].nbytes())) {
+                throw std::runtime_error(
+                    "remote layer descriptor size mismatch");
+              }
+              ++h2h_layers;
+              h2h_bytes += static_cast<int64_t>(layer.len);
+              mlcl::Request request;
+              request.op = mlcl::Op::kRead;
+              request.laddr =
+                  reinterpret_cast<uint8_t*>(local_views[i].data_ptr());
+              request.raddr = reinterpret_cast<uint8_t*>(layer.addr);
+              request.len = layer.len;
+              const auto h2h_start = std::chrono::steady_clock::now();
+              auto handle_or = transport_->Post(EndpointWithPort(
+                                                    remote_endpoint,
+                                                    response.data_port),
+                                                request);
+              if (!handle_or.ok()) {
+                ThrowStatus("SocketTransport read failed", handle_or.status());
+              }
+              auto status_or = transport_->Poll(handle_or.value());
+              if (!status_or.ok() ||
+                  status_or.value() != mlcl::Status::kSuccess) {
+                throw std::runtime_error(
+                    "SocketTransport read did not succeed");
+              }
+              h2h_ms +=
+                  DurationMs(h2h_start, std::chrono::steady_clock::now());
+              if (load_plan.RequiresHostReorder()) {
+                const auto reorder_start = std::chrono::steady_clock::now();
+                ReorderCompactBlocks(local_views[i], load_plan.host_dst_to_src);
+                host_reorder_ms +=
+                    DurationMs(reorder_start, std::chrono::steady_clock::now());
+              }
+            }
+
+            const auto h2d_start = std::chrono::steady_clock::now();
+            RaidenStageResult h2d =
+                IssueH2D(slot_idx, load_plan.num_blocks,
+                         load_plan.h2d_local_block_ids);
+            const auto h2d_issued = std::chrono::steady_clock::now();
+            h2d.future->Await();
+            const auto h2d_done = std::chrono::steady_clock::now();
+            h2d_bytes = h2d.total_bytes;
+            h2d_segments = h2d.copy_segments;
+            h2d_issue_ms = DurationMs(h2d_start, h2d_issued);
+            h2d_wait_ms = DurationMs(h2d_issued, h2d_done);
+            h2d_total_ms = DurationMs(h2d_start, h2d_done);
+
+            const auto ack_start = std::chrono::steady_clock::now();
+            AckRemote(remote_endpoint, uuid);
+            ack_ms = DurationMs(ack_start, std::chrono::steady_clock::now());
+          }
+        } catch (const std::exception& e) {
+          failed = true;
+          LOG(ERROR) << "Raiden load failed for req=" << req_id
+                     << " uuid=" << uuid << ": " << e.what();
+        } catch (...) {
+          failed = true;
+          LOG(ERROR) << "Raiden load failed for req=" << req_id
+                     << " uuid=" << uuid;
+        }
+        if (slot_idx >= 0) {
+          std::lock_guard<std::mutex> lock(mu_);
+          ReleaseSlotLocked(slot_idx);
+        }
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          if (report_recv_done) {
+            done_recving_.insert(req_id);
+            if (failed) failed_recving_.insert(req_id);
+          }
+        }
+        const auto done = std::chrono::steady_clock::now();
+        std::ostringstream timing;
+        timing << "RAIDEN_TIMING event=consumer_load"
+               << " req_id=" << req_id << " uuid=" << uuid
+               << " rank=" << tp_rank_ << " endpoint=" << remote_endpoint
+               << " blocks=" << load_plan.num_blocks
+               << " layers=" << h2h_layers << " bytes=" << h2h_bytes
+               << " h2d_bytes=" << h2d_bytes
+               << " h2d_segments=" << h2d_segments
+               << " queue_delay_ms=" << DurationMs(submit_start, worker_start)
+               << " slot_ms=" << slot_ms
+               << " control_setup_ms=" << control_setup_ms
+               << " descriptor_ms=" << descriptor_ms
+               << " h2h_ms=" << h2h_ms
+               << " host_reorder_ms=" << host_reorder_ms
+               << " h2d_issue_ms=" << h2d_issue_ms
+               << " h2d_wait_ms=" << h2d_wait_ms
+               << " h2d_total_ms=" << h2d_total_ms
+               << " ack_ms=" << ack_ms
+               << " total_ms=" << DurationMs(submit_start, done)
+               << " release_only=" << (release_only ? 1 : 0)
+               << " failed=" << (failed ? 1 : 0);
+        EmitTimingLog(timing.str());
+      });
     }
-    throw std::runtime_error(
-        "Raiden cross-host load is not implemented in this checkpoint");
+    return op_id;
   }
 
   py::tuple PollFinished() {
@@ -289,6 +576,17 @@ class RaidenTransferEngine {
     std::vector<std::string> failed_recving;
     {
       std::lock_guard<std::mutex> lock(mu_);
+      const auto now = std::chrono::steady_clock::now();
+      for (auto it = send_entries_.begin(); it != send_entries_.end();) {
+        const auto& entry = it->second;
+        if (entry->deadline <= now) {
+          done_sending_.insert(entry->req_id);
+          ReleaseEntrySlotLocked(entry);
+          it = send_entries_.erase(it);
+        } else {
+          ++it;
+        }
+      }
       done_sending.assign(done_sending_.begin(), done_sending_.end());
       done_recving.assign(done_recving_.begin(), done_recving_.end());
       failed_recving.assign(failed_recving_.begin(), failed_recving_.end());
@@ -382,14 +680,78 @@ class RaidenTransferEngine {
   struct SendEntry {
     std::string req_id;
     uint64_t uuid = 0;
+    int64_t slot_idx = -1;
+    int64_t num_blocks = 0;
     int64_t registered_num_blocks = 0;
+    int64_t total_bytes = 0;
+    int64_t copy_segments = 0;
     std::vector<int64_t> registered_block_ids;
     std::set<int64_t> registered_block_set;
+    std::chrono::steady_clock::time_point register_start;
+    std::chrono::steady_clock::time_point d2h_issue_start;
+    std::chrono::steady_clock::time_point d2h_issue_done;
+    std::chrono::steady_clock::time_point d2h_done;
+    bool stage_done = false;
+    bool failed = false;
+    bool pull_started = false;
+    bool slot_released = false;
+    std::chrono::steady_clock::time_point deadline;
   };
+
+  void ReleaseEntrySlotLocked(const std::shared_ptr<SendEntry>& entry) {
+    if (!entry || entry->slot_idx < 0 || entry->slot_released) return;
+    ReleaseSlotLocked(entry->slot_idx);
+    entry->slot_released = true;
+  }
+
+  struct PullLayerDescriptor {
+    uint64_t addr = 0;
+    uint64_t len = 0;
+  };
+
+  struct alignas(8) ControlRequestHeader {
+    uint32_t magic = 0x52414944;  // "RAID"
+    uint32_t op = 0;
+    uint64_t uuid = 0;
+    uint64_t num_blocks = 0;
+  };
+
+  struct alignas(8) ControlResponseHeader {
+    uint32_t magic = 0x44494152;  // "DIAR"
+    int32_t status = 0;
+    uint32_t num_layers = 0;
+    uint32_t data_port = 0;
+    uint64_t message_len = 0;
+  };
+
+  static constexpr uint32_t kControlMagic = 0x52414944;
+  static constexpr uint32_t kResponseMagic = 0x44494152;
+  static constexpr uint32_t kOpAck = 2;
+  static constexpr uint32_t kOpPullStream = 3;
 
   static double DurationMs(std::chrono::steady_clock::time_point start,
                            std::chrono::steady_clock::time_point end) {
     return std::chrono::duration<double, std::milli>(end - start).count();
+  }
+
+  static void WriteBlockIds(int fd, const std::vector<int64_t>& block_ids) {
+    if (block_ids.empty()) return;
+    CheckStatus("control block ids write",
+                WriteExact(fd, block_ids.data(),
+                           block_ids.size() * sizeof(int64_t)));
+  }
+
+  static std::vector<int64_t> ReadBlockIds(int fd, uint64_t num_blocks) {
+    if (num_blocks == 0) return {};
+    if (num_blocks >
+        static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+      throw std::invalid_argument("num_blocks is too large");
+    }
+    std::vector<int64_t> block_ids(static_cast<size_t>(num_blocks));
+    CheckStatus("control block ids read",
+                ReadExact(fd, block_ids.data(),
+                          block_ids.size() * sizeof(int64_t)));
+    return block_ids;
   }
 
   static CopySpec Offsets(const std::vector<int64_t>& block_ids,
@@ -445,6 +807,26 @@ class RaidenTransferEngine {
     std::vector<int64_t> ordered = block_ids;
     std::stable_sort(ordered.begin(), ordered.end());
     return ordered;
+  }
+
+  static void ValidateRequestedBlocks(
+      const SendEntry& entry, const std::vector<int64_t>& requested_block_ids) {
+    if (requested_block_ids.empty()) {
+      throw std::invalid_argument(
+          "pull stream requested no blocks; use ack-only path");
+    }
+    std::set<int64_t> seen;
+    for (int64_t block_id : requested_block_ids) {
+      if (entry.registered_block_set.find(block_id) ==
+          entry.registered_block_set.end()) {
+        throw std::invalid_argument(
+            "pull stream requested block not registered by producer");
+      }
+      if (!seen.insert(block_id).second) {
+        throw std::invalid_argument(
+            "pull stream requested duplicate producer block id");
+      }
+    }
   }
 
   static CopyPlan BuildProducerCopyPlan(
@@ -511,6 +893,31 @@ class RaidenTransferEngine {
     plan.h2d_copy =
         Offsets(plan.h2d_local_block_ids, /*source_is_compact=*/true);
     return plan;
+  }
+
+  static void ReorderCompactBlocks(at::Tensor& compact_blocks,
+                                   const std::vector<size_t>& dst_to_src) {
+    if (dst_to_src.empty()) return;
+    ValidateCpuTensor(compact_blocks, "Host reorder view");
+    const size_t num_blocks = dst_to_src.size();
+    if (num_blocks == 0 || compact_blocks.nbytes() % num_blocks != 0) {
+      throw std::invalid_argument("host reorder view has invalid block layout");
+    }
+    const size_t block_bytes =
+        static_cast<size_t>(compact_blocks.nbytes()) / num_blocks;
+    const auto total_bytes = static_cast<size_t>(compact_blocks.nbytes());
+    const uint8_t* src =
+        reinterpret_cast<const uint8_t*>(compact_blocks.data_ptr());
+    std::vector<uint8_t> reordered(total_bytes);
+    for (size_t dst_idx = 0; dst_idx < num_blocks; ++dst_idx) {
+      const size_t src_idx = dst_to_src[dst_idx];
+      if (src_idx >= num_blocks) {
+        throw std::out_of_range("host reorder source index out of range");
+      }
+      std::memcpy(reordered.data() + dst_idx * block_bytes,
+                  src + src_idx * block_bytes, block_bytes);
+    }
+    std::memcpy(compact_blocks.data_ptr(), reordered.data(), total_bytes);
   }
 
   TensorList LayerViews(int64_t slot_idx, int64_t num_blocks) {
@@ -585,6 +992,11 @@ class RaidenTransferEngine {
     return op_id;
   }
 
+  std::chrono::steady_clock::time_point DeadlineFromNow() const {
+    return std::chrono::steady_clock::now() +
+           std::chrono::milliseconds(static_cast<int64_t>(timeout_s_ * 1000.0));
+  }
+
   void AllocateHostSlots(int64_t num_slots) {
     if (kv_caches_.empty()) return;
     host_slots_.clear();
@@ -611,6 +1023,372 @@ class RaidenTransferEngine {
     }
   }
 
+  int64_t AcquireSlot() {
+    std::lock_guard<std::mutex> lock(mu_);
+    return AcquireSlotLocked();
+  }
+
+  int64_t AcquireSlotLocked() {
+    if (free_slots_.empty()) {
+      throw std::runtime_error("Raiden host slot pool exhausted");
+    }
+    int64_t slot = free_slots_.front();
+    free_slots_.pop_front();
+    return slot;
+  }
+
+  void ReleaseSlotLocked(int64_t slot_idx) {
+    if (slot_idx < 0) return;
+    free_slots_.push_back(slot_idx);
+  }
+
+  std::string EndpointWithPort(const std::string& endpoint, int port) const {
+    auto [host, ignored_port] = SplitEndpoint(endpoint);
+    (void)ignored_port;
+    return host + ":" + std::to_string(port);
+  }
+
+  PullLayerDescriptor LayerDescriptor(int64_t slot_idx, int64_t num_blocks,
+                                      size_t layer_idx) {
+    if (slot_idx < 0 || slot_idx >= static_cast<int64_t>(host_slots_.size())) {
+      throw std::out_of_range("slot_idx out of range");
+    }
+    if (layer_idx >= host_slots_[slot_idx].layers.size()) {
+      throw std::out_of_range("layer_idx out of range");
+    }
+    at::Tensor view =
+        host_slots_[slot_idx].layers[layer_idx].narrow(0, 0, num_blocks);
+    ValidateCpuTensor(view, "Host staging layer descriptor");
+    return {reinterpret_cast<uint64_t>(view.data_ptr()),
+            static_cast<uint64_t>(view.nbytes())};
+  }
+
+  void StartControlServer() {
+    control_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (control_fd_ < 0) {
+      throw std::runtime_error("failed to create Raiden control socket");
+    }
+    int opt = 1;
+    setsockopt(control_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    setsockopt(control_fd_, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+
+    sockaddr_in addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(local_control_port_);
+    if (bind(control_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) <
+        0) {
+      std::string err = std::strerror(errno);
+      close(control_fd_);
+      control_fd_ = -1;
+      throw std::runtime_error("bind Raiden control socket failed: " + err);
+    }
+    if (listen(control_fd_, 128) < 0) {
+      std::string err = std::strerror(errno);
+      close(control_fd_);
+      control_fd_ = -1;
+      throw std::runtime_error("listen Raiden control socket failed: " + err);
+    }
+    control_thread_ = std::thread([this]() { ControlLoop(); });
+  }
+
+  void StopControlServer() {
+    stopping_ = true;
+    if (control_fd_ >= 0) {
+      shutdown(control_fd_, SHUT_RDWR);
+      close(control_fd_);
+      control_fd_ = -1;
+    }
+    cv_.notify_all();
+    if (control_thread_.joinable()) {
+      control_thread_.join();
+    }
+    {
+      std::lock_guard<std::mutex> lock(control_workers_mu_);
+      for (auto& thread : control_workers_) {
+        if (thread.joinable()) thread.join();
+      }
+      control_workers_.clear();
+    }
+    {
+      std::lock_guard<std::mutex> lock(worker_threads_mu_);
+      for (auto& thread : worker_threads_) {
+        if (thread.joinable()) thread.join();
+      }
+      worker_threads_.clear();
+    }
+  }
+
+  void ControlLoop() {
+    while (!stopping_) {
+      pollfd pfd;
+      pfd.fd = control_fd_;
+      pfd.events = POLLIN;
+      int ret = poll(&pfd, 1, 50);
+      if (ret <= 0) continue;
+      sockaddr_in client_addr;
+      socklen_t len = sizeof(client_addr);
+      int client_fd =
+          accept(control_fd_, reinterpret_cast<sockaddr*>(&client_addr), &len);
+      if (client_fd < 0) continue;
+      int opt = 1;
+      setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+      std::lock_guard<std::mutex> lock(control_workers_mu_);
+      control_workers_.emplace_back([this, client_fd]() {
+        HandleControlConnection(client_fd);
+      });
+    }
+  }
+
+  void HandleControlConnection(int fd) {
+    while (!stopping_) {
+      ControlRequestHeader request;
+      absl::Status s = ReadExact(fd, &request, sizeof(request));
+      if (!s.ok()) break;
+      if (request.magic != kControlMagic) {
+        WriteControlError(fd, "bad control magic");
+        break;
+      }
+      if (request.op == kOpPullStream) {
+        HandlePullStreamRequest(fd, request);
+      } else if (request.op == kOpAck) {
+        AckSend(request.uuid);
+        WriteControlOk(fd, 0);
+      } else {
+        WriteControlError(fd, "unknown control op");
+      }
+    }
+    close(fd);
+  }
+
+  void WriteControlOk(int fd, size_t num_layers) {
+    ControlResponseHeader response;
+    response.magic = kResponseMagic;
+    response.status = 0;
+    response.num_layers = static_cast<uint32_t>(num_layers);
+    response.data_port = static_cast<uint32_t>(local_data_port_);
+    response.message_len = 0;
+    (void)WriteExact(fd, &response, sizeof(response));
+  }
+
+  void WriteControlError(int fd, const std::string& message) {
+    ControlResponseHeader response;
+    response.magic = kResponseMagic;
+    response.status = 1;
+    response.num_layers = 0;
+    response.data_port = static_cast<uint32_t>(local_data_port_);
+    response.message_len = message.size();
+    absl::Status s = WriteExact(fd, &response, sizeof(response));
+    if (!s.ok()) return;
+    if (!message.empty()) {
+      (void)WriteExact(fd, message.data(), message.size());
+    }
+  }
+
+  void HandlePullStreamRequest(int fd, const ControlRequestHeader& request) {
+    const auto request_start = std::chrono::steady_clock::now();
+    std::shared_ptr<SendEntry> entry;
+    std::vector<int64_t> requested_block_ids;
+    try {
+      if (request.num_blocks > static_cast<uint64_t>(max_blocks_)) {
+        throw std::invalid_argument("requested block count exceeds max_blocks");
+      }
+      requested_block_ids = ReadBlockIds(fd, request.num_blocks);
+    } catch (const std::exception& e) {
+      WriteControlError(fd, e.what());
+      return;
+    }
+
+    const auto requested_plan = BuildProducerCopyPlan(requested_block_ids);
+    int64_t slot_idx = -1;
+    bool failed = false;
+    std::string failure_reason;
+    size_t num_layers = 0;
+    try {
+      {
+        std::unique_lock<std::mutex> lock(mu_);
+        const auto deadline = DeadlineFromNow();
+        cv_.wait_until(lock, deadline, [&]() {
+          return stopping_ ||
+                 send_entries_.find(request.uuid) != send_entries_.end();
+        });
+        auto it = send_entries_.find(request.uuid);
+        if (it == send_entries_.end()) {
+          throw std::runtime_error("uuid not registered before timeout");
+        }
+        entry = it->second;
+        if (entry->failed) {
+          throw std::runtime_error("producer stage failed");
+        }
+        if (entry->pull_started) {
+          throw std::runtime_error("uuid already has an active pull");
+        }
+        ValidateRequestedBlocks(*entry, requested_plan.producer_remote_block_ids);
+        slot_idx = AcquireSlotLocked();
+        entry->slot_idx = slot_idx;
+        entry->slot_released = false;
+        entry->pull_started = true;
+        entry->num_blocks = requested_plan.num_blocks;
+        entry->d2h_issue_start = std::chrono::steady_clock::now();
+        entry->deadline = DeadlineFromNow();
+      }
+
+      RaidenStageResult staged =
+          IssueD2H(slot_idx, requested_plan.num_blocks,
+                   requested_plan.producer_remote_block_ids);
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        entry->d2h_issue_done = std::chrono::steady_clock::now();
+        entry->total_bytes = staged.total_bytes;
+        entry->copy_segments = staged.copy_segments;
+      }
+      staged.future->Await();
+      const auto d2h_done = std::chrono::steady_clock::now();
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        entry->stage_done = true;
+        entry->d2h_done = d2h_done;
+        entry->deadline = DeadlineFromNow();
+      }
+      cv_.notify_all();
+
+      num_layers = staged.host_views.size();
+      WriteControlOk(fd, num_layers);
+      for (size_t layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
+        PullLayerDescriptor descriptor =
+            LayerDescriptor(slot_idx, requested_plan.num_blocks, layer_idx);
+        CheckStatus("control stream layer descriptor write",
+                    WriteExact(fd, &descriptor, sizeof(descriptor)));
+      }
+    } catch (const std::exception& e) {
+      failed = true;
+      failure_reason = e.what();
+      LOG(ERROR) << "Raiden pull stream failed for uuid=" << request.uuid
+                 << ": " << failure_reason;
+      WriteControlError(fd, failure_reason);
+    } catch (...) {
+      failed = true;
+      failure_reason = "unknown error";
+      LOG(ERROR) << "Raiden pull stream failed for uuid=" << request.uuid;
+      WriteControlError(fd, failure_reason);
+    }
+    const auto done = std::chrono::steady_clock::now();
+    if (entry) {
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = send_entries_.find(request.uuid);
+        if (it != send_entries_.end()) {
+          it->second->stage_done = !failed;
+          it->second->failed = failed;
+          if (it->second->d2h_issue_done ==
+              std::chrono::steady_clock::time_point()) {
+            it->second->d2h_issue_done = done;
+          }
+          if (it->second->d2h_done ==
+              std::chrono::steady_clock::time_point()) {
+            it->second->d2h_done = done;
+          }
+        } else if (slot_idx >= 0 && !entry->slot_released) {
+          ReleaseSlotLocked(slot_idx);
+          entry->slot_released = true;
+        }
+      }
+      cv_.notify_all();
+      std::ostringstream stage_timing;
+      stage_timing << "RAIDEN_TIMING event=producer_stage"
+                   << " req_id=" << entry->req_id
+                   << " uuid=" << entry->uuid << " rank=" << tp_rank_
+                   << " registered_blocks=" << entry->registered_num_blocks
+                   << " blocks=" << entry->num_blocks
+                   << " bytes=" << entry->total_bytes
+                   << " copy_segments=" << entry->copy_segments
+                   << " d2h_issue_ms="
+                   << DurationMs(entry->d2h_issue_start,
+                                 entry->d2h_issue_done)
+                   << " d2h_wait_ms="
+                   << DurationMs(entry->d2h_issue_done, entry->d2h_done)
+                   << " d2h_total_ms="
+                   << DurationMs(entry->d2h_issue_start, entry->d2h_done)
+                   << " register_to_stage_ms="
+                   << DurationMs(entry->register_start, entry->d2h_done)
+                   << " failed=" << (failed ? 1 : 0);
+      EmitTimingLog(stage_timing.str());
+    }
+    std::ostringstream timing;
+    timing << "RAIDEN_TIMING event=producer_pull_stream"
+           << " req_id=" << (entry ? entry->req_id : "")
+           << " uuid=" << request.uuid << " rank=" << tp_rank_
+           << " registered_blocks=" << (entry ? entry->registered_num_blocks : 0)
+           << " blocks=" << requested_plan.num_blocks
+           << " layers=" << num_layers
+           << " bytes=" << (entry ? entry->total_bytes : 0)
+           << " stream_ms=" << DurationMs(request_start, done)
+           << " reason=" << failure_reason
+           << " failed=" << (failed ? 1 : 0);
+    EmitTimingLog(timing.str());
+  }
+
+  void AckRemote(const std::string& remote_endpoint, uint64_t uuid) {
+    int fd = ConnectTcp(remote_endpoint);
+    auto cleanup = std::unique_ptr<int, void (*)(int*)>(
+        &fd, [](int* p) {
+          if (p && *p >= 0) close(*p);
+        });
+    ControlRequestHeader request;
+    request.magic = kControlMagic;
+    request.op = kOpAck;
+    request.uuid = uuid;
+    request.num_blocks = 0;
+    CheckStatus("control ack write", WriteExact(fd, &request, sizeof(request)));
+    (void)ReadControlResponseHeader(fd);
+  }
+
+  ControlResponseHeader ReadControlResponseHeader(int fd) {
+    ControlResponseHeader response;
+    CheckStatus("control response read",
+                ReadExact(fd, &response, sizeof(response)));
+    if (response.magic != kResponseMagic) {
+      throw std::runtime_error("bad control response magic");
+    }
+    if (response.status != 0) {
+      std::string message(response.message_len, '\0');
+      if (response.message_len > 0) {
+        CheckStatus("control error body read",
+                    ReadExact(fd, message.data(), message.size()));
+      }
+      throw std::runtime_error("remote Raiden control error: " + message);
+    }
+    return response;
+  }
+
+  void AckSend(uint64_t uuid) {
+    std::shared_ptr<SendEntry> entry;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = send_entries_.find(uuid);
+      if (it == send_entries_.end()) {
+        pending_acks_.insert(uuid);
+        return;
+      }
+      entry = it->second;
+      done_sending_.insert(entry->req_id);
+      ReleaseEntrySlotLocked(entry);
+      send_entries_.erase(it);
+    }
+    const auto ack_done = std::chrono::steady_clock::now();
+    std::ostringstream timing;
+    timing << "RAIDEN_TIMING event=producer_ack"
+           << " req_id=" << entry->req_id << " uuid=" << entry->uuid
+           << " rank=" << tp_rank_ << " blocks=" << entry->num_blocks
+           << " bytes=" << entry->total_bytes
+           << " stage_to_ack_ms=" << DurationMs(entry->d2h_done, ack_done)
+           << " register_to_ack_ms="
+           << DurationMs(entry->register_start, ack_done)
+           << " failed=" << (entry->failed ? 1 : 0);
+    EmitTimingLog(timing.str());
+  }
+
   TensorList kv_caches_;
   std::unique_ptr<tpu_raiden::torch::KVCacheManager> kv_transfer_;
   int64_t tp_rank_ = 0;
@@ -624,10 +1402,20 @@ class RaidenTransferEngine {
   std::vector<HostSlot> host_slots_;
   std::deque<int64_t> free_slots_;
   std::map<uint64_t, std::shared_ptr<SendEntry>> send_entries_;
+  std::set<uint64_t> pending_acks_;
   std::set<std::string> done_sending_;
   std::set<std::string> done_recving_;
   std::set<std::string> failed_recving_;
   std::mutex mu_;
+  std::condition_variable cv_;
+  std::unique_ptr<tpu_raiden::transport::SocketTransport> transport_;
+  int control_fd_ = -1;
+  std::atomic<bool> stopping_{false};
+  std::thread control_thread_;
+  std::mutex control_workers_mu_;
+  std::vector<std::thread> control_workers_;
+  std::mutex worker_threads_mu_;
+  std::vector<std::thread> worker_threads_;
 };
 
 void AwaitAll(py::object futures) {
