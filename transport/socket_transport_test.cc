@@ -25,7 +25,7 @@
 #include <gtest/gtest.h>
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
-#include "third_party/mlcl/src/api/types.h"
+#include "transport/mlcl_types.h"
 
 namespace tpu_raiden {
 namespace transport {
