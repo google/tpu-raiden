@@ -442,12 +442,15 @@ class RaidenTransferEngine {
         size_t h2h_layers = 0;
         double slot_ms = 0.0;
         double control_setup_ms = 0.0;
+        double control_ms = 0.0;
         double descriptor_ms = 0.0;
         double h2h_ms = 0.0;
         double host_reorder_ms = 0.0;
         double h2d_issue_ms = 0.0;
+        double h2d_issue_wall_ms = 0.0;
         double h2d_wait_ms = 0.0;
         double h2d_total_ms = 0.0;
+        double pipeline_ms = 0.0;
         double ack_ms = 0.0;
         try {
           if (load_plan.num_blocks == 0) {
@@ -481,6 +484,9 @@ class RaidenTransferEngine {
                 ReadControlResponseHeader(control_fd);
             control_setup_ms =
                 DurationMs(control_start, std::chrono::steady_clock::now());
+            control_ms = control_setup_ms;
+            const std::string data_endpoint =
+                EndpointWithPort(remote_endpoint, response.data_port);
 
             std::vector<KVCacheHostSpan> local_spans =
                 LayerSpans(slot_idx,
@@ -488,61 +494,162 @@ class RaidenTransferEngine {
             if (response.num_layers != local_spans.size()) {
               throw std::runtime_error("remote layer descriptor count mismatch");
             }
-            for (size_t i = 0; i < local_spans.size(); ++i) {
-              PullLayerDescriptor layer;
-              const auto descriptor_start = std::chrono::steady_clock::now();
-              CheckStatus("control stream layer descriptor read",
-                          ReadExact(control_fd, &layer, sizeof(layer)));
-              descriptor_ms += DurationMs(
-                  descriptor_start, std::chrono::steady_clock::now());
-              if (layer.len != static_cast<uint64_t>(local_spans[i].nbytes)) {
-                throw std::runtime_error(
-                    "remote layer descriptor size mismatch");
-              }
-              ++h2h_layers;
-              h2h_bytes += static_cast<int64_t>(layer.len);
-              mlcl::Request request;
-              request.op = mlcl::Op::kRead;
-              request.laddr = local_spans[i].ptr;
-              request.raddr = reinterpret_cast<uint8_t*>(layer.addr);
-              request.len = layer.len;
-              const auto h2h_start = std::chrono::steady_clock::now();
-              auto handle_or = transport_->Post(EndpointWithPort(
-                                                    remote_endpoint,
-                                                    response.data_port),
-                                                request);
-              if (!handle_or.ok()) {
-                ThrowStatus("SocketTransport read failed", handle_or.status());
-              }
-              auto status_or = transport_->Poll(handle_or.value());
-              if (!status_or.ok() ||
-                  status_or.value() != mlcl::Status::kSuccess) {
-                throw std::runtime_error(
-                    "SocketTransport read did not succeed");
-              }
-              h2h_ms +=
-                  DurationMs(h2h_start, std::chrono::steady_clock::now());
-              if (load_plan.RequiresHostReorder()) {
-                const auto reorder_start = std::chrono::steady_clock::now();
-                ReorderCompactBlocks(local_spans[i],
-                                     load_plan.host_dst_to_src);
-                host_reorder_ms +=
-                    DurationMs(reorder_start, std::chrono::steady_clock::now());
-              }
+            h2d_segments = static_cast<int64_t>(load_plan.h2d_copy.sizes.size());
+            for (const KVCacheHostSpan& span : local_spans) {
+              h2d_bytes += static_cast<int64_t>(span.nbytes);
             }
+            bool h2d_started = false;
+            std::chrono::steady_clock::time_point h2d_first_issue_start;
+            std::chrono::steady_clock::time_point h2d_last_issue_done;
+            std::deque<size_t> h2d_ready_layers;
+            std::mutex h2d_ready_mu;
+            std::condition_variable h2d_ready_cv;
+            bool h2d_input_done = false;
+            std::exception_ptr h2d_exception;
+            std::mutex h2d_state_mu;
+            std::vector<std::shared_ptr<RaidenTransferFuture>>
+                h2d_batch_futures;
+            h2d_batch_futures.reserve(local_spans.size());
+            auto issue_h2d_ready_windows = [&]() {
+              try {
+                while (true) {
+                  std::vector<size_t> ready_layers;
+                  {
+                    std::unique_lock<std::mutex> lock(h2d_ready_mu);
+                    h2d_ready_cv.wait(lock, [&]() {
+                      return h2d_input_done || !h2d_ready_layers.empty();
+                    });
+                    if (h2d_ready_layers.empty()) {
+                      if (h2d_input_done) break;
+                      continue;
+                    }
+                    const size_t batch_layers = std::min<size_t>(
+                        h2d_ready_layers.size(),
+                        static_cast<size_t>(h2d_batch_max_layers_));
+                    ready_layers.reserve(batch_layers);
+                    while (!h2d_ready_layers.empty() &&
+                           ready_layers.size() < batch_layers) {
+                      ready_layers.push_back(h2d_ready_layers.front());
+                      h2d_ready_layers.pop_front();
+                    }
+                  }
 
-            const auto h2d_start = std::chrono::steady_clock::now();
-            RaidenStageResult h2d =
-                IssueH2D(slot_idx, load_plan.num_blocks,
-                         load_plan.h2d_local_block_ids);
-            const auto h2d_issued = std::chrono::steady_clock::now();
-            h2d.future->Await();
+                  H2DBatchIssueResult batch =
+                      IssueH2DBatch(slot_idx, load_plan.num_blocks,
+                                    local_spans, load_plan.h2d_copy,
+                                    ready_layers);
+                  {
+                    std::lock_guard<std::mutex> lock(h2d_state_mu);
+                    h2d_batch_futures.push_back(std::move(batch.future));
+                    if (batch.issued &&
+                        (!h2d_started ||
+                         batch.first_issue_start < h2d_first_issue_start)) {
+                      h2d_first_issue_start = batch.first_issue_start;
+                      h2d_started = true;
+                    }
+                    if (batch.issued &&
+                        (h2d_last_issue_done ==
+                             std::chrono::steady_clock::time_point() ||
+                         batch.last_issue_done > h2d_last_issue_done)) {
+                      h2d_last_issue_done = batch.last_issue_done;
+                    }
+                    h2d_issue_ms += batch.issue_ms;
+                  }
+                }
+              } catch (...) {
+                std::lock_guard<std::mutex> lock(h2d_state_mu);
+                if (!h2d_exception) {
+                  h2d_exception = std::current_exception();
+                }
+              }
+            };
+            std::thread h2d_issue_worker(issue_h2d_ready_windows);
+            std::exception_ptr pipeline_exception;
+            const auto pipeline_start = std::chrono::steady_clock::now();
+            try {
+              for (size_t i = 0; i < local_spans.size(); ++i) {
+                PullLayerDescriptor layer;
+                const auto descriptor_start = std::chrono::steady_clock::now();
+                CheckStatus("control stream layer descriptor read",
+                            ReadExact(control_fd, &layer, sizeof(layer)));
+                const double layer_descriptor_ms = DurationMs(
+                    descriptor_start, std::chrono::steady_clock::now());
+                descriptor_ms += layer_descriptor_ms;
+                control_ms += layer_descriptor_ms;
+                if (layer.len !=
+                    static_cast<uint64_t>(local_spans[i].nbytes)) {
+                  throw std::runtime_error(
+                      "remote layer descriptor size mismatch");
+                }
+                ++h2h_layers;
+                h2h_bytes += static_cast<int64_t>(layer.len);
+                mlcl::Request request;
+                request.op = mlcl::Op::kRead;
+                request.laddr = local_spans[i].ptr;
+                request.raddr = reinterpret_cast<uint8_t*>(layer.addr);
+                request.len = layer.len;
+                const auto h2h_start = std::chrono::steady_clock::now();
+                auto handle_or = transport_->Post(data_endpoint, request);
+                if (!handle_or.ok()) {
+                  ThrowStatus("SocketTransport read failed",
+                              handle_or.status());
+                }
+                auto status_or = transport_->Poll(handle_or.value());
+                if (!status_or.ok() ||
+                    status_or.value() != mlcl::Status::kSuccess) {
+                  throw std::runtime_error(
+                      "SocketTransport read did not succeed");
+                }
+                h2h_ms +=
+                    DurationMs(h2h_start, std::chrono::steady_clock::now());
+                if (load_plan.RequiresHostReorder()) {
+                  const auto reorder_start = std::chrono::steady_clock::now();
+                  ReorderCompactBlocks(local_spans[i],
+                                       load_plan.host_dst_to_src);
+                  host_reorder_ms += DurationMs(
+                      reorder_start, std::chrono::steady_clock::now());
+                }
+                {
+                  std::lock_guard<std::mutex> lock(h2d_ready_mu);
+                  h2d_ready_layers.push_back(i);
+                }
+                h2d_ready_cv.notify_one();
+              }
+            } catch (...) {
+              pipeline_exception = std::current_exception();
+            }
+            {
+              std::lock_guard<std::mutex> lock(h2d_ready_mu);
+              h2d_input_done = true;
+            }
+            h2d_ready_cv.notify_all();
+            if (h2d_issue_worker.joinable()) {
+              h2d_issue_worker.join();
+            }
+            auto h2d_future = std::make_shared<RaidenTransferFuture>();
+            for (auto& batch_future : h2d_batch_futures) {
+              h2d_future->AddAll(batch_future);
+            }
+            const auto h2d_issue_done =
+                h2d_started ? h2d_last_issue_done
+                            : std::chrono::steady_clock::now();
+            if (h2d_exception || pipeline_exception) {
+              h2d_future->Await();
+              if (h2d_exception) {
+                std::rethrow_exception(h2d_exception);
+              }
+              std::rethrow_exception(pipeline_exception);
+            }
+            h2d_issue_wall_ms =
+                h2d_started ? DurationMs(h2d_first_issue_start, h2d_issue_done)
+                            : 0.0;
+            h2d_future->Await();
             const auto h2d_done = std::chrono::steady_clock::now();
-            h2d_bytes = h2d.total_bytes;
-            h2d_segments = h2d.copy_segments;
-            h2d_issue_ms = DurationMs(h2d_start, h2d_issued);
-            h2d_wait_ms = DurationMs(h2d_issued, h2d_done);
-            h2d_total_ms = DurationMs(h2d_start, h2d_done);
+            h2d_wait_ms = DurationMs(h2d_issue_done, h2d_done);
+            h2d_total_ms = h2d_started
+                               ? DurationMs(h2d_first_issue_start, h2d_done)
+                               : 0.0;
+            pipeline_ms = DurationMs(pipeline_start, h2d_done);
 
             const auto ack_start = std::chrono::steady_clock::now();
             AckRemote(remote_endpoint, uuid);
@@ -580,12 +687,15 @@ class RaidenTransferEngine {
                << " queue_delay_ms=" << DurationMs(submit_start, worker_start)
                << " slot_ms=" << slot_ms
                << " control_setup_ms=" << control_setup_ms
+               << " control_ms=" << control_ms
                << " descriptor_ms=" << descriptor_ms
                << " h2h_ms=" << h2h_ms
                << " host_reorder_ms=" << host_reorder_ms
                << " h2d_issue_ms=" << h2d_issue_ms
+               << " h2d_issue_wall_ms=" << h2d_issue_wall_ms
                << " h2d_wait_ms=" << h2d_wait_ms
                << " h2d_total_ms=" << h2d_total_ms
+               << " pipeline_ms=" << pipeline_ms
                << " ack_ms=" << ack_ms
                << " total_ms=" << DurationMs(submit_start, done)
                << " release_only=" << (release_only ? 1 : 0)
