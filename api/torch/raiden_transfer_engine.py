@@ -50,13 +50,7 @@ _load_torch_tpu_common()
 from . import _raiden_transfer_engine as _impl
 
 RaidenTransferEngine = _impl.RaidenTransferEngine
-RaidenTransferFuture = _impl.RaidenTransferFuture
-await_all = _impl.await_all
-is_ready = _impl.is_ready
 
 __all__ = [
     "RaidenTransferEngine",
-    "RaidenTransferFuture",
-    "await_all",
-    "is_ready",
 ]
