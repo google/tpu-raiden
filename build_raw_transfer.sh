@@ -43,13 +43,13 @@ fi
 
 "${BAZEL_BIN}" --version
 
-echo "=== Building raw_transfer and kv_cache_manager with Bazel ==="
+echo "=== Building raw_transfer (jax) and disagg_kv_cache_manager with Bazel ==="
+# //api/jax:_kv_cache_manager bundles both kv_cache_manager_jax and
+# disagg_kv_cache_manager_jax into a single nanobind extension (see api/jax/BUILD).
 "${BAZEL_BIN}" build -c opt --check_visibility=false --verbose_failures --experimental_repo_remote_exec --incompatible_disallow_empty_glob=false \
   --repo_env=HERMETIC_PYTHON_VERSION=${HERMETIC_PYTHON_VERSION:-3.12} \
   //raiden_lib/raw_transfer/jax:raw_transfer \
   //api/jax:_kv_cache_manager \
-  //api/jax:_kv_cache_manager_ffi \
-  //api/jax:_weight_synchronizer \
   --disk_cache=${BAZEL_DISK_CACHE} \
   --repository_cache=${BAZEL_REPO_CACHE}
 
@@ -57,8 +57,6 @@ echo "=== Building raw_transfer and kv_cache_manager with Bazel ==="
 echo "=== Copying compiled shared libraries to source directory ==="
 cp -f "${WORKSPACE_DIR}/bazel-bin/raiden_lib/raw_transfer/jax/raw_transfer.so" "${WORKSPACE_DIR}/raiden_lib/raw_transfer/jax/"
 cp -f "${WORKSPACE_DIR}/bazel-bin/api/jax/_kv_cache_manager.so" "${WORKSPACE_DIR}/api/jax/"
-cp -f "${WORKSPACE_DIR}/bazel-bin/api/jax/_kv_cache_manager_ffi.so" "${WORKSPACE_DIR}/api/jax/"
-cp -f "${WORKSPACE_DIR}/bazel-bin/api/jax/_weight_synchronizer.so" "${WORKSPACE_DIR}/api/jax/"
 
 
 echo "=== Build Complete! ==="
