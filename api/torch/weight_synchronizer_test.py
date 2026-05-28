@@ -31,7 +31,7 @@ class WeightSynchronizerTorchTest(parameterized.TestCase):
   def setUp(self):
     super().setUp()
     # Initialize PyTorch XLA accelerator device E2E
-    self.device = torch.device("xla")
+    self.device = torch.device("tpu")
     self.num_layers = 2
     self.num_shards = 1
     self.block_size = 2
@@ -71,16 +71,13 @@ class WeightSynchronizerTorchTest(parameterized.TestCase):
         shards.append(t)
       dst2_tensors.append(shards)
 
-    # 2. Instantiate three real WeightSynchronizers on ephemeral ports!
-    ws_source = WeightSynchronizer(src_tensors, local_port=0, parallelism=1)
+    # 2. Instantiate destination WeightSynchronizers on ephemeral ports!
     ws_dest1 = WeightSynchronizer(dst1_tensors, local_port=0, parallelism=1)
     ws_dest2 = WeightSynchronizer(dst2_tensors, local_port=0, parallelism=1)
 
-    self.assertIsNotNone(ws_source.local_port)
     self.assertIsNotNone(ws_dest1.local_port)
     self.assertIsNotNone(ws_dest2.local_port)
 
-    peer_source = f"localhost:{ws_source.local_port}"
     peer_dest1 = f"localhost:{ws_dest1.local_port}"
     peer_dest2 = f"localhost:{ws_dest2.local_port}"
 
@@ -92,6 +89,11 @@ class WeightSynchronizerTorchTest(parameterized.TestCase):
       for sh in range(self.num_shards):
         val = float(l + 10.0)  # Layer 0=10.0, Layer 1=11.0
         src_tensors[l][sh].fill_(val)
+
+    # Recreate/Instantiate ws_source to capture filled buffers!
+    ws_source = WeightSynchronizer(src_tensors, local_port=0, parallelism=1)
+    self.assertIsNotNone(ws_source.local_port)
+    peer_source = f"localhost:{ws_source.local_port}"
 
     # Source pushes weights to both dest1 and dest2 socket servers E2E!
     ws_source.push_weights([peer_dest1, peer_dest2])
@@ -115,6 +117,14 @@ class WeightSynchronizerTorchTest(parameterized.TestCase):
       for sh in range(self.num_shards):
         val = float(l + 20.0)  # Layer 0=20.0, Layer 1=21.0
         src_tensors[l][sh].fill_(val)
+
+    # Recreate ws_source to capture new buffers!
+    ws_source = WeightSynchronizer(src_tensors, local_port=0, parallelism=1)
+    self.assertIsNotNone(ws_source.local_port)
+    peer_source = f"localhost:{ws_source.local_port}"
+
+    # Self-push to populate host buffer!
+    ws_source.push_weights([peer_source])
 
     # Dest1 and Dest2 independently pull weights from the trainer source!
     ws_dest1.pull_weights(peer_source)

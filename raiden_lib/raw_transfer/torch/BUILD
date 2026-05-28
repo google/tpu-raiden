@@ -37,7 +37,6 @@ nanobind_extension(
         "//third_party/py/torch/torch/headeronly:torch_headeronly",
         "//third_party/py/torch_tpu/eager:device_buffer",
         "//third_party/py/torch_tpu/eager:materialize",
-        "//third_party/py/torch_tpu/eager:structured_log_buffer",
         "//third_party/py/torch_tpu/eager:tensor_to_buffer",
         "//third_party/pybind11",
         "@com_google_absl//absl/status",
@@ -61,7 +60,6 @@ py_library(
         ":_torch_raw_transfer",
         "//third_party/py/torch:pytorch",
         "//third_party/py/torch_tpu",
-        "//third_party/py/torch_tpu:_loader",
     ],
 )
 
@@ -82,12 +80,9 @@ py_test(
         "//pyglib/contrib/g3_multiprocessing",
         "//third_party/py/torch:pytorch",
         "//third_party/py/torch_tpu",
-        "//third_party/py/torch_tpu/_internal/distributed/launchers:singlehost_wrapper",
-        "//third_party/py/torch_tpu/_internal/utils:hardware",
-        "//third_party/py/torch_tpu/tests/distributed:distributed_utils",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
-        "@numpy//numpy",
+        "@pypi//numpy",
     ],
 )
 
@@ -108,12 +103,9 @@ py_test(
         "//pyglib/contrib/g3_multiprocessing",
         "//third_party/py/torch:pytorch",
         "//third_party/py/torch_tpu",
-        "//third_party/py/torch_tpu/_internal/distributed/launchers:singlehost_wrapper",
-        "//third_party/py/torch_tpu/_internal/utils:hardware",
-        "//third_party/py/torch_tpu/tests/distributed:distributed_utils",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
-        "@numpy//numpy",
+        "@pypi//numpy",
     ],
 )
 
@@ -143,7 +135,7 @@ py_test(
         "//third_party/py/torch_tpu",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
-        "@numpy//numpy",
+        "@pypi//numpy",
     ],
 )
 
@@ -165,7 +157,7 @@ py_test(
         "//third_party/py/torch_tpu",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
-        "@numpy//numpy",
+        "@pypi//numpy",
     ],
 )
 

@@ -27,7 +27,7 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
   def setUp(self):
     super().setUp()
     # Initialize PyTorch XLA accelerator device E2E
-    self.device = torch.device("xla")
+    self.device = torch.device("tpu")
     self.num_layers = 2
     self.num_shards = 1
     self.block_size = 2
@@ -38,7 +38,8 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
       ("int32", torch.int32),
   )
   def test_e2e_distributed_staging_offloads_and_socket_transceives(self, dtype):
-    shape = (self.block_size, 128, 8)  # 16384 bytes capacity per layer shard
+    num_blocks = 2
+    shape = (num_blocks * self.block_size, 128, 8)  # 2 blocks capacity
 
     # 1. Allocate sharded eager tensors directly on the physical XLA TPU devices!
     # Layer 0 and Layer 1 for Source (Trainer)
@@ -66,14 +67,14 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
         src_tensors,
         block_size=self.block_size,
         local_port=0,
-        host_blocks_to_allocate=self.block_size,
+        host_blocks_to_allocate=num_blocks,
         parallelism=1,
     )
     ws_dest = KVCacheManager(
         dst_tensors,
         block_size=self.block_size,
         local_port=0,
-        host_blocks_to_allocate=self.block_size,
+        host_blocks_to_allocate=num_blocks,
         parallelism=1,
     )
 
@@ -101,27 +102,38 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
     d2h_future.Await()
 
     # ==========================================================================
-    # Step 2 (Network): Push blocks from Source to Destination socket server E2E!
+    # Step 2 (Network): Push and Pull E2E!
     # ==========================================================================
     # Source pushes block page 0 to destination peer server!
+    # This will allocate block 0 on ws_dest.
     write_ids, write_future = ws_source.h2h_write(peer_dest, src_block_ids=[0])
     write_future.Await()
     self.assertEqual(write_ids, [0])
 
     # Destination pulls block page 0 from source peer!
+    # This will allocate block 1 on ws_dest (since block 0 is locked).
     read_ids, read_future = ws_dest.h2h_read(peer_source, src_block_ids=[0])
     read_future.Await()
-    self.assertEqual(read_ids, [0])
+    self.assertEqual(read_ids, [1])
 
     # ==========================================================================
     # Step 3 (Destination): Stage received weights from Host onto Device TPU HBM E2E!
     # ==========================================================================
-    h2d_future = ws_dest.h2d(
+    # Copy pushed data (host block 0, offset 0) to device block 0 (offset 0)
+    h2d_future_push = ws_dest.h2d(
         src_offsets_major_dim=[0],
         dst_offsets_major_dim=[0],
         copy_sizes_major_dim=[self.block_size],
     )
-    h2d_future.Await()
+    h2d_future_push.Await()
+
+    # Copy pulled data (host block 1, offset 2) to device block 1 (offset 2)
+    h2d_future_pull = ws_dest.h2d(
+        src_offsets_major_dim=[2],
+        dst_offsets_major_dim=[2],
+        copy_sizes_major_dim=[self.block_size],
+    )
+    h2d_future_pull.Await()
 
     # ==========================================================================
     # Step 4: Verify complete numerical parity on the destination TPU devices!
@@ -130,7 +142,9 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
       for sh in range(self.num_shards):
         expected_val = float(l + 1.0)
         actual_data = dst_tensors[l][sh].cpu().numpy()
-        np.testing.assert_allclose(actual_data, expected_val, atol=1e-5)
+        # Verify both blocks have the expected values
+        np.testing.assert_allclose(actual_data[0:2], expected_val, atol=1e-5)
+        np.testing.assert_allclose(actual_data[2:4], expected_val, atol=1e-5)
 
 
 if __name__ == "__main__":

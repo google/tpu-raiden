@@ -25,7 +25,7 @@ py_library(
     deps = [
         "@com_google_absl_py//absl/flags",
         "@jax//jax",
-        "@numpy//numpy",
+        "@pypi//numpy",
     ],
 )
 
@@ -44,10 +44,4 @@ nanobind_extension(
         "//core:raw_transfer_impl",
         "@xla//xla/pjrt:status_casters",
     ],
-)
-
-py_library(
-    name = "raw_transfer_profiled_py",
-    srcs = ["raw_transfer_profiled.py"],
-    deps = [":raw_transfer"],
 )

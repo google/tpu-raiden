@@ -175,7 +175,7 @@ py_test(
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
         "@jax//jax",
-        "@numpy//numpy",
+        "@pypi//numpy",
     ],
 )
 
@@ -197,8 +197,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":kv_cache_manager_jax",
+        ":nb_statusor",
         "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status",
         "@xla//xla/ffi/api:c_api",
         "@xla//xla/ffi/api:ffi",
         "@xla//xla/stream_executor:platform",
@@ -237,7 +237,7 @@ py_library(
         ":_kv_cache_manager_ffi",
         "@jax//jax",
         "@jax//jax/experimental:compute_on",
-        "@numpy//numpy",
+        "@pypi//numpy",
     ],
 )
 
@@ -298,7 +298,7 @@ py_library(
         ":_weight_synchronizer_ffi",
         "@jax//jax",
         "@jax//jax/experimental:compute_on",
-        "@numpy//numpy",
+        "@pypi//numpy",
     ],
 )
 
@@ -318,7 +318,7 @@ py_test(
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
         "@jax//jax",
-        "@numpy//numpy",
+        "@pypi//numpy",
     ],
 )
 
@@ -338,7 +338,7 @@ py_test(
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
         "@jax//jax",
-        "@numpy//numpy",
+        "@pypi//numpy",
     ],
 )
 
@@ -405,7 +405,7 @@ py_library(
         ":weight_synchronizer_ffi_py",
         ":weight_synchronizer_jax_py",
         "@jax//jax",
-        "@numpy//numpy",
+        "@pypi//numpy",
     ],
 )
 
@@ -416,7 +416,7 @@ py_library(
     deps = [
         ":resharding_planner",
         "@jax//jax",
-        "@numpy//numpy",
+        "@pypi//numpy",
     ],
 )
 
@@ -424,10 +424,7 @@ py_library(
     name = "weight_synchronizer_jax_py",
     srcs = ["weight_synchronizer.py"],
     visibility = ["//visibility:public"],
-    deps = [
-        ":_weight_synchronizer",
-        ":resharding_planner",
-    ],
+    deps = [":_weight_synchronizer"],
 )
 
 py_test(
@@ -437,7 +434,7 @@ py_test(
         ":weight_synchronizer_jax_py",
         "@com_google_absl_py//absl/testing:absltest",
         "@jax//jax",
-        "@numpy//numpy",
+        "@pypi//numpy",
     ],
 )
 
@@ -448,7 +445,7 @@ py_test(
         ":resharding_planner",
         "@com_google_absl_py//absl/testing:absltest",
         "@jax//jax",
-        "@numpy//numpy",
+        "@pypi//numpy",
     ],
 )
 
@@ -460,6 +457,6 @@ py_test(
         ":resharding_test_lib",
         "@com_google_absl_py//absl/testing:absltest",
         "@jax//jax",
-        "@numpy//numpy",
+        "@pypi//numpy",
     ],
 )

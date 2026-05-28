@@ -22,7 +22,7 @@
 namespace raiden {
 
 using ::xla::PjRtBuffer;
-using ::xla::PjRtCopyFuture;
+using ::xla::PjRtCApiBuffer;
 using ::xla::Shape;
 
 // Unpack and forward to pure C++ transfer_d2h_core

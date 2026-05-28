@@ -32,6 +32,11 @@ using ::tpu_raiden::torch::KVCacheManager;
 
 // Pybind11 FFI bindings module definition for PyTorch E2E
 PYBIND11_MODULE(_kv_cache_manager, m) {
+  py::class_<::raiden::PjRtCopyFuture>(m, "PjRtCopyFuture")
+      .def("Await", &::raiden::PjRtCopyFuture::Await,
+           py::call_guard<py::gil_scoped_release>())
+      .def("IsReady", &::raiden::PjRtCopyFuture::IsReady);
+
   py::class_<KVCacheManager>(m, "KVCacheManager")
       .def(py::init<const std::vector<std::vector<at::Tensor>>&, int,
                     std::optional<int>, std::optional<int>,

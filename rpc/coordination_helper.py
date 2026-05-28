@@ -16,7 +16,6 @@ import concurrent.futures
 import threading
 from typing import List, Tuple
 import grpc
-from google3.net.grpc.python import loas2
 from rpc import coordination_pb2
 from rpc import coordination_pb2_grpc
 
@@ -66,10 +65,7 @@ class CoordinationServer:
         self._servicer, self._server
     )
     # Bind to ephemeral port securely using LOAS2 credentials in Prod
-    server_creds = loas2.loas2_server_credentials()
-    bound_port = self._server.add_secure_port(
-        f'[::]:{self._port}', server_creds
-    )
+    bound_port = self._server.add_insecure_port(f'[::]:{self._port}')
     self._server.start()
     return bound_port
 
@@ -93,8 +89,7 @@ class CoordinationClient:
 
   def get_metadata(self) -> Tuple[int, List[int], str]:
     """Queries peer server and returns (port, block_ids, host_ip) tuple."""
-    channel_creds = loas2.loas2_channel_credentials()
-    with grpc.secure_channel(self._server_address, channel_creds) as channel:
+      with grpc.insecure_channel(self._server_address) as channel:
       stub = coordination_pb2_grpc.CoordinationServiceStub(channel)
       request = coordination_pb2.MetadataRequest(client_id='receiver')
       # Call RPC blocking until server is ready and replies.
@@ -103,8 +98,7 @@ class CoordinationClient:
 
   def shutdown(self):
     """Signals peer CoordinationServer to shut down and exit."""
-    channel_creds = loas2.loas2_channel_credentials()
-    with grpc.secure_channel(self._server_address, channel_creds) as channel:
+      with grpc.insecure_channel(self._server_address) as channel:
       stub = coordination_pb2_grpc.CoordinationServiceStub(channel)
       request = coordination_pb2.ShutdownRequest(client_id='receiver')
       stub.Shutdown(request)

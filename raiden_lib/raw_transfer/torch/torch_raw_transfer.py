@@ -29,15 +29,16 @@
 """Raiden-native raw H2D/D2H transfer for TorchTPU tensors."""
 
 import ctypes
+import importlib
 import os
 from pathlib import Path
 
 import torch  # noqa: F401  # Load torch shared libraries before the extension.
 import torch_tpu
-from torch_tpu import _loader as _torch_tpu_loader
 
 
 def _load_torch_tpu_common() -> None:
+  _torch_tpu_loader = importlib.import_module("torch_tpu._loader")
   _torch_tpu_loader.load()
   common = Path(torch_tpu.__file__).resolve().parent / "common"
   lib = common / "libpywrap_torch_tpu_common.so"

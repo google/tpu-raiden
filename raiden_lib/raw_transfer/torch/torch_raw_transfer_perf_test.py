@@ -14,6 +14,8 @@
 
 import gc
 import os
+import pathlib
+import socket
 import time
 
 from absl.testing import absltest
@@ -23,12 +25,102 @@ import torch
 from torch import distributed as dist
 import torch.multiprocessing as mp
 import torch_tpu
-from torch_tpu._internal.distributed.launchers import singlehost_wrapper
-from torch_tpu._internal.utils import hardware
-from torch_tpu.tests.distributed import distributed_utils
 
 from google3.pyglib.contrib.g3_multiprocessing import g3_multiprocessing
 from raiden_lib.raw_transfer.torch import torch_raw_transfer
+
+_GOOGLE_PCI_VENDOR_ID = "0x1ae0"
+_TOPOLOGY_BY_TPU_PCI_DEVICE_ID = {
+    "0x005e": {1: "1,1,1", 2: "1,2,1", 4: "2,2,1", 8: "2,2,2"},  # TPU v4
+    "0x0062": {1: "1,1,1", 2: "1,2,1", 4: "2,2,1", 8: "2,2,2"},  # TPU v5p
+    "0x0063": {1: "1,1,1", 4: "2,2,1", 8: "2,2,2"},  # TPU v5e
+    "0x006f": {1: "1,1,1", 4: "2,2,1", 8: "2,4,1"},  # TPU v6e
+    "0x0076": {2: "1,1,1,2", 4: "1,2,1,2", 8: "2,2,1,2"},  # TPU v7
+}
+
+
+def _scan_pci_tpus():
+  count = 0
+  topology_map = None
+  pci_devices = pathlib.Path("/sys/bus/pci/devices")
+  if not pci_devices.exists():
+    return 0, None
+  for device_path in pci_devices.iterdir():
+    try:
+      vendor_id = (device_path / "vendor").read_text().strip()
+      if vendor_id != _GOOGLE_PCI_VENDOR_ID:
+        continue
+      device_id = (device_path / "device").read_text().strip()
+      if device_id in _TOPOLOGY_BY_TPU_PCI_DEVICE_ID:
+        try:
+          group_id = (device_path / "iommu_group").readlink().name
+          (pathlib.Path("/dev/vfio") / group_id).stat()
+        except OSError:
+          continue
+        count += 1
+        if topology_map is None:
+          topology_map = _TOPOLOGY_BY_TPU_PCI_DEVICE_ID[device_id]
+    except OSError:
+      continue
+  return count, topology_map
+
+
+def get_tpu_device_count() -> int:
+  count, _ = _scan_pci_tpus()
+  return count
+
+
+def get_tpu_topology(world_size: int) -> str:
+  _, topology_map = _scan_pci_tpus()
+  if topology_map and world_size in topology_map:
+    return topology_map[world_size]
+  raise ValueError(f"No TPU topology found for count: {world_size}")
+
+
+def pick_unused_ports(count: int) -> list[int]:
+  ports = []
+  for _ in range(count):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("localhost", 0))
+    port = s.getsockname()[1]
+    ports.append(port)
+    s.close()
+  return ports
+
+
+def prepare_tpu_environment(world_size: int) -> None:
+  if "TORCH_TPU_XPROF_SESSION_ID" not in os.environ:
+    os.environ["TORCH_TPU_XPROF_SESSION_ID"] = str(time.time_ns())
+  if "TORCH_TPU_SLICEBUILDER_ADDRESSES" not in os.environ:
+    ports = pick_unused_ports(world_size)
+    os.environ["TORCH_TPU_SLICEBUILDER_ADDRESSES"] = ",".join(
+        [f"localhost:{p}" for p in ports]
+    )
+  if "TORCH_TPU_TOPOLOGY" not in os.environ:
+    os.environ["TORCH_TPU_TOPOLOGY"] = get_tpu_topology(world_size)
+
+
+def _worker_fn(rank: int, world_size: int, master_port: int, fn, args, kwargs):
+  os.environ["MASTER_ADDR"] = "localhost"
+  os.environ["MASTER_PORT"] = str(master_port)
+  os.environ["RANK"] = str(rank)
+  os.environ["WORLD_SIZE"] = str(world_size)
+  os.environ["LOCAL_RANK"] = str(rank)
+  os.environ["GROUP_RANK"] = "0"
+  os.environ["LOCAL_WORLD_SIZE"] = str(world_size)
+  fn(*args, **kwargs)
+
+
+def dist_run(world_size: int, fn, *args, **kwargs):
+  prepare_tpu_environment(world_size)
+  master_port = pick_unused_ports(1)[0]
+  mp.spawn(
+      _worker_fn,
+      args=(world_size, master_port, fn, args, kwargs),
+      nprocs=world_size,
+      join=True,
+  )
+
 
 SUPPORTED_DTYPES = {
     torch.float8_e4m3fn: "fp8",
@@ -403,12 +495,10 @@ class TorchRawTransferPerfTest(parameterized.TestCase):
   def test_kv_cache_perf_compare(self, dtype, num_layers, num_blocks):
     if dtype not in SUPPORTED_DTYPES:
       self.skipTest(f"Unsupported dtype: {dtype}")
-    device_count = hardware.get_tpu_device_count()
-    distributed_utils.dist_run(
+    device_count = get_tpu_device_count()
+    dist_run(
         device_count,
-        singlehost_wrapper.tpu_env_wrapper(
-            _run_kv_cache_perf_compare, world_size=device_count
-        ),
+        _run_kv_cache_perf_compare,
         dtype,
         num_layers,
         num_blocks,
@@ -425,12 +515,10 @@ class TorchRawTransferPerfTest(parameterized.TestCase):
   def test_large_shape_perf_compare(self, num_layers, shape, dtype):
     if dtype not in SUPPORTED_DTYPES:
       self.skipTest("Unsupported dtype")
-    device_count = hardware.get_tpu_device_count()
-    distributed_utils.dist_run(
+    device_count = get_tpu_device_count()
+    dist_run(
         device_count,
-        singlehost_wrapper.tpu_env_wrapper(
-            _run_large_shape_perf_compare, world_size=device_count
-        ),
+        _run_large_shape_perf_compare,
         num_layers,
         shape,
         dtype,

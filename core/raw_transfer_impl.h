@@ -40,7 +40,7 @@
 namespace raiden {
 
 using ::xla::PjRtBuffer;
-using ::xla::PjRtCopyFuture;
+using ::xla::PjRtCApiBuffer;
 using ::xla::Shape;
 
 // Pure C++ implementation of D2H transfer core

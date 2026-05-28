@@ -33,6 +33,7 @@ cc_library(
     deps = [
         "//core:raiden_manager_base",
         "//core:raw_transfer_core",
+        "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -59,7 +60,6 @@ cc_test(
     linkopts = ["-Wl,--allow-shlib-undefined"],
     deps = [
         ":weight_synchronizer_base",
-        "//third_party/python_runtime:embedded_interpreter",  # keep
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_googletest//:gtest_main",

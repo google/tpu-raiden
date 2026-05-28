@@ -36,22 +36,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-try:
-  from google3.perftools.accelerators.xprof.api.python import traceme
-except ImportError:
-
-  class traceme:
-
-    def __init__(self, name, **kwargs):
-      pass
-
-    def __enter__(self):
-      return self
-
-    def __exit__(self, *args):
-      pass
-
-
 # JAX-native open-source profiler imports loaded dynamically on export
 
 
@@ -135,8 +119,14 @@ def xprof_session_manager(dtype):
   finally:
     jax.profiler.stop_trace()
     print("*" * 80)
-    print(f"Hardware trace capture completed successfully! Target metrics logged to {log_dir}")
-    print("Visualize trace metrics natively by executing: tensorboard --logdir=" + log_dir)
+    print(
+        "Hardware trace capture completed successfully! "
+        f"Target metrics logged to {log_dir}"
+    )
+    print(
+        "Visualize trace metrics natively by executing: "
+        f"tensorboard --logdir={log_dir}"
+    )
     print("*" * 80)
 
 
@@ -172,7 +162,7 @@ def create_mesh(axis_shapes, axis_names, explicit_axis: bool = False):
 
 
 def create_single_layer_kv_cache(
-    cache_shape: Tuple,
+    cache_shape: Tuple[int, ...],
     cache_dtype: jnp.dtype,
     cache_sharding: jax.sharding.NamedSharding,
     init_zeros: bool = False,

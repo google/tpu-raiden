@@ -22,12 +22,10 @@ package(default_visibility = ["//visibility:public"])
 proto_library(
     name = "coordination_proto",
     srcs = ["coordination.proto"],
-    has_services = True,
 )
 
 py_proto_library(
     name = "coordination_py_pb2",
-    has_services = True,
     deps = [":coordination_proto"],
 )
 
