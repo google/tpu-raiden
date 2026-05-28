@@ -17,10 +17,6 @@ cc_library(
         "include/zmq.hpp",
     ],
     includes = ["include"],
-    linkopts = [
-        "-L/mnt/disks/jcgu/anaconda3/lib",
-        "-lzmq",
-        "-Wl,-rpath,/mnt/disks/jcgu/anaconda3/lib",
-    ],
+    linkopts = ["-lzmq"],
     visibility = ["//visibility:public"],
 )
