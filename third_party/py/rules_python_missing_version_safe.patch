@@ -1,0 +1,17 @@
+diff --git a/python/private/python_register_toolchains.bzl b/python/private/python_register_toolchains.bzl
+--- a/python/private/python_register_toolchains.bzl
++++ b/python/private/python_register_toolchains.bzl
+@@ -102,9 +102,12 @@
+     # list[str] of the platform names that were used
+     loaded_platforms = []
+ 
+     # dict[str repo name, tuple[str, platform_info]]
+     impl_repos = {}
++    version_info = tool_versions.get(python_version, None)
++    if not version_info:
++        return struct(impl_repos = {})
+     for platform, platform_info in platforms.items():
+-        sha256 = tool_versions[python_version]["sha256"].get(platform, None)
++        sha256 = version_info["sha256"].get(platform, None)
+         if not sha256:
+             continue

@@ -1,0 +1,118 @@
+// Copyright 2026 Google LLC.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package tpu_raiden.kv_cache.global_registry;
+
+option java_multiple_files = true;
+option java_outer_classname = "GlobalRegistry";
+
+// WARNING: This API is currently under active development and is not
+// stabilized. It is subject to backward-incompatible changes without prior
+// notice.
+service GlobalRegistryService {
+  // Registers a batch of KV cache entries.
+  rpc Register(RegisterRequest) returns (RegisterResponse) {
+    option deadline = 10.0;
+  }
+
+  // Looks up KV cache entries for a batch of prefix hashes.
+  // The lookup processes prefix hashes sequentially and stops at the first miss
+  // (a hash with no active registrations). All subsequent prefix hashes in the
+  // request are treated as misses and will be absent from the response map.
+  rpc Lookup(LookupRequest) returns (LookupResponse) {
+    option deadline = 10.0;
+  }
+
+  // Unregisters a KV cache entry (e.g. on eviction).
+  rpc Unregister(UnregisterRequest) returns (UnregisterResponse) {
+    option deadline = 10.0;
+  }
+}
+
+message KVBlockMetadata {
+  // String representing the host address. Typically in the format "IP:port" or
+  // "hostname:port". Must uniquely identify the host instance.
+  string host_address = 1;
+  // Identifier for the cache block on the host. Must be non-negative (>= 0),
+  // representing the logical index in the host's physical block allocation
+  // pool.
+  int32 block_id = 2;
+}
+
+message RegisterEntry {
+  string prefix_hash = 1;
+  KVBlockMetadata metadata = 2;
+  // Time-to-live for this registration in seconds. If positive, the entry will
+  // automatically expire and be eligible for background cleanup after this
+  // duration. During lookups, expired entries are lazily filtered out.
+  //
+  // If 0 or negative, the server's default TTL is used (which defaults to 1
+  // hour in the server implementation).
+  //
+  // Rules of thumb for setting TTL:
+  // - For stable environments with low host churn, a longer TTL (e.g., 30+
+  // minutes)
+  //   is recommended to maximize cache hit rates.
+  // - For dynamic environments or unstable hosts, a shorter TTL (e.g., 5-10
+  // minutes)
+  //   helps minimize stale lookups if a host crashes before unregistering.
+  // - The TTL should generally be larger than the expected time between cache
+  // reuses.
+  int64 ttl_seconds = 3;
+}
+
+message RegisterRequest {
+  repeated RegisterEntry entries = 1;
+}
+
+message RegisterResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message LookupRequest {
+  // Ordered list of prefix hashes, from the shortest prefix (e.g., first
+  // logical block) to the longest prefix (e.g., full prompt). Each hash is
+  // typically computed cumulatively based on the previous prefix hash, forming
+  // a dependency chain. The lookup executes sequentially and terminates at the
+  // first miss.
+  repeated string prefix_hashes = 1;
+}
+
+message LookupResponse {
+  // List of metadata corresponding to the prefix hashes in the LookupRequest.
+  // The i-th metadata corresponds to the i-th prefix hash in the request.
+  // Due to stop-on-first-miss behavior, this list will only contain entries
+  // up to the first miss (i.e., its length will be equal to the number of
+  // sequential hits before the first miss).
+  //
+  // TODO: Optimize response size when multiple blocks are on the same
+  // host (e.g., by deduplicating host addresses into a host list and using
+  // indices in results).
+  // TODO: Consider supporting replicated cache blocks (which currently
+  // overwrite each other in the registry).
+  repeated KVBlockMetadata results = 1;
+}
+
+message UnregisterRequest {
+  repeated string prefix_hashes = 1;
+  string host_address = 2;
+}
+
+message UnregisterResponse {
+  bool success = 1;
+  string error_message = 2;
+}

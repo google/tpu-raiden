@@ -1,0 +1,113 @@
+diff --git a/MODULE.bazel b/MODULE.bazel
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -1,16 +1,8 @@
++module(name = "nanobind_abseil", version = "1.0.0")
++
++bazel_dep(name = "rules_cc", version = "0.2.9")
+ bazel_dep(name = "rules_python", version = "1.7.0")
+ bazel_dep(name = "platforms", version = "1.0.0")
+ bazel_dep(name = "rules_license", version = "1.0.0")
+ bazel_dep(name = "nanobind_bazel", version = "2.9.2")
+ bazel_dep(name = "abseil-cpp", version = "20250814.1", repo_name = "com_google_absl")
+-
+-python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+-python.toolchain(python_version = "3.14", is_default = True)
+-
+-pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+-pip.parse(
+-    hub_name = "pypi",
+-    python_version = "3.14",
+-    requirements_lock = "//nanobind_abseil:requirements.txt",
+-)
+-use_repo(pip, "pypi")
+diff --git a/nanobind_abseil/BUILD b/nanobind_abseil/BUILD
+--- a/nanobind_abseil/BUILD
++++ b/nanobind_abseil/BUILD
+@@ -1,4 +1,5 @@
+ # nanobind_abseil: Nanobind bindings for absl types.
++load("@rules_cc//cc:defs.bzl", "cc_library")
+ 
+ load("@rules_license//rules:license.bzl", "license")
+@@ -110,2 +111,13 @@
+     ],
+ )
++
++cc_library(
++    name = "statusor",
++    hdrs = ["statusor.h"],
++    copts = COPTS,
++    deps = [
++        ":status",
++        "@com_google_absl//absl/status:statusor",
++        "@nanobind",
++    ],
++)
+diff --git a/nanobind_abseil/statusor.h b/nanobind_abseil/statusor.h
+new file mode 100644
+--- /dev/null
++++ b/nanobind_abseil/statusor.h
+@@ -0,0 +1,63 @@
++/* Copyright 2026 Google LLC
++ 
++ Licensed under the Apache License, Version 2.0 (the "License");
++ you may not use this file except in compliance with the License.
++ You may obtain a copy of the License at
++ 
++     http://www.apache.org/licenses/LICENSE-2.0
++ 
++ Unless required by applicable law or agreed to in writing, software
++ distributed under the License is distributed on an "AS IS" BASIS,
++ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ See the License for the specific language governing permissions and
++ limitations under the License.
++ ==============================================================================*/
++ 
++#ifndef NANOBIND_ABSEIL_STATUSOR_H_
++#define NANOBIND_ABSEIL_STATUSOR_H_
++ 
++#include <cstdint>
++#include <utility>
++ 
++#include "absl/status/statusor.h"
++#include "nanobind/nanobind.h"
++#include "nanobind_abseil/status.h"
++ 
++namespace nanobind {
++namespace detail {
++ 
++// A Nanobind type caster for absl::StatusOr<T>. This type caster allows
++// Nanobind to automatically convert a non-OK return status to a Python
++// exception, or return the value if the status is OK.
++template <typename T>
++struct type_caster<absl::StatusOr<T>> {
++  using ValueCaster = make_caster<T>;
++ 
++  NB_TYPE_CASTER(absl::StatusOr<T>,
++                 const_name("StatusOr[") + ValueCaster::Name + const_name("]"));
++ 
++  bool from_python(handle src, uint8_t flags, cleanup_list* cleanup) noexcept {
++    ValueCaster caster;
++    if (!caster.from_python(src, flags, cleanup)) {
++      return false;
++    }
++    value = absl::StatusOr<T>(std::move(caster).operator cast_t<T>());
++    return true;
++  }
++ 
++  template <typename U>
++  static handle from_cpp(U&& status_or, rv_policy policy,
++                         cleanup_list* cleanup) noexcept {
++    if (!status_or.ok()) {
++      PyErr_Format(PyExc_RuntimeError, "absl::StatusOr not ok: %s",
++                   status_or.status().ToString().c_str());
++      return nullptr;
++    }
++    return ValueCaster::from_cpp(forward_like_<U>(*status_or), policy, cleanup);
++  }
++};
++ 
++} // namespace detail
++} // namespace nanobind
++ 
++#endif // NANOBIND_ABSEIL_STATUSOR_H_

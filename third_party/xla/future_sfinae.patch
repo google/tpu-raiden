@@ -1,0 +1,32 @@
+--- a/xla/tsl/concurrency/future.h
++++ b/xla/tsl/concurrency/future.h
+@@ -743,9 +743,10 @@
+   }
+ 
+   // Flattens a `Future<Future<T>>` to `Future<T>`
+-  template <typename U = T, std::enable_if_t<internal::IsFuture<U>::value &&
+-                                             !is_move_only>* = nullptr>
+-  [[nodiscard]] Future<internal::future_type_t<typename U::value_type>>
++  template <typename U = T>
++  [[nodiscard]] std::enable_if_t<
++      internal::IsFuture<U>::value && !Future<T>::is_move_only,
++      Future<internal::future_type_t<typename U::value_type>>>
+   Flatten() const&;
+ 
+   // Flattens a `Future<Future<T>>` to `Future<T>`
+@@ -1273,10 +1274,11 @@
+ }
+ 
+ template <typename T>
+-template <typename U, std::enable_if_t<internal::IsFuture<U>::value &&
+-                                       !Future<T>::is_move_only>*>
+-Future<internal::future_type_t<typename U::value_type>> Future<T>::Flatten()
+-    const& {
++template <typename U>
++std::enable_if_t<
++    internal::IsFuture<U>::value && !Future<T>::is_move_only,
++    Future<internal::future_type_t<typename U::value_type>>>
++Future<T>::Flatten() const& {
+   using R = internal::future_type_t<typename U::value_type>;
+   auto [promise, future] = MakePromise<R>();
+ 
