@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -74,7 +75,8 @@ KVCacheManagerBase::KVCacheManagerBase(
     int block_size, std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate,
     std::optional<std::vector<const uint8_t*>> external_host_ptrs,
-    bool unsafe_skip_buffer_lock, int parallelism)
+    bool unsafe_skip_buffer_lock, int parallelism,
+    HostBufferAllocator host_allocator)
     : RaidenManagerBase(layer_buffers.size(),
                         layer_buffers.empty() ? 0 : layer_buffers[0].size(),
                         layer_buffers.empty() ? 0
@@ -137,6 +139,17 @@ KVCacheManagerBase::KVCacheManagerBase(
         }
         shard_info.host_size = alloc_size;
         shard_idx++;
+      } else if (host_allocator) {
+        HostBufferAllocation allocation = host_allocator(alloc_size);
+        if (alloc_size > 0 && allocation.ptr == nullptr) {
+          throw std::runtime_error("Host allocator returned null buffer");
+        }
+        if (allocation.size < alloc_size) {
+          throw std::runtime_error("Host allocator returned undersized buffer");
+        }
+        shard_info.host_ptr = allocation.ptr;
+        shard_info.host_size = allocation.size;
+        shard_info.host_owner = std::move(allocation.owner);
       } else {
         void* ptr = nullptr;
         if (alloc_size > 0) {
@@ -170,7 +183,8 @@ KVCacheManagerBase::KVCacheManagerBase(
 KVCacheManagerBase::KVCacheManagerBase(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
     int block_size, std::optional<int> local_port,
-    std::optional<int> host_blocks_to_allocate, int parallelism)
+    std::optional<int> host_blocks_to_allocate, int parallelism,
+    HostBufferAllocator host_allocator)
     : RaidenManagerBase(num_layers, num_shards, slice_byte_size, block_size,
                         local_port, parallelism) {
   int total_blocks = host_blocks_to_allocate.value_or(0);
@@ -186,18 +200,31 @@ KVCacheManagerBase::KVCacheManagerBase(
 
       int num_host_blocks = host_blocks_to_allocate.value_or(0);
       size_t alloc_size = num_host_blocks * block_size_ * slice_byte_size_;
-      void* ptr = nullptr;
-      if (alloc_size > 0) {
-        if (posix_memalign(&ptr, 64, alloc_size) != 0) {
-          throw std::runtime_error("Failed to allocate host buffer");
+      if (host_allocator) {
+        HostBufferAllocation allocation = host_allocator(alloc_size);
+        if (alloc_size > 0 && allocation.ptr == nullptr) {
+          throw std::runtime_error("Host allocator returned null buffer");
         }
-        std::memset(ptr, 0, alloc_size);
+        if (allocation.size < alloc_size) {
+          throw std::runtime_error("Host allocator returned undersized buffer");
+        }
+        shard_info.host_ptr = allocation.ptr;
+        shard_info.host_size = allocation.size;
+        shard_info.host_owner = std::move(allocation.owner);
+      } else {
+        void* ptr = nullptr;
+        if (alloc_size > 0) {
+          if (posix_memalign(&ptr, 64, alloc_size) != 0) {
+            throw std::runtime_error("Failed to allocate host buffer");
+          }
+          std::memset(ptr, 0, alloc_size);
+        }
+        shard_info.owned_host_buffer =
+            std::unique_ptr<uint8_t[], void (*)(void*)>(
+                static_cast<uint8_t*>(ptr), [](void* p) { free(p); });
+        shard_info.host_ptr = shard_info.owned_host_buffer.get();
+        shard_info.host_size = alloc_size;
       }
-      shard_info.owned_host_buffer =
-          std::unique_ptr<uint8_t[], void (*)(void*)>(
-              static_cast<uint8_t*>(ptr), [](void* p) { free(p); });
-      shard_info.host_ptr = shard_info.owned_host_buffer.get();
-      shard_info.host_size = alloc_size;
 
       layer_info.shards.push_back(std::move(shard_info));
     }
@@ -683,6 +710,81 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dFrom(
   raiden::PjRtCopyFuture future({});
   future.Append(std::move(futures), shard_hold);
   return future;
+}
+
+absl::Status KVCacheManagerBase::ConfigureHostStagingSlots(
+    int64_t num_slots, int64_t max_major_per_slot) {
+  if (num_slots <= 0) {
+    return absl::InvalidArgumentError("num_slots must be positive");
+  }
+  if (max_major_per_slot <= 0) {
+    return absl::InvalidArgumentError("max_major_per_slot must be positive");
+  }
+  const size_t required_size =
+      static_cast<size_t>(num_slots) *
+      static_cast<size_t>(max_major_per_slot) * slice_byte_size_;
+  for (const auto& layer_info : layers_) {
+    for (const auto& shard_info : layer_info.shards) {
+      if (shard_info.host_size < required_size) {
+        return absl::InvalidArgumentError(
+            "Host staging buffer is too small for requested slots");
+      }
+    }
+  }
+  staging_num_slots_ = num_slots;
+  staging_max_major_per_slot_ = max_major_per_slot;
+  return absl::OkStatus();
+}
+
+absl::StatusOr<KVCacheHostSpan> KVCacheManagerBase::HostSpan(
+    size_t layer_idx, size_t shard_idx, int64_t slot_idx, int64_t num_major) {
+  if (staging_num_slots_ <= 0 || staging_max_major_per_slot_ <= 0) {
+    return absl::FailedPreconditionError(
+        "Host staging slots have not been configured");
+  }
+  if (slot_idx < 0 || slot_idx >= staging_num_slots_) {
+    return absl::OutOfRangeError("slot_idx out of range");
+  }
+  if (num_major < 0 || num_major > staging_max_major_per_slot_) {
+    return absl::OutOfRangeError("num_major out of range");
+  }
+  if (layer_idx >= layers_.size() ||
+      shard_idx >= layers_[layer_idx].shards.size()) {
+    return absl::OutOfRangeError("HostSpan layer or shard index out of range");
+  }
+  const int64_t base_major = slot_idx * staging_max_major_per_slot_;
+  const size_t byte_offset =
+      static_cast<size_t>(base_major) * slice_byte_size_;
+  const size_t nbytes = static_cast<size_t>(num_major) * slice_byte_size_;
+  const auto& shard_info = layers_[layer_idx].shards[shard_idx];
+  if (byte_offset + nbytes > shard_info.host_size) {
+    return absl::OutOfRangeError("HostSpan exceeds host staging buffer");
+  }
+  KVCacheHostSpan span;
+  span.ptr = const_cast<uint8_t*>(shard_info.host_ptr) + byte_offset;
+  span.nbytes = nbytes;
+  span.slot_idx = slot_idx;
+  span.base_major = base_major;
+  span.num_major = num_major;
+  span.layer_idx = layer_idx;
+  span.shard_idx = shard_idx;
+  return span;
+}
+
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hToHostSlot(
+    size_t layer_idx, int64_t slot_idx, int64_t num_major,
+    const KVCacheCopySpec& copy_spec, size_t shard_idx) {
+  TF_ASSIGN_OR_RETURN(KVCacheHostSpan span,
+                      HostSpan(layer_idx, shard_idx, slot_idx, num_major));
+  return D2hTo(layer_idx, span.ptr, span.nbytes, copy_spec, shard_idx);
+}
+
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dFromHostSlot(
+    size_t layer_idx, int64_t slot_idx, int64_t num_major,
+    const KVCacheCopySpec& copy_spec, size_t shard_idx) {
+  TF_ASSIGN_OR_RETURN(KVCacheHostSpan span,
+                      HostSpan(layer_idx, shard_idx, slot_idx, num_major));
+  return H2dFrom(layer_idx, span.ptr, span.nbytes, copy_spec, shard_idx);
 }
 
 }  // namespace kv_cache

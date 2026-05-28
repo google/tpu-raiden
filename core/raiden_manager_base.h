@@ -70,6 +70,7 @@ class RaidenManagerBase {
     size_t device_size = 0;
     std::unique_ptr<uint8_t[], void (*)(void*)> owned_host_buffer = {
         nullptr, [](void*) {}};
+    std::shared_ptr<void> host_owner;
   };
 
   struct LayerInfoBase {

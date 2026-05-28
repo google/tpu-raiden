@@ -17,6 +17,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -40,6 +41,24 @@ struct KVCacheCopySpec {
   std::vector<int64_t> sizes;
 };
 
+struct KVCacheHostSpan {
+  uint8_t* ptr = nullptr;
+  size_t nbytes = 0;
+  int64_t slot_idx = -1;
+  int64_t base_major = 0;
+  int64_t num_major = 0;
+  size_t layer_idx = 0;
+  size_t shard_idx = 0;
+};
+
+struct HostBufferAllocation {
+  uint8_t* ptr = nullptr;
+  size_t size = 0;
+  std::shared_ptr<void> owner;
+};
+
+using HostBufferAllocator = std::function<HostBufferAllocation(size_t)>;
+
 class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
  public:
   // Core C++ Constructor wrapping raw PJRT buffers directly (used by JAX and
@@ -50,14 +69,16 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<int> host_blocks_to_allocate = std::nullopt,
       std::optional<std::vector<const uint8_t*>> external_host_ptrs =
           std::nullopt,
-      bool unsafe_skip_buffer_lock = false, int parallelism = 1);
+      bool unsafe_skip_buffer_lock = false, int parallelism = 1,
+      HostBufferAllocator host_allocator = nullptr);
 
   // Standard CPU-only Constructor for remote workers E2E
   KVCacheManagerBase(size_t num_layers, size_t num_shards,
                      size_t slice_byte_size, int block_size = 1,
                      std::optional<int> local_port = std::nullopt,
                      std::optional<int> host_blocks_to_allocate = std::nullopt,
-                     int parallelism = 1);
+                     int parallelism = 1,
+                     HostBufferAllocator host_allocator = nullptr);
 
   ~KVCacheManagerBase() override;
 
@@ -124,6 +145,21 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       size_t layer_idx, const void* src_host_ptr, size_t src_size,
       const KVCacheCopySpec& copy_spec, size_t shard_idx = 0);
 
+  absl::Status ConfigureHostStagingSlots(int64_t num_slots,
+                                         int64_t max_major_per_slot);
+
+  absl::StatusOr<KVCacheHostSpan> HostSpan(size_t layer_idx, size_t shard_idx,
+                                           int64_t slot_idx,
+                                           int64_t num_major);
+
+  absl::StatusOr<raiden::PjRtCopyFuture> D2hToHostSlot(
+      size_t layer_idx, int64_t slot_idx, int64_t num_major,
+      const KVCacheCopySpec& copy_spec, size_t shard_idx = 0);
+
+  absl::StatusOr<raiden::PjRtCopyFuture> H2dFromHostSlot(
+      size_t layer_idx, int64_t slot_idx, int64_t num_major,
+      const KVCacheCopySpec& copy_spec, size_t shard_idx = 0);
+
   void SetExternalHostBuffer(
       const std::vector<raiden::BufferHoldAndAlias>& buffer_holds);
 
@@ -131,6 +167,8 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   const PJRT_Api* c_api_ = nullptr;
   const PJRT_RawBuffer_Extension* extension_ = nullptr;
   size_t physical_size_ = 0;
+  int64_t staging_num_slots_ = 0;
+  int64_t staging_max_major_per_slot_ = 0;
 
   std::unique_ptr<LogicalBlockManager> block_manager_;
 

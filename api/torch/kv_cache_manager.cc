@@ -15,12 +15,15 @@
 #include "api/torch/kv_cache_manager.h"
 
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
+#include "ATen/Functions.h"
 #include "ATen/core/TensorBody.h"
 #include "absl/status/statusor.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -96,6 +99,23 @@ std::optional<std::vector<const uint8_t*>> CastExternalPointers(
   return cast_ptrs;
 }
 
+kv_cache::HostBufferAllocator TorchPinnedHostAllocator() {
+  return [](size_t size_bytes) -> kv_cache::HostBufferAllocation {
+    if (size_bytes > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+      throw std::invalid_argument("Host staging allocation is too large");
+    }
+    at::Tensor host = at::empty(
+        {static_cast<int64_t>(size_bytes)},
+        at::TensorOptions().dtype(at::kByte).device(at::kCPU).pinned_memory(true));
+    auto owner = std::make_shared<at::Tensor>(std::move(host));
+    kv_cache::HostBufferAllocation allocation;
+    allocation.ptr = static_cast<uint8_t*>(owner->data_ptr());
+    allocation.size = static_cast<size_t>(owner->nbytes());
+    allocation.owner = owner;
+    return allocation;
+  };
+}
+
 }  // namespace
 
 KVCacheManager::KVCacheManager(
@@ -106,7 +126,7 @@ KVCacheManager::KVCacheManager(
     : kv_cache::KVCacheManagerBase(
           UnpackTorchTensors(device_tensors), block_size, local_port,
           host_blocks_to_allocate, CastExternalPointers(external_host_ptrs),
-          unsafe_skip_buffer_lock, parallelism) {}
+          unsafe_skip_buffer_lock, parallelism, TorchPinnedHostAllocator()) {}
 
 KVCacheManager::~KVCacheManager() = default;
 
