@@ -1,3 +1,4 @@
+#!/bin/bash
 # Copyright 2026 Google LLC.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,19 +13,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-#!/bin/bash
+# Run the JAX raw_transfer tests (raiden_lib/raw_transfer/jax):
+#   1. raw_transfer_test.py       -- correctness unit tests
+#   2. raw_transfer_perf_test.py  -- D2H/H2D benchmark vs jax.device_put
+#
+# Requires TPU devices and a built raw_transfer.so (run build_raw_transfer.sh first).
+#
+# Set PERF_ONLY=1 to skip the unit tests and run only the benchmark.
 
 set -e
 
 WORKSPACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
+cd "${WORKSPACE_DIR}"
 
-# Point to the directory containing the compiled raw_transfer.so and source files
-# We also include the workspace parent dir to map absolute 'google3.third_party...' python imports!
+# Resolve imports of the form `from raiden_lib.raw_transfer.jax import raw_transfer`:
+#   - WORKSPACE_DIR  -> source tree (the in-tree raw_transfer.so copied by build)
+#   - bazel-bin      -> freshly built artifacts, if not yet copied into the tree
 export PYTHONPATH="${WORKSPACE_DIR}:${WORKSPACE_DIR}/bazel-bin:${PYTHONPATH}"
 
+if [[ "${PERF_ONLY:-0}" != "1" ]]; then
+  echo "=== [1/2] Unit tests: raiden_lib/raw_transfer/jax/raw_transfer_test.py ==="
+  python -m raiden_lib.raw_transfer.jax.raw_transfer_test 2>&1 \
+    | tee "${WORKSPACE_DIR}/test.log"
+  echo ""
+fi
 
-# Change to the tests directory to avoid Python's local directory import shadowing
-cd "${WORKSPACE_DIR}/raiden_lib/raw_transfer/jax"
+echo "=== [2/2] Benchmark: raiden_lib/raw_transfer/jax/raw_transfer_perf_test.py ==="
+# Telemetry is appended to ${TELEMETRY_LOG_PATH:-/tmp/raw_perf_performance.jsonl}.
+python -m raiden_lib.raw_transfer.jax.raw_transfer_perf_test \
+  --telemetry_log_path="${TELEMETRY_LOG_PATH:-/tmp/raw_perf_performance.jsonl}" \
+  ${BENCHMARK_RUNS:+--benchmark_runs="${BENCHMARK_RUNS}"} 2>&1 \
+  | tee "${WORKSPACE_DIR}/perf_test.log"
 
-echo "=== Running: raw_transfer_test.py ==="
-python raw_transfer_test.py 2>&1 | tee "${WORKSPACE_DIR}/test.log"
+echo ""
+echo "=== Done ==="

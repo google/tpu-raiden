@@ -19,14 +19,31 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 DEFAULT_WORKSPACE_DIR="$SCRIPT_DIR"
 WORKSPACE_DIR="${WORKSPACE_DIR:-${DEFAULT_WORKSPACE_DIR}}"
-BAZEL_CACHE_BASE="${BAZEL_CACHE_DIR:-${HOME}/.bazel_cache}"
+BAZEL_CACHE_BASE="${BAZEL_CACHE_DIR:-/mnt/disks/jcgu/bazel_cache}"
 BAZEL_DISK_CACHE="${BAZEL_CACHE_BASE}/disk_cache"
 BAZEL_REPO_CACHE="${BAZEL_CACHE_BASE}/repo_cache"
 
 echo "=== Navigating to workspace directory ==="
 cd "${WORKSPACE_DIR}"
 
-# 0. Set up standalone Bazel environment based on .bazelversion in /tmp
+# 0a. Ensure libzmq is installed system-wide.
+# //third_party/zeromq:cppzmq links against -lzmq (and headers at
+# /usr/include/zmq.h are read at compile time of disagg_kv_cache_manager_base).
+# Idempotent: only installs if missing.
+if [[ ! -f /usr/include/zmq.h ]] || ! ldconfig -p 2>/dev/null | grep -q "libzmq.so"; then
+  echo "=== Installing system libzmq (libzmq3-dev) ==="
+  if command -v sudo >/dev/null 2>&1; then
+    sudo apt-get update -qq
+    sudo apt-get install -y libzmq3-dev
+  else
+    apt-get update -qq
+    apt-get install -y libzmq3-dev
+  fi
+else
+  echo "=== libzmq already installed; skipping apt-get install ==="
+fi
+
+# 0b. Set up standalone Bazel environment based on .bazelversion in /tmp
 BAZEL_VERSION="7.7.0"
 VERSION_FILE="${WORKSPACE_DIR}/.bazelversion"
 if [[ -f "${VERSION_FILE}" ]]; then
