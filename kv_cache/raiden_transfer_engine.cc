@@ -156,15 +156,6 @@ int ConnectTcp(const std::string& endpoint) {
   return fd;
 }
 
-void ValidateCpuTensor(const at::Tensor& tensor, const char* role) {
-  if (!tensor.device().is_cpu()) {
-    throw std::invalid_argument(std::string(role) + " must be a CPU tensor");
-  }
-  if (!tensor.is_contiguous()) {
-    throw std::invalid_argument(std::string(role) + " must be contiguous");
-  }
-}
-
 std::vector<std::vector<at::Tensor>> SingleShardLayers(
     const TensorList& kv_caches) {
   std::vector<std::vector<at::Tensor>> layers;
@@ -217,7 +208,7 @@ class RaidenTransferFuture {
 
 struct RaidenStageResult {
   std::shared_ptr<RaidenTransferFuture> future;
-  TensorList host_views;
+  std::vector<KVCacheHostSpan> host_spans;
   int64_t total_bytes = 0;
   int64_t copy_segments = 0;
 };
@@ -232,6 +223,7 @@ class RaidenTransferEngine {
         local_control_port_(static_cast<int>(local_control_port)),
         local_data_port_(static_cast<int>(local_control_port) + 1),
         max_blocks_(max_blocks),
+        num_slots_(num_slots),
         timeout_s_(timeout_s),
         unsafe_skip_buffer_lock_(unsafe_skip_buffer_lock) {
     if (max_blocks_ <= 0) {
@@ -241,7 +233,6 @@ class RaidenTransferEngine {
       throw std::invalid_argument("num_slots must be positive");
     }
     RegisterKvCache(kv_caches);
-    AllocateHostSlots(num_slots);
     transport_ = std::make_unique<tpu_raiden::transport::SocketTransport>(
         local_data_port_);
     StartControlServer();
@@ -251,10 +242,23 @@ class RaidenTransferEngine {
 
   std::vector<int64_t> RegisterKvCache(const TensorList& kv_caches) {
     kv_caches_ = kv_caches;
+    if (num_slots_ <= 0) {
+      throw std::invalid_argument("num_slots must be configured first");
+    }
+    if (max_blocks_ >
+        std::numeric_limits<int>::max() / std::max<int64_t>(num_slots_, 1)) {
+      throw std::invalid_argument("host staging block count exceeds int range");
+    }
+    const int host_blocks_to_allocate =
+        static_cast<int>(num_slots_ * max_blocks_);
     kv_transfer_ = std::make_unique<tpu_raiden::torch::KVCacheManager>(
         SingleShardLayers(kv_caches_), /*block_size=*/1,
-        /*local_port=*/std::nullopt, /*host_blocks_to_allocate=*/std::nullopt,
+        /*local_port=*/std::nullopt, host_blocks_to_allocate,
         /*external_host_ptrs=*/std::nullopt, unsafe_skip_buffer_lock_);
+    CheckStatus("configure KVCacheManager host staging slots",
+                kv_transfer_->ConfigureHostStagingSlots(num_slots_,
+                                                        max_blocks_));
+    InitializeSlotPool(num_slots_);
 
     std::vector<int64_t> region_ids;
     region_ids.reserve(kv_caches_.size());
@@ -273,7 +277,8 @@ class RaidenTransferEngine {
   py::tuple StageD2H(int64_t slot_idx, int64_t num_blocks,
                      const std::vector<int64_t>& block_ids) {
     RaidenStageResult result = IssueD2H(slot_idx, num_blocks, block_ids);
-    return py::make_tuple(result.future, kv_caches_, result.host_views,
+    return py::make_tuple(result.future, kv_caches_,
+                          HostSpanMemoryViews(result.host_spans),
                           result.total_bytes);
   }
 
@@ -303,11 +308,7 @@ class RaidenTransferEngine {
     if (rank != tp_rank_) {
       throw std::invalid_argument("Raiden internal slots are per-rank only");
     }
-    py::list views;
-    for (const auto& view : LayerViews(slot_idx, num_blocks)) {
-      views.append(view);
-    }
-    return views;
+    return HostSpanMemoryViews(LayerSpans(slot_idx, num_blocks));
   }
 
   void UnpackRankLayers(int64_t slot_idx, int64_t rank, int64_t num_blocks,
@@ -315,22 +316,26 @@ class RaidenTransferEngine {
     if (rank != tp_rank_) {
       throw std::invalid_argument("Raiden internal slots are per-rank only");
     }
-    TensorList views = LayerViews(slot_idx, num_blocks);
+    std::vector<KVCacheHostSpan> spans = LayerSpans(slot_idx, num_blocks);
     size_t idx = 0;
     for (py::handle item : layer_buffers) {
-      if (idx >= views.size()) {
+      if (idx >= spans.size()) {
         throw std::invalid_argument("too many layer buffers");
       }
       py::buffer source = py::reinterpret_borrow<py::buffer>(item);
       py::buffer_info info = source.request();
-      if (static_cast<int64_t>(info.size * info.itemsize) !=
-          views[idx].nbytes()) {
+      if (info.size < 0 || info.itemsize < 0) {
+        throw std::invalid_argument("layer buffer has invalid size");
+      }
+      const size_t source_bytes =
+          static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
+      if (source_bytes != spans[idx].nbytes) {
         throw std::invalid_argument("layer buffer size mismatch");
       }
-      std::memcpy(views[idx].data_ptr(), info.ptr, views[idx].nbytes());
+      std::memcpy(spans[idx].ptr, info.ptr, spans[idx].nbytes);
       ++idx;
     }
-    if (idx != views.size()) {
+    if (idx != spans.size()) {
       throw std::invalid_argument("too few layer buffers");
     }
   }
@@ -455,21 +460,20 @@ class RaidenTransferEngine {
             control_setup_ms =
                 DurationMs(control_start, std::chrono::steady_clock::now());
 
-            TensorList local_views =
-                LayerViews(slot_idx,
+            std::vector<KVCacheHostSpan> local_spans =
+                LayerSpans(slot_idx,
                            static_cast<int64_t>(load_plan.num_blocks));
-            if (response.num_layers != local_views.size()) {
+            if (response.num_layers != local_spans.size()) {
               throw std::runtime_error("remote layer descriptor count mismatch");
             }
-            for (size_t i = 0; i < local_views.size(); ++i) {
+            for (size_t i = 0; i < local_spans.size(); ++i) {
               PullLayerDescriptor layer;
               const auto descriptor_start = std::chrono::steady_clock::now();
               CheckStatus("control stream layer descriptor read",
                           ReadExact(control_fd, &layer, sizeof(layer)));
               descriptor_ms += DurationMs(
                   descriptor_start, std::chrono::steady_clock::now());
-              if (layer.len !=
-                  static_cast<uint64_t>(local_views[i].nbytes())) {
+              if (layer.len != static_cast<uint64_t>(local_spans[i].nbytes)) {
                 throw std::runtime_error(
                     "remote layer descriptor size mismatch");
               }
@@ -477,8 +481,7 @@ class RaidenTransferEngine {
               h2h_bytes += static_cast<int64_t>(layer.len);
               mlcl::Request request;
               request.op = mlcl::Op::kRead;
-              request.laddr =
-                  reinterpret_cast<uint8_t*>(local_views[i].data_ptr());
+              request.laddr = local_spans[i].ptr;
               request.raddr = reinterpret_cast<uint8_t*>(layer.addr);
               request.len = layer.len;
               const auto h2h_start = std::chrono::steady_clock::now();
@@ -499,7 +502,8 @@ class RaidenTransferEngine {
                   DurationMs(h2h_start, std::chrono::steady_clock::now());
               if (load_plan.RequiresHostReorder()) {
                 const auto reorder_start = std::chrono::steady_clock::now();
-                ReorderCompactBlocks(local_views[i], load_plan.host_dst_to_src);
+                ReorderCompactBlocks(local_spans[i],
+                                     load_plan.host_dst_to_src);
                 host_reorder_ms +=
                     DurationMs(reorder_start, std::chrono::steady_clock::now());
               }
@@ -671,10 +675,6 @@ class RaidenTransferEngine {
 
   struct PendingOperation {
     std::shared_ptr<RaidenTransferFuture> future;
-  };
-
-  struct HostSlot {
-    TensorList layers;
   };
 
   struct SendEntry {
@@ -895,19 +895,17 @@ class RaidenTransferEngine {
     return plan;
   }
 
-  static void ReorderCompactBlocks(at::Tensor& compact_blocks,
+  static void ReorderCompactBlocks(const KVCacheHostSpan& compact_blocks,
                                    const std::vector<size_t>& dst_to_src) {
     if (dst_to_src.empty()) return;
-    ValidateCpuTensor(compact_blocks, "Host reorder view");
     const size_t num_blocks = dst_to_src.size();
-    if (num_blocks == 0 || compact_blocks.nbytes() % num_blocks != 0) {
+    if (num_blocks == 0 || compact_blocks.nbytes % num_blocks != 0) {
       throw std::invalid_argument("host reorder view has invalid block layout");
     }
     const size_t block_bytes =
-        static_cast<size_t>(compact_blocks.nbytes()) / num_blocks;
-    const auto total_bytes = static_cast<size_t>(compact_blocks.nbytes());
-    const uint8_t* src =
-        reinterpret_cast<const uint8_t*>(compact_blocks.data_ptr());
+        static_cast<size_t>(compact_blocks.nbytes) / num_blocks;
+    const size_t total_bytes = compact_blocks.nbytes;
+    const uint8_t* src = compact_blocks.ptr;
     std::vector<uint8_t> reordered(total_bytes);
     for (size_t dst_idx = 0; dst_idx < num_blocks; ++dst_idx) {
       const size_t src_idx = dst_to_src[dst_idx];
@@ -917,26 +915,41 @@ class RaidenTransferEngine {
       std::memcpy(reordered.data() + dst_idx * block_bytes,
                   src + src_idx * block_bytes, block_bytes);
     }
-    std::memcpy(compact_blocks.data_ptr(), reordered.data(), total_bytes);
+    std::memcpy(compact_blocks.ptr, reordered.data(), total_bytes);
   }
 
-  TensorList LayerViews(int64_t slot_idx, int64_t num_blocks) {
-    if (slot_idx < 0 || slot_idx >= static_cast<int64_t>(host_slots_.size())) {
-      throw std::out_of_range("slot_idx out of range");
+  std::vector<KVCacheHostSpan> LayerSpans(int64_t slot_idx,
+                                          int64_t num_blocks) {
+    if (!kv_transfer_) {
+      throw std::runtime_error("KV cache manager is not registered");
     }
     if (num_blocks < 0 || num_blocks > max_blocks_) {
       throw std::out_of_range("num_blocks out of range");
     }
-    TensorList host_views;
-    host_views.reserve(kv_caches_.size());
-    for (size_t layer_idx = 0; layer_idx < host_slots_[slot_idx].layers.size();
+    std::vector<KVCacheHostSpan> spans;
+    spans.reserve(kv_transfer_->num_layers());
+    for (size_t layer_idx = 0; layer_idx < kv_transfer_->num_layers();
          ++layer_idx) {
-      at::Tensor tensor =
-          host_slots_[slot_idx].layers[layer_idx].narrow(0, 0, num_blocks);
-      ValidateCpuTensor(tensor, "Host staging view");
-      host_views.push_back(std::move(tensor));
+      spans.push_back(ValueOrThrow(
+          "Failed to get KVCacheManager host staging span",
+          kv_transfer_->HostSpan(layer_idx, /*shard_idx=*/0, slot_idx,
+                                 num_blocks)));
     }
-    return host_views;
+    return spans;
+  }
+
+  static py::list HostSpanMemoryViews(
+      const std::vector<KVCacheHostSpan>& host_spans) {
+    py::list views;
+    for (const KVCacheHostSpan& span : host_spans) {
+      if (span.nbytes >
+          static_cast<size_t>(std::numeric_limits<ssize_t>::max())) {
+        throw std::overflow_error("host span is too large for Python view");
+      }
+      views.append(py::memoryview::from_memory(
+          span.ptr, static_cast<ssize_t>(span.nbytes)));
+    }
+    return views;
   }
 
   RaidenStageResult IssueD2H(int64_t slot_idx, int64_t num_blocks,
@@ -946,18 +959,17 @@ class RaidenTransferEngine {
     }
     CopySpec copy_spec = Offsets(block_ids, /*source_is_compact=*/false);
     KVCacheCopySpec transfer_spec = ToKVCacheCopySpec(copy_spec);
-    TensorList host_views = LayerViews(slot_idx, num_blocks);
+    std::vector<KVCacheHostSpan> host_spans = LayerSpans(slot_idx, num_blocks);
     auto future = std::make_shared<RaidenTransferFuture>();
     int64_t total_bytes = 0;
     for (size_t i = 0; i < kv_transfer_->num_layers(); ++i) {
-      total_bytes += static_cast<int64_t>(host_views[i].nbytes());
+      total_bytes += static_cast<int64_t>(host_spans[i].nbytes);
       future->Add(ValueOrThrow("Failed to issue D2H transfer",
-                               kv_transfer_->D2hTo(
-                                   i, host_views[i].data_ptr(),
-                                   host_views[i].nbytes(), transfer_spec)));
+                               kv_transfer_->D2hToHostSlot(
+                                   i, slot_idx, num_blocks, transfer_spec)));
     }
     return {.future = std::move(future),
-            .host_views = std::move(host_views),
+            .host_spans = std::move(host_spans),
             .total_bytes = total_bytes,
             .copy_segments = static_cast<int64_t>(copy_spec.sizes.size())};
   }
@@ -970,18 +982,17 @@ class RaidenTransferEngine {
     }
     CopySpec copy_spec = Offsets(local_block_ids, /*source_is_compact=*/true);
     KVCacheCopySpec transfer_spec = ToKVCacheCopySpec(copy_spec);
-    TensorList host_views = LayerViews(slot_idx, num_blocks);
+    std::vector<KVCacheHostSpan> host_spans = LayerSpans(slot_idx, num_blocks);
     auto future = std::make_shared<RaidenTransferFuture>();
     int64_t total_bytes = 0;
     for (size_t i = 0; i < kv_transfer_->num_layers(); ++i) {
-      total_bytes += static_cast<int64_t>(host_views[i].nbytes());
+      total_bytes += static_cast<int64_t>(host_spans[i].nbytes);
       future->Add(ValueOrThrow("Failed to issue H2D transfer",
-                               kv_transfer_->H2dFrom(
-                                   i, host_views[i].data_ptr(),
-                                   host_views[i].nbytes(), transfer_spec)));
+                               kv_transfer_->H2dFromHostSlot(
+                                   i, slot_idx, num_blocks, transfer_spec)));
     }
     return {.future = std::move(future),
-            .host_views = std::move(host_views),
+            .host_spans = std::move(host_spans),
             .total_bytes = total_bytes,
             .copy_segments = static_cast<int64_t>(copy_spec.sizes.size())};
   }
@@ -997,28 +1008,9 @@ class RaidenTransferEngine {
            std::chrono::milliseconds(static_cast<int64_t>(timeout_s_ * 1000.0));
   }
 
-  void AllocateHostSlots(int64_t num_slots) {
-    if (kv_caches_.empty()) return;
-    host_slots_.clear();
+  void InitializeSlotPool(int64_t num_slots) {
     free_slots_.clear();
-    host_slots_.reserve(num_slots);
     for (int64_t slot = 0; slot < num_slots; ++slot) {
-      HostSlot host_slot;
-      host_slot.layers.reserve(kv_caches_.size());
-      for (const auto& kv : kv_caches_) {
-        std::vector<int64_t> shape;
-        shape.reserve(kv.dim());
-        shape.push_back(max_blocks_);
-        for (int64_t d = 1; d < kv.dim(); ++d) {
-          shape.push_back(kv.size(d));
-        }
-        at::Tensor host = at::empty(
-            shape,
-            kv.options().device(c10::Device(c10::kCPU)).pinned_memory(true));
-        ValidateCpuTensor(host, "Host staging allocation");
-        host_slot.layers.push_back(std::move(host));
-      }
-      host_slots_.push_back(std::move(host_slot));
       free_slots_.push_back(slot);
     }
   }
@@ -1050,17 +1042,12 @@ class RaidenTransferEngine {
 
   PullLayerDescriptor LayerDescriptor(int64_t slot_idx, int64_t num_blocks,
                                       size_t layer_idx) {
-    if (slot_idx < 0 || slot_idx >= static_cast<int64_t>(host_slots_.size())) {
-      throw std::out_of_range("slot_idx out of range");
-    }
-    if (layer_idx >= host_slots_[slot_idx].layers.size()) {
-      throw std::out_of_range("layer_idx out of range");
-    }
-    at::Tensor view =
-        host_slots_[slot_idx].layers[layer_idx].narrow(0, 0, num_blocks);
-    ValidateCpuTensor(view, "Host staging layer descriptor");
-    return {reinterpret_cast<uint64_t>(view.data_ptr()),
-            static_cast<uint64_t>(view.nbytes())};
+    KVCacheHostSpan span =
+        ValueOrThrow("Failed to get KVCacheManager host staging descriptor",
+                     kv_transfer_->HostSpan(layer_idx, /*shard_idx=*/0,
+                                            slot_idx, num_blocks));
+    return {reinterpret_cast<uint64_t>(span.ptr),
+            static_cast<uint64_t>(span.nbytes)};
   }
 
   void StartControlServer() {
@@ -1253,7 +1240,7 @@ class RaidenTransferEngine {
       }
       cv_.notify_all();
 
-      num_layers = staged.host_views.size();
+      num_layers = staged.host_spans.size();
       WriteControlOk(fd, num_layers);
       for (size_t layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
         PullLayerDescriptor descriptor =
@@ -1395,11 +1382,11 @@ class RaidenTransferEngine {
   int local_control_port_ = 0;
   int local_data_port_ = 0;
   int64_t max_blocks_ = 0;
+  int64_t num_slots_ = 0;
   double timeout_s_ = 120.0;
   bool unsafe_skip_buffer_lock_ = true;
   int64_t next_op_id_ = 1;
   std::map<int64_t, PendingOperation> pending_;
-  std::vector<HostSlot> host_slots_;
   std::deque<int64_t> free_slots_;
   std::map<uint64_t, std::shared_ptr<SendEntry>> send_entries_;
   std::set<uint64_t> pending_acks_;
