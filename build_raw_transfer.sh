@@ -22,6 +22,7 @@ WORKSPACE_DIR="${WORKSPACE_DIR:-${DEFAULT_WORKSPACE_DIR}}"
 BAZEL_CACHE_BASE="${BAZEL_CACHE_DIR:-${HOME}/.bazel_cache}"
 BAZEL_DISK_CACHE="${BAZEL_CACHE_BASE}/disk_cache"
 BAZEL_REPO_CACHE="${BAZEL_CACHE_BASE}/repo_cache"
+BAZEL_OUTPUT_BASE="${BAZEL_OUTPUT_BASE:-/tmp/tpu_raiden_bazel_output_${USER}}"
 
 echo "=== Navigating to workspace directory ==="
 cd "${WORKSPACE_DIR}"
@@ -44,14 +45,19 @@ fi
 "${BAZEL_BIN}" --version
 
 echo "=== Building raw_transfer and kv_cache_manager with Bazel ==="
-"${BAZEL_BIN}" build -c opt --check_visibility=false --verbose_failures --experimental_repo_remote_exec --incompatible_disallow_empty_glob=false \
+"${BAZEL_BIN}" --install_base="${BAZEL_OUTPUT_BASE}/install_base" --output_base="${BAZEL_OUTPUT_BASE}" --host_jvm_args="-Xmx512m" --host_jvm_args="-Xms128m" build -c opt --check_visibility=false --verbose_failures --experimental_repo_remote_exec --incompatible_disallow_empty_glob=false \
   --repo_env=HERMETIC_PYTHON_VERSION=${HERMETIC_PYTHON_VERSION:-3.12} \
+  --repo_env=PIP_INDEX_URL="https://pypi.org/simple" \
+  --repo_env=PIP_EXTRA_INDEX_URL="" \
+  --repo_env=PYTHON_KEYRING_BACKEND="keyring.backends.null.Keyring" \
+  --repo_env=PIP_CONFIG_FILE="/dev/null" \
   //raiden_lib/raw_transfer/jax:raw_transfer \
   //api/jax:_kv_cache_manager \
   //api/jax:_kv_cache_manager_ffi \
   //api/jax:_weight_synchronizer \
   --disk_cache=${BAZEL_DISK_CACHE} \
-  --repository_cache=${BAZEL_REPO_CACHE}
+  --repository_cache=${BAZEL_REPO_CACHE} \
+  "$@"
 
 
 echo "=== Copying compiled shared libraries to source directory ==="

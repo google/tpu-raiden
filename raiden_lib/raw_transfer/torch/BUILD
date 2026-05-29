@@ -57,7 +57,6 @@ py_library(
     name = "torch_raw_transfer",
     srcs = ["torch_raw_transfer.py"],
     deps = [
-        ":_torch_raw_transfer",
         "//third_party/py/torch:pytorch",
         "//third_party/py/torch_tpu",
     ],
