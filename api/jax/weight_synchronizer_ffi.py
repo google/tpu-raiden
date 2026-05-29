@@ -19,7 +19,7 @@ from jax.experimental import compute_on
 import jax.numpy as jnp
 import numpy as np
 
-from api.jax import _weight_synchronizer_ffi
+from frameworks.jax import _weight_synchronizer_ffi
 
 
 def init_weight_synchronizer(

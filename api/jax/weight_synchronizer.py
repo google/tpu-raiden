@@ -17,7 +17,7 @@
 from typing import List, Optional
 
 # Import Nanobind binary library directly E2E!
-from api.jax import _weight_synchronizer
+from frameworks.jax import _weight_synchronizer
 
 
 class WeightSynchronizer:

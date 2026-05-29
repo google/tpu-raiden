@@ -17,9 +17,9 @@
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
-#include "api/jax/kv_cache_manager.h"
-#include "api/jax/nb_statusor.h"
 #include "core/raw_transfer_core.h"
+#include "frameworks/jax/kv_cache_manager.h"
+#include "frameworks/jax/nb_statusor.h"
 
 namespace nb = nanobind;
 

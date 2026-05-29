@@ -14,8 +14,8 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
-#include "api/jax/weight_synchronizer.h"
-#include "api/jax/weight_synchronizer_ffi.h"
+#include "frameworks/jax/weight_synchronizer.h"
+#include "frameworks/jax/weight_synchronizer_ffi.h"
 
 namespace nb = nanobind;
 

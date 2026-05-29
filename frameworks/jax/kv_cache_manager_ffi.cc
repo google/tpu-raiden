@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "api/jax/kv_cache_manager_ffi.h"
+#include "frameworks/jax/kv_cache_manager_ffi.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -32,7 +32,7 @@
 #include "xla/stream_executor/platform_manager.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
-#include "api/jax/kv_cache_manager.h"
+#include "frameworks/jax/kv_cache_manager.h"
 
 namespace tpu_raiden {
 namespace kv_cache {

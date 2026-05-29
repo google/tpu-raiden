@@ -12,136 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
-load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
-
-cc_library(
-    name = "kv_cache_manager_jax",
-    srcs = select({
-        "//:jax_disabled": [],
-        "//conditions:default": [
-            "kv_cache_manager.cc",
-        ],
-    }),
-    hdrs = select({
-        "//:jax_disabled": [],
-        "//conditions:default": [
-            "kv_cache_manager.h",
-        ],
-    }),
-    copts = [
-        "-fexceptions",
-        "-march=x86-64-v2",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = select({
-        "//:jax_disabled": [],
-        "//conditions:default": [
-            ":jax_utils",
-            "//kv_cache:kv_cache_manager_base",
-            "@nanobind",
-        ],
-    }),
-)
-
-cc_library(
-    name = "jax_utils",
-    hdrs = select({
-        "//:jax_disabled": [],
-        "//conditions:default": [
-            "jax_utils.h",
-        ],
-    }),
-    copts = [
-        "-fexceptions",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = select({
-        "//:jax_disabled": [],
-        "//conditions:default": [
-            "@jax//jaxlib:py_client",
-            "@nanobind",
-            "@rules_python//python/cc:current_py_cc_headers",
-            "@xla//xla/pjrt:pjrt_client",
-            "@xla//xla/python/ifrt",
-            "@xla//xla/python/pjrt_ifrt",
-        ],
-    }),
-)
-
-cc_library(
-    name = "nb_statusor",
-    hdrs = ["nb_statusor.h"],
-    copts = ["-fexceptions"],
-    features = ["-use_header_modules"],
-    deps = [
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@nanobind",
-        "@rules_python//python/cc:current_py_cc_headers",
-    ],
-)
-
-nanobind_extension(
-    name = "_kv_cache_manager",
-    srcs = [
-        "kv_cache_manager_module.cc",
-        "nb_statusor.h",
-    ],
-    copts = [
-        "-fexceptions",
-        "-march=x86-64-v2",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":kv_cache_manager_jax",
-        ":nb_statusor",
-        "//core:raw_transfer_core",
-        "//kv_cache:kv_cache_manager_base",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@nanobind",
-        "@rules_python//python/cc:current_py_cc_headers",
-    ],
-)
 
 py_library(
     name = "kv_cache_manager_jax_py",
     srcs = ["kv_cache_manager.py"],
     visibility = ["//visibility:public"],
     deps = [
-        ":_kv_cache_manager",
+        "//frameworks/jax:_kv_cache_manager",
     ],
 )
 
-nanobind_extension(
+py_library(
     name = "kv_cache_store",
-    srcs = [
-        "kv_cache_store_module.cc",
-    ],
-    copts = [
-        "-fno-strict-aliasing",
-        "-fexceptions",
-    ],
-    features = ["-use_header_modules"],
+    srcs = ["kv_cache_store.py"],
     visibility = ["//visibility:public"],
     deps = [
-        ":kv_cache_manager_jax",
-        "//kv_cache:kv_cache_store",
-        "@nanobind",
-        "@xla//xla/pjrt:status_casters",
+        "//frameworks/jax:kv_cache_store",
     ],
 )
 
@@ -161,132 +50,15 @@ py_test(
     ],
 )
 
-cc_library(
-    name = "kv_cache_manager_ffi",
-    srcs = select({
-        "//:jax_disabled": [],
-        "//conditions:default": [
-            "kv_cache_manager_ffi.cc",
-        ],
-    }),
-    hdrs = select({
-        "//:jax_disabled": [],
-        "//conditions:default": [
-            "kv_cache_manager_ffi.h",
-        ],
-    }),
-    copts = [
-        "-fexceptions",
-        "-march=x86-64-v2",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = select({
-        "//:jax_disabled": [],
-        "//conditions:default": [
-            ":kv_cache_manager_jax",
-            "@com_google_absl//absl/log",
-            "@com_google_absl//absl/status",
-            "@xla//xla/ffi/api:c_api",
-            "@xla//xla/ffi/api:ffi",
-            "@xla//xla/stream_executor:platform",
-            "@xla//xla/stream_executor:platform_manager",
-            "@xla//xla/stream_executor:stream",
-            "@xla//xla/stream_executor:stream_executor_h",
-            "@xla//xla/stream_executor/tpu:tpu_executor",
-        ],
-    }),
-    alwayslink = 1,
-)
-
-nanobind_extension(
-    name = "_kv_cache_manager_ffi",
-    srcs = [
-        "kv_cache_manager_ffi_module.cc",
-    ],
-    copts = [
-        "-fexceptions",
-        "-march=x86-64-v2",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":kv_cache_manager_ffi",
-        ":kv_cache_manager_jax",
-    ],
-)
-
 py_library(
     name = "kv_cache_manager_ffi_py",
     srcs = ["kv_cache_manager_ffi.py"],
     visibility = ["//visibility:public"],
     deps = [
-        ":_kv_cache_manager_ffi",
+        "//frameworks/jax:_kv_cache_manager_ffi",
         "@jax//jax",
         "@jax//jax/experimental:compute_on",
         "@pypi//numpy",
-    ],
-)
-
-cc_library(
-    name = "weight_synchronizer_ffi",
-    srcs = select({
-        "//:jax_disabled": [],
-        "//conditions:default": [
-            "weight_synchronizer_ffi.cc",
-        ],
-    }),
-    hdrs = select({
-        "//:jax_disabled": [],
-        "//conditions:default": [
-            "weight_synchronizer_ffi.h",
-        ],
-    }),
-    copts = [
-        "-fexceptions",
-        "-march=x86-64-v2",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = select({
-        "//:jax_disabled": [],
-        "//conditions:default": [
-            ":weight_synchronizer_jax",
-            "@com_google_absl//absl/log",
-            "@com_google_absl//absl/status",
-            "@xla//xla/ffi/api:ffi",
-            "@xla//xla/stream_executor:platform",
-            "@xla//xla/stream_executor:platform_manager",
-            "@xla//xla/stream_executor:stream",
-            "@xla//xla/stream_executor:stream_executor_h",
-        ],
-    }),
-    alwayslink = 1,
-)
-
-nanobind_extension(
-    name = "_weight_synchronizer_ffi",
-    srcs = [
-        "weight_synchronizer_ffi_module.cc",
-    ],
-    copts = [
-        "-fexceptions",
-        "-march=x86-64-v2",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":weight_synchronizer_ffi",
-        ":weight_synchronizer_jax",
-        "@nanobind",
     ],
 )
 
@@ -295,7 +67,7 @@ py_library(
     srcs = ["weight_synchronizer_ffi.py"],
     visibility = ["//visibility:public"],
     deps = [
-        ":_weight_synchronizer_ffi",
+        "//frameworks/jax:_weight_synchronizer_ffi",
         "@jax//jax",
         "@jax//jax/experimental:compute_on",
         "@pypi//numpy",
@@ -319,62 +91,6 @@ py_test(
         "@com_google_absl_py//absl/testing:parameterized",
         "@jax//jax",
         "@pypi//numpy",
-    ],
-)
-
-cc_library(
-    name = "weight_synchronizer_jax",
-    srcs = select({
-        "//:jax_disabled": [],
-        "//conditions:default": [
-            "weight_synchronizer.cc",
-        ],
-    }),
-    hdrs = select({
-        "//:jax_disabled": [],
-        "//conditions:default": [
-            "weight_synchronizer.h",
-        ],
-    }),
-    copts = [
-        "-fexceptions",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = select({
-        "//:jax_disabled": [],
-        "//conditions:default": [
-            ":jax_utils",
-            "//weight_sync:weight_synchronizer_base",
-            "@com_google_absl//absl/status",
-            "@com_google_absl//absl/status:statusor",
-            "@nanobind",
-            "@xla//xla/pjrt:pjrt_client",
-        ],
-    }),
-    alwayslink = 1,
-)
-
-nanobind_extension(
-    name = "_weight_synchronizer",
-    srcs = [
-        "weight_synchronizer_module.cc",
-    ],
-    copts = [
-        "-fexceptions",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":weight_synchronizer_jax",
-        "//core:raw_transfer_core",
-        "//weight_sync:weight_synchronizer_base",
-        "@com_google_absl//absl/status:statusor",
-        "@nanobind",
     ],
 )
 
@@ -413,7 +129,9 @@ py_library(
     name = "weight_synchronizer_jax_py",
     srcs = ["weight_synchronizer.py"],
     visibility = ["//visibility:public"],
-    deps = [":_weight_synchronizer"],
+    deps = [
+        "//frameworks/jax:_weight_synchronizer",
+    ],
 )
 
 py_test(
@@ -449,3 +167,6 @@ py_test(
         "@pypi//numpy",
     ],
 )
+
+# Keep Copybara happy by maintaining at least one internal reference target prefix reference:
+# //:dummy_target

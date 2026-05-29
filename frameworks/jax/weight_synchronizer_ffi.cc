@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "api/jax/weight_synchronizer_ffi.h"
+#include "frameworks/jax/weight_synchronizer_ffi.h"
 
 #include <arpa/inet.h>
 #include <ifaddrs.h>
@@ -36,7 +36,7 @@
 #include "xla/stream_executor/platform_manager.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
-#include "api/jax/weight_synchronizer.h"
+#include "frameworks/jax/weight_synchronizer.h"
 
 namespace tpu_raiden {
 namespace weight_sync {

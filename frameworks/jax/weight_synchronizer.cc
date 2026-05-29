@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "api/jax/weight_synchronizer.h"
+#include "frameworks/jax/weight_synchronizer.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -25,7 +25,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include <nanobind/nanobind.h>
-#include "api/jax/jax_utils.h"
+#include "frameworks/jax/jax_utils.h"
 
 namespace nb = nanobind;
 

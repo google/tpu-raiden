@@ -33,18 +33,8 @@ cc_library(
 
 cc_library(
     name = "kv_cache_manager_torch",
-    srcs = select({
-        "//:torch_disabled": [],
-        "//conditions:default": [
-            "kv_cache_manager.cc",
-        ],
-    }),
-    hdrs = select({
-        "//:torch_disabled": [],
-        "//conditions:default": [
-            "kv_cache_manager.h",
-        ],
-    }),
+    srcs = ["kv_cache_manager.cc"],
+    hdrs = ["kv_cache_manager.h"],
     copts = [
         "-std=c++20",
         "-fexceptions",
@@ -54,34 +44,26 @@ cc_library(
         "-use_header_modules",
     ],
     visibility = ["//visibility:public"],
-    deps = select({
-        "//:torch_disabled": [],
-        "//conditions:default": [
-            ":torch_tpu_stablehlo_headers",
-            "//core:xla_raw_transfer_headers",
-            "//kv_cache:kv_cache_manager_base",
-            "@com_google_absl//absl/status",
-            "@com_google_absl//absl/status:statusor",
-            "@torch_tpu//shims/torch:aten_headers",
-            "@torch_tpu//shims/torch:torch_headers",
-            "@torch_tpu//shims/torch/c10/core:base_headers",
-            "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
-            "@torch_tpu//torch_tpu/eager:device_buffer",
-            "@torch_tpu//torch_tpu/eager:materialize",
-            "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
-            "@xla//xla/pjrt:pjrt_client",
-        ],
-    }),
+    deps = [
+        ":torch_tpu_stablehlo_headers",
+        "//core:xla_raw_transfer_headers",
+        "//kv_cache:kv_cache_manager_base",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@torch_tpu//shims/torch:aten_headers",
+        "@torch_tpu//shims/torch:torch_headers",
+        "@torch_tpu//shims/torch/c10/core:base_headers",
+        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
+        "@torch_tpu//torch_tpu/eager:device_buffer",
+        "@torch_tpu//torch_tpu/eager:materialize",
+        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
+        "@xla//xla/pjrt:pjrt_client",
+    ],
 )
 
 nanobind_extension(
     name = "_kv_cache_manager",
-    srcs = select({
-        "//:torch_disabled": [],
-        "//conditions:default": [
-            "kv_cache_manager_module.cc",
-        ],
-    }),
+    srcs = ["kv_cache_manager_module.cc"],
     copts = [
         "-fexceptions",
     ],
@@ -89,42 +71,30 @@ nanobind_extension(
         "-use_header_modules",
     ],
     visibility = ["//visibility:public"],
-    deps = select({
-        "//:torch_disabled": [],
-        "//conditions:default": [
-            ":kv_cache_manager_torch",
-            "//core:raw_transfer_core",
-            "//kv_cache:kv_cache_manager_base",
-            "@com_google_absl//absl/status:statusor",
-            "@pybind11",
-            "@torch_tpu//shims/torch:torch_headers",
-        ],
-    }),
+    deps = [
+        ":kv_cache_manager_torch",
+        "//core:raw_transfer_core",
+        "//kv_cache:kv_cache_manager_base",
+        "@com_google_absl//absl/status:statusor",
+        "@pybind11",
+        "@torch_tpu//shims/torch:torch_headers",
+    ],
 )
 
 py_library(
     name = "kv_cache_manager_torch_py",
-    srcs = select({
-        "//:torch_disabled": [],
-        "//conditions:default": ["kv_cache_manager.py"],
-    }),
+    srcs = ["kv_cache_manager.py"],
     visibility = ["//visibility:public"],
-    deps = select({
-        "//:torch_disabled": [],
-        "//conditions:default": [
-            ":_kv_cache_manager",
-            "@torch_tpu//shims/torch:pytorch",
-            "@torch_tpu//torch_tpu",
-        ],
-    }),
+    deps = [
+        ":_kv_cache_manager",
+        "@torch_tpu//shims/torch:pytorch",
+        "@torch_tpu//torch_tpu",
+    ],
 )
 
 py_test(
     name = "kv_cache_manager_test",
-    srcs = select({
-        "//:torch_disabled": [],
-        "//conditions:default": ["kv_cache_manager_test.py"],
-    }),
+    srcs = ["kv_cache_manager_test.py"],
     tags = [
         "cpu:8",
         "notap",
@@ -132,33 +102,20 @@ py_test(
         "requires-ghostlite:8",
         "requires-net:external",
     ],
-    deps = select({
-        "//:torch_disabled": [],
-        "//conditions:default": [
-            ":kv_cache_manager_torch_py",
-            "@com_google_absl_py//absl/testing:absltest",
-            "@com_google_absl_py//absl/testing:parameterized",
-            "@pypi//numpy",
-            "@torch_tpu//shims/torch:pytorch",
-            "@torch_tpu//torch_tpu",
-        ],
-    }),
+    deps = [
+        ":kv_cache_manager_torch_py",
+        "@com_google_absl_py//absl/testing:absltest",
+        "@com_google_absl_py//absl/testing:parameterized",
+        "@pypi//numpy",
+        "@torch_tpu//shims/torch:pytorch",
+        "@torch_tpu//torch_tpu",
+    ],
 )
 
 cc_library(
     name = "weight_synchronizer_torch",
-    srcs = select({
-        "//:torch_disabled": [],
-        "//conditions:default": [
-            "weight_synchronizer.cc",
-        ],
-    }),
-    hdrs = select({
-        "//:torch_disabled": [],
-        "//conditions:default": [
-            "weight_synchronizer.h",
-        ],
-    }),
+    srcs = ["weight_synchronizer.cc"],
+    hdrs = ["weight_synchronizer.h"],
     copts = [
         "-std=c++20",
         "-fexceptions",
@@ -168,38 +125,30 @@ cc_library(
         "-use_header_modules",
     ],
     visibility = ["//visibility:public"],
-    deps = select({
-        "//:torch_disabled": [],
-        "//conditions:default": [
-            "//weight_sync:weight_synchronizer_base",
-            "@com_google_absl//absl/status",
-            "@stablehlo//:attr_type_builder_util",
-            "@stablehlo//:chlo_builder",
-            "@stablehlo//:chlo_ops",
-            "@stablehlo//:func_builder",
-            "@stablehlo//:mlir_builder",
-            "@stablehlo//:stablehlo_builder",
-            "@stablehlo//:stablehlo_ops",
-            "@torch_tpu//shims/torch:aten_headers",
-            "@torch_tpu//shims/torch:torch_headers",
-            "@torch_tpu//shims/torch/c10/core:base_headers",
-            "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
-            "@torch_tpu//torch_tpu/eager:device_buffer",
-            "@torch_tpu//torch_tpu/eager:materialize",
-            "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
-            "@xla//xla/pjrt:pjrt_client",
-        ],
-    }),
+    deps = [
+        "//weight_sync:weight_synchronizer_base",
+        "@com_google_absl//absl/status",
+        "@stablehlo//:attr_type_builder_util",
+        "@stablehlo//:chlo_builder",
+        "@stablehlo//:chlo_ops",
+        "@stablehlo//:func_builder",
+        "@stablehlo//:mlir_builder",
+        "@stablehlo//:stablehlo_builder",
+        "@stablehlo//:stablehlo_ops",
+        "@torch_tpu//shims/torch:aten_headers",
+        "@torch_tpu//shims/torch:torch_headers",
+        "@torch_tpu//shims/torch/c10/core:base_headers",
+        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
+        "@torch_tpu//torch_tpu/eager:device_buffer",
+        "@torch_tpu//torch_tpu/eager:materialize",
+        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
+        "@xla//xla/pjrt:pjrt_client",
+    ],
 )
 
 nanobind_extension(
     name = "_weight_synchronizer",
-    srcs = select({
-        "//:torch_disabled": [],
-        "//conditions:default": [
-            "weight_synchronizer_module.cc",
-        ],
-    }),
+    srcs = ["weight_synchronizer_module.cc"],
     copts = [
         "-fexceptions",
     ],
@@ -207,42 +156,30 @@ nanobind_extension(
         "-use_header_modules",
     ],
     visibility = ["//visibility:public"],
-    deps = select({
-        "//:torch_disabled": [],
-        "//conditions:default": [
-            ":weight_synchronizer_torch",
-            "//core:raw_transfer_core",
-            "//weight_sync:weight_synchronizer_base",
-            "@com_google_absl//absl/status",
-            "@pybind11",
-            "@torch_tpu//shims/torch:torch_headers",
-        ],
-    }),
+    deps = [
+        ":weight_synchronizer_torch",
+        "//core:raw_transfer_core",
+        "//weight_sync:weight_synchronizer_base",
+        "@com_google_absl//absl/status",
+        "@pybind11",
+        "@torch_tpu//shims/torch:torch_headers",
+    ],
 )
 
 py_library(
     name = "weight_synchronizer_torch_py",
-    srcs = select({
-        "//:torch_disabled": [],
-        "//conditions:default": ["weight_synchronizer.py"],
-    }),
+    srcs = ["weight_synchronizer.py"],
     visibility = ["//visibility:public"],
-    deps = select({
-        "//:torch_disabled": [],
-        "//conditions:default": [
-            ":_weight_synchronizer",
-            "@torch_tpu//shims/torch:pytorch",
-            "@torch_tpu//torch_tpu",
-        ],
-    }),
+    deps = [
+        ":_weight_synchronizer",
+        "@torch_tpu//shims/torch:pytorch",
+        "@torch_tpu//torch_tpu",
+    ],
 )
 
 py_test(
     name = "weight_synchronizer_test",
-    srcs = select({
-        "//:torch_disabled": [],
-        "//conditions:default": ["weight_synchronizer_test.py"],
-    }),
+    srcs = ["weight_synchronizer_test.py"],
     tags = [
         "cpu:8",
         "notap",
@@ -250,17 +187,14 @@ py_test(
         "requires-ghostlite:8",
         "requires-net:external",
     ],
-    deps = select({
-        "//:torch_disabled": [],
-        "//conditions:default": [
-            ":weight_synchronizer_torch_py",
-            "@com_google_absl_py//absl/testing:absltest",
-            "@com_google_absl_py//absl/testing:parameterized",
-            "@pypi//numpy",
-            "@torch_tpu//shims/torch:pytorch",
-            "@torch_tpu//torch_tpu",
-        ],
-    }),
+    deps = [
+        ":weight_synchronizer_torch_py",
+        "@com_google_absl_py//absl/testing:absltest",
+        "@com_google_absl_py//absl/testing:parameterized",
+        "@pypi//numpy",
+        "@torch_tpu//shims/torch:pytorch",
+        "@torch_tpu//torch_tpu",
+    ],
 )
 
 nanobind_extension(

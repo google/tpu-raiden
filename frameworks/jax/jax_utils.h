@@ -15,8 +15,8 @@
 /* Copyright 2026 The TPU Raiden Authors. All Rights Reserved.
 ==============================================================================*/
 
-#ifndef THIRD_PARTY_TPU_RAIDEN_API_JAX_JAX_UTILS_H_
-#define THIRD_PARTY_TPU_RAIDEN_API_JAX_JAX_UTILS_H_
+#ifndef THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_JAX_JAX_UTILS_H_
+#define THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_JAX_JAX_UTILS_H_
 
 #include <Python.h>
 
@@ -112,4 +112,4 @@ inline std::vector<xla::PjRtBuffer*> ExtractPjRtBuffersFromPyArray(
 
 }  // namespace jax
 
-#endif  // THIRD_PARTY_TPU_RAIDEN_API_JAX_JAX_UTILS_H_
+#endif  // THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_JAX_JAX_UTILS_H_

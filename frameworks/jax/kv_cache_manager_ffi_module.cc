@@ -12,20 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_TPU_RAIDEN_API_JAX_WEIGHT_SYNCHRONIZER_FFI_H_
-#define THIRD_PARTY_TPU_RAIDEN_API_JAX_WEIGHT_SYNCHRONIZER_FFI_H_
+#include "frameworks/jax/kv_cache_manager.h"
+#include "frameworks/jax/kv_cache_manager_ffi.h"
 
-namespace tpu_raiden {
-namespace jax {
-class WeightSynchronizer;
-}  // namespace jax
+namespace nb = nanobind;
 
-namespace weight_sync {
+NB_MODULE(_kv_cache_manager_ffi, m) {
+  m.def("destroy_kv_cache", []() {
+    for (int i = 0; i < 32; ++i) {
+      if (tpu_raiden::kv_cache::g_kv_cache_managers[i] != nullptr) {
+        delete tpu_raiden::kv_cache::g_kv_cache_managers[i];
+        tpu_raiden::kv_cache::g_kv_cache_managers[i] = nullptr;
+      }
+    }
+  });
 
-// Global registry map for distributed JAX meshes multi-device support
-extern jax::WeightSynchronizer* g_weight_synchronizers[32];
-
-}  // namespace weight_sync
-}  // namespace tpu_raiden
-
-#endif  // THIRD_PARTY_TPU_RAIDEN_API_JAX_WEIGHT_SYNCHRONIZER_FFI_H_
+  m.def("sync_copies", &tpu_raiden::kv_cache::SyncCopies);
+}

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "api/jax/kv_cache_manager.h"
+#include "frameworks/jax/kv_cache_manager.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -21,7 +21,7 @@
 #include <utility>
 #include <vector>
 
-#include "api/jax/jax_utils.h"
+#include "frameworks/jax/jax_utils.h"
 
 namespace nb = nanobind;
 

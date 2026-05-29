@@ -25,7 +25,7 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 #include "xla/pjrt/status_casters.h"
-#include "api/jax/kv_cache_manager.h"
+#include "frameworks/jax/kv_cache_manager.h"
 #include "kv_cache/kv_cache_store.h"
 
 namespace nb = nanobind;

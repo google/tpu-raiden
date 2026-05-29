@@ -12,21 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_TPU_RAIDEN_API_JAX_KV_CACHE_MANAGER_FFI_H_
-#define THIRD_PARTY_TPU_RAIDEN_API_JAX_KV_CACHE_MANAGER_FFI_H_
+#ifndef THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_JAX_WEIGHT_SYNCHRONIZER_FFI_H_
+#define THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_JAX_WEIGHT_SYNCHRONIZER_FFI_H_
 
 namespace tpu_raiden {
-namespace kv_cache {
 namespace jax {
-class KVCacheManager;
+class WeightSynchronizer;
 }  // namespace jax
 
+namespace weight_sync {
+
 // Global registry map for distributed JAX meshes multi-device support
-extern jax::KVCacheManager* g_kv_cache_managers[32];
+extern jax::WeightSynchronizer* g_weight_synchronizers[32];
 
-void SyncCopies();
-
-}  // namespace kv_cache
+}  // namespace weight_sync
 }  // namespace tpu_raiden
 
-#endif  // THIRD_PARTY_TPU_RAIDEN_API_JAX_KV_CACHE_MANAGER_FFI_H_
+#endif  // THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_JAX_WEIGHT_SYNCHRONIZER_FFI_H_

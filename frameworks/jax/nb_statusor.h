@@ -15,8 +15,8 @@
 /* Copyright 2026 The TPU Raiden Authors. All Rights Reserved.
 ==============================================================================*/
 
-#ifndef THIRD_PARTY_TPU_RAIDEN_API_JAX_NB_STATUS_H_
-#define THIRD_PARTY_TPU_RAIDEN_API_JAX_NB_STATUS_H_
+#ifndef THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_JAX_NB_STATUS_H_
+#define THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_JAX_NB_STATUS_H_
 
 #include <Python.h>
 
@@ -86,4 +86,4 @@ struct type_caster<absl::StatusOr<T>> {
 }  // namespace detail
 }  // namespace nanobind
 
-#endif  // THIRD_PARTY_TPU_RAIDEN_API_JAX_NB_STATUS_H_
+#endif  // THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_JAX_NB_STATUS_H_

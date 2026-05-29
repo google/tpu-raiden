@@ -17,7 +17,7 @@
 from typing import Any, List, Optional
 
 # Import JAX Nanobind binary extension E2E!
-from api.jax import _kv_cache_manager
+from frameworks.jax import _kv_cache_manager
 
 
 class KVCacheManager:

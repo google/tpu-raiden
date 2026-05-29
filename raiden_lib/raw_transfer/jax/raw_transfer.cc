@@ -17,8 +17,8 @@
 
 #include "absl/status/status.h"
 #include "xla/pjrt/status_casters.h"
-#include "api/jax/jax_utils.h"
 #include "core/raw_transfer_impl.h"
+#include "frameworks/jax/jax_utils.h"
 
 namespace raiden {
 

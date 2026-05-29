@@ -23,8 +23,8 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
-#include "api/jax/weight_synchronizer.h"
 #include "core/raw_transfer_core.h"
+#include "frameworks/jax/weight_synchronizer.h"
 
 namespace nb = nanobind;
 
@@ -71,16 +71,16 @@ NB_MODULE(_weight_synchronizer, m) {
           nb::call_guard<nb::gil_scoped_release>())
       .def(
           "H2dChunk",
-          [](WeightSynchronizer& self, size_t shard_idx, size_t host_offset_bytes,
-             size_t device_offset_bytes, size_t size_bytes) {
+          [](WeightSynchronizer& self, size_t shard_idx,
+             size_t host_offset_bytes, size_t device_offset_bytes,
+             size_t size_bytes) {
             auto status_or_future = self.H2dChunk(
                 shard_idx, host_offset_bytes, device_offset_bytes, size_bytes
             );
             if (!status_or_future.ok()) {
               throw std::runtime_error(
                   "Weight sync H2DChunk failed: " +
-                  std::string(status_or_future.status().message())
-              );
+                  std::string(status_or_future.status().message()));
             }
             status_or_future.value().Await();
           },

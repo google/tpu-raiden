@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_TPU_RAIDEN_API_JAX_KV_CACHE_MANAGER_H_
-#define THIRD_PARTY_TPU_RAIDEN_API_JAX_KV_CACHE_MANAGER_H_
+#ifndef THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_JAX_KV_CACHE_MANAGER_H_
+#define THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_JAX_KV_CACHE_MANAGER_H_
 
 #include <cstdint>
 #include <optional>
@@ -48,4 +48,4 @@ class KVCacheManager : public KVCacheManagerBase {
 }  // namespace kv_cache
 }  // namespace tpu_raiden
 
-#endif  // THIRD_PARTY_TPU_RAIDEN_API_JAX_KV_CACHE_MANAGER_H_
+#endif  // THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_JAX_KV_CACHE_MANAGER_H_
