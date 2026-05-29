@@ -32,7 +32,6 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
-#include "third_party/peregrine/src/api/types.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -295,7 +294,8 @@ absl::Status SocketTransport::DispatchReadRequest(
   return ReadExact(fd, request.laddr, resp_header.length);
 }
 
-absl::StatusOr<peregrine::Status> SocketTransport::Poll(peregrine::Handle handle) {
+absl::StatusOr<peregrine::Status> SocketTransport::Poll(
+    peregrine::Handle handle) {
   absl::MutexLock _(&mu_);
   auto it = status_map_.find(handle);
   if (it == status_map_.end()) {

@@ -187,12 +187,13 @@ void ValidateTpuTensor(const at::Tensor& tensor, const char* role) {
 torch_tpu::DeviceBufferRef GetMaterializedBufferRef(const at::Tensor& tensor) {
   return ValueOrThrow(
       "Failed to materialize TPU tensor",
-      torch_tpu::MaterializeAndReturn(
+      torch_tpu::GetMaterialized(
           tensor, torch_tpu::MaterializationReason::kCpuTransfer));
 }
 
 xla::PjRtBuffer* GetPjRtBuffer(const torch_tpu::DeviceBufferRef& buffer_ref) {
-  return ValueOrThrow("Failed to get PjRtBuffer", buffer_ref.AwaitBuffer());
+  return ValueOrThrow("Failed to get PjRtBuffer",
+                      buffer_ref.GetOrMaterializeBuffer());
 }
 
 void AwaitReady(xla::PjRtBuffer* buffer, const char* role) {

@@ -25,8 +25,6 @@
 #include <gtest/gtest.h>
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
-#include "third_party/peregrine/src/api/transport.h"
-#include "third_party/peregrine/src/api/types.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -64,7 +62,7 @@ TEST(SocketTransportTest, PointToPointWriteTransfer) {
       "Hello Distributed KV Cache Transfer via POSIX TCP!";
   std::vector<uint8_t> dst_payload(src_payload.size(), 0);
 
-  // Prepare peregrine Request struct mapping remote memory pointers cleanly.
+  // Prepare transport request struct mapping remote memory pointers cleanly.
   peregrine::Request request;
   request.op = peregrine::Op::kWrite;
   request.laddr = reinterpret_cast<uint8_t*>(src_payload.data());

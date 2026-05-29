@@ -15,8 +15,17 @@
 # BUILD file for tpu_raiden SocketTransport library package.
 
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("//core:header_only_cc_info.bzl", "header_only_cc_info")
 
 package(default_visibility = ["//visibility:public"])
+
+header_only_cc_info(
+    name = "tsl_platform_headers",
+    deps = [
+        "@xla//xla/tsl/platform:errors",
+        "@xla//xla/tsl/platform:statusor",
+    ],
+)
 
 cc_library(
     name = "block_transport",
@@ -37,23 +46,23 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
-        "@xla//xla/tsl/platform:errors",
-        "@xla//xla/tsl/platform:statusor",
+        ":tsl_platform_headers",
     ],
 )
 
 cc_library(
     name = "socket_transport",
     srcs = ["socket_transport.cc"],
-    hdrs = ["socket_transport.h"],
+    hdrs = [
+        "peregrine_types.h",
+        "socket_transport.h",
+    ],
     copts = [
         "-fno-strict-aliasing",
         "-fexceptions",
     ],
     features = ["-use_header_modules"],
     deps = [
-        "//third_party/peregrine/src/api:transport",
-        "//third_party/peregrine/src/api:types",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
@@ -74,8 +83,6 @@ cc_test(
     features = ["-use_header_modules"],
     deps = [
         ":socket_transport",
-        "//third_party/peregrine/src/api:transport",
-        "//third_party/peregrine/src/api:types",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest",

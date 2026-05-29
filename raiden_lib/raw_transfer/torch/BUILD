@@ -28,6 +28,7 @@ nanobind_extension(
         ],
     }),
     copts = [
+        "-std=c++20",
         "-fno-strict-aliasing",
         "-fexceptions",
     ],
@@ -35,17 +36,16 @@ nanobind_extension(
     deps = select({
         "//:torch_disabled": [],
         "//conditions:default": [
+            "//api/torch:torch_tpu_stablehlo_headers",
             "//core:raw_transfer_core",
-            "//third_party/py/torch:aten_headers",
-            "//third_party/py/torch:torch_headers",
-            "//third_party/py/torch/c10/core:base_headers",
-            "//third_party/py/torch/torch/headeronly:torch_headeronly",
-            "//third_party/pybind11",
             "@com_google_absl//absl/status",
             "@com_google_absl//absl/status:statusor",
-            "@torch_tpu//eager:device_buffer",
-            "@torch_tpu//eager:materialize",
-            "@torch_tpu//eager:tensor_to_buffer",
+            "@pybind11//:pybind11",
+            "@torch_tpu//shims/torch:aten_headers",
+            "@torch_tpu//shims/torch:torch_headers",
+            "@torch_tpu//shims/torch/c10/core:base_headers",
+            "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
+            "@torch_tpu_headers//:headers",
             "@xla//xla:future",
             "@xla//xla:shape_util",
             "@xla//xla/pjrt:common_pjrt_client",
@@ -69,8 +69,9 @@ py_library(
         "//:torch_disabled": [],
         "//conditions:default": [
             ":_torch_raw_transfer",
-            "//third_party/py/torch:pytorch",
-            "@torch_tpu",
+            "@torch_tpu//shims/torch:pytorch",
+            "@torch_tpu//torch_tpu:_loader",
+            "@torch_tpu//torch_tpu:torch_tpu",
         ],
     }),
 )
@@ -95,11 +96,11 @@ py_test(
         "//conditions:default": [
             ":torch_raw_transfer",
             "//pyglib/contrib/g3_multiprocessing",
-            "//third_party/py/torch:pytorch",
+            "@torch_tpu//shims/torch:pytorch",
+            "@torch_tpu//torch_tpu:torch_tpu",
             "@com_google_absl_py//absl/testing:absltest",
             "@com_google_absl_py//absl/testing:parameterized",
             "@pypi//numpy",
-            "@torch_tpu",
         ],
     }),
 )
@@ -124,11 +125,11 @@ py_test(
         "//conditions:default": [
             ":torch_raw_transfer",
             "//pyglib/contrib/g3_multiprocessing",
-            "//third_party/py/torch:pytorch",
+            "@torch_tpu//shims/torch:pytorch",
+            "@torch_tpu//torch_tpu:torch_tpu",
             "@com_google_absl_py//absl/testing:absltest",
             "@com_google_absl_py//absl/testing:parameterized",
             "@pypi//numpy",
-            "@torch_tpu",
         ],
     }),
 )
@@ -160,11 +161,11 @@ py_test(
         "//:torch_disabled": [],
         "//conditions:default": [
             ":torch_raw_transfer",
-            "//third_party/py/torch:pytorch",
+            "@torch_tpu//shims/torch:pytorch",
+            "@torch_tpu//torch_tpu:torch_tpu",
             "@com_google_absl_py//absl/testing:absltest",
             "@com_google_absl_py//absl/testing:parameterized",
             "@pypi//numpy",
-            "@torch_tpu",
         ],
     }),
 )
@@ -188,11 +189,11 @@ py_test(
         "//:torch_disabled": [],
         "//conditions:default": [
             ":torch_raw_transfer",
-            "//third_party/py/torch:pytorch",
+            "@torch_tpu//shims/torch:pytorch",
+            "@torch_tpu//torch_tpu:torch_tpu",
             "@com_google_absl_py//absl/testing:absltest",
             "@com_google_absl_py//absl/testing:parameterized",
             "@pypi//numpy",
-            "@torch_tpu",
         ],
     }),
 )

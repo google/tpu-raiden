@@ -19,10 +19,16 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 DEFAULT_WORKSPACE_DIR="$SCRIPT_DIR"
 WORKSPACE_DIR="${WORKSPACE_DIR:-${DEFAULT_WORKSPACE_DIR}}"
-BAZEL_CACHE_BASE="${BAZEL_CACHE_DIR:-${HOME}/.bazel_cache}"
+DEFAULT_BAZEL_CACHE_BASE="/mnt/disk/tpu-raiden-bazel-cache"
+DEFAULT_BAZEL_OUTPUT_BASE="/mnt/disk/bazel-output-user-root/tpu_raiden_${USER}"
+if [[ ! -d /mnt/disk || ! -w /mnt/disk ]]; then
+  DEFAULT_BAZEL_CACHE_BASE="${HOME}/.bazel_cache"
+  DEFAULT_BAZEL_OUTPUT_BASE="/tmp/tpu_raiden_bazel_output_${USER}"
+fi
+BAZEL_CACHE_BASE="${BAZEL_CACHE_DIR:-${DEFAULT_BAZEL_CACHE_BASE}}"
 BAZEL_DISK_CACHE="${BAZEL_CACHE_BASE}/disk_cache"
 BAZEL_REPO_CACHE="${BAZEL_CACHE_BASE}/repo_cache"
-BAZEL_OUTPUT_BASE="${BAZEL_OUTPUT_BASE:-/tmp/tpu_raiden_bazel_output_${USER}}"
+BAZEL_OUTPUT_BASE="${BAZEL_OUTPUT_BASE:-${DEFAULT_BAZEL_OUTPUT_BASE}}"
 
 echo "=== Navigating to workspace directory ==="
 cd "${WORKSPACE_DIR}"
@@ -59,14 +65,17 @@ if [ "$#" -gt 0 ]; then
     jax)
       BUILD_JAX=true
       BUILD_TORCH=false
+      shift
       ;;
     torch)
       BUILD_JAX=false
       BUILD_TORCH=true
+      shift
       ;;
     both)
       BUILD_JAX=true
       BUILD_TORCH=true
+      shift
       ;;
     *)
       echo "Usage: $0 [jax|torch|both]"
@@ -77,6 +86,7 @@ fi
 
 BAZEL_TARGETS=()
 DEFINE_FLAGS=""
+TORCH_REPO_ENV_FLAGS=()
 
 if [ "$BUILD_JAX" = true ]; then
   echo "Configuring build for JAX..."
@@ -92,10 +102,27 @@ fi
 
 if [ "$BUILD_TORCH" = true ]; then
   echo "Configuring build for Torch..."
+  if [[ -z "${TORCH_SOURCE:-}" ]]; then
+    TORCH_SOURCE="$(python3 - <<'PY'
+import importlib.util
+import pathlib
+
+spec = importlib.util.find_spec("torch")
+if spec is None or not spec.submodule_search_locations:
+  raise SystemExit("torch package not found on Python path")
+print(pathlib.Path(next(iter(spec.submodule_search_locations))).resolve().parent)
+PY
+)"
+  fi
+  export TORCH_SOURCE
+  echo "Using local torch from: ${TORCH_SOURCE}"
+  DEFINE_FLAGS+=" --define=TORCH_SOURCE=local"
+  TORCH_REPO_ENV_FLAGS+=("--repo_env=TORCH_SOURCE=${TORCH_SOURCE}")
   BAZEL_TARGETS+=(
     "//raiden_lib/raw_transfer/torch:_torch_raw_transfer"
     "//api/torch:_kv_cache_manager"
     "//api/torch:_weight_synchronizer"
+    "//api/torch:_raiden_transfer_engine"
   )
 else
   DEFINE_FLAGS+=" --define with_torch=false"
@@ -106,6 +133,8 @@ if [ ${#BAZEL_TARGETS[@]} -eq 0 ]; then
   exit 1
 fi
 
+mkdir -p "${BAZEL_DISK_CACHE}" "${BAZEL_REPO_CACHE}" "$(dirname "${BAZEL_OUTPUT_BASE}")"
+
 echo "=== Building targets with Bazel ==="
 "${BAZEL_BIN}" --install_base="${BAZEL_OUTPUT_BASE}/install_base" --output_base="${BAZEL_OUTPUT_BASE}" --host_jvm_args="-Xmx32g" --host_jvm_args="-Xms2g" build -c opt --check_visibility=false --verbose_failures --experimental_repo_remote_exec --incompatible_disallow_empty_glob=false \
   --repo_env=HERMETIC_PYTHON_VERSION=${HERMETIC_PYTHON_VERSION:-3.12} \
@@ -113,6 +142,7 @@ echo "=== Building targets with Bazel ==="
   --repo_env=PIP_EXTRA_INDEX_URL="" \
   --repo_env=PYTHON_KEYRING_BACKEND="keyring.backends.null.Keyring" \
   --repo_env=PIP_CONFIG_FILE="/dev/null" \
+  "${TORCH_REPO_ENV_FLAGS[@]}" \
   "${BAZEL_TARGETS[@]}" \
   ${DEFINE_FLAGS} \
   --disk_cache=${BAZEL_DISK_CACHE} \
@@ -134,6 +164,7 @@ if [ "$BUILD_TORCH" = true ]; then
   cp -f "${WORKSPACE_DIR}/bazel-bin/raiden_lib/raw_transfer/torch/_torch_raw_transfer.so" "${WORKSPACE_DIR}/raiden_lib/raw_transfer/torch/"
   cp -f "${WORKSPACE_DIR}/bazel-bin/api/torch/_kv_cache_manager.so" "${WORKSPACE_DIR}/api/torch/"
   cp -f "${WORKSPACE_DIR}/bazel-bin/api/torch/_weight_synchronizer.so" "${WORKSPACE_DIR}/api/torch/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/api/torch/_raiden_transfer_engine.so" "${WORKSPACE_DIR}/api/torch/"
 fi
 
 

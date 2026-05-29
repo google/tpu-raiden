@@ -31,8 +31,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
-#include "third_party/peregrine/src/api/transport.h"
-#include "third_party/peregrine/src/api/types.h"
+#include "transport/peregrine_types.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -64,8 +63,8 @@ class SocketTransport final : public peregrine::Transport {
 
   // Posts an asynchronous transport request to communicate with `peer`.
   // Returns a process-unique handle to poll completion.
-  absl::StatusOr<peregrine::Handle> Post(std::string_view peer,
-                                    const peregrine::Request& request) override;
+  absl::StatusOr<peregrine::Handle> Post(
+      std::string_view peer, const peregrine::Request& request) override;
 
   // Queries the completion status of `handle`. Removes handle if completed.
   absl::StatusOr<peregrine::Status> Poll(peregrine::Handle handle) override;

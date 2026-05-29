@@ -44,10 +44,19 @@ git_override(
 bazel_dep(name = "rules_python", version = "1.8.5")
 
 raiden_imports = use_extension(
-    "//third_party/tpu_raiden/third_party/torch_tpu_configure:extension.bzl",
+    "//third_party/torch_tpu_configure:extension.bzl",
     "raiden_imports",
 )
 use_repo(raiden_imports, "torch_tpu", "torch_tpu_headers")
+
+torch_local_repo = use_repo_rule(
+    "@torch_tpu//bazel:torch_local_repo.bzl",
+    "torch_local_repo",
+)
+
+torch_local_repo(
+    name = "local_torch",
+)
 
 single_version_override(
     module_name = "rules_python",
