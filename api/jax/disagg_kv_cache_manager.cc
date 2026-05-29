@@ -87,12 +87,18 @@ DisaggKVCacheManager::DisaggKVCacheManager(
     nb::list device_arrays, int block_size, std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate,
     std::optional<std::vector<uintptr_t>> external_host_ptrs,
-    bool unsafe_skip_buffer_lock, int parallelism)
+    bool unsafe_skip_buffer_lock, int transport_parallelism,
+    int worker_parallelism)
     : DisaggKVCacheManagerBase(UnpackPjrtBuffers(device_arrays), block_size,
                                local_port, host_blocks_to_allocate,
                                CastExternalPointers(external_host_ptrs),
-                               unsafe_skip_buffer_lock, parallelism),
-      device_arrays_(std::move(device_arrays)) {}
+                               unsafe_skip_buffer_lock, transport_parallelism),
+      device_arrays_(std::move(device_arrays)) {
+  // transport_parallelism flows to the BlockTransport (Push/Pull stream count)
+  // through the base ctor; worker_parallelism sizes the H2H worker pool that
+  // Start() spawns, and is consumed there.
+  worker_parallelism_ = worker_parallelism;
+}
 
 DisaggKVCacheManager::~DisaggKVCacheManager() = default;
 

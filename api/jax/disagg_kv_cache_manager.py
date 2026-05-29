@@ -35,7 +35,8 @@ class DisaggKVCacheManager:
       host_blocks_to_allocate: Optional[int] = None,
       external_host_ptrs: Optional[List[int]] = None,
       unsafe_skip_buffer_lock: bool = False,
-      parallelism: int = 1,
+      transport_parallelism: int = 1,
+      worker_parallelism: int = 1,
   ):
     """Instantiates the sharded JAX Disaggregated KV Cache Manager.
 
@@ -47,7 +48,10 @@ class DisaggKVCacheManager:
       host_blocks_to_allocate: Max host blocks staging cache size.
       external_host_ptrs: Pinned external CPU host memory addresses list.
       unsafe_skip_buffer_lock: Skip dynamic safety locking.
-      parallelism: Parallel TCP sockets workers count.
+      transport_parallelism: Number of parallel TCP streams a SINGLE H2H
+        Push/Pull is striped across (the BlockTransport parallelism).
+      worker_parallelism: Number of H2H worker threads draining the transfer
+        queue, i.e. how many H2H transfers run concurrently.
     """
     self._impl = _kv_cache_manager.DisaggKVCacheManager(
         device_arrays,
@@ -56,7 +60,8 @@ class DisaggKVCacheManager:
         host_blocks_to_allocate,
         external_host_ptrs,
         unsafe_skip_buffer_lock,
-        parallelism,
+        transport_parallelism,
+        worker_parallelism,
     )
 
   def start(self):

@@ -388,14 +388,18 @@ class DisaggKVCacheManagerTest(parameterized.TestCase):
     ]
     jax.block_until_ready(decode_tpu_arrs)
 
-    # 3. Initialize managers with parallelism = 2!
+    # 3. Initialize managers with parallelism = 2 on BOTH axes: per-transfer TCP
+    # streams (transport_parallelism) and concurrent H2H workers
+    # (worker_parallelism). This stresses the concurrent block-allocation /
+    # NOTIFY path that previously corrupted KV.
     prefill_manager = disagg_kv_cache_manager.DisaggKVCacheManager(
         device_arrays=prefill_tpu_arrs,
         block_size=block_size,
         local_port=0,
         host_blocks_to_allocate=8,
         unsafe_skip_buffer_lock=self.skip_lock,
-        parallelism=parallelism,
+        transport_parallelism=parallelism,
+        worker_parallelism=parallelism,
     )
     decode_manager = disagg_kv_cache_manager.DisaggKVCacheManager(
         device_arrays=decode_tpu_arrs,
@@ -403,7 +407,8 @@ class DisaggKVCacheManagerTest(parameterized.TestCase):
         local_port=0,
         host_blocks_to_allocate=8,
         unsafe_skip_buffer_lock=self.skip_lock,
-        parallelism=parallelism,
+        transport_parallelism=parallelism,
+        worker_parallelism=parallelism,
     )
 
     prefill_manager.start()

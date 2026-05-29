@@ -106,13 +106,14 @@ NB_MODULE(_kv_cache_manager, m) {
   nb::class_<tpu_raiden::kv_cache::jax::DisaggKVCacheManager>(
       m, "DisaggKVCacheManager")
       .def(nb::init<nb::list, int, std::optional<int>, std::optional<int>,
-                    std::optional<std::vector<uintptr_t>>, bool, int>(),
+                    std::optional<std::vector<uintptr_t>>, bool, int, int>(),
            nb::arg("device_arrays"), nb::arg("block_size") = 1,
            nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("external_host_ptrs") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
-           nb::arg("parallelism") = 1)
+           nb::arg("transport_parallelism") = 1,
+           nb::arg("worker_parallelism") = 1)
       .def("start", &tpu_raiden::kv_cache::DisaggKVCacheManagerBase::Start)
       .def("stop", &tpu_raiden::kv_cache::DisaggKVCacheManagerBase::Stop,
            nb::call_guard<nb::gil_scoped_release>())

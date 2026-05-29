@@ -104,7 +104,82 @@ INFO: Build completed successfully, 5 total actions
 
 ---
 
-## 4. Critical Fixes & Technical Deep Dive
+## 4. Prefill ↔ Decode Workflow & Information Exchange
+
+This section traces a single KV transfer end-to-end and marks **exactly which information each side needs locally, and which pieces cross the wire**. The goal: a reader should be able to see what the prefill must know, what the decode must know, and what they hand each other to complete one transfer.
+
+Two independent network channels connect the engines:
+
+| Channel | Transport | Endpoint port | Carries |
+| :--- | :--- | :--- | :--- |
+| **Control plane** | ZeroMQ `REQ`/`REP` | `zmq_control_port()` | small text messages: peer registration, `NOTIFY_COMPLETE` |
+| **Data plane** | TCP `BlockTransport` | `local_port()` (a.k.a. `transport_port`) | the KV block **bytes** + the block-id handshake |
+
+### What each side submits
+
+| Side | Request | Fields it must supply | Meaning of the offsets |
+| :--- | :--- | :--- | :--- |
+| **Prefill** (sender) | `PREFILL_D2H` | `request_id`, `src_offsets`, `dst_offsets`, `sizes`, `peer` | `src_offsets`: device major-dim offsets of the KV to send. `dst_offsets`: prefill-**local host staging** offsets. `peer`: decode's registered name. |
+| **Decode** (receiver) | `DECODE_H2D` | `request_id`, `dst_offsets`, `sizes` | `dst_offsets`: device major-dim offsets where the received KV must land. |
+
+> `request_id` is the **shared key**: both sides must use the *same* id so the decode can match an incoming `NOTIFY_COMPLETE` to the `DECODE_H2D` it queued. Offsets/sizes are in **major-dimension slice units**; a "block" is `block_size` consecutive slices, so a block id `b` covers major slices `[b*block_size, (b+1)*block_size)`.
+
+### Sequence (with information exchanged at each step)
+
+```mermaid
+sequenceDiagram
+    participant P as Prefill (sender)
+    participant D as Decode (receiver)
+    Note over P,D: Step 0 — Bootstrap (control plane)
+    D-->>P: ip, zmq_control_port, transport_port
+    Note over P: Step 1 — D2H (local): device KV[src_offsets] → host staging
+    Note over P,D: Step 2 — H2H Push (data plane / TCP)
+    P->>D: header{op=Push, num_blocks} + KV bytes
+    D->>D: AllocateBlocks(num_blocks) → allocated_ids
+    D-->>P: allocated_ids  (where the blocks actually landed on D)
+    Note over P,D: Step 3 — NOTIFY (control plane / ZMQ)
+    P->>D: NOTIFY_COMPLETE:request_id:allocated_ids
+    D-->>P: OK
+    Note over D: Step 4 — H2D (local): host staging[allocated_ids] → device KV[dst_offsets]
+```
+
+**Step 0 — Bootstrap / peer discovery (control plane).**
+Prefill must learn decode's `{ip, zmq_control_port, transport_port}` — via `register_peer(...)`, the `CONNECT_REQ:<name>:<ip>:<zmq>:<transport>` handshake, or an external discovery proxy.
+*Crosses the wire:* decode's `ip`, `zmq_control_port`, `transport_port`. Afterwards prefill can reach decode on **both** planes; for a push the decode needs to know **nothing** about the prefill.
+
+**Step 1 — Prefill D2H (local, nothing on the wire).**
+Device KV at `src_offsets` is copied into the prefill's host staging buffer. The staging block ids are derived locally as `dst_offsets / block_size`.
+
+**Step 2 — H2H Push (data plane).**
+Prefill opens `parallelism` TCP streams to decode's `transport_port` and pushes the staged blocks.
+- *Prefill → Decode:* `BlockPacketHeader{op=Push, num_blocks}`, then the raw KV bytes for every `layer × shard`, for each block.
+- *Decode → Prefill:* the **receiver-allocated block ids**. Decode's `LogicalBlockManager` allocates `num_blocks` free blocks in **its own** host staging buffer, returns their ids, then writes the incoming bytes into exactly those blocks.
+- ⚠️ **Who owns the block ids:** the **decode** decides where blocks land, not the prefill. The prefill receives these ids as the push's return value. They are generally **not** equal to the prefill's local staging ids — they coincide only when the decode happens to allocate sequentially (e.g. a fresh pool at `parallelism=1`).
+
+**Step 3 — NOTIFY_COMPLETE (control plane).**
+After every push stream is acknowledged, prefill notifies decode.
+- *Prefill → Decode:* `NOTIFY_COMPLETE:<request_id>:<block_ids>`, where `<block_ids>` is the **receiver-allocated ids returned in Step 2** (comma-separated).
+- *Decode → Prefill:* `OK`.
+- This is the message that tells the decode **which of its own staging blocks** now hold this request's KV.
+
+**Step 4 — Decode H2D (local, nothing on the wire).**
+Decode matches `request_id` to the pending `DECODE_H2D`, and for each notified block id computes `src_offset = block_id * block_size` (host staging), pairs it **positionally** with the request's `dst_offsets[i]`, and copies host staging → device KV.
+
+### Information ownership summary
+
+| Information | Produced by | Needed by | How it gets there |
+| :--- | :--- | :--- | :--- |
+| decode `ip` / `zmq_control_port` / `transport_port` | Decode | Prefill | bootstrap (Step 0) |
+| `src_offsets`, prefill staging ids | Prefill | Prefill (local) | from `PREFILL_D2H` |
+| KV **bytes** | Prefill | Decode | H2H push (Step 2) |
+| **receiver-allocated block ids** | **Decode** | Prefill, then **back to Decode** | data-plane return (Step 2) → `NOTIFY` (Step 3) |
+| `dst_offsets`, `sizes` | Decode | Decode (local) | from `DECODE_H2D` |
+
+The non-obvious flow is the **block-id round-trip**: the ids originate on the *decode*, travel *back* to the prefill on the data plane, and must be *echoed forward* to the decode in the `NOTIFY`. Sending anything else here silently corrupts the transfer under concurrency — see [§5 "Receiver Block-Identity in NOTIFY"](#receiver-block-identity-in-notify-parallelism1-corruption).
+
+---
+
+## 5. Critical Fixes & Technical Deep Dive
 
 ### ZMQ Context Destructor Deadlock
 *   **Problem**: Under standard ZeroMQ coordination, `Stop()` blocks on `zmq_context_.reset()`. In ZMQ, `zmq_ctx_destroy()` blocks indefinitely until *all* associated socket instances (including short-lived REQ sockets used for client messaging) are closed. If background socket deallocations lag, the test hangs during exit.
@@ -130,9 +205,21 @@ INFO: Build completed successfully, 5 total actions
     ```
     This releases the Python GIL immediately upon entering C++ `Stop()`, allowing the background threads to safely acquire the GIL when stack unwinding and destroying callback references, unblocking the thread join.
 
+### Receiver Block-Identity in NOTIFY (parallelism>1 corruption)
+*   **Problem**: KV silently corrupted whenever multiple blocks were transferred concurrently (`parallelism > 1`, or several in-flight requests). The orchestrator's `kH2hComplete` handler built the `NOTIFY_COMPLETE` payload from `active_requests[req_id].block_ids`, which still held the prefill's **local staging** ids (`dst_offsets / block_size`). But per §4 (Step 2 — H2H Push), the ids that matter are the **receiver-allocated** ids returned by the push — they were stored on the *event's* request copy and ignored. The decode then computed its H2D `src_offsets` from the wrong ids and read the wrong staging blocks. At `parallelism=1` the decode's `LogicalBlockManager` allocates sequentially, so staging ids `[0,1]` happened to equal the allocated ids `[0,1]` and it worked **by coincidence**; at `parallelism>1` the decode could allocate `[1,0]`, the stale `[0,1]` was sent, and the two blocks were swapped — verified via send/recv/H2D fingerprint logging (data was placed correctly in host blocks, but the `block_ids` reaching H2D were `[0,1]` when they should have been `[1,0]`).
+*   **Solution**: In the `kH2HWrite` branch of `OrchestrationLoop`, refresh the canonical request with the ids the push actually allocated **before** composing the notification:
+    ```cpp
+    // event.request carries the block_ids the receiver allocated for this push;
+    // active_requests still holds our local staging ids.
+    req.block_ids = event.request.block_ids;
+    std::string msg = absl::StrCat("NOTIFY_COMPLETE:", req.request_id, ":");
+    ```
+*   **Companion fix (data race)**: `LogicalBlockManager` is not thread-safe, yet the transport's receiver `ConnectionWorker` threads call `AllocateBlocks` concurrently (one per inbound stream) while the orchestrator `Unlock`s completed blocks. Two concurrent `Allocate()` calls could hand out the **same** free block. Added an `absl::Mutex block_manager_mutex_` (in `kv_cache_manager_base.h`) guarding the `AllocateBlocks` override and the orchestrator's `Unlock`.
+*   **Regression coverage**: `disagg_kv_cache_manager_test.py::test_e2e_disagg_push_multi_request_concurrent` (runs at `parallelism=2`) reproduces the corruption and now passes; verified end-to-end across two TPU hosts up to 8 requests / `parallelism=4`.
+
 ---
 
-## 5. Optimized Non-Blocking Coordination Design
+## 6. Optimized Non-Blocking Coordination Design
 
 To transition both **Local transfers (PJRT)** and **Host-to-Host transfers (TCP)** from blocking execution to high-performance concurrent pipelining, we have designed two zero-overhead non-blocking collection patterns:
 
@@ -160,29 +247,35 @@ graph TD
 
 ---
 
-### B. Host-to-Host transfers: Concurrent Workers Pool (`parallelism`)
+### B. Host-to-Host transfers: Two independent parallelism knobs
 
-Since `BlockTransport::Push` and `Pull` are inherently blocking and do not expose asynchronous future interfaces, we scale them concurrently using a **Multi-Worker Thread Pool** mapped to the user-supplied `parallelism` parameter.
+`BlockTransport::Push`/`Pull` are blocking, so H2H concurrency is scaled with **two separately-named, independently-tunable** configs. Conflating them (a single `parallelism`) previously masked the bug in [§5](#receiver-block-identity-in-notify-parallelism1-corruption), so they are now distinct:
+
+| Config (Python kwarg) | C++ member | Scope | Controls |
+| :--- | :--- | :--- | :--- |
+| `worker_parallelism` | `DisaggKVCacheManagerBase::worker_parallelism_` | **request-level** | number of `H2hTransferLoop` threads draining `h2h_work_queue_` → how many H2H transfers run **concurrently** |
+| `transport_parallelism` | `RaidenManagerBase::transport_parallelism_` | **transfer-level** | the `parallelism` argument to `BlockTransport::Push`/`Pull` → how many **TCP streams** a *single* transfer is striped across |
+
+The two compose: with `worker_parallelism=W` and `transport_parallelism=T`, up to `W` transfers run at once and each fans out over `T` sockets, so up to `W*T` concurrent TCP streams.
 
 ```mermaid
 graph TD
     Orchestrator[Orchestrator Thread] -- Push --> H2hQueue[H2H Work Queue]
-    subgraph H2H Worker Pool (parallelism threads)
-        Worker1[H2H Worker Thread 1] -- Pop Concurrent --> H2hQueue
-        Worker2[H2H Worker Thread 2] -- Pop Concurrent --> H2hQueue
+    subgraph Pool[H2H Worker Pool — worker_parallelism threads]
+        Worker1[H2H Worker 1] -- Pop --> H2hQueue
+        Worker2[H2H Worker 2] -- Pop --> H2hQueue
     end
-    Worker1 -- Blocking Push/Pull --> Peer[Remote Peer TCP Server]
-    Worker1 -- Push kH2hComplete --> OrchQueue[Orchestrator Queue]
+    Worker1 -- "Push/Pull (splits into transport_parallelism TCP streams)" --> Peer[Remote Peer TCP Server]
+    Worker1 -- kH2hComplete --> OrchQueue[Orchestrator Queue]
 ```
 
-1.  **Shared Work Queue**: All `kH2HWrite` and `kH2HRead` requests are pushed to the thread-safe `h2h_work_queue_`.
-2.  **Worker Scaling**: Instead of spawning a single H2H background thread, we spin up `parallelism_` threads in `Start()` running the same `H2hTransferLoop`:
+1.  **Worker pool (`worker_parallelism`)**: `Start()` spins up `worker_parallelism_` threads running `H2hTransferLoop`, all concurrently popping the thread-safe `h2h_work_queue_`:
     ```cpp
-    for (int i = 0; i < parallelism_; ++i) {
+    for (int i = 0; i < worker_parallelism_; ++i) {
       h2h_transfer_threads_.push_back(
           std::thread(&DisaggKVCacheManagerBase::H2hTransferLoop, this));
     }
     ```
-3.  **Concurrent Pop Execution**: The worker threads concurrently block on `h2h_work_queue_.Pop(req)`. Since the queue is guarded under an `absl::Mutex`, pops are safe and load-balanced automatically. Multiple socket transfers execute in parallel.
-4.  **Benefits**: Reuses existing queue structures, completely eliminates serialization bottlenecks on host-to-host copies, and fully honors the `parallelism` configuration.
+2.  **Per-transfer streams (`transport_parallelism`)**: each worker calls `H2hWriteDirect`/`H2hReadDirect`, which pass `transport_parallelism_` to `BlockTransport::Push`/`Pull`. `Push` splits the request's blocks across that many `H2hWriteWorker` streams (each its own socket), and the receiver accepts one `ConnectionWorker` per stream.
+3.  **Concurrency safety**: because multiple streams/requests now allocate receiver blocks concurrently, the `LogicalBlockManager` is guarded by `block_manager_mutex_`, and the completion path notifies the peer with the **receiver-allocated** block ids (see [§5](#receiver-block-identity-in-notify-parallelism1-corruption)).
 

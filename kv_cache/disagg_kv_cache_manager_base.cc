@@ -80,7 +80,7 @@ absl::Status DisaggKVCacheManagerBase::Start() {
       std::thread(&DisaggKVCacheManagerBase::OrchestrationLoop, this);
   local_transfer_thread_ =
       std::thread(&DisaggKVCacheManagerBase::LocalTransferLoop, this);
-  for (int i = 0; i < parallelism_; ++i) {
+  for (int i = 0; i < worker_parallelism_; ++i) {
     h2h_transfer_threads_.push_back(
         std::thread(&DisaggKVCacheManagerBase::H2hTransferLoop, this));
   }
@@ -290,9 +290,14 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
         } else if (req.type == DisaggTransferRequest::Type::kDecodeH2D) {
           LOG(INFO) << "[Orchestrator] Request " << event.request_id
                     << ": H2D complete, request fully done!";
-          // Unlock host blocks
+          // Unlock host blocks. Must hold block_manager_mutex_ because the
+          // transport's receiver threads concurrently Allocate() on it.
           if (block_manager_) {
-            absl::Status unlock_status = block_manager_->Unlock(req.block_ids);
+            absl::Status unlock_status;
+            {
+              absl::MutexLock lock(&block_manager_mutex_);
+              unlock_status = block_manager_->Unlock(req.block_ids);
+            }
             if (!unlock_status.ok()) {
               LOG(ERROR) << "[Orchestrator] Failed to unlock blocks on Decode: "
                          << unlock_status;
@@ -323,6 +328,13 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
           LOG(INFO) << "[Orchestrator] Request " << event.request_id
                     << ": H2H Write complete, sending ZMQ notification to "
                     << req.peer;
+          // The push returned the RECEIVER's allocated block ids (which the
+          // peer's H2D must read from). These live on the completed request
+          // carried by the event; active_requests still holds our local
+          // staging ids. They coincide only when the receiver happens to
+          // allocate sequentially (e.g. parallelism==1), so refresh from the
+          // event or the peer reads the wrong blocks under concurrency.
+          req.block_ids = event.request.block_ids;
           // Notify peer via ZMQ
           std::string msg =
               absl::StrCat("NOTIFY_COMPLETE:", req.request_id, ":");

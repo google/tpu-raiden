@@ -30,12 +30,12 @@ namespace tpu_raiden {
 RaidenManagerBase::RaidenManagerBase(size_t num_layers, size_t num_shards,
                                      size_t slice_byte_size, int block_size,
                                      std::optional<int> local_port,
-                                     int parallelism)
+                                     int transport_parallelism)
     : num_layers_(num_layers),
       num_shards_(num_shards),
       slice_byte_size_(slice_byte_size),
       block_size_(block_size),
-      parallelism_(parallelism) {
+      transport_parallelism_(transport_parallelism) {
   shard_factor_ = 1;
 
   int port = local_port.value_or(0);
@@ -96,7 +96,7 @@ absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hWriteDirect(
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
-  return server_->Push(peer, src_block_ids, parallelism_);
+  return server_->Push(peer, src_block_ids, transport_parallelism_);
 }
 
 absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hReadDirect(
@@ -105,7 +105,7 @@ absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hReadDirect(
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
-  return server_->Pull(peer, src_block_ids, parallelism_);
+  return server_->Pull(peer, src_block_ids, transport_parallelism_);
 }
 
 absl::Status RaidenManagerBase::PullWeightsChunk(

@@ -149,6 +149,11 @@ class DisaggKVCacheManagerBase : public KVCacheManagerBase {
   std::vector<std::thread> h2h_transfer_threads_;
   std::thread listener_thread_;
 
+  // Number of H2hTransferLoop worker threads draining h2h_work_queue_, i.e. how
+  // many H2H transfers run concurrently. Distinct from transport_parallelism_
+  // (the per-transfer TCP stream count). Set by subclasses before Start().
+  int worker_parallelism_ = 1;
+
   bool running_ ABSL_GUARDED_BY(running_mutex_) = false;
   absl::Mutex running_mutex_;
 

@@ -23,8 +23,10 @@
 #include <utility>
 #include <vector>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/synchronization/mutex.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -52,14 +54,14 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<int> host_blocks_to_allocate = std::nullopt,
       std::optional<std::vector<const uint8_t*>> external_host_ptrs =
           std::nullopt,
-      bool unsafe_skip_buffer_lock = false, int parallelism = 1);
+      bool unsafe_skip_buffer_lock = false, int transport_parallelism = 1);
 
   // Standard CPU-only Constructor for remote workers E2E
   KVCacheManagerBase(size_t num_layers, size_t num_shards,
                      size_t slice_byte_size, int block_size = 1,
                      std::optional<int> local_port = std::nullopt,
                      std::optional<int> host_blocks_to_allocate = std::nullopt,
-                     int parallelism = 1);
+                     int transport_parallelism = 1);
 
   ~KVCacheManagerBase() override;
 
@@ -142,12 +144,22 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   std::unique_ptr<LogicalBlockManager> block_manager_;
 
+  // LogicalBlockManager is not thread-safe, but AllocateBlocks() is called
+  // concurrently by the transport's receiver ConnectionWorker threads (one per
+  // inbound H2H connection: parallelism>1 and/or multiple in-flight requests),
+  // while the orchestrator thread concurrently Unlock()s completed blocks. All
+  // block_manager_ operations must hold this mutex. Without it, two concurrent
+  // Allocate() calls can hand out the SAME free block, so two requests write
+  // different KV into the same host block and one silently clobbers the other.
+  absl::Mutex block_manager_mutex_;
+
   // Separate PJRT active holds matrix to protect subclass scoping E2E!
   std::vector<std::vector<raiden::BufferHoldAndAlias>> buffer_holds_;
 
   // Override parent AllocateBlocks using our dynamic block manager!
   absl::StatusOr<std::vector<int>> AllocateBlocks(size_t num_blocks,
                                                   int64_t entity_id) override {
+    absl::MutexLock lock(&block_manager_mutex_);
     return block_manager_->Allocate(num_blocks, entity_id, /*lock=*/true);
   }
 

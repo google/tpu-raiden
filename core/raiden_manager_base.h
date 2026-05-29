@@ -31,10 +31,14 @@ namespace tpu_raiden {
 
 class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
  public:
+  // transport_parallelism = number of parallel TCP streams a single H2H
+  // Push/Pull is split across (passed to BlockTransport::Push/Pull). This is
+  // distinct from the disaggregated manager's worker-pool size; see
+  // DisaggKVCacheManagerBase::worker_parallelism_.
   RaidenManagerBase(size_t num_layers, size_t num_shards,
                     size_t slice_byte_size, int block_size = 1,
                     std::optional<int> local_port = std::nullopt,
-                    int parallelism = 1);
+                    int transport_parallelism = 1);
 
   ~RaidenManagerBase() override;
 
@@ -86,7 +90,9 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   size_t num_shards_ = 0;
   size_t slice_byte_size_ = 0;
   int block_size_ = 1;
-  int parallelism_ = 1;
+  // Number of parallel TCP streams per H2H Push/Pull (the BlockTransport
+  // parallelism). NOT the H2H worker-thread-pool size.
+  int transport_parallelism_ = 1;
   size_t shard_factor_ = 1;
   int64_t major_dim_size_ = 0;
 

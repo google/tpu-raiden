@@ -36,7 +36,8 @@ class DisaggKVCacheManager : public DisaggKVCacheManagerBase {
       std::optional<int> local_port = std::nullopt,
       std::optional<int> host_blocks_to_allocate = std::nullopt,
       std::optional<std::vector<uintptr_t>> external_host_ptrs = std::nullopt,
-      bool unsafe_skip_buffer_lock = false, int parallelism = 1);
+      bool unsafe_skip_buffer_lock = false, int transport_parallelism = 1,
+      int worker_parallelism = 1);
 
   ~DisaggKVCacheManager() override;
 
