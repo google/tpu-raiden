@@ -171,6 +171,9 @@ def main():
                   help="address the peer dials this engine on")
   ap.add_argument("--peer-name", default="decode",
                   help="prefill: name of the decode peer to resolve")
+  ap.add_argument("--mode", default="push", choices=["push", "pull"],
+                  help="push: prefill pushes to decode; pull: decode pulls "
+                       "from prefill")
   ap.add_argument("--n-layers", type=int, default=2)
   ap.add_argument("--block-size", type=int, default=2)
   ap.add_argument("--dtype", default="int32",
@@ -273,26 +276,39 @@ def main():
     return cb
 
   n = len(requests)
+  pull = (args.mode == "pull")
+  peer_name = "prefill" if args.role == "decode" else "decode"
+
+  def register_self():
+    proxy_register(args.proxy_endpoint, args.self_name, args.self_ip,
+                   my_zmq, my_trans)
+
+  def connect_to(name):
+    ip, pz, pt = proxy_resolve(args.proxy_endpoint, name)
+    manager.register_peer(name, ip, pz, pt)
+    print(f"[{args.role}] connected to '{name}' -> {ip} (zmq={pz}, trans={pt})",
+          flush=True)
+
   rc = 0
   try:
     if args.role == "decode":
-      # Queue ALL receives FIRST; each pends until its peer NOTIFY_COMPLETE.
+      if pull:
+        # PULL: the prefill registers up front; resolve+connect to it, queue
+        # the pull receives, THEN advertise readiness so the prefill only
+        # stages (and sends NOTIFY_READY) once our receives are pending.
+        connect_to(peer_name)
       for rid, _src_i, dst_i, szs in requests:
         manager.submit_request(
             request_id=rid,
             req_type=dm.DisaggTransferRequestType.DECODE_H2D,
-            dst_offsets=dst_i,
-            sizes=szs,
-            callback=make_cb(rid),
-        )
-      # Only now advertise ourselves: a successful RESOLVE on the prefill side
-      # means we are ready to receive.
-      proxy_register(args.proxy_endpoint, args.self_name, args.self_ip,
-                     my_zmq, my_trans)
-      print(f"[decode] registered '{args.self_name}'; {n} request(s) queued, "
-            "waiting for pushes...", flush=True)
+            dst_offsets=dst_i, sizes=szs,
+            peer=(peer_name if pull else ""), pull=pull,
+            callback=make_cb(rid))
+      register_self()  # readiness signal (prefill's RESOLVE unblocks on this)
+      print(f"[decode] {n} request(s) queued ({args.mode}); waiting...",
+            flush=True)
       if not all_done.wait(timeout=args.timeout):
-        raise TimeoutError(f"decode H2D incomplete; pending={sorted(pending)}")
+        raise TimeoutError(f"decode incomplete; pending={sorted(pending)}")
       if errors:
         raise RuntimeError("decode callback error: " + "; ".join(errors))
       ok, msg = verify_decode(arrays, plan, shape, np_dtype)
@@ -300,28 +316,23 @@ def main():
       rc = 0 if ok else 1
 
     else:  # prefill
-      ip, peer_zmq, peer_trans = proxy_resolve(
-          args.proxy_endpoint, args.peer_name)
-      print(f"[prefill] resolved '{args.peer_name}' -> {ip} "
-            f"(zmq={peer_zmq}, trans={peer_trans})", flush=True)
-      manager.register_peer(args.peer_name, ip, peer_zmq, peer_trans)
+      if pull:
+        register_self()  # decode must be able to resolve+pull from us
+      connect_to(peer_name)  # blocks until the decode has queued its receives
       for rid, src_i, dst_i, szs in requests:
         manager.submit_request(
             request_id=rid,
             req_type=dm.DisaggTransferRequestType.PREFILL_D2H,
-            src_offsets=src_i,
-            dst_offsets=dst_i,
-            sizes=szs,
-            peer=args.peer_name,
-            callback=make_cb(rid),
-        )
-      print(f"[prefill] submitted {n} PREFILL_D2H; waiting for pushes...",
+            src_offsets=src_i, dst_offsets=dst_i, sizes=szs,
+            peer=peer_name, pull=pull,
+            callback=make_cb(rid))
+      print(f"[prefill] submitted {n} PREFILL_D2H ({args.mode}); waiting...",
             flush=True)
       if not all_done.wait(timeout=args.timeout):
-        raise TimeoutError(f"prefill push incomplete; pending={sorted(pending)}")
+        raise TimeoutError(f"prefill incomplete; pending={sorted(pending)}")
       if errors:
         raise RuntimeError("prefill callback error: " + "; ".join(errors))
-      print(f"[prefill] all {n} pushes complete.", flush=True)
+      print(f"[prefill] all {n} transfers complete.", flush=True)
       rc = 0
   finally:
     manager.stop()

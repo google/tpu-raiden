@@ -108,23 +108,32 @@ INFO: Build completed successfully, 5 total actions
 
 This section traces a single KV transfer end-to-end and marks **exactly which information each side needs locally, and which pieces cross the wire**. The goal: a reader should be able to see what the prefill must know, what the decode must know, and what they hand each other to complete one transfer.
 
+There are **two transfer modes**, selected per-request by the `pull_mode` flag (both sides of a transfer must agree):
+
+- **Push (default)** — the **prefill** stages the KV and *pushes* it to the decode, then notifies it. The prefill drives the data movement.
+- **Pull** — the **prefill** stages the KV and advertises readiness; the **decode** *pulls* it, then acks. The decode drives the data movement.
+
+Both move identical bytes via the same two planes; they differ in **who initiates the H2H transfer** and in the control handshake.
+
 Two independent network channels connect the engines:
 
 | Channel | Transport | Endpoint port | Carries |
 | :--- | :--- | :--- | :--- |
-| **Control plane** | ZeroMQ `REQ`/`REP` | `zmq_control_port()` | small text messages: peer registration, `NOTIFY_COMPLETE` |
-| **Data plane** | TCP `BlockTransport` | `local_port()` (a.k.a. `transport_port`) | the KV block **bytes** + the block-id handshake |
+| **Control plane** | ZeroMQ `REQ`/`REP` | `zmq_control_port()` | small text messages: peer registration; push: `NOTIFY_COMPLETE`; pull: `NOTIFY_READY` + `PULL_COMPLETE` |
+| **Data plane** | TCP `BlockTransport` | `local_port()` (a.k.a. `transport_port`) | the KV block **bytes** + the block-id handshake (`Push` op=1 / `Pull` op=2) |
 
 ### What each side submits
 
 | Side | Request | Fields it must supply | Meaning of the offsets |
 | :--- | :--- | :--- | :--- |
-| **Prefill** (sender) | `PREFILL_D2H` | `request_id`, `src_offsets`, `dst_offsets`, `sizes`, `peer` | `src_offsets`: device major-dim offsets of the KV to send. `dst_offsets`: prefill-**local host staging** offsets. `peer`: decode's registered name. |
-| **Decode** (receiver) | `DECODE_H2D` | `request_id`, `dst_offsets`, `sizes` | `dst_offsets`: device major-dim offsets where the received KV must land. |
+| **Prefill** | `PREFILL_D2H` | `request_id`, `src_offsets`, `dst_offsets`, `sizes`, `peer`, `pull_mode` | `src_offsets`: device major-dim offsets of the KV to send. `dst_offsets`: prefill-**local host staging** offsets. `peer`: the decode's registered name. |
+| **Decode** | `DECODE_H2D` | `request_id`, `dst_offsets`, `sizes`, `pull_mode`, (`peer` in pull) | `dst_offsets`: device major-dim offsets where the received KV must land. In **pull** mode `peer` must be set to the prefill (the source to pull from). |
 
-> `request_id` is the **shared key**: both sides must use the *same* id so the decode can match an incoming `NOTIFY_COMPLETE` to the `DECODE_H2D` it queued. Offsets/sizes are in **major-dimension slice units**; a "block" is `block_size` consecutive slices, so a block id `b` covers major slices `[b*block_size, (b+1)*block_size)`.
+> `request_id` is the **shared key**: both sides must use the *same* id so the decode can match an incoming notification to the `DECODE_H2D` it queued. Offsets/sizes are in **major-dimension slice units**; a "block" is `block_size` consecutive slices, so a block id `b` covers major slices `[b*block_size, (b+1)*block_size)`.
+>
+> **Peer registration:** push needs **one** direction — the prefill must have the decode registered (it pushes + notifies). Pull needs **both** directions — the decode must have the prefill registered (to pull + ack) *and* the prefill must have the decode registered (to send `NOTIFY_READY`).
 
-### Sequence (with information exchanged at each step)
+### Push mode — sequence (with information exchanged at each step)
 
 ```mermaid
 sequenceDiagram
@@ -176,6 +185,68 @@ Decode matches `request_id` to the pending `DECODE_H2D`, and for each notified b
 | `dst_offsets`, `sizes` | Decode | Decode (local) | from `DECODE_H2D` |
 
 The non-obvious flow is the **block-id round-trip**: the ids originate on the *decode*, travel *back* to the prefill on the data plane, and must be *echoed forward* to the decode in the `NOTIFY`. Sending anything else here silently corrupts the transfer under concurrency — see [§5 "Receiver Block-Identity in NOTIFY"](#receiver-block-identity-in-notify-parallelism1-corruption).
+
+### Pull mode — sequence (with information exchanged at each step)
+
+In pull mode the **decode initiates** the data movement. The prefill still does its D2H first, but instead of pushing it advertises readiness and waits; the decode reads the blocks and acks.
+
+```mermaid
+sequenceDiagram
+    participant P as Prefill (source)
+    participant D as Decode (puller)
+    Note over P,D: Step 0 — Bootstrap (BOTH directions registered)
+    P-->>D: ip, zmq_control_port, transport_port
+    D-->>P: ip, zmq_control_port, transport_port
+    Note over P: Step 1 — D2H (local): device KV[src_offsets] → host staging (blocks = dst_offsets/block_size)
+    Note over P,D: Step 2 — NOTIFY_READY (control plane / ZMQ)
+    P->>D: NOTIFY_READY:request_id:prefill_block_ids
+    D-->>P: OK
+    Note over P,D: Step 3 — H2H Read / Pull (data plane / TCP)
+    D->>D: AllocateBlocks(n) → local_ids
+    D->>P: header{op=Pull, remote_block_id=prefill_block_ids[0], num_blocks}
+    P-->>D: KV bytes (the requested remote blocks)
+    Note over D: Step 4 — H2D (local): host staging[local_ids] → device KV[dst_offsets]
+    Note over P,D: Step 5 — PULL_COMPLETE (control plane / ZMQ)
+    D->>P: PULL_COMPLETE:request_id
+    P-->>D: OK
+```
+
+**Step 0 — Bootstrap (both directions).** Unlike push, the decode must reach the prefill (to pull + ack) *and* the prefill must reach the decode (to send `NOTIFY_READY`). So `{ip, zmq_control_port, transport_port}` is exchanged **both ways**.
+
+**Step 1 — Prefill D2H (local).** Identical to push: device KV at `src_offsets` → host staging; the staging block ids are `dst_offsets / block_size`. Because the decode reads these later, the prefill keeps the request **pending** (the buffer must not be reused) until Step 5.
+
+**Step 2 — NOTIFY_READY (control plane).**
+- *Prefill → Decode:* `NOTIFY_READY:<request_id>:<prefill_block_ids>` — the prefill's **own** staging block ids (where the data sits on the prefill). *(Contrast push, where `NOTIFY_COMPLETE` carries the **decode's** block ids.)*
+- *Decode → Prefill:* `OK`.
+
+**Step 3 — H2H Read / Pull (data plane).** On `NOTIFY_READY`, the decode issues an H2H Read. It **allocates its own local blocks** (`local_ids`), then pulls the prefill's blocks into them.
+- *Decode → Prefill:* `BlockPacketHeader{op=Pull, remote_block_id = prefill_block_ids[0], num_blocks}` (one request per `transport_parallelism` stream). The current `Pull` reads **consecutive** remote blocks from that base.
+- *Prefill → Decode:* the raw KV bytes for the requested remote blocks (every `layer × shard`).
+- The pull returns the decode-local `local_ids` (where the data landed locally) — the analogue of push's receiver-allocated ids, but here both produced and consumed on the **decode** side, so there is no cross-engine round-trip.
+
+**Step 4 — Decode H2D (local).** `src_offset = local_id * block_size`, paired positionally with the request's `dst_offsets`, copies host staging → device KV.
+
+**Step 5 — PULL_COMPLETE (control plane).**
+- *Decode → Prefill:* `PULL_COMPLETE:<request_id>` — releases the prefill (it completes its request and can reuse the staging buffer).
+- *Prefill → Decode:* `OK`.
+
+#### Push vs. pull at a glance
+
+| | Push | Pull |
+| :--- | :--- | :--- |
+| Initiates H2H | Prefill (`op=Push`) | Decode (`op=Pull`) |
+| Who allocates receiver blocks | Decode (during the inbound push) | Decode (during its own pull) |
+| Readiness signal | — (prefill just pushes) | `NOTIFY_READY` (P→D), prefill block ids |
+| Completion signal | `NOTIFY_COMPLETE` (P→D), decode block ids | `PULL_COMPLETE` (D→P) |
+| Peer registration | prefill→decode only | both directions |
+| Block ids in the control msg | the **decode's** (round-tripped via the push) | the **prefill's** (the remote source to read) |
+| `peer` on `DECODE_H2D` | not needed | required (the prefill) |
+
+#### Pull-mode limitations
+
+- **Pull reads *consecutive* remote blocks.** The data-plane `Pull` (op=2) sends a single base `remote_block_id = prefill_block_ids[0]` plus `num_blocks` and the server reads `remote_block_id + k` for each `k`. So a pull request's prefill staging blocks **must be contiguous** — which holds when `dst_offsets` are consecutive multiples of `block_size`, but a non-contiguous staging layout would pull the wrong blocks. Push has no such constraint (it sends every block explicitly). Lifting this requires extending the `Pull` header to carry the explicit remote block-id list instead of a single base.
+- **Pull requires both-direction peer registration** (decode↔prefill), versus push's single direction (prefill→decode).
+- **H2H Read is the only pull primitive wired up.** `kH2HRead` now drives decode-side pulls; there is no standalone "pull weights" path here (that lives in `PullWeightsChunk`, op=3, used by resharding).
 
 ---
 

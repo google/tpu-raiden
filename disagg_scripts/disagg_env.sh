@@ -38,6 +38,9 @@ export N_LAYERS="${N_LAYERS:-2}"
 export BLOCK_SIZE="${BLOCK_SIZE:-2}"
 export DTYPE="${DTYPE:-int32}"
 export DEVICE="${DEVICE:-tpu}"
+# Transfer direction: "push" (prefill pushes to decode) or "pull" (decode pulls
+# from prefill).
+export MODE="${MODE:-push}"
 # Two distinct H2H parallelism knobs (see disagg_kv_cache_manager.py):
 #   TRANSPORT_PARALLELISM = parallel TCP streams per single Push/Pull (BlockTransport)
 #   WORKER_PARALLELISM    = concurrent H2H worker threads (transfers in flight)

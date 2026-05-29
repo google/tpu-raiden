@@ -33,8 +33,15 @@ cd raiden_oss_0528/disagg_scripts
 NUM_REQUESTS=4 ./run_two_node_disagg_test.sh  # 4 concurrent requests
 NUM_REQUESTS=4 WORKER_PARALLELISM=2 ./run_two_node_disagg_test.sh      # 2 concurrent H2H workers
 TRANSPORT_PARALLELISM=2 ./run_two_node_disagg_test.sh                  # split each transfer over 2 TCP streams
+MODE=pull ./run_two_node_disagg_test.sh                               # decode pulls from prefill (default: push)
 DTYPE=bf16 N_LAYERS=4 ./run_two_node_disagg_test.sh
+
+./run_all_two_node_tests.sh   # the full push+pull matrix with a PASS/FAIL summary
 ```
+
+`MODE` selects the transfer direction: `push` (default — prefill pushes to
+decode) or `pull` (decode pulls from prefill). See §4 of
+`../disagg_kv_cache_manager.md` for the per-step information exchange of each.
 
 `NUM_REQUESTS=N` fires N concurrent requests; request `i` is shifted by
 `i*sum(SIZES)` on both src and dst so the requests touch **disjoint, independently

@@ -52,7 +52,7 @@ sleep 2
 
 COMMON_ARGS="--proxy-endpoint ${PROXY_ENDPOINT} \
   --n-layers ${N_LAYERS} --block-size ${BLOCK_SIZE} --dtype ${DTYPE} \
-  --device ${DEVICE} --num-requests ${NUM_REQUESTS} \
+  --device ${DEVICE} --num-requests ${NUM_REQUESTS} --mode ${MODE} \
   --transport-parallelism ${TRANSPORT_PARALLELISM} \
   --worker-parallelism ${WORKER_PARALLELISM} \
   --src-offsets ${SRC_OFFSETS} --dst-offsets ${DST_OFFSETS} --sizes ${SIZES}"

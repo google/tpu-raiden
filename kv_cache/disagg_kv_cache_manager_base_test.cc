@@ -130,6 +130,72 @@ TEST(DisaggKVCacheManagerBaseTest, E2EPushWorkflowMocked) {
   EXPECT_TRUE(decode.h2d_called());
 }
 
+TEST(DisaggKVCacheManagerBaseTest, E2EPullWorkflowMocked) {
+  // PULL mode: prefill stages (D2H) and advertises readiness; the decode pulls
+  // the blocks (real H2H Read over loopback) then loads them (H2D). D2h/H2d are
+  // mocked; the H2H Read + the NOTIFY_READY/PULL_COMPLETE zmq handshake are real.
+  MockDisaggKVCacheManager prefill(
+      /*num_layers=*/1, /*num_shards=*/1, /*slice_byte_size=*/1024,
+      /*block_size=*/2, /*local_port=*/0, /*host_blocks_to_allocate=*/4,
+      /*parallelism=*/1);
+  MockDisaggKVCacheManager decode(
+      /*num_layers=*/1, /*num_shards=*/1, /*slice_byte_size=*/1024,
+      /*block_size=*/2, /*local_port=*/0, /*host_blocks_to_allocate=*/4,
+      /*parallelism=*/1);
+
+  ASSERT_TRUE(prefill.Start().ok());
+  ASSERT_TRUE(decode.Start().ok());
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  // Pull needs BOTH directions registered: prefill -> decode for NOTIFY_READY,
+  // decode -> prefill for the H2H Read pull and the PULL_COMPLETE ack.
+  prefill.RegisterPeer("decode", "127.0.0.1", decode.zmq_control_port(),
+                       decode.local_port().value());
+  decode.RegisterPeer("prefill", "127.0.0.1", prefill.zmq_control_port(),
+                      prefill.local_port().value());
+
+  absl::Notification prefill_done;
+  absl::Notification decode_done;
+
+  // 1. Decode submits a PULL receive (peer = the prefill to pull from).
+  DisaggTransferRequest decode_req;
+  decode_req.request_id = 3001;
+  decode_req.type = DisaggTransferRequest::Type::kDecodeH2D;
+  decode_req.pull_mode = true;
+  decode_req.dst_offsets = {0, 2};
+  decode_req.sizes = {2, 2};
+  decode_req.peer = "prefill";
+  decode_req.callback = [&](absl::Status s) {
+    EXPECT_TRUE(s.ok());
+    decode_done.Notify();
+  };
+  ASSERT_TRUE(decode.SubmitRequest(decode_req).ok());
+
+  // 2. Prefill submits a PULL stage (peer = the decode to notify).
+  DisaggTransferRequest prefill_req;
+  prefill_req.request_id = 3001;
+  prefill_req.type = DisaggTransferRequest::Type::kPrefillD2H;
+  prefill_req.pull_mode = true;
+  prefill_req.src_offsets = {4, 6};
+  prefill_req.dst_offsets = {0, 2};
+  prefill_req.sizes = {2, 2};
+  prefill_req.peer = "decode";
+  prefill_req.callback = [&](absl::Status s) {
+    EXPECT_TRUE(s.ok());
+    prefill_done.Notify();
+  };
+  ASSERT_TRUE(prefill.SubmitRequest(prefill_req).ok());
+
+  EXPECT_TRUE(prefill_done.WaitForNotificationWithTimeout(absl::Seconds(5)));
+  EXPECT_TRUE(decode_done.WaitForNotificationWithTimeout(absl::Seconds(5)));
+
+  prefill.Stop();
+  decode.Stop();
+
+  EXPECT_TRUE(prefill.d2h_called());  // prefill staged device -> host
+  EXPECT_TRUE(decode.h2d_called());   // decode loaded host -> device after pull
+}
+
 // -----------------------------------------------------------------------------
 // CPU-only unit tests that exercise individual base-class surfaces without
 // needing the full E2E push flow (and without PJRT). They use the same

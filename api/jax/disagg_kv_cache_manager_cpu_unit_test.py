@@ -51,6 +51,14 @@ class DisaggTransferRequestBindingTest(parameterized.TestCase):
     self.assertEqual(list(req.block_ids), [])
     self.assertEqual(req.peer, "")
     self.assertEqual(req.entity_id, 0)
+    self.assertFalse(req.pull_mode)  # PUSH is the default
+
+  def test_pull_mode_round_trip(self):
+    req = ext.DisaggTransferRequest()
+    req.pull_mode = True
+    self.assertTrue(req.pull_mode)
+    req.pull_mode = False
+    self.assertFalse(req.pull_mode)
 
   def test_request_id_round_trip_large(self):
     req = ext.DisaggTransferRequest()

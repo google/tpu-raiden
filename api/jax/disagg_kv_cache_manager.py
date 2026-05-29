@@ -88,6 +88,7 @@ class DisaggKVCacheManager:
       peer: str = "",
       block_ids: List[int] = [],
       entity_id: int = 0,
+      pull: bool = False,
       callback: Optional[Callable[[Any], None]] = None,
   ):
     """Submits a disaggregated transfer request.
@@ -101,11 +102,17 @@ class DisaggKVCacheManager:
       peer: Target peer name registered via `register_peer`.
       block_ids: Block IDs list (host blocks).
       entity_id: Entity ID (passed to TCP BlockTransport).
+      pull: If True, use PULL mode (decode pulls from prefill) instead of the
+        default PUSH mode (prefill pushes to decode). Both the prefill
+        (PREFILL_D2H) and decode (DECODE_H2D) requests of one transfer must set
+        this identically, and in pull mode both must set `peer` to the other
+        engine (registered on both sides).
       callback: User Python callback `cb(err)` invoked upon completion.
     """
     req = DisaggTransferRequest()
     req.request_id = request_id
     req.type = req_type
+    req.pull_mode = pull
     req.src_offsets = src_offsets
     req.dst_offsets = dst_offsets
     req.sizes = sizes

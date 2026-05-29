@@ -279,17 +279,51 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
         }
 
         if (req.type == DisaggTransferRequest::Type::kPrefillD2H) {
-          LOG(INFO) << "[Orchestrator] Request " << event.request_id
-                    << ": D2H complete, triggering H2H Write";
-          req.type = DisaggTransferRequest::Type::kH2HWrite;
+          // Our local staging block ids for this request.
           req.block_ids.clear();
           for (int64_t offset : req.dst_offsets) {
             req.block_ids.push_back(offset / block_size_);
           }
-          h2h_work_queue_.Push(req);
+          if (req.pull_mode) {
+            // PULL: don't transfer; tell the decode the data is staged and
+            // where to read it. Keep the request pending until PULL_COMPLETE so
+            // the staging buffer isn't reused before the decode has pulled.
+            LOG(INFO) << "[Orchestrator] Request " << event.request_id
+                      << ": D2H complete (pull), sending NOTIFY_READY to "
+                      << req.peer;
+            std::string msg =
+                absl::StrCat("NOTIFY_READY:", req.request_id, ":");
+            for (size_t i = 0; i < req.block_ids.size(); ++i) {
+              absl::StrAppend(&msg, req.block_ids[i]);
+              if (i + 1 < req.block_ids.size()) absl::StrAppend(&msg, ",");
+            }
+            absl::Status mq_status = SendZmqMessage(req.peer, msg).status();
+            if (!mq_status.ok()) {
+              LOG(ERROR) << "[Orchestrator] Failed to send NOTIFY_READY to "
+                         << req.peer << ": " << mq_status;
+              InvokeCallback(req.callback, mq_status);
+              active_requests.erase(it);
+            }
+            // else: leave pending; completion happens on kPullComplete.
+          } else {
+            LOG(INFO) << "[Orchestrator] Request " << event.request_id
+                      << ": D2H complete, triggering H2H Write";
+            req.type = DisaggTransferRequest::Type::kH2HWrite;
+            h2h_work_queue_.Push(req);
+          }
         } else if (req.type == DisaggTransferRequest::Type::kDecodeH2D) {
           LOG(INFO) << "[Orchestrator] Request " << event.request_id
                     << ": H2D complete, request fully done!";
+          // PULL: ack the prefill so it can release its staging buffer.
+          if (req.pull_mode) {
+            std::string msg =
+                absl::StrCat("PULL_COMPLETE:", req.request_id, ":");
+            absl::Status mq_status = SendZmqMessage(req.peer, msg).status();
+            if (!mq_status.ok()) {
+              LOG(ERROR) << "[Orchestrator] Failed to send PULL_COMPLETE to "
+                         << req.peer << ": " << mq_status;
+            }
+          }
           // Unlock host blocks. Must hold block_manager_mutex_ because the
           // transport's receiver threads concurrently Allocate() on it.
           if (block_manager_) {
@@ -358,6 +392,14 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
         } else if (req.type == DisaggTransferRequest::Type::kH2HRead) {
           LOG(INFO) << "[Orchestrator] Request " << event.request_id
                     << ": H2H Read complete, triggering local H2D";
+          // The pull returned the decode-LOCAL block ids where the data landed
+          // (active_requests still holds the remote/prefill ids we pulled from),
+          // so refresh and derive the H2D source offsets from them.
+          req.block_ids = event.request.block_ids;
+          req.src_offsets.clear();
+          for (int bid : req.block_ids) {
+            req.src_offsets.push_back(bid * block_size_);
+          }
           req.type = DisaggTransferRequest::Type::kDecodeH2D;
           local_work_queue_.Push(req);
         }
@@ -396,6 +438,43 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
           pending_req.block_ids = std::move(event.block_ids);
           active_requests[req_id] = std::move(pending_req);
         }
+        break;
+      }
+      case Event::Type::kPullReady: {
+        // PULL (decode side): the prefill staged the data and told us its
+        // remote block ids. Pull them via H2H Read. Assumes the DECODE_H2D
+        // request was already submitted (the decode is the puller; it sets up
+        // first), so it is present in active_requests with peer + dst_offsets.
+        int64_t req_id = event.request_id;
+        auto it = active_requests.find(req_id);
+        if (it == active_requests.end()) {
+          LOG(ERROR) << "[Orchestrator] kPullReady for unknown request "
+                     << req_id << " (decode request not submitted yet?)";
+          break;
+        }
+        auto& existing = it->second;
+        existing.block_ids = std::move(event.block_ids);  // remote (prefill) ids
+        existing.type = DisaggTransferRequest::Type::kH2HRead;
+        LOG(INFO) << "[Orchestrator] Request " << req_id
+                  << ": peer ready, triggering H2H Read (pull) from "
+                  << existing.peer;
+        h2h_work_queue_.Push(existing);
+        break;
+      }
+      case Event::Type::kPullComplete: {
+        // PULL (prefill side): the decode finished pulling and acked. The
+        // staging buffer can be released; complete the request.
+        int64_t req_id = event.request_id;
+        auto it = active_requests.find(req_id);
+        if (it == active_requests.end()) {
+          LOG(ERROR) << "[Orchestrator] kPullComplete for unknown request "
+                     << req_id;
+          break;
+        }
+        LOG(INFO) << "[Orchestrator] Request " << req_id
+                  << ": pull complete ack received, request fully done!";
+        InvokeCallback(it->second.callback, absl::OkStatus());
+        active_requests.erase(it);
         break;
       }
     }
@@ -453,37 +532,41 @@ void DisaggKVCacheManagerBase::H2hTransferLoop() {
   DisaggTransferRequest req;
   while (h2h_work_queue_.Pop(req)) {
     absl::Status status;
-    if (req.type == DisaggTransferRequest::Type::kH2HWrite) {
-      // Resolve peer to get IP:Port
-      PeerInfo peer_info;
-      {
-        absl::MutexLock lock(&peer_map_mutex_);
-        auto it = peers_.find(req.peer);
-        if (it == peers_.end()) {
-          status = absl::NotFoundError(
-              absl::StrCat("Peer ", req.peer, " not found"));
-        } else {
-          peer_info = it->second;
-        }
-      }
 
-      if (status.ok()) {
-        std::string peer_endpoint =
-            absl::StrCat(peer_info.ip, ":", peer_info.transport_port);
-        // H2hWriteDirect is blocking
-        auto res_or =
-            H2hWriteDirect(peer_endpoint, req.block_ids, req.entity_id);
-        if (!res_or.ok()) {
-          status = res_or.status();
-        } else {
-          // Update request with allocated block IDs on receiver
-          req.block_ids = res_or.value();
-          status = absl::OkStatus();
-        }
+    // Both write (push) and read (pull) target a peer; resolve it once.
+    PeerInfo peer_info;
+    {
+      absl::MutexLock lock(&peer_map_mutex_);
+      auto it = peers_.find(req.peer);
+      if (it == peers_.end()) {
+        status = absl::NotFoundError(
+            absl::StrCat("Peer ", req.peer, " not found"));
+      } else {
+        peer_info = it->second;
       }
-    } else if (req.type == DisaggTransferRequest::Type::kH2HRead) {
-      // Handle H2H Read if needed (similar to Write but calls H2hReadDirect)
-      status = absl::UnimplementedError("H2H Read is not implemented yet");
+    }
+    std::string peer_endpoint =
+        absl::StrCat(peer_info.ip, ":", peer_info.transport_port);
+
+    if (status.ok() && req.type == DisaggTransferRequest::Type::kH2HWrite) {
+      // PUSH: send our staged blocks to the peer. Returns the block ids the
+      // RECEIVER allocated (where the data landed on the peer).
+      auto res_or = H2hWriteDirect(peer_endpoint, req.block_ids, req.entity_id);
+      if (!res_or.ok()) {
+        status = res_or.status();
+      } else {
+        req.block_ids = res_or.value();
+      }
+    } else if (status.ok() &&
+               req.type == DisaggTransferRequest::Type::kH2HRead) {
+      // PULL: read the peer's blocks (req.block_ids = remote ids) into our host
+      // buffer. Returns the LOCAL block ids the data was placed into.
+      auto res_or = H2hReadDirect(peer_endpoint, req.block_ids, req.entity_id);
+      if (!res_or.ok()) {
+        status = res_or.status();
+      } else {
+        req.block_ids = res_or.value();
+      }
     }
     orchestrator_queue_.Push(
         {Event::Type::kH2hComplete, req.request_id, status, req, {}, ""});
@@ -578,6 +661,43 @@ void DisaggKVCacheManagerBase::ListenerLoop() {
           event.type = Event::Type::kPeerNotification;
           event.request_id = req_id;
           event.block_ids = std::move(block_ids);
+          orchestrator_queue_.Push(std::move(event));
+
+          absl::Status s = SendZmqReply("OK");
+          if (!s.ok()) LOG(ERROR) << s;
+        } else if (cmd == "NOTIFY_READY") {
+          // PULL: prefill staged data and is advertising its remote block ids
+          // for the decode to pull. Same wire format as NOTIFY_COMPLETE.
+          if (parts.size() != 3) {
+            absl::Status s = SendZmqReply("ERROR:Invalid NOTIFY_READY");
+            if (!s.ok()) LOG(ERROR) << s;
+            continue;
+          }
+          int64_t req_id = std::stoll(parts[1]);
+          std::vector<std::string> block_strs = absl::StrSplit(parts[2], ',');
+          std::vector<int> block_ids;
+          for (const auto& s : block_strs) {
+            if (!s.empty()) block_ids.push_back(std::stoi(s));
+          }
+
+          Event event;
+          event.type = Event::Type::kPullReady;
+          event.request_id = req_id;
+          event.block_ids = std::move(block_ids);
+          orchestrator_queue_.Push(std::move(event));
+
+          absl::Status s = SendZmqReply("OK");
+          if (!s.ok()) LOG(ERROR) << s;
+        } else if (cmd == "PULL_COMPLETE") {
+          // PULL: decode finished pulling; ack back to the prefill.
+          if (parts.size() < 2) {
+            absl::Status s = SendZmqReply("ERROR:Invalid PULL_COMPLETE");
+            if (!s.ok()) LOG(ERROR) << s;
+            continue;
+          }
+          Event event;
+          event.type = Event::Type::kPullComplete;
+          event.request_id = std::stoll(parts[1]);
           orchestrator_queue_.Push(std::move(event));
 
           absl::Status s = SendZmqReply("OK");

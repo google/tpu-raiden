@@ -40,6 +40,17 @@ struct DisaggTransferRequest {
   int64_t request_id;
   Type type;
 
+  // Transfer direction for the H2H stage:
+  //   false (default) = PUSH: prefill stages then pushes to the decode, then
+  //                     notifies it (NOTIFY_COMPLETE).
+  //   true            = PULL: prefill stages then tells the decode the data is
+  //                     ready (NOTIFY_READY); the decode pulls it (H2H Read)
+  //                     and acks completion (PULL_COMPLETE).
+  // Both the prefill (kPrefillD2H) and decode (kDecodeH2D) requests of one
+  // transfer must agree on this flag, and in PULL mode both must specify the
+  // other engine as `peer` (registered on both sides).
+  bool pull_mode = false;
+
   // For local D2H/H2D
   std::vector<int64_t> src_offsets;
   std::vector<int64_t> dst_offsets;
@@ -110,7 +121,9 @@ class DisaggKVCacheManagerBase : public KVCacheManagerBase {
       kExternalRequest,
       kLocalComplete,
       kH2hComplete,
-      kPeerNotification
+      kPeerNotification,  // PUSH: peer finished pushing (NOTIFY_COMPLETE)
+      kPullReady,         // PULL: prefill staged data, decode may pull (NOTIFY_READY)
+      kPullComplete       // PULL: decode finished pulling (PULL_COMPLETE)
     };
     Type type;
     int64_t request_id;

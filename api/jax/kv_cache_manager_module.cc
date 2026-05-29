@@ -89,6 +89,8 @@ NB_MODULE(_kv_cache_manager, m) {
       .def_rw("request_id",
               &tpu_raiden::kv_cache::DisaggTransferRequest::request_id)
       .def_rw("type", &tpu_raiden::kv_cache::DisaggTransferRequest::type)
+      .def_rw("pull_mode",
+              &tpu_raiden::kv_cache::DisaggTransferRequest::pull_mode)
       .def_rw("src_offsets",
               &tpu_raiden::kv_cache::DisaggTransferRequest::src_offsets)
       .def_rw("dst_offsets",
