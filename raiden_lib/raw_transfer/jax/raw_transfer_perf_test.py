@@ -24,9 +24,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from raiden_lib.raw_transfer.jax import raw_transfer
-from raiden_lib.raw_transfer.jax import raw_transfer_profiled
-from raiden_lib.raw_transfer.jax import utils
+try:
+  from raiden_lib.raw_transfer.jax import raw_transfer
+  from raiden_lib.raw_transfer.jax import raw_transfer_profiled
+  from raiden_lib.raw_transfer.jax import utils
+except ModuleNotFoundError:
+  from raiden_lib.raw_transfer.jax import raw_transfer
+  from raiden_lib.raw_transfer.jax import raw_transfer_profiled
+  from raiden_lib.raw_transfer.jax import utils
 
 # os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 
@@ -217,6 +222,12 @@ class RawTransferPerfTest(parameterized.TestCase):
           )
       )
     jax.block_until_ready(src_arrs)
+
+    # Force shadow page invalidation on PJRT/IFRT backend
+    tpu_mutate_fn = jax.jit(
+        lambda x: x
+        + jnp.array(1 if x.dtype == jnp.int32 else 0.01, dtype=x.dtype)
+    )
 
     # Create pinned host sharding
     pinned_host_sharding = jax.sharding.NamedSharding(
@@ -485,66 +496,160 @@ class RawTransferPerfTest(parameterized.TestCase):
         f" {np.median(batched_h2d_times):.6f} s"
     )
 
-    # Benchmark JAX (skipped in single-slice GCE baseline)
+    # Benchmark JAX Pinned Host Baseline
     print(
-        "JAX comparative baseline benchmark skipped (host collectives bypassed)"
+        f"[{dtype}, {num_layers} layers, shape={shape}] Benchmarking JAX Pinned"
+        " Host Baseline..."
     )
-    jax_d2h_times = [1e9] * num_iterations
-    jax_h2d_times = [1e9] * num_iterations
+    jax_pinned_d2h_times = []
+    jax_pinned_h2d_times = []
+
+    for i in range(num_iterations):
+      gc.disable()
+      start = time.time()
+      jax_pinned_dst_arrs = []
+      for j in range(num_layers):
+        jax_pinned_dst_arrs.append(
+            jax.device_put(src_arrs[j], pinned_host_sharding)
+        )
+      jax.block_until_ready(jax_pinned_dst_arrs)
+      jax_pinned_d2h_times.append(time.time() - start)
+
+      gc.enable()
+      gc.collect()
+      if i == 0:
+        verify_data_integrity(src_arrs, jax_pinned_dst_arrs, "JAX Pinned D2H")
+
+      gc.disable()
+      start = time.time()
+      jax_pinned_tpu_dst_arrs = []
+      for j in range(num_layers):
+        jax_pinned_tpu_dst_arrs.append(
+            jax.device_put(dst_arrs[j], tpu_sharding)
+        )
+      jax.block_until_ready(jax_pinned_tpu_dst_arrs)
+      jax_pinned_h2d_times.append(time.time() - start)
+
+      gc.enable()
+      gc.collect()
+      if i == 0:
+        verify_data_integrity(
+            src_arrs, jax_pinned_tpu_dst_arrs, "JAX Pinned H2D"
+        )
 
     print(
-        f"[{dtype}, {num_layers} layers, shape={shape}] jax.device_put D2H"
-        f" times: {jax_d2h_times}"
+        f"[{dtype}, {num_layers} layers, shape={shape}] JAX Pinned D2H times:"
+        f" {jax_pinned_d2h_times}"
     )
     print(
-        f"[{dtype}, {num_layers} layers, shape={shape}] jax.device_put H2D"
-        f" times: {jax_h2d_times}"
+        f"[{dtype}, {num_layers} layers, shape={shape}] JAX Pinned H2D times:"
+        f" {jax_pinned_h2d_times}"
     )
     print(
-        f"[{dtype}, {num_layers} layers, shape={shape}] jax.device_put D2H avg"
-        f" time: {np.median(jax_d2h_times):.6f} s (median) /"
-        f" {np.mean(jax_d2h_times):.6f} s (mean)"
+        f"[{dtype}, {num_layers} layers, shape={shape}] JAX Pinned D2H avg"
+        f" time: {np.median(jax_pinned_d2h_times):.6f} s (median) /"
+        f" {np.mean(jax_pinned_d2h_times):.6f} s (mean)"
     )
     print(
-        f"[{dtype}, {num_layers} layers, shape={shape}] jax.device_put H2D avg"
-        f" time: {np.median(jax_h2d_times):.6f} s (median) /"
-        f" {np.mean(jax_h2d_times):.6f} s (mean)"
+        f"[{dtype}, {num_layers} layers, shape={shape}] JAX Pinned H2D avg"
+        f" time: {np.median(jax_pinned_h2d_times):.6f} s (median) /"
+        f" {np.mean(jax_pinned_h2d_times):.6f} s (mean)"
+    )
+
+    # Benchmark JAX Standard Baseline (non-pinned NumPy)
+    print(
+        f"[{dtype}, {num_layers} layers, shape={shape}] Benchmarking JAX"
+        " Standard Baseline..."
+    )
+    jax_std_d2h_times = []
+    jax_std_h2d_times = []
+
+    # Pre-allocate standard numpy host arrays for clean H2D timing
+    std_host_numpy_arrs = []
+    for j in range(num_layers):
+      std_host_numpy_arrs.append(
+          np.zeros(shape, dtype=np.float32).astype(dtype)
+      )
+
+    for i in range(num_iterations):
+      # Invalidate local shadow copies by mutating array on device
+      src_arrs = [tpu_mutate_fn(arr) for arr in src_arrs]
+      jax.block_until_ready(src_arrs)
+
+      gc.disable()
+      start = time.time()
+      jax_std_dst_arrs = []
+      for j in range(num_layers):
+        jax_std_dst_arrs.append(jax.device_get(src_arrs[j]))
+      # jax.device_get blocks Python until fully transferred to NumPy
+      jax_std_d2h_times.append(time.time() - start)
+
+      gc.enable()
+      gc.collect()
+      if i == 0:
+        verify_data_integrity(src_arrs, jax_std_dst_arrs, "JAX Standard D2H")
+
+      gc.disable()
+      start = time.time()
+      jax_std_tpu_dst_arrs = []
+      for j in range(num_layers):
+        jax_std_tpu_dst_arrs.append(
+            jax.device_put(std_host_numpy_arrs[j], tpu_sharding)
+        )
+      jax.block_until_ready(jax_std_tpu_dst_arrs)
+      jax_std_h2d_times.append(time.time() - start)
+
+      gc.enable()
+      gc.collect()
+      if i == 0:
+        verify_data_integrity(
+            src_arrs, jax_std_tpu_dst_arrs, "JAX Standard H2D"
+        )
+
+    print(
+        f"[{dtype}, {num_layers} layers, shape={shape}] JAX Standard D2H times:"
+        f" {jax_std_d2h_times}"
+    )
+    print(
+        f"[{dtype}, {num_layers} layers, shape={shape}] JAX Standard H2D times:"
+        f" {jax_std_h2d_times}"
+    )
+    print(
+        f"[{dtype}, {num_layers} layers, shape={shape}] JAX Standard D2H avg"
+        f" time: {np.median(jax_std_d2h_times):.6f} s (median) /"
+        f" {np.mean(jax_std_d2h_times):.6f} s (mean)"
+    )
+    print(
+        f"[{dtype}, {num_layers} layers, shape={shape}] JAX Standard H2D avg"
+        f" time: {np.median(jax_std_h2d_times):.6f} s (median) /"
+        f" {np.mean(jax_std_h2d_times):.6f} s (mean)"
     )
 
     # Calculate bandwidth
     element_size = jnp.empty((), dtype=dtype).nbytes
     total_bytes = np.prod(shape) * element_size * num_layers
 
-    lib_d2h_bw_median = (
-        total_bytes / np.median(d2h_times) / (1024 * 1024 * 1024)
-    )
-    lib_d2h_bw_mean = total_bytes / np.mean(d2h_times) / (1024 * 1024 * 1024)
-    lib_h2d_bw_median = (
-        total_bytes / np.median(h2d_times) / (1024 * 1024 * 1024)
-    )
-    lib_h2d_bw_mean = total_bytes / np.mean(h2d_times) / (1024 * 1024 * 1024)
-
-    jax_d2h_bw_median = (
-        total_bytes / np.median(jax_d2h_times) / (1024 * 1024 * 1024)
-    )
-    jax_d2h_bw_mean = (
-        total_bytes / np.mean(jax_d2h_times) / (1024 * 1024 * 1024)
-    )
-    jax_h2d_bw_median = (
-        total_bytes / np.median(jax_h2d_times) / (1024 * 1024 * 1024)
-    )
-    jax_h2d_bw_mean = (
-        total_bytes / np.mean(jax_h2d_times) / (1024 * 1024 * 1024)
-    )
-    lib_d2h_bw = lib_d2h_bw_median
-    lib_h2d_bw = lib_h2d_bw_median
-    jax_d2h_bw = jax_d2h_bw_median
-    jax_h2d_bw = jax_h2d_bw_median
+    lib_d2h_bw = total_bytes / np.median(d2h_times) / (1024 * 1024 * 1024)
+    lib_h2d_bw = total_bytes / np.median(h2d_times) / (1024 * 1024 * 1024)
     lib_sync_d2h_bw = (
         total_bytes / np.median(sync_d2h_times) / (1024 * 1024 * 1024)
     )
     lib_sync_h2d_bw = (
         total_bytes / np.median(sync_h2d_times) / (1024 * 1024 * 1024)
+    )
+
+    jax_pinned_d2h_bw = (
+        total_bytes / np.median(jax_pinned_d2h_times) / (1024 * 1024 * 1024)
+    )
+    jax_pinned_h2d_bw = (
+        total_bytes / np.median(jax_pinned_h2d_times) / (1024 * 1024 * 1024)
+    )
+
+    jax_std_d2h_bw = (
+        total_bytes / np.median(jax_std_d2h_times) / (1024 * 1024 * 1024)
+    )
+    jax_std_h2d_bw = (
+        total_bytes / np.median(jax_std_h2d_times) / (1024 * 1024 * 1024)
     )
 
     print(
@@ -564,20 +669,40 @@ class RawTransferPerfTest(parameterized.TestCase):
         f" bandwidth: {lib_sync_h2d_bw:.3f} GB/s"
     )
     print(
-        f"[{dtype}, {num_layers} layers, shape={shape}] jax.device_put D2H"
-        f" bandwidth: {jax_d2h_bw:.3f} GB/s"
+        f"[{dtype}, {num_layers} layers, shape={shape}] JAX Pinned D2H"
+        f" bandwidth: {jax_pinned_d2h_bw:.3f} GB/s"
     )
     print(
-        f"[{dtype}, {num_layers} layers, shape={shape}] jax.device_put H2D"
-        f" bandwidth: {jax_h2d_bw:.3f} GB/s"
+        f"[{dtype}, {num_layers} layers, shape={shape}] JAX Pinned H2D"
+        f" bandwidth: {jax_pinned_h2d_bw:.3f} GB/s"
+    )
+    print(
+        f"[{dtype}, {num_layers} layers, shape={shape}] JAX Standard D2H"
+        f" bandwidth: {jax_std_d2h_bw:.3f} GB/s"
+    )
+    print(
+        f"[{dtype}, {num_layers} layers, shape={shape}] JAX Standard H2D"
+        f" bandwidth: {jax_std_h2d_bw:.3f} GB/s"
     )
     print(
         f"[{dtype}, {num_layers} layers, shape={shape}] Relative Sync D2H"
-        f" bandwidth (Lib_Sync/JAX): {lib_sync_d2h_bw / jax_d2h_bw:.2f}x"
+        " bandwidth (Lib_Sync/JAX_Pinned):"
+        f" {lib_sync_d2h_bw / jax_pinned_d2h_bw:.2f}x"
     )
     print(
         f"[{dtype}, {num_layers} layers, shape={shape}] Relative Sync H2D"
-        f" bandwidth (Lib_Sync/JAX): {lib_sync_h2d_bw / jax_h2d_bw:.2f}x"
+        " bandwidth (Lib_Sync/JAX_Pinned):"
+        f" {lib_sync_h2d_bw / jax_pinned_h2d_bw:.2f}x"
+    )
+    print(
+        f"[{dtype}, {num_layers} layers, shape={shape}] Relative Sync D2H"
+        " bandwidth (Lib_Sync/JAX_Std):"
+        f" {lib_sync_d2h_bw / jax_std_d2h_bw:.2f}x"
+    )
+    print(
+        f"[{dtype}, {num_layers} layers, shape={shape}] Relative Sync H2D"
+        " bandwidth (Lib_Sync/JAX_Std):"
+        f" {lib_sync_h2d_bw / jax_std_h2d_bw:.2f}x"
     )
 
     log_telemetry(
@@ -681,6 +806,12 @@ class RawTransferPerfTest(parameterized.TestCase):
           )
       )
     jax.block_until_ready(src_arrs)
+
+    # Force shadow page invalidation on PJRT/IFRT backend
+    tpu_mutate_fn = jax.jit(
+        lambda x: x
+        + jnp.array(1 if x.dtype == jnp.int32 else 0.01, dtype=x.dtype)
+    )
 
     # Create pinned host sharding
     pinned_host_sharding = jax.sharding.NamedSharding(
@@ -828,16 +959,96 @@ class RawTransferPerfTest(parameterized.TestCase):
     print(f"[{test_str}] Library non-batch D2H times: {non_batch_d2h_times}")
     print(f"[{test_str}] Library non-batch H2D times: {non_batch_h2d_times}")
 
-    # Benchmark JAX (skipped in single-slice GCE baseline)
-    print(
-        "JAX large shape comparative baseline benchmark skipped (host"
-        " collectives bypassed)"
-    )
-    jax_d2h_times = [1e9] * num_iterations
-    jax_h2d_times = [1e9] * num_iterations
+    # Benchmark JAX Pinned Host Baseline
+    print(f"[{test_str}] Benchmarking JAX Pinned Host Baseline...")
+    jax_pinned_d2h_times = []
+    jax_pinned_h2d_times = []
 
-    print(f"[{test_str}] JAX D2H times: {jax_d2h_times}")
-    print(f"[{test_str}] JAX H2D times: {jax_h2d_times}")
+    for i in range(num_iterations):
+      gc.disable()
+      start = time.time()
+      jax_pinned_dst_arrs = []
+      for j in range(num_layers):
+        jax_pinned_dst_arrs.append(
+            jax.device_put(src_arrs[j], pinned_host_sharding)
+        )
+      jax.block_until_ready(jax_pinned_dst_arrs)
+      jax_pinned_d2h_times.append(time.time() - start)
+
+      gc.enable()
+      gc.collect()
+      if i == 0:
+        verify_data_integrity(src_arrs, jax_pinned_dst_arrs, "JAX Pinned D2H")
+
+      gc.disable()
+      start = time.time()
+      jax_pinned_tpu_dst_arrs = []
+      for j in range(num_layers):
+        jax_pinned_tpu_dst_arrs.append(
+            jax.device_put(dst_arrs[j], tpu_sharding)
+        )
+      jax.block_until_ready(jax_pinned_tpu_dst_arrs)
+      jax_pinned_h2d_times.append(time.time() - start)
+
+      gc.enable()
+      gc.collect()
+      if i == 0:
+        verify_data_integrity(
+            src_arrs, jax_pinned_tpu_dst_arrs, "JAX Pinned H2D"
+        )
+
+    print(f"[{test_str}] JAX Pinned D2H times: {jax_pinned_d2h_times}")
+    print(f"[{test_str}] JAX Pinned H2D times: {jax_pinned_h2d_times}")
+
+    # Benchmark JAX Standard Baseline (non-pinned NumPy)
+    print(f"[{test_str}] Benchmarking JAX Standard Baseline...")
+    jax_std_d2h_times = []
+    jax_std_h2d_times = []
+
+    # Pre-allocate standard numpy host arrays for clean H2D timing
+    std_host_numpy_arrs = []
+    for j in range(num_layers):
+      std_host_numpy_arrs.append(
+          np.zeros(shape, dtype=np.float32).astype(dtype)
+      )
+
+    for i in range(num_iterations):
+      # Invalidate local shadow copies by mutating array on device
+      src_arrs = [tpu_mutate_fn(arr) for arr in src_arrs]
+      jax.block_until_ready(src_arrs)
+
+      gc.disable()
+      start = time.time()
+      jax_std_dst_arrs = []
+      for j in range(num_layers):
+        jax_std_dst_arrs.append(jax.device_get(src_arrs[j]))
+      # jax.device_get blocks Python until fully transferred to NumPy
+      jax_std_d2h_times.append(time.time() - start)
+
+      gc.enable()
+      gc.collect()
+      if i == 0:
+        verify_data_integrity(src_arrs, jax_std_dst_arrs, "JAX Standard D2H")
+
+      gc.disable()
+      start = time.time()
+      jax_std_tpu_dst_arrs = []
+      for j in range(num_layers):
+        jax_std_tpu_dst_arrs.append(
+            jax.device_put(std_host_numpy_arrs[j], tpu_sharding)
+        )
+      jax.block_until_ready(jax_std_tpu_dst_arrs)
+      jax_std_h2d_times.append(time.time() - start)
+
+      gc.enable()
+      gc.collect()
+      if i == 0:
+        verify_data_integrity(
+            src_arrs, jax_std_tpu_dst_arrs, "JAX Standard H2D"
+        )
+
+    print(f"[{test_str}] JAX Standard D2H times: {jax_std_d2h_times}")
+    print(f"[{test_str}] JAX Standard H2D times: {jax_std_h2d_times}")
 
     # Calculate bandwidth
     element_size = jnp.empty((), dtype=dtype).nbytes
@@ -866,8 +1077,10 @@ class RawTransferPerfTest(parameterized.TestCase):
     report_perf("Library optimized batch H2D", opt_batched_h2d_times)
     report_perf("Library native batch D2H", naive_batched_d2h_times)
     report_perf("Library native batch H2D", naive_batched_h2d_times)
-    report_perf("JAX D2H", jax_d2h_times)
-    report_perf("JAX H2D", jax_h2d_times)
+    report_perf("JAX Pinned D2H", jax_pinned_d2h_times)
+    report_perf("JAX Pinned H2D", jax_pinned_h2d_times)
+    report_perf("JAX Standard D2H", jax_std_d2h_times)
+    report_perf("JAX Standard H2D", jax_std_h2d_times)
 
     log_telemetry(
         test_name="large_shape_perf_compare",
@@ -984,6 +1197,8 @@ class RawTransferPerfTest(parameterized.TestCase):
 if __name__ == "__main__":
   import sys
 
-  # sys.argv.append("--pjrt_tpu_track_event_dependencies=false")
-  # sys.argv.append("--jax_max_inflight_async_computations=64")
+  # if "pjrt_tpu_track_event_dependencies" in flags.FLAGS:
+  #   sys.argv.append("--pjrt_tpu_track_event_dependencies=false")
+  # if "jax_max_inflight_async_computations" in flags.FLAGS:
+  #   sys.argv.append("--jax_max_inflight_async_computations=64")
   absltest.main()
