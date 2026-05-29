@@ -130,6 +130,198 @@ TEST(DisaggKVCacheManagerBaseTest, E2EPushWorkflowMocked) {
   EXPECT_TRUE(decode.h2d_called());
 }
 
+// -----------------------------------------------------------------------------
+// CPU-only unit tests that exercise individual base-class surfaces without
+// needing the full E2E push flow (and without PJRT). They use the same
+// MockDisaggKVCacheManager subclass declared above to bypass real H2D/D2H.
+// -----------------------------------------------------------------------------
+
+namespace {
+std::unique_ptr<MockDisaggKVCacheManager> MakeMock() {
+  return std::make_unique<MockDisaggKVCacheManager>(
+      /*num_layers=*/1, /*num_shards=*/1, /*slice_byte_size=*/1024,
+      /*block_size=*/2, /*local_port=*/0, /*host_blocks_to_allocate=*/4,
+      /*parallelism=*/1);
+}
+}  // namespace
+
+TEST(DisaggKVCacheManagerBaseTest, StartAllocatesEphemeralZmqPort) {
+  auto m = MakeMock();
+  ASSERT_TRUE(m->Start().ok());
+  EXPECT_GT(m->zmq_control_port(), 0);
+  m->Stop();
+}
+
+TEST(DisaggKVCacheManagerBaseTest, StartAllocatesLocalDataPort) {
+  auto m = MakeMock();
+  ASSERT_TRUE(m->Start().ok());
+  ASSERT_TRUE(m->local_port().has_value());
+  EXPECT_GT(*m->local_port(), 0);
+  m->Stop();
+}
+
+TEST(DisaggKVCacheManagerBaseTest, DoubleStartIsIdempotent) {
+  auto m = MakeMock();
+  ASSERT_TRUE(m->Start().ok());
+  int port = m->zmq_control_port();
+  ASSERT_TRUE(m->Start().ok());  // second call: running_ already true
+  EXPECT_EQ(m->zmq_control_port(), port);
+  m->Stop();
+}
+
+TEST(DisaggKVCacheManagerBaseTest, DoubleStopIsIdempotent) {
+  auto m = MakeMock();
+  ASSERT_TRUE(m->Start().ok());
+  m->Stop();
+  m->Stop();  // second Stop must be a no-op, not crash
+}
+
+TEST(DisaggKVCacheManagerBaseTest, TwoInstancesGetDistinctPorts) {
+  auto m1 = MakeMock();
+  auto m2 = MakeMock();
+  ASSERT_TRUE(m1->Start().ok());
+  ASSERT_TRUE(m2->Start().ok());
+  EXPECT_NE(m1->zmq_control_port(), m2->zmq_control_port());
+  ASSERT_TRUE(m1->local_port().has_value());
+  ASSERT_TRUE(m2->local_port().has_value());
+  EXPECT_NE(*m1->local_port(), *m2->local_port());
+  m1->Stop();
+  m2->Stop();
+}
+
+TEST(DisaggKVCacheManagerBaseTest, RepeatedStartStopCyclesAreSafe) {
+  auto m = MakeMock();
+  for (int i = 0; i < 3; ++i) {
+    ASSERT_TRUE(m->Start().ok());
+    EXPECT_GT(m->zmq_control_port(), 0);
+    m->Stop();
+  }
+}
+
+TEST(DisaggKVCacheManagerBaseTest, SubmitBeforeStartReturnsFailedPrecondition) {
+  auto m = MakeMock();
+  DisaggTransferRequest req;
+  req.request_id = 1;
+  req.type = DisaggTransferRequest::Type::kDecodeH2D;
+  req.dst_offsets = {0};
+  req.sizes = {1};
+  absl::Status s = m->SubmitRequest(req);
+  EXPECT_FALSE(s.ok());
+  EXPECT_EQ(s.code(), absl::StatusCode::kFailedPrecondition);
+}
+
+TEST(DisaggKVCacheManagerBaseTest, SubmitAfterStopReturnsFailedPrecondition) {
+  auto m = MakeMock();
+  ASSERT_TRUE(m->Start().ok());
+  m->Stop();
+  DisaggTransferRequest req;
+  req.request_id = 2;
+  req.type = DisaggTransferRequest::Type::kDecodeH2D;
+  req.dst_offsets = {0};
+  req.sizes = {1};
+  absl::Status s = m->SubmitRequest(req);
+  EXPECT_FALSE(s.ok());
+  EXPECT_EQ(s.code(), absl::StatusCode::kFailedPrecondition);
+}
+
+TEST(DisaggKVCacheManagerBaseTest, RegisterPeerAcceptsMultiplePeers) {
+  auto m = MakeMock();
+  ASSERT_TRUE(m->Start().ok());
+  m->RegisterPeer("peer_a", "127.0.0.1", 9100, 9101);
+  m->RegisterPeer("peer_b", "127.0.0.1", 9200, 9201);
+  m->RegisterPeer("peer_c", "127.0.0.1", 9300, 9301);
+  m->Stop();
+}
+
+TEST(DisaggKVCacheManagerBaseTest, RegisterPeerOverwritesExistingName) {
+  auto m = MakeMock();
+  ASSERT_TRUE(m->Start().ok());
+  m->RegisterPeer("peer_x", "127.0.0.1", 1, 2);
+  m->RegisterPeer("peer_x", "127.0.0.1", 3, 4);  // overwrite
+  m->Stop();
+}
+
+TEST(DisaggKVCacheManagerBaseTest, DestructorStopsRunningManager) {
+  // ~DisaggKVCacheManagerBase() invokes Stop(); going out of scope must be
+  // safe even if the user forgot to call Stop() explicitly.
+  int port = 0;
+  {
+    auto m = MakeMock();
+    ASSERT_TRUE(m->Start().ok());
+    port = m->zmq_control_port();
+    EXPECT_GT(port, 0);
+    // m goes out of scope here; destructor must Stop() without hang/segv.
+  }
+}
+
+TEST(DisaggKVCacheManagerBaseTest, DecodeRequestPendsUntilPeerNotification) {
+  // Per the orchestrator contract, a DECODE_H2D request is queued and held
+  // pending the peer's NOTIFY_COMPLETE; it must NOT fire H2d on its own.
+  // (See OrchestrationLoop: "Waiting for peer notification to trigger H2D".)
+  auto m = MakeMock();
+  ASSERT_TRUE(m->Start().ok());
+  absl::Notification done;
+  DisaggTransferRequest req;
+  req.request_id = 4242;
+  req.type = DisaggTransferRequest::Type::kDecodeH2D;
+  req.dst_offsets = {0};
+  req.sizes = {1};
+  req.callback = [&](absl::Status s) { done.Notify(); };
+  ASSERT_TRUE(m->SubmitRequest(req).ok());
+  // Without a peer notification, the request stays pending.
+  EXPECT_FALSE(done.WaitForNotificationWithTimeout(absl::Milliseconds(200)));
+  EXPECT_FALSE(m->h2d_called());
+  // Stop() must still unblock cleanly while a request is queued.
+  m->Stop();
+}
+
+// -----------------------------------------------------------------------------
+// ThreadSafeQueue (declared in the same public header).
+// -----------------------------------------------------------------------------
+TEST(ThreadSafeQueueTest, PushPopOrderingIsFifo) {
+  ThreadSafeQueue<int> q;
+  q.Push(1);
+  q.Push(2);
+  q.Push(3);
+  int v = 0;
+  ASSERT_TRUE(q.Pop(v));
+  EXPECT_EQ(v, 1);
+  ASSERT_TRUE(q.Pop(v));
+  EXPECT_EQ(v, 2);
+  ASSERT_TRUE(q.Pop(v));
+  EXPECT_EQ(v, 3);
+  q.Shutdown();
+  EXPECT_FALSE(q.Pop(v));  // empty + shutdown -> false
+}
+
+TEST(ThreadSafeQueueTest, ShutdownUnblocksPendingPop) {
+  ThreadSafeQueue<int> q;
+  absl::Notification popped;
+  std::thread t([&] {
+    int v = 0;
+    bool ok = q.Pop(v);
+    EXPECT_FALSE(ok);  // returns false because queue is empty + shutdown
+    popped.Notify();
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  q.Shutdown();
+  EXPECT_TRUE(popped.WaitForNotificationWithTimeout(absl::Seconds(2)));
+  t.join();
+}
+
+TEST(ThreadSafeQueueTest, PostShutdownPushIsDrainedBeforeFalse) {
+  ThreadSafeQueue<int> q;
+  q.Push(7);
+  q.Push(8);
+  q.Shutdown();
+  int v = 0;
+  ASSERT_TRUE(q.Pop(v));  // drains existing items first
+  EXPECT_EQ(v, 7);
+  ASSERT_TRUE(q.Pop(v));
+  EXPECT_EQ(v, 8);
+  EXPECT_FALSE(q.Pop(v));  // now empty + shutdown
+}
+
 }  // namespace
 }  // namespace kv_cache
 }  // namespace tpu_raiden

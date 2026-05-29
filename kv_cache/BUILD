@@ -124,4 +124,23 @@ cc_library(
     ],
 )
 
+cc_test(
+    name = "disagg_kv_cache_manager_base_test",
+    srcs = ["disagg_kv_cache_manager_base_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":disagg_kv_cache_manager_base",
+        "//core:raw_transfer_core",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 # JAX test targets successfully relocated to api/jax/BUILD.
