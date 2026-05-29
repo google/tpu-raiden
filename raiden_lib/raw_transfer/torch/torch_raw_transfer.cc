@@ -155,7 +155,7 @@ bool IsPartial(const xla::Shape& shape,
                const std::vector<int64_t>& dst_offsets_major_dim,
                const std::vector<int64_t>& copy_sizes_major_dim) {
   if (src_offsets_major_dim.empty()) return false;
-  if (shape.dimensions_size() == 0) return true;
+  if (shape.dimensions().size() == 0) return true;
   const int64_t full_major_dim = shape.dimensions(0);
   for (size_t i = 0; i < src_offsets_major_dim.size(); ++i) {
     if (src_offsets_major_dim[i] != 0 || dst_offsets_major_dim[i] != 0 ||
@@ -226,7 +226,7 @@ void IssueD2HCopy(const std::shared_ptr<PjRtCopyFuture>& acc,
   const int64_t slice_byte_size = GetMajorSliceByteSize(src_buffer);
 
   if (is_partial) {
-    if (src_buffer->on_device_shape().dimensions_size() < 3) {
+    if (src_buffer->on_device_shape().dimensions().size() < 3) {
       throw std::invalid_argument(
           "Only rank >= 3 TPU tensors support partial raw copies");
     }
@@ -282,7 +282,7 @@ void IssueH2DCopy(const std::shared_ptr<PjRtCopyFuture>& acc,
   const int64_t slice_byte_size = GetMajorSliceByteSize(dst_buffer);
 
   if (is_partial) {
-    if (dst_buffer->on_device_shape().dimensions_size() < 3) {
+    if (dst_buffer->on_device_shape().dimensions().size() < 3) {
       throw std::invalid_argument(
           "Only rank >= 3 TPU tensors support partial raw copies");
     }
