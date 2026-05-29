@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#if __has_include("absl/status/status.h")
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "xla/future.h"
@@ -30,15 +31,105 @@
 #include "xla/pjrt/abstract_tracked_device_buffer.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
-#include "xla/pjrt/c/pjrt_c_api_raw_buffer_external.h"
+#include "xla/pjrt/c/pjrt_c_api_helpers.h"
 #include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/raw_buffer.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
 #include "xla/tsl/concurrency/ref_count.h"
+#else
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "xla/future.h"
+#include "xla/layout.h"
+#include "xla/pjrt/abstract_tracked_device_buffer.h"
+#include "xla/pjrt/c/pjrt_c_api.h"
+#include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
+#include "xla/pjrt/c/pjrt_c_api_helpers.h"
+#include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
+#include "xla/pjrt/pjrt_client.h"
+#include "xla/pjrt/raw_buffer.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
+#include "xla/tsl/concurrency/ref_count.h"
+#endif
 
 namespace raiden {
+
+inline void PjRtCApiRawBuffer_Destroy(const PJRT_Api* c_api,
+                                      const PJRT_RawBuffer_Extension* extension,
+                                      PJRT_RawBuffer* buffer) {
+  PJRT_RawBuffer_Destroy_Args args;
+  args.struct_size = PJRT_RawBuffer_Destroy_Args_STRUCT_SIZE;
+  args.extension_start = nullptr;
+  args.buffer = buffer;
+  extension->PJRT_RawBuffer_Destroy(&args);
+}
+
+inline absl::StatusOr<PJRT_RawBuffer*> PjRtCApiBuffer_CreateRawAliasOfBuffer(
+    const PJRT_Api* c_api, const PJRT_RawBuffer_Extension* extension,
+    PJRT_Buffer* buffer) {
+  PJRT_RawBuffer_CreateRawAliasOfBuffer_Args args;
+  args.struct_size = PJRT_RawBuffer_CreateRawAliasOfBuffer_Args_STRUCT_SIZE;
+  args.extension_start = nullptr;
+  args.buffer = buffer;
+  args.raw_buffer = nullptr;
+
+  PJRT_Error* error = extension->PJRT_RawBuffer_CreateRawAliasOfBuffer(&args);
+  if (error) {
+    std::unique_ptr<PJRT_Error, pjrt::PJRT_ErrorDeleter> _error(
+        error, pjrt::MakeErrorDeleter(c_api));
+    return pjrt::PjrtErrorToStatus(_error.get(), c_api);
+  }
+  return args.raw_buffer;
+}
+
+inline xla::Future<> PjRtCApiRawBuffer_CopyRawHostToDevice(
+    const PJRT_Api* c_api, const PJRT_RawBuffer_Extension* extension,
+    PJRT_RawBuffer* buffer, const void* src, int64_t offset,
+    int64_t transfer_size) {
+  PJRT_RawBuffer_CopyRawHostToDevice_Args args;
+  args.struct_size = PJRT_RawBuffer_CopyRawHostToDevice_Args_STRUCT_SIZE;
+  args.extension_start = nullptr;
+  args.buffer = buffer;
+  args.src = src;
+  args.offset = offset;
+  args.transfer_size = transfer_size;
+  args.event = nullptr;
+
+  PJRT_Error* error = extension->PJRT_RawBuffer_CopyRawHostToDevice(&args);
+  if (error) {
+    std::unique_ptr<PJRT_Error, pjrt::PJRT_ErrorDeleter> _error(
+        error, pjrt::MakeErrorDeleter(c_api));
+    absl::Status _status = pjrt::PjrtErrorToStatus(_error.get(), c_api);
+    return xla::Future<>(_status);
+  }
+  return pjrt::ConvertCEventToCppFuture(args.event, c_api);
+}
+
+inline xla::Future<> PjRtCApiRawBuffer_CopyRawDeviceToHost(
+    const PJRT_Api* c_api, const PJRT_RawBuffer_Extension* extension,
+    PJRT_RawBuffer* buffer, void* dst, int64_t offset,
+    int64_t transfer_size) {
+  PJRT_RawBuffer_CopyRawDeviceToHost_Args args;
+  args.struct_size = PJRT_RawBuffer_CopyRawDeviceToHost_Args_STRUCT_SIZE;
+  args.extension_start = nullptr;
+  args.buffer = buffer;
+  args.dst = dst;
+  args.offset = offset;
+  args.transfer_size = transfer_size;
+  args.event = nullptr;
+
+  PJRT_Error* error = extension->PJRT_RawBuffer_CopyRawDeviceToHost(&args);
+  if (error) {
+    std::unique_ptr<PJRT_Error, pjrt::PJRT_ErrorDeleter> _error(
+        error, pjrt::MakeErrorDeleter(c_api));
+    absl::Status _status = pjrt::PjrtErrorToStatus(_error.get(), c_api);
+    return xla::Future<>(_status);
+  }
+  return pjrt::ConvertCEventToCppFuture(args.event, c_api);
+}
 
 struct RawBufferHolder {
   const PJRT_Api* c_api;
@@ -51,7 +142,7 @@ struct RawBufferHolder {
 
   ~RawBufferHolder() {
     if (buffer) {
-      pjrt::PjRtCApiRawBuffer_Destroy(c_api, extension, buffer);
+      PjRtCApiRawBuffer_Destroy(c_api, extension, buffer);
     }
   }
 };
@@ -165,7 +256,7 @@ struct BufferHoldAndAlias {
           return absl::InternalError("RawBuffer extension missing");
         }
       }
-      auto status_or_raw = pjrt::PjRtCApiBuffer_CreateRawAliasOfBuffer(
+      auto status_or_raw = PjRtCApiBuffer_CreateRawAliasOfBuffer(
           c_api, extension, capi_buf->c_buffer());
       if (!status_or_raw.ok()) {
         return status_or_raw.status();
@@ -184,7 +275,7 @@ struct BufferHoldAndAlias {
     if (is_common_buffer) {
       return common_raw_buffer->CopyRawHostToDevice(src, device_offset, size);
     }
-    return pjrt::PjRtCApiRawBuffer_CopyRawHostToDevice(
+    return PjRtCApiRawBuffer_CopyRawHostToDevice(
         c_hold->c_api, c_hold->extension, c_raw_buffer, src, device_offset,
         size);
   }
@@ -194,7 +285,7 @@ struct BufferHoldAndAlias {
     if (is_common_buffer) {
       return buffer->CopyRawToHost(host_ptr, device_offset, size);
     }
-    return pjrt::PjRtCApiRawBuffer_CopyRawDeviceToHost(
+    return PjRtCApiRawBuffer_CopyRawDeviceToHost(
         c_hold->c_api, c_hold->extension, c_raw_buffer, host_ptr, device_offset,
         size);
   }
