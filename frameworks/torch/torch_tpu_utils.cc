@@ -18,30 +18,30 @@
 #include <string>
 #include <utility>
 
+#include "torch_tpu/eager/device_buffer.h"
+#include "torch_tpu/eager/materialize.h"
+#include "torch_tpu/eager/tensor_to_buffer.h"
+
 namespace tpu_raiden {
 namespace torch {
 
-void ValidateTpuTensor(const at::Tensor& tensor, const char* role) {
+xla::PjRtBuffer* UnpackTorchTensor(const at::Tensor& tensor) {
   if (tensor.device().type() != at::DeviceType::PrivateUse1) {
-    throw std::invalid_argument(std::string(role) +
-                                " must reside on TPU device private use space");
+    throw std::invalid_argument(
+        "Tensor must reside on TPU device private use space");
   }
   if (!tensor.is_contiguous()) {
-    throw std::invalid_argument(std::string(role) + " must be contiguous");
+    throw std::invalid_argument("Tensor must be contiguous");
   }
-}
 
-torch_tpu::DeviceBufferRef GetMaterializedBufferRef(const at::Tensor& tensor) {
   auto status_or_ref = torch_tpu::MaterializeAndReturn(
       tensor, torch_tpu::MaterializationReason::kCpuTransfer);
   if (!status_or_ref.ok()) {
     throw std::runtime_error("Failed to materialize TPU tensor: " +
                              std::string(status_or_ref.status().message()));
   }
-  return std::move(status_or_ref.value());
-}
+  torch_tpu::DeviceBufferRef buffer_ref = std::move(status_or_ref.value());
 
-xla::PjRtBuffer* GetPjRtBuffer(const torch_tpu::DeviceBufferRef& buffer_ref) {
   auto status_or_buf = buffer_ref.AwaitBuffer();
   if (!status_or_buf.ok()) {
     throw std::runtime_error("Failed to fetch PjRtBuffer from TPU reference: " +
@@ -50,10 +50,8 @@ xla::PjRtBuffer* GetPjRtBuffer(const torch_tpu::DeviceBufferRef& buffer_ref) {
   return status_or_buf.value();
 }
 
-xla::PjRtBuffer* UnpackTorchTensor(const at::Tensor& tensor) {
-  ValidateTpuTensor(tensor, "Tensor");
-  torch_tpu::DeviceBufferRef buffer_ref = GetMaterializedBufferRef(tensor);
-  return GetPjRtBuffer(buffer_ref);
+c10::DataPtr AllocateTpuPinnedHostBuffer(size_t size_bytes) {
+  return torch_tpu::GetTpuPinnedAllocator()->allocate(size_bytes);
 }
 
 }  // namespace torch

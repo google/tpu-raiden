@@ -18,29 +18,18 @@
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
+#include "c10/core/Allocator.h"
 #include "xla/pjrt/pjrt_client.h"
-#include "torch_tpu/eager/device_buffer.h"
-#include "torch_tpu/eager/materialize.h"
-#include "torch_tpu/eager/tensor_to_buffer.h"
 
 namespace tpu_raiden {
 namespace torch {
 
-// Validates that the tensor is a TPU tensor and is contiguous.
-// Throws std::invalid_argument if validation fails.
-void ValidateTpuTensor(const at::Tensor& tensor, const char* role);
-
-// Materializes the TPU tensor and returns a DeviceBufferRef.
-// Throws std::runtime_error if materialization fails.
-torch_tpu::DeviceBufferRef GetMaterializedBufferRef(const at::Tensor& tensor);
-
-// Extracts the raw PjRtBuffer pointer from the DeviceBufferRef.
-// Throws std::runtime_error if extraction fails.
-xla::PjRtBuffer* GetPjRtBuffer(const torch_tpu::DeviceBufferRef& buffer_ref);
-
 // Unpacks a single PyTorch tensor into a raw PjRtBuffer pointer.
 // Throws exceptions if validation or materialization fails.
 xla::PjRtBuffer* UnpackTorchTensor(const at::Tensor& tensor);
+
+// Allocates a TPU pinned host buffer of the given size.
+c10::DataPtr AllocateTpuPinnedHostBuffer(size_t size_bytes);
 
 }  // namespace torch
 }  // namespace tpu_raiden

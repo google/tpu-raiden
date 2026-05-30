@@ -39,6 +39,9 @@ namespace {
 
 using TensorList = std::vector<at::Tensor>;
 
+using ::tpu_raiden::torch::AllocateTpuPinnedHostBuffer;
+using ::tpu_raiden::torch::UnpackTorchTensor;
+
 class RawHostBuffer {
  public:
   explicit RawHostBuffer(int64_t size_bytes) {
@@ -99,7 +102,7 @@ class RawHostBuffer {
       }
     }
 
-    data_ = torch_tpu::GetTpuPinnedAllocator()->allocate(size_bytes_);
+    data_ = AllocateTpuPinnedHostBuffer(size_bytes_);
     if (data_.get() == nullptr) {
       throw std::runtime_error("Failed to allocate TPU pinned host buffer");
     }
@@ -173,10 +176,6 @@ void ValidateCpuTensor(const at::Tensor& tensor, const char* role) {
   }
 }
 
-using ::tpu_raiden::torch::GetMaterializedBufferRef;
-using ::tpu_raiden::torch::GetPjRtBuffer;
-using ::tpu_raiden::torch::ValidateTpuTensor;
-
 void AwaitReady(xla::PjRtBuffer* buffer, const char* role) {
   (void)buffer;
   (void)role;
@@ -185,12 +184,6 @@ void AwaitReady(xla::PjRtBuffer* buffer, const char* role) {
 void KeepTensorAlive(const std::shared_ptr<PjRtCopyFuture>& future,
                      const at::Tensor& tensor) {
   future->AddUserHold(std::make_shared<at::Tensor>(tensor));
-}
-
-void KeepBufferRefAlive(const std::shared_ptr<PjRtCopyFuture>& future,
-                        torch_tpu::DeviceBufferRef buffer_ref) {
-  future->AddUserHold(
-      std::make_shared<torch_tpu::DeviceBufferRef>(std::move(buffer_ref)));
 }
 
 void IssueD2HCopy(const std::shared_ptr<PjRtCopyFuture>& acc,
@@ -317,17 +310,13 @@ std::shared_ptr<PjRtCopyFuture> TransferD2HBatchAsync(
                       copy_sizes_major_dim);
   auto acc = std::make_shared<PjRtCopyFuture>(std::vector<xla::Future<>>{});
   for (size_t i = 0; i < src_arrs.size(); ++i) {
-    ValidateTpuTensor(src_arrs[i], "Source");
     ValidateCpuTensor(dst_arrs[i], "Destination");
-    torch_tpu::DeviceBufferRef src_buffer_ref =
-        GetMaterializedBufferRef(src_arrs[i]);
-    xla::PjRtBuffer* src_buffer = GetPjRtBuffer(src_buffer_ref);
+    xla::PjRtBuffer* src_buffer = UnpackTorchTensor(src_arrs[i]);
     AwaitReady(src_buffer, "Source");
     IssueD2HCopy(acc, src_buffer,
                  reinterpret_cast<uint8_t*>(dst_arrs[i].data_ptr()),
                  dst_arrs[i].nbytes(), src_offsets_major_dim,
                  dst_offsets_major_dim, copy_sizes_major_dim);
-    KeepBufferRefAlive(acc, std::move(src_buffer_ref));
     KeepTensorAlive(acc, src_arrs[i]);
     KeepTensorAlive(acc, dst_arrs[i]);
   }
@@ -347,15 +336,11 @@ std::shared_ptr<PjRtCopyFuture> TransferH2DBatchAsync(
   auto acc = std::make_shared<PjRtCopyFuture>(std::vector<xla::Future<>>{});
   for (size_t i = 0; i < src_arrs.size(); ++i) {
     ValidateCpuTensor(src_arrs[i], "Source");
-    ValidateTpuTensor(dst_arrs[i], "Destination");
-    torch_tpu::DeviceBufferRef dst_buffer_ref =
-        GetMaterializedBufferRef(dst_arrs[i]);
-    xla::PjRtBuffer* dst_buffer = GetPjRtBuffer(dst_buffer_ref);
+    xla::PjRtBuffer* dst_buffer = UnpackTorchTensor(dst_arrs[i]);
     AwaitReady(dst_buffer, "Destination");
     IssueH2DCopy(acc, reinterpret_cast<const uint8_t*>(src_arrs[i].data_ptr()),
                  src_arrs[i].nbytes(), dst_buffer, src_offsets_major_dim,
                  dst_offsets_major_dim, copy_sizes_major_dim);
-    KeepBufferRefAlive(acc, std::move(dst_buffer_ref));
     KeepTensorAlive(acc, src_arrs[i]);
     KeepTensorAlive(acc, dst_arrs[i]);
   }
@@ -386,13 +371,11 @@ class PreparedTorchRawTransfer
   PreparedTorchRawTransfer(const at::Tensor& tpu_tensor,
                            std::shared_ptr<RawHostBuffer> host_buffer,
                            bool unsafe_skip_buffer_lock)
-      : tpu_tensor_(tpu_tensor), host_buffer_(std::move(host_buffer)) {
+      : host_buffer_(std::move(host_buffer)) {
     if (!host_buffer_) {
       throw std::invalid_argument("host_buffer must not be None");
     }
-    ValidateTpuTensor(tpu_tensor_, "TPU tensor");
-    buffer_ref_ = GetMaterializedBufferRef(tpu_tensor_);
-    pjrt_buffer_ = GetPjRtBuffer(*buffer_ref_);
+    pjrt_buffer_ = UnpackTorchTensor(tpu_tensor);
     host_buffer_->EnsureBoundToDevice(pjrt_buffer_->device());
     physical_size_ = static_cast<size_t>(
         ValueOrThrow("Failed to get TPU physical buffer size",
@@ -458,9 +441,7 @@ class PreparedTorchRawTransfer
   }
 
  private:
-  at::Tensor tpu_tensor_;
   std::shared_ptr<RawHostBuffer> host_buffer_;
-  std::optional<torch_tpu::DeviceBufferRef> buffer_ref_;
   xla::PjRtBuffer* pjrt_buffer_ = nullptr;
   size_t physical_size_ = 0;
   BufferHoldAndAlias hold_;
