@@ -31,6 +31,7 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//frameworks/torch:torch_utils",
         "//weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
         "@stablehlo//:attr_type_builder_util",
@@ -44,9 +45,6 @@ cc_library(
         "@torch_tpu//shims/torch:torch_headers",
         "@torch_tpu//shims/torch/c10/core:base_headers",
         "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
-        "@torch_tpu//torch_tpu/eager:device_buffer",
-        "@torch_tpu//torch_tpu/eager:materialize",
-        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
         "@xla//xla/pjrt:pjrt_client",
     ],
 )
@@ -68,5 +66,49 @@ nanobind_extension(
         "@com_google_absl//absl/status",
         "@pybind11",
         "@torch_tpu//shims/torch:torch_headers",
+    ],
+)
+
+cc_library(
+    name = "torch_tpu_utils",
+    srcs = ["torch_tpu_utils.cc"],
+    hdrs = ["torch_tpu_utils.h"],
+    copts = [
+        "-std=c++20",
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
+    features = [
+        "-use_header_modules",
+    ],
+    deps = [
+        "@com_google_absl//absl/status",
+        "@torch_tpu//shims/torch:aten_headers",
+        "@torch_tpu//shims/torch:torch_headers",
+        "@torch_tpu//shims/torch/c10/core:base_headers",
+        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
+        "@torch_tpu//torch_tpu/eager:device_buffer",
+        "@torch_tpu//torch_tpu/eager:materialize",
+        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
+        "@xla//xla/pjrt:pjrt_client",
+    ],
+)
+
+cc_library(
+    name = "torch_utils",
+    srcs = ["torch_utils.cc"],
+    hdrs = ["torch_utils.h"],
+    copts = [
+        "-std=c++20",
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
+    features = [
+        "-use_header_modules",
+    ],
+    deps = [
+        ":torch_tpu_utils",
+        "@torch_tpu//shims/torch:aten_headers",
+        "@xla//xla/pjrt:pjrt_client",
     ],
 )
