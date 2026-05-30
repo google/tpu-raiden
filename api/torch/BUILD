@@ -269,7 +269,7 @@ nanobind_extension(
         ":kv_cache_manager_torch",
         "//core:raw_transfer_core",
         "//kv_cache:kv_cache_manager_base",
-        "//transport:socket_transport",
+        "//transport:block_transport",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",

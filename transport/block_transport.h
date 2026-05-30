@@ -103,13 +103,14 @@ class BlockTransport {
   void ListenerLoop();
 
   void H2hWriteWorker(int stream_idx, const std::string& peer,
-                      size_t blocks_per_stream,
+                      size_t block_offset, size_t block_count,
                       const std::vector<int>& src_block_ids,
                       std::vector<int>& allocated_ids,
                       std::vector<absl::Status>& statuses);
 
   void H2hReadWorker(int stream_idx, const std::string& peer,
-                     size_t blocks_per_stream, size_t remote_blocks_per_stream,
+                     size_t local_block_offset, size_t local_block_count,
+                     size_t remote_block_offset, size_t remote_block_count,
                      int base_remote_id, const std::vector<int>& allocated_ids,
                      const std::vector<uint8_t*>& explicit_dst_ptrs,
                      std::vector<absl::Status>& statuses);
