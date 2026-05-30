@@ -21,25 +21,29 @@
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
-#include "c10/core/Allocator.h"
-#include "c10/core/Device.h"
-#include "pybind11/gil.h"
-#include "pybind11/pybind11.h"
-#include "pybind11/stl.h"
+#include "nanobind/nanobind.h"
+#include "nanobind/stl/optional.h"
+#include "nanobind/stl/shared_ptr.h"
+#include "nanobind/stl/string.h"
+#include "nanobind/stl/vector.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "core/host_memory_allocator.h"
 #include "core/raw_transfer_core.h"
-#include "torch/extension.h"  // IWYU pragma: keep
-#include "torch/headeronly/core/DeviceType.h"
-#include "torch_tpu/eager/device_buffer.h"
-#include "torch_tpu/eager/materialize.h"
-#include "torch_tpu/eager/tensor_to_buffer.h"
+#include "frameworks/torch/torch_nanobind_utils.h"
+#include "frameworks/torch/torch_tpu_utils.h"
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
 namespace raiden {
 namespace {
 
 using TensorList = std::vector<at::Tensor>;
+
+using ::tpu_raiden::torch::UnpackTorchTensor;
+
+void DeleteHostBufferAllocation(void* ctx) {
+  delete static_cast<std::shared_ptr<tpu_raiden::HostBufferAllocation>*>(ctx);
+}
 
 class RawHostBuffer {
  public:
@@ -101,7 +105,17 @@ class RawHostBuffer {
       }
     }
 
-    data_ = torch_tpu::GetTpuPinnedAllocator()->allocate(size_bytes_);
+    tpu_raiden::PinnedHostAllocator allocator(device->client());
+    auto status_or_alloc = allocator.Allocate(size_bytes_);
+    if (!status_or_alloc.ok()) {
+      throw std::runtime_error("Failed to allocate TPU pinned host buffer: " +
+                               status_or_alloc.status().ToString());
+    }
+    auto alloc = std::move(status_or_alloc).value();
+    auto* ctx = new std::shared_ptr<tpu_raiden::HostBufferAllocation>(
+        std::make_shared<tpu_raiden::HostBufferAllocation>(std::move(alloc)));
+    data_ = c10::DataPtr((*ctx)->ptr, ctx, &DeleteHostBufferAllocation,
+                         c10::Device(c10::DeviceType::CPU));
     if (data_.get() == nullptr) {
       throw std::runtime_error("Failed to allocate TPU pinned host buffer");
     }
@@ -175,26 +189,6 @@ void ValidateCpuTensor(const at::Tensor& tensor, const char* role) {
   }
 }
 
-void ValidateTpuTensor(const at::Tensor& tensor, const char* role) {
-  if (tensor.device().type() != at::DeviceType::PrivateUse1) {
-    throw std::invalid_argument(std::string(role) + " must be a TPU tensor");
-  }
-  if (!tensor.is_contiguous()) {
-    throw std::invalid_argument(std::string(role) + " must be contiguous");
-  }
-}
-
-torch_tpu::DeviceBufferRef GetMaterializedBufferRef(const at::Tensor& tensor) {
-  return ValueOrThrow(
-      "Failed to materialize TPU tensor",
-      torch_tpu::MaterializeAndReturn(
-          tensor, torch_tpu::MaterializationReason::kCpuTransfer));
-}
-
-xla::PjRtBuffer* GetPjRtBuffer(const torch_tpu::DeviceBufferRef& buffer_ref) {
-  return ValueOrThrow("Failed to get PjRtBuffer", buffer_ref.AwaitBuffer());
-}
-
 void AwaitReady(xla::PjRtBuffer* buffer, const char* role) {
   (void)buffer;
   (void)role;
@@ -203,12 +197,6 @@ void AwaitReady(xla::PjRtBuffer* buffer, const char* role) {
 void KeepTensorAlive(const std::shared_ptr<PjRtCopyFuture>& future,
                      const at::Tensor& tensor) {
   future->AddUserHold(std::make_shared<at::Tensor>(tensor));
-}
-
-void KeepBufferRefAlive(const std::shared_ptr<PjRtCopyFuture>& future,
-                        torch_tpu::DeviceBufferRef buffer_ref) {
-  future->AddUserHold(
-      std::make_shared<torch_tpu::DeviceBufferRef>(std::move(buffer_ref)));
 }
 
 void IssueD2HCopy(const std::shared_ptr<PjRtCopyFuture>& acc,
@@ -245,7 +233,7 @@ void IssueD2HCopy(const std::shared_ptr<PjRtCopyFuture>& acc,
     if (dst_size < static_cast<size_t>(physical_size)) {
       throw std::invalid_argument("Destination CPU tensor is too small");
     }
-    py::gil_scoped_release release;
+    nb::gil_scoped_release release;
     futures.push_back(hold.CopyRawDeviceToHost(dst_data, 0, physical_size));
   } else {
     for (size_t i = 0; i < src_offsets_major_dim.size(); ++i) {
@@ -259,7 +247,7 @@ void IssueD2HCopy(const std::shared_ptr<PjRtCopyFuture>& acc,
         throw std::invalid_argument(
             "Copy range exceeds destination CPU tensor");
       }
-      py::gil_scoped_release release;
+      nb::gil_scoped_release release;
       futures.push_back(hold.CopyRawDeviceToHost(dst_data + dst_offset,
                                                  src_offset, size_to_copy));
     }
@@ -301,7 +289,7 @@ void IssueH2DCopy(const std::shared_ptr<PjRtCopyFuture>& acc,
     if (src_size < static_cast<size_t>(physical_size)) {
       throw std::invalid_argument("Source CPU tensor is too small");
     }
-    py::gil_scoped_release release;
+    nb::gil_scoped_release release;
     futures.push_back(hold.CopyRawHostToDevice(src_data, 0, physical_size));
   } else {
     for (size_t i = 0; i < src_offsets_major_dim.size(); ++i) {
@@ -315,7 +303,7 @@ void IssueH2DCopy(const std::shared_ptr<PjRtCopyFuture>& acc,
         throw std::invalid_argument(
             "Copy range exceeds destination TPU buffer");
       }
-      py::gil_scoped_release release;
+      nb::gil_scoped_release release;
       futures.push_back(hold.CopyRawHostToDevice(src_data + src_offset,
                                                  dst_offset, size_to_copy));
     }
@@ -335,17 +323,13 @@ std::shared_ptr<PjRtCopyFuture> TransferD2HBatchAsync(
                       copy_sizes_major_dim);
   auto acc = std::make_shared<PjRtCopyFuture>(std::vector<xla::Future<>>{});
   for (size_t i = 0; i < src_arrs.size(); ++i) {
-    ValidateTpuTensor(src_arrs[i], "Source");
     ValidateCpuTensor(dst_arrs[i], "Destination");
-    torch_tpu::DeviceBufferRef src_buffer_ref =
-        GetMaterializedBufferRef(src_arrs[i]);
-    xla::PjRtBuffer* src_buffer = GetPjRtBuffer(src_buffer_ref);
+    xla::PjRtBuffer* src_buffer = UnpackTorchTensor(src_arrs[i]);
     AwaitReady(src_buffer, "Source");
     IssueD2HCopy(acc, src_buffer,
                  reinterpret_cast<uint8_t*>(dst_arrs[i].data_ptr()),
                  dst_arrs[i].nbytes(), src_offsets_major_dim,
                  dst_offsets_major_dim, copy_sizes_major_dim);
-    KeepBufferRefAlive(acc, std::move(src_buffer_ref));
     KeepTensorAlive(acc, src_arrs[i]);
     KeepTensorAlive(acc, dst_arrs[i]);
   }
@@ -365,15 +349,11 @@ std::shared_ptr<PjRtCopyFuture> TransferH2DBatchAsync(
   auto acc = std::make_shared<PjRtCopyFuture>(std::vector<xla::Future<>>{});
   for (size_t i = 0; i < src_arrs.size(); ++i) {
     ValidateCpuTensor(src_arrs[i], "Source");
-    ValidateTpuTensor(dst_arrs[i], "Destination");
-    torch_tpu::DeviceBufferRef dst_buffer_ref =
-        GetMaterializedBufferRef(dst_arrs[i]);
-    xla::PjRtBuffer* dst_buffer = GetPjRtBuffer(dst_buffer_ref);
+    xla::PjRtBuffer* dst_buffer = UnpackTorchTensor(dst_arrs[i]);
     AwaitReady(dst_buffer, "Destination");
     IssueH2DCopy(acc, reinterpret_cast<const uint8_t*>(src_arrs[i].data_ptr()),
                  src_arrs[i].nbytes(), dst_buffer, src_offsets_major_dim,
                  dst_offsets_major_dim, copy_sizes_major_dim);
-    KeepBufferRefAlive(acc, std::move(dst_buffer_ref));
     KeepTensorAlive(acc, src_arrs[i]);
     KeepTensorAlive(acc, dst_arrs[i]);
   }
@@ -404,13 +384,11 @@ class PreparedTorchRawTransfer
   PreparedTorchRawTransfer(const at::Tensor& tpu_tensor,
                            std::shared_ptr<RawHostBuffer> host_buffer,
                            bool unsafe_skip_buffer_lock)
-      : tpu_tensor_(tpu_tensor), host_buffer_(std::move(host_buffer)) {
+      : host_buffer_(std::move(host_buffer)) {
     if (!host_buffer_) {
       throw std::invalid_argument("host_buffer must not be None");
     }
-    ValidateTpuTensor(tpu_tensor_, "TPU tensor");
-    buffer_ref_ = GetMaterializedBufferRef(tpu_tensor_);
-    pjrt_buffer_ = GetPjRtBuffer(*buffer_ref_);
+    pjrt_buffer_ = UnpackTorchTensor(tpu_tensor);
     host_buffer_->EnsureBoundToDevice(pjrt_buffer_->device());
     physical_size_ = static_cast<size_t>(
         ValueOrThrow("Failed to get TPU physical buffer size",
@@ -436,7 +414,7 @@ class PreparedTorchRawTransfer
         std::make_shared<PjRtCopyFuture>(std::vector<xla::Future<>>{});
     xla::Future<> copy_future;
     {
-      py::gil_scoped_release release;
+      nb::gil_scoped_release release;
       copy_future = hold_.CopyRawDeviceToHost(host_buffer_->MutableData(), 0,
                                               physical_size_);
     }
@@ -452,7 +430,7 @@ class PreparedTorchRawTransfer
         std::make_shared<PjRtCopyFuture>(std::vector<xla::Future<>>{});
     xla::Future<> copy_future;
     {
-      py::gil_scoped_release release;
+      nb::gil_scoped_release release;
       copy_future =
           hold_.CopyRawHostToDevice(host_buffer_->Data(), 0, physical_size_);
     }
@@ -465,45 +443,43 @@ class PreparedTorchRawTransfer
 
   void D2H() {
     auto future = D2HAsync();
-    py::gil_scoped_release release;
+    nb::gil_scoped_release release;
     future->Await();
   }
 
   void H2D() {
     auto future = H2DAsync();
-    py::gil_scoped_release release;
+    nb::gil_scoped_release release;
     future->Await();
   }
 
  private:
-  at::Tensor tpu_tensor_;
   std::shared_ptr<RawHostBuffer> host_buffer_;
-  std::optional<torch_tpu::DeviceBufferRef> buffer_ref_;
   xla::PjRtBuffer* pjrt_buffer_ = nullptr;
   size_t physical_size_ = 0;
   BufferHoldAndAlias hold_;
 };
 
-void AwaitAll(py::object futures) {
-  if (py::isinstance<PjRtCopyFuture>(futures)) {
-    auto future = futures.cast<std::shared_ptr<PjRtCopyFuture>>();
-    py::gil_scoped_release release;
+void AwaitAll(nb::object futures) {
+  if (nb::isinstance<PjRtCopyFuture>(futures)) {
+    auto future = nb::cast<std::shared_ptr<PjRtCopyFuture>>(futures);
+    nb::gil_scoped_release release;
     future->Await();
     return;
   }
-  for (py::handle item : futures) {
-    auto future = item.cast<std::shared_ptr<PjRtCopyFuture>>();
-    py::gil_scoped_release release;
+  for (nb::handle item : futures) {
+    auto future = nb::cast<std::shared_ptr<PjRtCopyFuture>>(item);
+    nb::gil_scoped_release release;
     future->Await();
   }
 }
 
-bool IsReady(py::object futures) {
-  if (py::isinstance<PjRtCopyFuture>(futures)) {
-    return futures.cast<std::shared_ptr<PjRtCopyFuture>>()->IsReady();
+bool IsReady(nb::object futures) {
+  if (nb::isinstance<PjRtCopyFuture>(futures)) {
+    return nb::cast<std::shared_ptr<PjRtCopyFuture>>(futures)->IsReady();
   }
-  for (py::handle item : futures) {
-    if (!item.cast<std::shared_ptr<PjRtCopyFuture>>()->IsReady()) {
+  for (nb::handle item : futures) {
+    if (!nb::cast<std::shared_ptr<PjRtCopyFuture>>(item)->IsReady()) {
       return false;
     }
   }
@@ -512,50 +488,51 @@ bool IsReady(py::object futures) {
 
 }  // namespace
 
-PYBIND11_MODULE(_torch_raw_transfer, m) {
-  py::class_<RawHostBuffer, std::shared_ptr<RawHostBuffer>>(m, "RawHostBuffer")
-      .def(py::init<int64_t>(), py::arg("size_bytes"))
-      .def_property_readonly("size_bytes", &RawHostBuffer::SizeBytes)
-      .def_property_readonly("data_ptr", &RawHostBuffer::DataPtr)
-      .def_property_readonly("is_pjrt_backed", &RawHostBuffer::IsPjRtBacked);
+NB_MODULE(_torch_raw_transfer, m) {
+  nb::class_<RawHostBuffer>(m, "RawHostBuffer")
+      .def(nb::init<int64_t>(), nb::arg("size_bytes"))
+      .def_prop_ro("size_bytes", &RawHostBuffer::SizeBytes)
+      .def_prop_ro("data_ptr", &RawHostBuffer::DataPtr)
+      .def_prop_ro("is_pjrt_backed", &RawHostBuffer::IsPjRtBacked);
 
-  py::class_<PjRtCopyFuture, std::shared_ptr<PjRtCopyFuture>>(m,
-                                                              "PjRtCopyFuture")
+  nb::class_<PjRtCopyFuture>(m, "PjRtCopyFuture")
       .def("Await", &PjRtCopyFuture::Await,
-           py::call_guard<py::gil_scoped_release>())
+           nb::call_guard<nb::gil_scoped_release>())
       .def("wait", &PjRtCopyFuture::Await,
-           py::call_guard<py::gil_scoped_release>())
+           nb::call_guard<nb::gil_scoped_release>())
       .def("IsReady", &PjRtCopyFuture::IsReady)
       .def("is_ready", &PjRtCopyFuture::IsReady);
 
-  py::class_<PreparedTorchRawTransfer,
-             std::shared_ptr<PreparedTorchRawTransfer>>(
-      m, "PreparedTorchRawTransfer")
-      .def(py::init<const at::Tensor&, std::shared_ptr<RawHostBuffer>, bool>(),
-           py::arg("tpu_tensor"), py::arg("host_buffer"),
-           py::arg("unsafe_skip_buffer_lock") = true)
-      .def_property_readonly("physical_size_bytes",
-                             &PreparedTorchRawTransfer::PhysicalSizeBytes)
-      .def_property_readonly("host_buffer",
-                             &PreparedTorchRawTransfer::HostBuffer)
+  nb::class_<PreparedTorchRawTransfer>(m, "PreparedTorchRawTransfer")
+      .def(nb::new_([](const at::Tensor& tpu_tensor,
+                       std::shared_ptr<RawHostBuffer> host_buffer,
+                       bool unsafe_skip_buffer_lock) {
+             return std::make_shared<PreparedTorchRawTransfer>(
+                 tpu_tensor, host_buffer, unsafe_skip_buffer_lock);
+           }),
+           nb::arg("tpu_tensor"), nb::arg("host_buffer"),
+           nb::arg("unsafe_skip_buffer_lock") = true)
+      .def_prop_ro("physical_size_bytes",
+                   &PreparedTorchRawTransfer::PhysicalSizeBytes)
+      .def_prop_ro("host_buffer", &PreparedTorchRawTransfer::HostBuffer)
       .def("d2h_async", &PreparedTorchRawTransfer::D2HAsync)
       .def("h2d_async", &PreparedTorchRawTransfer::H2DAsync)
       .def("d2h", &PreparedTorchRawTransfer::D2H)
       .def("h2d", &PreparedTorchRawTransfer::H2D);
 
-  m.def("await_all", &AwaitAll, py::arg("futures"));
-  m.def("is_ready", &IsReady, py::arg("futures"));
+  m.def("await_all", &AwaitAll, nb::arg("futures"));
+  m.def("is_ready", &IsReady, nb::arg("futures"));
 
-  m.def("transfer_d2h_async", &TransferD2HAsync, py::arg("src_arr"),
-        py::arg("dst_arr"), py::kw_only(),
-        py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
-        py::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
-        py::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
-  m.def("transfer_h2d_async", &TransferH2DAsync, py::arg("src_arr"),
-        py::arg("dst_arr"), py::kw_only(),
-        py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
-        py::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
-        py::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
+  m.def("transfer_d2h_async", &TransferD2HAsync, nb::arg("src_arr"),
+        nb::arg("dst_arr"), nb::kw_only(),
+        nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+        nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
+        nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
+  m.def("transfer_h2d_async", &TransferH2DAsync, nb::arg("src_arr"),
+        nb::arg("dst_arr"), nb::kw_only(),
+        nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+        nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
+        nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
   m.def(
       "transfer_d2h",
       [](const at::Tensor& src_arr, const at::Tensor& dst_arr,
@@ -565,13 +542,13 @@ PYBIND11_MODULE(_torch_raw_transfer, m) {
         auto future =
             TransferD2HAsync(src_arr, dst_arr, src_offsets_major_dim,
                              dst_offsets_major_dim, copy_sizes_major_dim);
-        py::gil_scoped_release release;
+        nb::gil_scoped_release release;
         future->Await();
       },
-      py::arg("src_arr"), py::arg("dst_arr"), py::kw_only(),
-      py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
-      py::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
-      py::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
+      nb::arg("src_arr"), nb::arg("dst_arr"), nb::kw_only(),
+      nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+      nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
+      nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
   m.def(
       "transfer_h2d",
       [](const at::Tensor& src_arr, const at::Tensor& dst_arr,
@@ -581,24 +558,24 @@ PYBIND11_MODULE(_torch_raw_transfer, m) {
         auto future =
             TransferH2DAsync(src_arr, dst_arr, src_offsets_major_dim,
                              dst_offsets_major_dim, copy_sizes_major_dim);
-        py::gil_scoped_release release;
+        nb::gil_scoped_release release;
         future->Await();
       },
-      py::arg("src_arr"), py::arg("dst_arr"), py::kw_only(),
-      py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
-      py::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
-      py::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
+      nb::arg("src_arr"), nb::arg("dst_arr"), nb::kw_only(),
+      nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+      nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
+      nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
 
-  m.def("transfer_d2h_batch_async", &TransferD2HBatchAsync, py::arg("src_arrs"),
-        py::arg("dst_arrs"), py::kw_only(),
-        py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
-        py::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
-        py::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
-  m.def("transfer_h2d_batch_async", &TransferH2DBatchAsync, py::arg("src_arrs"),
-        py::arg("dst_arrs"), py::kw_only(),
-        py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
-        py::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
-        py::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
+  m.def("transfer_d2h_batch_async", &TransferD2HBatchAsync, nb::arg("src_arrs"),
+        nb::arg("dst_arrs"), nb::kw_only(),
+        nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+        nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
+        nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
+  m.def("transfer_h2d_batch_async", &TransferH2DBatchAsync, nb::arg("src_arrs"),
+        nb::arg("dst_arrs"), nb::kw_only(),
+        nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+        nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
+        nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
   m.def(
       "transfer_d2h_batch",
       [](const TensorList& src_arrs, const TensorList& dst_arrs,
@@ -608,13 +585,13 @@ PYBIND11_MODULE(_torch_raw_transfer, m) {
         auto future =
             TransferD2HBatchAsync(src_arrs, dst_arrs, src_offsets_major_dim,
                                   dst_offsets_major_dim, copy_sizes_major_dim);
-        py::gil_scoped_release release;
+        nb::gil_scoped_release release;
         future->Await();
       },
-      py::arg("src_arrs"), py::arg("dst_arrs"), py::kw_only(),
-      py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
-      py::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
-      py::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
+      nb::arg("src_arrs"), nb::arg("dst_arrs"), nb::kw_only(),
+      nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+      nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
+      nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
   m.def(
       "transfer_h2d_batch",
       [](const TensorList& src_arrs, const TensorList& dst_arrs,
@@ -624,13 +601,13 @@ PYBIND11_MODULE(_torch_raw_transfer, m) {
         auto future =
             TransferH2DBatchAsync(src_arrs, dst_arrs, src_offsets_major_dim,
                                   dst_offsets_major_dim, copy_sizes_major_dim);
-        py::gil_scoped_release release;
+        nb::gil_scoped_release release;
         future->Await();
       },
-      py::arg("src_arrs"), py::arg("dst_arrs"), py::kw_only(),
-      py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
-      py::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
-      py::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
+      nb::arg("src_arrs"), nb::arg("dst_arrs"), nb::kw_only(),
+      nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+      nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
+      nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{});
 }
 
 }  // namespace raiden

@@ -56,6 +56,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":logical_block_manager",
+        "//core:host_memory_allocator",
         "//core:raiden_manager_base",
         "//core:raw_transfer_core",
         "//core:xla_raw_transfer_headers",

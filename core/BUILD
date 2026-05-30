@@ -79,6 +79,31 @@ header_only_cc_info(
 )
 
 cc_library(
+    name = "host_memory_allocator",
+    srcs = [
+        "host_memory_allocator.cc",
+    ],
+    hdrs = [
+        "host_memory_allocator.h",
+    ],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":xla_raw_transfer_headers",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@xla//xla/pjrt:common_pjrt_client",
+        "@xla//xla/pjrt:host_memory_allocator",
+        "@xla//xla/pjrt:pjrt_client",
+    ],
+)
+
+cc_library(
     name = "raw_transfer_core",
     hdrs = [
         "raw_transfer_core.h",
