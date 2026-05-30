@@ -24,8 +24,8 @@
 #include "nanobind/stl/string.h"
 #include "nanobind/stl/vector.h"
 #include "absl/status/statusor.h"
-#include "api/torch/kv_cache_manager.h"
 #include "core/raw_transfer_core.h"
+#include "frameworks/torch/kv_cache_manager.h"
 #include "frameworks/torch/torch_nanobind_utils.h"
 
 namespace nb = nanobind;

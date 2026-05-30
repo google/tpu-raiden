@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "api/torch/kv_cache_manager.h"
+#include "frameworks/torch/kv_cache_manager.h"
 
 #include <cstddef>
 #include <cstdint>

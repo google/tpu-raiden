@@ -119,3 +119,64 @@ cc_library(
         "@torch_tpu//shims/torch:torch_headers",
     ],
 )
+
+cc_library(
+    name = "kv_cache_manager_torch",
+    srcs = ["kv_cache_manager.cc"],
+    hdrs = ["kv_cache_manager.h"],
+    copts = [
+        "-std=c++20",
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
+    features = [
+        "-use_header_modules",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":torch_tpu_utils",
+        ":torch_utils",
+        "//core:host_memory_allocator",
+        "//core:xla_raw_transfer_headers",
+        "//kv_cache:kv_cache_manager_base",
+        "@com_google_absl//absl/status:statusor",
+        "@torch_tpu//shims/torch:aten_headers",
+        "@torch_tpu//shims/torch:torch_headers",
+    ],
+)
+
+nanobind_extension(
+    name = "_kv_cache_manager",
+    srcs = ["kv_cache_manager_module.cc"],
+    features = [
+        "-use_header_modules",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":kv_cache_manager_torch",
+        ":torch_nanobind_utils",
+        "//core:raw_transfer_core",
+        "//kv_cache:kv_cache_manager_base",
+        "@com_google_absl//absl/status:statusor",
+    ],
+)
+
+nanobind_extension(
+    name = "_raiden_transfer_engine",
+    srcs = ["raiden_transfer_engine.cc"],
+    features = [
+        "-use_header_modules",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":kv_cache_manager_torch",
+        ":torch_nanobind_utils",
+        "//core:raw_transfer_core",
+        "//kv_cache:kv_cache_manager_base",
+        "//transport:socket_transport",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@torch_tpu//shims/torch:aten_headers",
+    ],
+)

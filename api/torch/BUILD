@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@nanobind_abseil/google:nanobind.bzl", "nanobind_extension")
-load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
@@ -32,53 +30,12 @@ cc_library(
     ],
 )
 
-cc_library(
-    name = "kv_cache_manager_torch",
-    srcs = ["kv_cache_manager.cc"],
-    hdrs = ["kv_cache_manager.h"],
-    copts = [
-        "-std=c++20",
-        "-fexceptions",
-        "-march=x86-64-v2",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//core:host_memory_allocator",
-        "//core:xla_raw_transfer_headers",
-        "//frameworks/torch:torch_tpu_utils",
-        "//frameworks/torch:torch_utils",
-        "//kv_cache:kv_cache_manager_base",
-        "@com_google_absl//absl/status:statusor",
-        "@torch_tpu//shims/torch:aten_headers",
-        "@torch_tpu//shims/torch:torch_headers",
-    ],
-)
-
-nanobind_extension(
-    name = "_kv_cache_manager",
-    srcs = ["kv_cache_manager_module.cc"],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":kv_cache_manager_torch",
-        "//core:raw_transfer_core",
-        "//frameworks/torch:torch_nanobind_utils",
-        "//kv_cache:kv_cache_manager_base",
-        "@com_google_absl//absl/status:statusor",
-    ],
-)
-
 py_library(
     name = "kv_cache_manager_torch_py",
     srcs = ["kv_cache_manager.py"],
     visibility = ["//visibility:public"],
     deps = [
-        ":_kv_cache_manager",
+        "//frameworks/torch:_kv_cache_manager",
         "@torch_tpu//shims/torch:pytorch",
         "@torch_tpu//torch_tpu",
     ],
@@ -136,31 +93,6 @@ py_test(
     ],
 )
 
-nanobind_extension(
-    name = "_raiden_transfer_engine",
-    srcs = ["raiden_transfer_engine.cc"],
-    copts = [
-        "-fno-strict-aliasing",
-        "-fexceptions",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":kv_cache_manager_torch",
-        "//core:raw_transfer_core",
-        "//frameworks/torch:torch_nanobind_utils",
-        "//kv_cache:kv_cache_manager_base",
-        "//transport:socket_transport",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@nanobind",
-        "@torch_tpu//shims/torch:aten_headers",
-    ],
-)
-
 py_library(
     name = "raiden_transfer_engine",
     srcs = ["raiden_transfer_engine.py"],
@@ -169,7 +101,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        ":_raiden_transfer_engine",
+        "//frameworks/torch:_raiden_transfer_engine",
         "@torch_tpu//shims/torch:pytorch",
         "@torch_tpu//torch_tpu",
         "@torch_tpu//torch_tpu:_loader",
