@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load("//tools/build_defs/testing:bzl_library.bzl", "bzl_library")
 load(":header_only_cc_info.bzl", "header_only_cc_info")
 
@@ -181,4 +181,55 @@ bzl_library(
     parse_tests = False,
     visibility = ["//visibility:private"],
     deps = ["//third_party/bazel_rules/rules_cc/cc/common"],
+)
+
+cc_library(
+    name = "tpu_pjrt_manager",
+    srcs = [
+        "tpu_pjrt_manager.cc",
+    ],
+    hdrs = [
+        "tpu_pjrt_manager.h",
+    ],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/types:span",
+        "@xla//xla:literal",
+        "@xla//xla:shape_util",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/pjrt/plugin/xla_tpu:tpu_static_registration",
+        "@xla//xla/pjrt/plugin/xla_tpu:xla_tpu_pjrt_client",
+    ],
+)
+
+cc_test(
+    name = "tpu_pjrt_manager_test",
+    srcs = ["tpu_pjrt_manager_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    tags = [
+        "no_oss",
+        "requires-jellyfish",
+    ],
+    deps = [
+        ":tpu_pjrt_manager",
+        "@xla//xla:literal",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/tsl/platform:status_matchers",
+        "@xla//xla/tsl/platform:statusor",
+        "@xla//xla/tsl/platform:test",
+        "@xla//xla/tsl/platform:test_main",
+    ],
 )
