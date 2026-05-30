@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@nanobind_abseil/google:nanobind.bzl", "nanobind_extension")
 load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
@@ -22,23 +23,17 @@ licenses(["notice"])
 nanobind_extension(
     name = "_torch_raw_transfer",
     srcs = ["torch_raw_transfer.cc"],
-    copts = [
-        "-fno-strict-aliasing",
-        "-fexceptions",
-    ],
     features = ["-use_header_modules"],
     deps = [
         "//core:raw_transfer_core",
+        "//frameworks/torch:torch_nanobind_utils",
+        "//frameworks/torch:torch_tpu_utils",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        "@pybind11",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
         "@torch_tpu//shims/torch/c10/core:base_headers",
         "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
-        "@torch_tpu//torch_tpu/eager:device_buffer",
-        "@torch_tpu//torch_tpu/eager:materialize",
-        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
         "@xla//xla:future",
         "@xla//xla:shape_util",
         "@xla//xla/pjrt:common_pjrt_client",

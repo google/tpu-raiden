@@ -57,18 +57,22 @@
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
-#include "pybind11/pybind11.h"
-#include "pybind11/stl.h"
+#include "nanobind/nanobind.h"
+#include "nanobind/ndarray.h"
+#include "nanobind/stl/shared_ptr.h"
+#include "nanobind/stl/string.h"
+#include "nanobind/stl/vector.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "api/torch/kv_cache_manager.h"
 #include "core/raw_transfer_core.h"
+#include "frameworks/torch/torch_nanobind_utils.h"
 #include "kv_cache/kv_cache_manager_base.h"
 #include "transport/socket_transport.h"
 #include "torch/extension.h"  // IWYU pragma: keep
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
 namespace tpu_raiden::kv_cache {
 namespace {
@@ -297,16 +301,16 @@ class RaidenTransferEngine {
     return region_ids;
   }
 
-  void RegisterHostBuffers(py::object /*host_pool*/, int64_t tp_rank) {
+  void RegisterHostBuffers(nb::object /*host_pool*/, int64_t tp_rank) {
     tp_rank_ = tp_rank;
   }
 
   bool UsesPreparedTpuBuffers() const { return kv_transfer_ != nullptr; }
 
-  py::tuple StageD2H(int64_t slot_idx, int64_t num_blocks,
+  nb::tuple StageD2H(int64_t slot_idx, int64_t num_blocks,
                      const std::vector<int64_t>& block_ids) {
     RaidenStageResult result = IssueD2H(slot_idx, num_blocks, block_ids);
-    return py::make_tuple(result.future, kv_caches_,
+    return nb::make_tuple(result.future, kv_caches_,
                           HostSpanMemoryViews(result.host_spans),
                           result.total_bytes);
   }
@@ -317,7 +321,7 @@ class RaidenTransferEngine {
     result.future->Await();
   }
 
-  py::tuple CommitH2D(int64_t slot_idx, int64_t num_blocks,
+  nb::tuple CommitH2D(int64_t slot_idx, int64_t num_blocks,
                       const std::vector<int64_t>& local_block_ids) {
     if (num_blocks != static_cast<int64_t>(local_block_ids.size())) {
       throw std::invalid_argument("num_blocks must match len(local_block_ids)");
@@ -327,12 +331,12 @@ class RaidenTransferEngine {
     auto t_issued = std::chrono::steady_clock::now();
     result.future->Await();
     auto t_done = std::chrono::steady_clock::now();
-    return py::make_tuple(DurationMs(t0, t_issued),
+    return nb::make_tuple(DurationMs(t0, t_issued),
                           DurationMs(t_issued, t_done), DurationMs(t0, t_done),
                           result.total_bytes);
   }
 
-  py::object RankLayerViews(int64_t slot_idx, int64_t rank,
+  nb::object RankLayerViews(int64_t slot_idx, int64_t rank,
                             int64_t num_blocks) {
     if (rank != tp_rank_) {
       throw std::invalid_argument("Raiden internal slots are per-rank only");
@@ -341,27 +345,22 @@ class RaidenTransferEngine {
   }
 
   void UnpackRankLayers(int64_t slot_idx, int64_t rank, int64_t num_blocks,
-                        py::object layer_buffers) {
+                        nb::object layer_buffers) {
     if (rank != tp_rank_) {
       throw std::invalid_argument("Raiden internal slots are per-rank only");
     }
     std::vector<KVCacheHostSpan> spans = LayerSpans(slot_idx, num_blocks);
     size_t idx = 0;
-    for (py::handle item : layer_buffers) {
+    for (nb::handle item : layer_buffers) {
       if (idx >= spans.size()) {
         throw std::invalid_argument("too many layer buffers");
       }
-      py::buffer source = py::reinterpret_borrow<py::buffer>(item);
-      py::buffer_info info = source.request();
-      if (info.size < 0 || info.itemsize < 0) {
-        throw std::invalid_argument("layer buffer has invalid size");
-      }
-      const size_t source_bytes =
-          static_cast<size_t>(info.size) * static_cast<size_t>(info.itemsize);
+      nb::ndarray<> source = nb::cast<nb::ndarray<>>(item);
+      const size_t source_bytes = source.nbytes();
       if (source_bytes != spans[idx].nbytes) {
         throw std::invalid_argument("layer buffer size mismatch");
       }
-      std::memcpy(spans[idx].ptr, info.ptr, spans[idx].nbytes);
+      std::memcpy(spans[idx].ptr, source.data(), spans[idx].nbytes);
       ++idx;
     }
     if (idx != spans.size()) {
@@ -600,7 +599,7 @@ class RaidenTransferEngine {
     return StorePending(std::move(op));
   }
 
-  py::tuple PollFinished() {
+  nb::tuple PollFinished() {
     std::vector<std::string> done_sending;
     std::vector<std::string> done_recving;
     std::vector<std::string> failed_recving;
@@ -624,7 +623,7 @@ class RaidenTransferEngine {
       done_recving_.clear();
       failed_recving_.clear();
     }
-    return py::make_tuple(done_sending, done_recving, failed_recving);
+    return nb::make_tuple(done_sending, done_recving, failed_recving);
   }
 
   std::vector<int64_t> PollTransferOps() {
@@ -666,11 +665,11 @@ class RaidenTransferEngine {
         Offsets(block_ids, /*source_is_compact=*/false).sizes.size());
   }
 
-  py::dict SendCopyPlanForTesting(const std::vector<int64_t>& block_ids) const {
+  nb::dict SendCopyPlanForTesting(const std::vector<int64_t>& block_ids) const {
     return CopyPlanToDict(BuildProducerCopyPlan(block_ids));
   }
 
-  py::dict LoadCopyPlanForTesting(
+  nb::dict LoadCopyPlanForTesting(
       const std::vector<int64_t>& remote_block_ids,
       const std::vector<int64_t>& local_block_ids) const {
     return CopyPlanToDict(BuildLoadCopyPlan(remote_block_ids, local_block_ids));
@@ -810,16 +809,16 @@ class RaidenTransferEngine {
     return spec;
   }
 
-  static py::dict CopySpecToDict(const CopySpec& spec) {
-    py::dict out;
+  static nb::dict CopySpecToDict(const CopySpec& spec) {
+    nb::dict out;
     out["src_offsets"] = spec.src_offsets;
     out["dst_offsets"] = spec.dst_offsets;
     out["sizes"] = spec.sizes;
     return out;
   }
 
-  static py::dict CopyPlanToDict(const CopyPlan& plan) {
-    py::dict out;
+  static nb::dict CopyPlanToDict(const CopyPlan& plan) {
+    nb::dict out;
     out["num_blocks"] = plan.num_blocks;
     out["requested_remote_block_ids"] = plan.requested_remote_block_ids;
     out["requested_local_block_ids"] = plan.requested_local_block_ids;
@@ -967,16 +966,21 @@ class RaidenTransferEngine {
     return spans;
   }
 
-  static py::list HostSpanMemoryViews(
+  static nb::list HostSpanMemoryViews(
       const std::vector<KVCacheHostSpan>& host_spans) {
-    py::list views;
+    nb::list views;
     for (const KVCacheHostSpan& span : host_spans) {
       if (span.nbytes >
           static_cast<size_t>(std::numeric_limits<ssize_t>::max())) {
         throw std::overflow_error("host span is too large for Python view");
       }
-      views.append(py::memoryview::from_memory(
-          span.ptr, static_cast<ssize_t>(span.nbytes)));
+      PyObject* mv = PyMemoryView_FromMemory(reinterpret_cast<char*>(span.ptr),
+                                             static_cast<ssize_t>(span.nbytes),
+                                             PyBUF_WRITE);
+      if (mv == nullptr) {
+        throw std::runtime_error("Failed to create Python memoryview");
+      }
+      views.append(nb::steal<nb::object>(mv));
     }
     return views;
   }
@@ -1435,24 +1439,24 @@ class RaidenTransferEngine {
   std::vector<std::thread> worker_threads_;
 };
 
-void AwaitAll(py::object futures) {
-  if (py::isinstance<RaidenTransferFuture>(futures)) {
-    auto future = futures.cast<std::shared_ptr<RaidenTransferFuture>>();
+void AwaitAll(nb::object futures) {
+  if (nb::isinstance<RaidenTransferFuture>(futures)) {
+    auto future = nb::cast<std::shared_ptr<RaidenTransferFuture>>(futures);
     future->Await();
     return;
   }
-  for (py::handle item : futures) {
-    auto future = item.cast<std::shared_ptr<RaidenTransferFuture>>();
+  for (nb::handle item : futures) {
+    auto future = nb::cast<std::shared_ptr<RaidenTransferFuture>>(item);
     future->Await();
   }
 }
 
-bool IsReady(py::object futures) {
-  if (py::isinstance<RaidenTransferFuture>(futures)) {
-    return futures.cast<std::shared_ptr<RaidenTransferFuture>>()->IsReady();
+bool IsReady(nb::object futures) {
+  if (nb::isinstance<RaidenTransferFuture>(futures)) {
+    return nb::cast<std::shared_ptr<RaidenTransferFuture>>(futures)->IsReady();
   }
-  for (py::handle item : futures) {
-    if (!item.cast<std::shared_ptr<RaidenTransferFuture>>()->IsReady()) {
+  for (nb::handle item : futures) {
+    if (!nb::cast<std::shared_ptr<RaidenTransferFuture>>(item)->IsReady()) {
       return false;
     }
   }
@@ -1461,68 +1465,66 @@ bool IsReady(py::object futures) {
 
 }  // namespace
 
-PYBIND11_MODULE(_raiden_transfer_engine, m) {
-  py::class_<RaidenTransferFuture, std::shared_ptr<RaidenTransferFuture>>(
-      m, "RaidenTransferFuture")
+NB_MODULE(_raiden_transfer_engine, m) {
+  nb::class_<RaidenTransferFuture>(m, "RaidenTransferFuture")
       .def("Await", &RaidenTransferFuture::Await)
       .def("wait", &RaidenTransferFuture::Await)
       .def("IsReady", &RaidenTransferFuture::IsReady)
       .def("is_ready", &RaidenTransferFuture::IsReady);
 
-  py::class_<RaidenTransferEngine>(m, "RaidenTransferEngine")
-      .def(py::init<const TensorList&, int64_t, int64_t, int64_t, int64_t,
+  nb::class_<RaidenTransferEngine>(m, "RaidenTransferEngine")
+      .def(nb::init<const TensorList&, int64_t, int64_t, int64_t, int64_t,
                     double, bool>(),
-           py::arg("kv_caches"), py::arg("tp_rank"),
-           py::arg("local_control_port"), py::arg("max_blocks"),
-           py::arg("num_slots"), py::arg("timeout_s") = 120.0,
-           py::arg("unsafe_skip_buffer_lock") = true)
-      .def_property_readonly("uses_prepared_tpu_buffers",
-                             &RaidenTransferEngine::UsesPreparedTpuBuffers)
-      .def_property_readonly("local_control_port",
-                             &RaidenTransferEngine::local_control_port)
-      .def_property_readonly("local_data_port",
-                             &RaidenTransferEngine::local_data_port)
+           nb::arg("kv_caches"), nb::arg("tp_rank"),
+           nb::arg("local_control_port"), nb::arg("max_blocks"),
+           nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
+           nb::arg("unsafe_skip_buffer_lock") = true)
+      .def_prop_ro("uses_prepared_tpu_buffers",
+                   &RaidenTransferEngine::UsesPreparedTpuBuffers)
+      .def_prop_ro("local_control_port",
+                   &RaidenTransferEngine::local_control_port)
+      .def_prop_ro("local_data_port", &RaidenTransferEngine::local_data_port)
       .def("register_kv_cache", &RaidenTransferEngine::RegisterKvCache,
-           py::arg("kv_caches"))
+           nb::arg("kv_caches"))
       .def("register_host_buffers", &RaidenTransferEngine::RegisterHostBuffers,
-           py::arg("host_pool"), py::arg("tp_rank"))
+           nb::arg("host_pool"), nb::arg("tp_rank"))
       .def("register_send", &RaidenTransferEngine::RegisterSend,
-           py::arg("req_id"), py::arg("uuid"), py::arg("block_ids"))
-      .def("submit_load", &RaidenTransferEngine::SubmitLoad, py::arg("req_id"),
-           py::arg("uuid"), py::arg("remote_endpoint"),
-           py::arg("remote_block_ids"), py::arg("local_block_ids"))
-      .def("stage_d2h", &RaidenTransferEngine::StageD2H, py::kw_only(),
-           py::arg("slot_idx"), py::arg("num_blocks"), py::arg("block_ids"))
-      .def("stage_d2h_sync", &RaidenTransferEngine::StageD2HSync, py::kw_only(),
-           py::arg("slot_idx"), py::arg("num_blocks"), py::arg("block_ids"))
-      .def("commit_h2d", &RaidenTransferEngine::CommitH2D, py::kw_only(),
-           py::arg("slot_idx"), py::arg("num_blocks"),
-           py::arg("local_block_ids"))
+           nb::arg("req_id"), nb::arg("uuid"), nb::arg("block_ids"))
+      .def("submit_load", &RaidenTransferEngine::SubmitLoad, nb::arg("req_id"),
+           nb::arg("uuid"), nb::arg("remote_endpoint"),
+           nb::arg("remote_block_ids"), nb::arg("local_block_ids"))
+      .def("stage_d2h", &RaidenTransferEngine::StageD2H, nb::kw_only(),
+           nb::arg("slot_idx"), nb::arg("num_blocks"), nb::arg("block_ids"))
+      .def("stage_d2h_sync", &RaidenTransferEngine::StageD2HSync, nb::kw_only(),
+           nb::arg("slot_idx"), nb::arg("num_blocks"), nb::arg("block_ids"))
+      .def("commit_h2d", &RaidenTransferEngine::CommitH2D, nb::kw_only(),
+           nb::arg("slot_idx"), nb::arg("num_blocks"),
+           nb::arg("local_block_ids"))
       .def("rank_layer_views", &RaidenTransferEngine::RankLayerViews,
-           py::arg("slot_idx"), py::arg("rank"), py::arg("num_blocks"))
+           nb::arg("slot_idx"), nb::arg("rank"), nb::arg("num_blocks"))
       .def("unpack_rank_layers", &RaidenTransferEngine::UnpackRankLayers,
-           py::arg("slot_idx"), py::arg("rank"), py::arg("num_blocks"),
-           py::arg("layer_buffers"))
-      .def("submit_d2h", &RaidenTransferEngine::SubmitD2H, py::kw_only(),
-           py::arg("slot_idx"), py::arg("num_blocks"), py::arg("block_ids"))
-      .def("submit_h2d", &RaidenTransferEngine::SubmitH2D, py::kw_only(),
-           py::arg("slot_idx"), py::arg("num_blocks"),
-           py::arg("local_block_ids"))
+           nb::arg("slot_idx"), nb::arg("rank"), nb::arg("num_blocks"),
+           nb::arg("layer_buffers"))
+      .def("submit_d2h", &RaidenTransferEngine::SubmitD2H, nb::kw_only(),
+           nb::arg("slot_idx"), nb::arg("num_blocks"), nb::arg("block_ids"))
+      .def("submit_h2d", &RaidenTransferEngine::SubmitH2D, nb::kw_only(),
+           nb::arg("slot_idx"), nb::arg("num_blocks"),
+           nb::arg("local_block_ids"))
       .def("poll_finished", &RaidenTransferEngine::PollFinished)
       .def("poll_transfer_ops", &RaidenTransferEngine::PollTransferOps)
       .def("wait_transfer", &RaidenTransferEngine::WaitTransfer,
-           py::arg("op_id"))
+           nb::arg("op_id"))
       .def("_count_copy_segments_for_testing",
            &RaidenTransferEngine::CountCopySegmentsForTesting,
-           py::arg("block_ids"))
+           nb::arg("block_ids"))
       .def("_send_copy_plan_for_testing",
-           &RaidenTransferEngine::SendCopyPlanForTesting, py::arg("block_ids"))
+           &RaidenTransferEngine::SendCopyPlanForTesting, nb::arg("block_ids"))
       .def("_load_copy_plan_for_testing",
            &RaidenTransferEngine::LoadCopyPlanForTesting,
-           py::arg("remote_block_ids"), py::arg("local_block_ids"));
+           nb::arg("remote_block_ids"), nb::arg("local_block_ids"));
 
-  m.def("await_all", &AwaitAll, py::arg("futures"));
-  m.def("is_ready", &IsReady, py::arg("futures"));
+  m.def("await_all", &AwaitAll, nb::arg("futures"));
+  m.def("is_ready", &IsReady, nb::arg("futures"));
 }
 
 }  // namespace tpu_raiden::kv_cache
