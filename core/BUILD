@@ -13,6 +13,7 @@
 # limitations under the License.
 
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//tools/build_defs/testing:bzl_library.bzl", "bzl_library")
 load(":header_only_cc_info.bzl", "header_only_cc_info")
 
 package(default_visibility = ["//visibility:public"])
@@ -148,4 +149,36 @@ cc_library(
         "@xla//xla/tsl/platform:logging",
         "@xla//xla/tsl/platform:statusor",
     ],
+)
+
+cc_library(
+    name = "transfer_engine_base",
+    srcs = [
+        "transfer_engine_base.cc",
+    ],
+    hdrs = [
+        "transfer_engine_base.h",
+    ],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":raw_transfer_core",
+        "//kv_cache:kv_cache_manager_base",
+        "//transport:socket_transport",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+    ],
+)
+
+bzl_library(
+    name = "header_only_cc_info_bzl",
+    srcs = ["header_only_cc_info.bzl"],
+    parse_tests = False,
+    visibility = ["//visibility:private"],
+    deps = ["//third_party/bazel_rules/rules_cc/cc/common"],
 )

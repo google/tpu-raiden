@@ -171,12 +171,8 @@ nanobind_extension(
     deps = [
         ":kv_cache_manager_torch",
         ":torch_nanobind_utils",
-        "//core:raw_transfer_core",
+        "//core:transfer_engine_base",
         "//kv_cache:kv_cache_manager_base",
-        "//transport:socket_transport",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
         "@torch_tpu//shims/torch:aten_headers",
     ],
 )
