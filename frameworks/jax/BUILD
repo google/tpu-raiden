@@ -35,6 +35,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":jax_utils",
+        "//core:host_memory_allocator",
         "//kv_cache:kv_cache_manager_base",
         "@nanobind",
     ],

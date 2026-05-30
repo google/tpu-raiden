@@ -30,6 +30,7 @@
 #include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/stream_executor/stream.h"
+#include "core/host_memory_allocator.h"
 #include "core/raiden_manager_base.h"
 #include "core/raw_transfer_core.h"
 #include "kv_cache/logical_block_manager.h"
@@ -53,17 +54,8 @@ struct KVCacheHostSpan {
   size_t shard_idx = 0;
 };
 
-struct HostBufferAllocation {
-  uint8_t* ptr = nullptr;
-  size_t size = 0;
-  // Keeps the underlying allocation alive.
-  std::shared_ptr<void> owner;
-};
-
-// Returns a HostBufferAllocation of at least the requested size.
-// On failure, returns a non-OK status.
-using HostBufferAllocator =
-    std::function<absl::StatusOr<HostBufferAllocation>(size_t)>;
+using ::tpu_raiden::HostBufferAllocation;
+using ::tpu_raiden::HostBufferAllocator;
 
 class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
  public:

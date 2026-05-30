@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@nanobind_abseil/google:nanobind.bzl", "nanobind_extension")
 load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
@@ -45,28 +46,20 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        ":torch_tpu_stablehlo_headers",
+        "//core:host_memory_allocator",
         "//core:xla_raw_transfer_headers",
+        "//frameworks/torch:torch_tpu_utils",
+        "//frameworks/torch:torch_utils",
         "//kv_cache:kv_cache_manager_base",
-        "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
-        "@torch_tpu//shims/torch/c10/core:base_headers",
-        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
-        "@torch_tpu//torch_tpu/eager:device_buffer",
-        "@torch_tpu//torch_tpu/eager:materialize",
-        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
-        "@xla//xla/pjrt:pjrt_client",
     ],
 )
 
 nanobind_extension(
     name = "_kv_cache_manager",
     srcs = ["kv_cache_manager_module.cc"],
-    copts = [
-        "-fexceptions",
-    ],
     features = [
         "-use_header_modules",
     ],
@@ -74,10 +67,9 @@ nanobind_extension(
     deps = [
         ":kv_cache_manager_torch",
         "//core:raw_transfer_core",
+        "//frameworks/torch:torch_nanobind_utils",
         "//kv_cache:kv_cache_manager_base",
         "@com_google_absl//absl/status:statusor",
-        "@pybind11",
-        "@torch_tpu//shims/torch:torch_headers",
     ],
 )
 
@@ -158,14 +150,14 @@ nanobind_extension(
     deps = [
         ":kv_cache_manager_torch",
         "//core:raw_transfer_core",
+        "//frameworks/torch:torch_nanobind_utils",
         "//kv_cache:kv_cache_manager_base",
         "//transport:socket_transport",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        "@pybind11",
+        "@nanobind",
         "@torch_tpu//shims/torch:aten_headers",
-        "@torch_tpu//shims/torch:torch_headers",
     ],
 )
 
