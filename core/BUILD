@@ -286,3 +286,31 @@ cc_test(
         "@xla//xla/tsl/platform:test_main",
     ],
 )
+
+cc_test(
+    name = "raw_transfer_core_test",
+    srcs = ["raw_transfer_core_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = [
+        "-use_header_modules",
+        "-layering_check",
+    ],
+    tags = [
+        "no_oss",
+        "requires-jellyfish",
+    ],
+    deps = [
+        ":raw_transfer_core",
+        ":tpu_pjrt_manager",
+        "@xla//xla:future",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
+        "@xla//xla/tsl/platform:status_matchers",
+        "@xla//xla/tsl/platform:statusor",
+        "@xla//xla/tsl/platform:test",
+        "@xla//xla/tsl/platform:test_main",
+    ],
+)
