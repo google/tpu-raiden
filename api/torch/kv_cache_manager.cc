@@ -19,75 +19,19 @@
 #include <limits>
 #include <memory>
 #include <optional>
-#include <stdexcept>
 #include <utility>
 #include <vector>
 
 #include "ATen/Functions.h"
-#include "ATen/core/TensorBody.h"
 #include "absl/status/statusor.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "frameworks/torch/torch_utils.h"
 #include "kv_cache/kv_cache_manager_base.h"
-#include "torch_tpu/eager/device_buffer.h"
-#include "torch_tpu/eager/materialize.h"
-#include "torch_tpu/eager/tensor_to_buffer.h"
 
 namespace tpu_raiden {
 namespace torch {
 
 namespace {
-
-// Unpacks PyTorch sharded tensors matrix into raw PjRtBuffer pointers E2E!
-std::vector<std::vector<xla::PjRtBuffer*>> UnpackTorchTensors(
-    const std::vector<std::vector<at::Tensor>>& device_tensors) {
-  size_t num_layers = device_tensors.size();
-  if (num_layers == 0) return {};
-
-  size_t num_shards = device_tensors[0].size();
-  std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers;
-  layer_buffers.reserve(num_layers);
-
-  for (size_t l = 0; l < num_layers; ++l) {
-    if (device_tensors[l].size() != num_shards) {
-      throw std::invalid_argument(
-          "Symmetrical shards count mismatch across layers during PyTorch "
-          "unpack");
-    }
-    std::vector<xla::PjRtBuffer*> shard_buffers;
-    shard_buffers.reserve(num_shards);
-
-    for (size_t sh = 0; sh < num_shards; ++sh) {
-      const at::Tensor& tensor = device_tensors[l][sh];
-      if (tensor.device().type() != at::DeviceType::PrivateUse1) {
-        throw std::invalid_argument(
-            "Tensor must reside on TPU device private use space");
-      }
-      if (!tensor.is_contiguous()) {
-        throw std::invalid_argument("Tensor must be contiguous");
-      }
-
-      // Materialize the underlying PyTorch TPU DeviceBufferRef E2E
-      auto status_or_ref = torch_tpu::MaterializeAndReturn(
-          tensor, torch_tpu::MaterializationReason::kCpuTransfer);
-      if (!status_or_ref.ok()) {
-        throw std::runtime_error("Failed to materialize TPU tensor: " +
-                                 std::string(status_or_ref.status().message()));
-      }
-      torch_tpu::DeviceBufferRef buffer_ref = std::move(status_or_ref.value());
-
-      // Extract raw PjRtBuffer device pointer
-      auto status_or_buf = buffer_ref.AwaitBuffer();
-      if (!status_or_buf.ok()) {
-        throw std::runtime_error(
-            "Failed to fetch PjRtBuffer from TPU reference: " +
-            std::string(status_or_buf.status().message()));
-      }
-      shard_buffers.push_back(status_or_buf.value());
-    }
-    layer_buffers.push_back(std::move(shard_buffers));
-  }
-  return layer_buffers;
-}
 
 std::optional<std::vector<const uint8_t*>> CastExternalPointers(
     const std::optional<std::vector<uintptr_t>>& external_host_ptrs) {
