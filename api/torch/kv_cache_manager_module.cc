@@ -18,35 +18,38 @@
 #include <utility>
 #include <vector>
 
-#include "pybind11/gil.h"
-#include "pybind11/pybind11.h"
-#include "pybind11/stl.h"
+#include "nanobind/nanobind.h"
+#include "nanobind/stl/optional.h"
+#include "nanobind/stl/pair.h"
+#include "nanobind/stl/string.h"
+#include "nanobind/stl/vector.h"
 #include "absl/status/statusor.h"
 #include "api/torch/kv_cache_manager.h"
 #include "core/raw_transfer_core.h"
+#include "frameworks/torch/torch_nanobind_utils.h"
 #include "torch/extension.h"
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
 using ::tpu_raiden::torch::KVCacheManager;
 
-// Pybind11 FFI bindings module definition for PyTorch E2E
-PYBIND11_MODULE(_kv_cache_manager, m) {
-  py::class_<::raiden::PjRtCopyFuture>(m, "PjRtCopyFuture")
+// Nanobind FFI bindings module definition for PyTorch E2E
+NB_MODULE(_kv_cache_manager, m) {
+  nb::class_<::raiden::PjRtCopyFuture>(m, "PjRtCopyFuture")
       .def("Await", &::raiden::PjRtCopyFuture::Await,
-           py::call_guard<py::gil_scoped_release>())
+           nb::call_guard<nb::gil_scoped_release>())
       .def("IsReady", &::raiden::PjRtCopyFuture::IsReady);
 
-  py::class_<KVCacheManager>(m, "KVCacheManager")
-      .def(py::init<const std::vector<std::vector<at::Tensor>>&, int,
+  nb::class_<KVCacheManager>(m, "KVCacheManager")
+      .def(nb::init<const std::vector<std::vector<at::Tensor>>&, int,
                     std::optional<int>, std::optional<int>,
                     std::optional<std::vector<uintptr_t>>, bool, int>(),
-           py::arg("device_tensors"), py::arg("block_size") = 1,
-           py::arg("local_port") = py::none(),
-           py::arg("host_blocks_to_allocate") = py::none(),
-           py::arg("external_host_ptrs") = py::none(),
-           py::arg("unsafe_skip_buffer_lock") = false,
-           py::arg("parallelism") = 1)
+           nb::arg("device_tensors"), nb::arg("block_size") = 1,
+           nb::arg("local_port") = nb::none(),
+           nb::arg("host_blocks_to_allocate") = nb::none(),
+           nb::arg("external_host_ptrs") = nb::none(),
+           nb::arg("unsafe_skip_buffer_lock") = false,
+           nb::arg("parallelism") = 1)
       .def(
           "H2d",
           [](KVCacheManager& self,
@@ -63,9 +66,9 @@ PYBIND11_MODULE(_kv_cache_manager, m) {
             }
             return status_or.value();
           },
-          py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
-          py::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
-          py::arg("copy_sizes_major_dim") = std::vector<int64_t>{})
+          nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+          nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
+          nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{})
       .def(
           "D2h",
           [](KVCacheManager& self,
@@ -82,9 +85,9 @@ PYBIND11_MODULE(_kv_cache_manager, m) {
             }
             return status_or.value();
           },
-          py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
-          py::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
-          py::arg("copy_sizes_major_dim") = std::vector<int64_t>{})
+          nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+          nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
+          nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{})
       .def(
           "D2hAutoAllocate",
           [](KVCacheManager& self,
@@ -100,9 +103,9 @@ PYBIND11_MODULE(_kv_cache_manager, m) {
             }
             return status_or.value();
           },
-          py::arg("src_offsets_major_dim") = std::vector<int64_t>{},
-          py::arg("copy_sizes_major_dim") = std::vector<int64_t>{},
-          py::arg("entity_id") = 0)
+          nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
+          nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{},
+          nb::arg("entity_id") = 0)
       .def(
           "H2hWrite",
           [](KVCacheManager& self, std::string peer,
@@ -116,8 +119,8 @@ PYBIND11_MODULE(_kv_cache_manager, m) {
             }
             return status_or.value();
           },
-          py::arg("peer"), py::arg("src_block_ids"), py::arg("entity_id") = 0,
-          py::call_guard<py::gil_scoped_release>())
+          nb::arg("peer"), nb::arg("src_block_ids"), nb::arg("entity_id") = 0,
+          nb::call_guard<nb::gil_scoped_release>())
       .def(
           "H2hRead",
           [](KVCacheManager& self, std::string peer,
@@ -131,12 +134,11 @@ PYBIND11_MODULE(_kv_cache_manager, m) {
             }
             return status_or.value();
           },
-          py::arg("peer"), py::arg("src_block_ids"), py::arg("entity_id") = 0,
-          py::call_guard<py::gil_scoped_release>())
-      .def_property_readonly("local_port", &KVCacheManager::local_port)
-      .def_property_readonly("num_layers", &KVCacheManager::num_layers)
-      .def_property_readonly("num_shards", &KVCacheManager::num_shards)
-      .def_property_readonly("block_size", &KVCacheManager::block_size)
-      .def_property_readonly("slice_byte_size",
-                             &KVCacheManager::slice_byte_size);
+          nb::arg("peer"), nb::arg("src_block_ids"), nb::arg("entity_id") = 0,
+          nb::call_guard<nb::gil_scoped_release>())
+      .def_prop_ro("local_port", &KVCacheManager::local_port)
+      .def_prop_ro("num_layers", &KVCacheManager::num_layers)
+      .def_prop_ro("num_shards", &KVCacheManager::num_shards)
+      .def_prop_ro("block_size", &KVCacheManager::block_size)
+      .def_prop_ro("slice_byte_size", &KVCacheManager::slice_byte_size);
 }

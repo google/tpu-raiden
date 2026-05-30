@@ -12,30 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "frameworks/torch/weight_synchronizer.h"
+#ifndef THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_TORCH_UTILS_H_
+#define THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_TORCH_UTILS_H_
 
-#include <cstddef>
-#include <memory>
-#include <optional>
 #include <vector>
 
-#include "absl/status/status.h"
+#include "ATen/core/TensorBody.h"
 #include "xla/pjrt/pjrt_client.h"
-#include "frameworks/torch/torch_utils.h"
-#include "weight_sync/weight_synchronizer_base.h"
 
 namespace tpu_raiden {
 namespace torch {
 
-WeightSynchronizer::WeightSynchronizer(
-    const std::vector<std::vector<at::Tensor>>& device_tensors,
-    std::optional<int> local_port, int parallelism)
-    : weight_sync::WeightSynchronizerBase(
-          UnpackTorchTensors(device_tensors), local_port,
-          /*external_host_ptrs=*/std::nullopt,
-          /*unsafe_skip_buffer_lock=*/true, parallelism) {}
-
-WeightSynchronizer::~WeightSynchronizer() = default;
+// Unpacks a 2D vector of PyTorch sharded tensors into a 2D vector of raw
+// PjRtBuffer pointers. Throws exceptions if validation or materialization
+// fails.
+std::vector<std::vector<xla::PjRtBuffer*>> UnpackTorchTensors(
+    const std::vector<std::vector<at::Tensor>>& device_tensors);
 
 }  // namespace torch
 }  // namespace tpu_raiden
+
+#endif  // THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_TORCH_UTILS_H_
