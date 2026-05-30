@@ -46,17 +46,14 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        ":torch_tpu_stablehlo_headers",
+        "//core:host_memory_allocator",
         "//core:xla_raw_transfer_headers",
+        "//frameworks/torch:torch_tpu_utils",
         "//frameworks/torch:torch_utils",
         "//kv_cache:kv_cache_manager_base",
-        "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
-        "@torch_tpu//shims/torch/c10/core:base_headers",
-        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
-        "@xla//xla/pjrt:pjrt_client",
     ],
 )
 
@@ -73,7 +70,6 @@ nanobind_extension(
         "//frameworks/torch:torch_nanobind_utils",
         "//kv_cache:kv_cache_manager_base",
         "@com_google_absl//absl/status:statusor",
-        "@torch_tpu//shims/torch:torch_headers",
     ],
 )
 
@@ -162,7 +158,6 @@ nanobind_extension(
         "@com_google_absl//absl/status:statusor",
         "@nanobind",
         "@torch_tpu//shims/torch:aten_headers",
-        "@torch_tpu//shims/torch:torch_headers",
     ],
 )
 

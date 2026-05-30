@@ -35,13 +35,6 @@ cc_library(
         "//frameworks/torch:torch_utils",
         "//weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
-        "@stablehlo//:attr_type_builder_util",
-        "@stablehlo//:chlo_builder",
-        "@stablehlo//:chlo_ops",
-        "@stablehlo//:func_builder",
-        "@stablehlo//:mlir_builder",
-        "@stablehlo//:stablehlo_builder",
-        "@stablehlo//:stablehlo_ops",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
         "@torch_tpu//shims/torch/c10/core:base_headers",
@@ -63,7 +56,6 @@ nanobind_extension(
         "//core:raw_transfer_core",
         "//weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
-        "@torch_tpu//shims/torch:torch_headers",
     ],
 )
 
@@ -83,7 +75,6 @@ cc_library(
         "@com_google_absl//absl/status",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
-        "@torch_tpu//shims/torch/c10/core:base_headers",
         "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
         "@torch_tpu//torch_tpu/eager:device_buffer",
         "@torch_tpu//torch_tpu/eager:materialize",
@@ -114,6 +105,12 @@ cc_library(
 cc_library(
     name = "torch_nanobind_utils",
     hdrs = ["torch_nanobind_utils.h"],
+    copts = [
+        "-fexceptions",
+    ],
+    features = [
+        "-use_header_modules",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "@nanobind",

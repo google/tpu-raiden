@@ -70,7 +70,6 @@
 #include "frameworks/torch/torch_nanobind_utils.h"
 #include "kv_cache/kv_cache_manager_base.h"
 #include "transport/socket_transport.h"
-#include "torch/extension.h"  // IWYU pragma: keep
 
 namespace nb = nanobind;
 

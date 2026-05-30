@@ -15,10 +15,7 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_TORCH_TPU_UTILS_TORCH_TPU_UTILS_H_
 #define THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_TORCH_TORCH_TPU_UTILS_TORCH_TPU_UTILS_H_
 
-#include <vector>
-
 #include "ATen/core/TensorBody.h"
-#include "c10/core/Allocator.h"
 #include "xla/pjrt/pjrt_client.h"
 
 namespace tpu_raiden {
@@ -27,9 +24,6 @@ namespace torch {
 // Unpacks a single PyTorch tensor into a raw PjRtBuffer pointer.
 // Throws exceptions if validation or materialization fails.
 xla::PjRtBuffer* UnpackTorchTensor(const at::Tensor& tensor);
-
-// Allocates a TPU pinned host buffer of the given size.
-c10::DataPtr AllocateTpuPinnedHostBuffer(size_t size_bytes);
 
 }  // namespace torch
 }  // namespace tpu_raiden

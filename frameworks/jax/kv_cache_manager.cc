@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/host_memory_allocator.h"
 #include "frameworks/jax/jax_utils.h"
 
 namespace nb = nanobind;
@@ -82,15 +83,38 @@ std::optional<std::vector<const uint8_t*>> CastExternalPointers(
 
 }  // namespace
 
+// Helper to create JAX Pinned Host Allocator
+HostBufferAllocator JaxPinnedHostAllocator(
+    const std::vector<std::vector<xla::PjRtBuffer*>>& buffers) {
+  xla::PjRtClient* client = buffers.empty() || buffers[0].empty()
+                                ? nullptr
+                                : buffers[0][0]->device()->client();
+  auto allocator = std::make_shared<PinnedHostAllocator>(client);
+  return
+      [allocator](size_t size_bytes) -> absl::StatusOr<HostBufferAllocation> {
+        return allocator->Allocate(size_bytes);
+      };
+}
+
 KVCacheManager::KVCacheManager(
     nb::list device_arrays, int block_size, std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate,
     std::optional<std::vector<uintptr_t>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism)
-    : KVCacheManagerBase(UnpackPjrtBuffers(device_arrays), block_size,
-                         local_port, host_blocks_to_allocate,
-                         CastExternalPointers(external_host_ptrs),
-                         unsafe_skip_buffer_lock, parallelism),
+    : KVCacheManager(UnpackPjrtBuffers(device_arrays), block_size, local_port,
+                     host_blocks_to_allocate, external_host_ptrs,
+                     unsafe_skip_buffer_lock, parallelism,
+                     std::move(device_arrays)) {}
+
+KVCacheManager::KVCacheManager(
+    std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers, int block_size,
+    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
+    std::optional<std::vector<uintptr_t>> external_host_ptrs,
+    bool unsafe_skip_buffer_lock, int parallelism, nanobind::list device_arrays)
+    : KVCacheManagerBase(
+          layer_buffers, block_size, local_port, host_blocks_to_allocate,
+          CastExternalPointers(external_host_ptrs), unsafe_skip_buffer_lock,
+          parallelism, JaxPinnedHostAllocator(layer_buffers)),
       device_arrays_(std::move(device_arrays)) {}
 
 KVCacheManager::~KVCacheManager() = default;

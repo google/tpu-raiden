@@ -21,19 +21,16 @@
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
-#include "c10/core/Allocator.h"
-#include "c10/core/Device.h"
 #include "nanobind/nanobind.h"
 #include "nanobind/stl/optional.h"
 #include "nanobind/stl/shared_ptr.h"
 #include "nanobind/stl/string.h"
 #include "nanobind/stl/vector.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "core/host_memory_allocator.h"
 #include "core/raw_transfer_core.h"
 #include "frameworks/torch/torch_nanobind_utils.h"
 #include "frameworks/torch/torch_tpu_utils.h"
-#include "torch/extension.h"  // IWYU pragma: keep
-#include "torch/headeronly/core/DeviceType.h"
 
 namespace nb = nanobind;
 
@@ -42,8 +39,11 @@ namespace {
 
 using TensorList = std::vector<at::Tensor>;
 
-using ::tpu_raiden::torch::AllocateTpuPinnedHostBuffer;
 using ::tpu_raiden::torch::UnpackTorchTensor;
+
+void DeleteHostBufferAllocation(void* ctx) {
+  delete static_cast<std::shared_ptr<tpu_raiden::HostBufferAllocation>*>(ctx);
+}
 
 class RawHostBuffer {
  public:
@@ -105,7 +105,17 @@ class RawHostBuffer {
       }
     }
 
-    data_ = AllocateTpuPinnedHostBuffer(size_bytes_);
+    tpu_raiden::PinnedHostAllocator allocator(device->client());
+    auto status_or_alloc = allocator.Allocate(size_bytes_);
+    if (!status_or_alloc.ok()) {
+      throw std::runtime_error("Failed to allocate TPU pinned host buffer: " +
+                               status_or_alloc.status().ToString());
+    }
+    auto alloc = std::move(status_or_alloc).value();
+    auto* ctx = new std::shared_ptr<tpu_raiden::HostBufferAllocation>(
+        std::make_shared<tpu_raiden::HostBufferAllocation>(std::move(alloc)));
+    data_ = c10::DataPtr((*ctx)->ptr, ctx, &DeleteHostBufferAllocation,
+                         c10::Device(c10::DeviceType::CPU));
     if (data_.get() == nullptr) {
       throw std::runtime_error("Failed to allocate TPU pinned host buffer");
     }

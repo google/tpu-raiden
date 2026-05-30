@@ -27,7 +27,6 @@
 #include "api/torch/kv_cache_manager.h"
 #include "core/raw_transfer_core.h"
 #include "frameworks/torch/torch_nanobind_utils.h"
-#include "torch/extension.h"
 
 namespace nb = nanobind;
 

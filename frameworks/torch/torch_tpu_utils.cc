@@ -19,7 +19,6 @@
 #include <utility>
 
 #include "torch_tpu/eager/device_buffer.h"
-#include "torch_tpu/eager/materialize.h"
 #include "torch_tpu/eager/tensor_to_buffer.h"
 
 namespace tpu_raiden {
@@ -48,10 +47,6 @@ xla::PjRtBuffer* UnpackTorchTensor(const at::Tensor& tensor) {
                              std::string(status_or_buf.status().message()));
   }
   return status_or_buf.value();
-}
-
-c10::DataPtr AllocateTpuPinnedHostBuffer(size_t size_bytes) {
-  return torch_tpu::GetTpuPinnedAllocator()->allocate(size_bytes);
 }
 
 }  // namespace torch
