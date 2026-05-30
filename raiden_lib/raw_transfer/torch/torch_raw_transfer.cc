@@ -28,11 +28,9 @@
 #include "pybind11/stl.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "core/raw_transfer_core.h"
+#include "frameworks/torch/torch_tpu_utils.h"
 #include "torch/extension.h"  // IWYU pragma: keep
 #include "torch/headeronly/core/DeviceType.h"
-#include "torch_tpu/eager/device_buffer.h"
-#include "torch_tpu/eager/materialize.h"
-#include "torch_tpu/eager/tensor_to_buffer.h"
 
 namespace py = pybind11;
 
@@ -175,25 +173,9 @@ void ValidateCpuTensor(const at::Tensor& tensor, const char* role) {
   }
 }
 
-void ValidateTpuTensor(const at::Tensor& tensor, const char* role) {
-  if (tensor.device().type() != at::DeviceType::PrivateUse1) {
-    throw std::invalid_argument(std::string(role) + " must be a TPU tensor");
-  }
-  if (!tensor.is_contiguous()) {
-    throw std::invalid_argument(std::string(role) + " must be contiguous");
-  }
-}
-
-torch_tpu::DeviceBufferRef GetMaterializedBufferRef(const at::Tensor& tensor) {
-  return ValueOrThrow(
-      "Failed to materialize TPU tensor",
-      torch_tpu::MaterializeAndReturn(
-          tensor, torch_tpu::MaterializationReason::kCpuTransfer));
-}
-
-xla::PjRtBuffer* GetPjRtBuffer(const torch_tpu::DeviceBufferRef& buffer_ref) {
-  return ValueOrThrow("Failed to get PjRtBuffer", buffer_ref.AwaitBuffer());
-}
+using ::tpu_raiden::torch::GetMaterializedBufferRef;
+using ::tpu_raiden::torch::GetPjRtBuffer;
+using ::tpu_raiden::torch::ValidateTpuTensor;
 
 void AwaitReady(xla::PjRtBuffer* buffer, const char* role) {
   (void)buffer;
