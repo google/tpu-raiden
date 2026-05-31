@@ -21,8 +21,9 @@
 #include <utility>
 #include <vector>
 
-#include "core/host_memory_allocator.h"
+#include "core/utils.h"
 #include "frameworks/jax/jax_utils.h"
+#include "frameworks/jax/utils.h"
 
 namespace nb = nanobind;
 
@@ -30,80 +31,14 @@ namespace tpu_raiden {
 namespace kv_cache {
 namespace jax {
 
-namespace {
-
-// Helper to extract flat matrix of raw PJRT pointers from list of JAX Arrays
-// E2E
-std::vector<std::vector<xla::PjRtBuffer*>> UnpackPjrtBuffers(
-    nb::list device_arrays) {
-  size_t num_layers = nb::len(device_arrays);
-  if (num_layers == 0) return {};
-
-  size_t num_shards =
-      nb::len(nb::cast<nb::list>(device_arrays[0].attr("addressable_shards")));
-  std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers;
-  layer_buffers.reserve(num_layers);
-
-  for (size_t l = 0; l < num_layers; ++l) {
-    nb::object dst = device_arrays[l];
-    xla::ifrt::Array* dst_ifrt_array =
-        ::jax::GetIfrtArrayFromPyObject(dst.ptr());
-    auto* dst_compat_arr = ::jax::CastToPjRtCompatibleArray(dst_ifrt_array);
-    if (dst_compat_arr == nullptr) {
-      throw std::runtime_error("Not a PjRt compatible array");
-    }
-
-    auto dst_buffers = dst_compat_arr->pjrt_buffers();
-    if (dst_buffers.size() != num_shards) {
-      throw std::runtime_error(
-          "Number of shards mismatch across layers during unpack");
-    }
-
-    std::vector<xla::PjRtBuffer*> shard_buffers;
-    shard_buffers.reserve(num_shards);
-    for (size_t i = 0; i < num_shards; ++i) {
-      shard_buffers.push_back(dst_buffers[i].get());
-    }
-    layer_buffers.push_back(std::move(shard_buffers));
-  }
-  return layer_buffers;
-}
-
-// Helper to cast external host addresses cleanly E2E
-std::optional<std::vector<const uint8_t*>> CastExternalPointers(
-    const std::optional<std::vector<uintptr_t>>& external_host_ptrs) {
-  if (!external_host_ptrs.has_value()) return std::nullopt;
-  std::vector<const uint8_t*> cast_ptrs;
-  cast_ptrs.reserve(external_host_ptrs->size());
-  for (uintptr_t addr : *external_host_ptrs) {
-    cast_ptrs.push_back(reinterpret_cast<const uint8_t*>(addr));
-  }
-  return cast_ptrs;
-}
-
-}  // namespace
-
-// Helper to create JAX Pinned Host Allocator
-HostBufferAllocator JaxPinnedHostAllocator(
-    const std::vector<std::vector<xla::PjRtBuffer*>>& buffers) {
-  xla::PjRtClient* client = buffers.empty() || buffers[0].empty()
-                                ? nullptr
-                                : buffers[0][0]->device()->client();
-  auto allocator = std::make_shared<PinnedHostAllocator>(client);
-  return
-      [allocator](size_t size_bytes) -> absl::StatusOr<HostBufferAllocation> {
-        return allocator->Allocate(size_bytes);
-      };
-}
-
 KVCacheManager::KVCacheManager(
     nb::list device_arrays, int block_size, std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate,
     std::optional<std::vector<uintptr_t>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism)
-    : KVCacheManager(UnpackPjrtBuffers(device_arrays), block_size, local_port,
-                     host_blocks_to_allocate, external_host_ptrs,
-                     unsafe_skip_buffer_lock, parallelism,
+    : KVCacheManager(tpu_raiden::jax::UnpackJaxArrays(device_arrays),
+                     block_size, local_port, host_blocks_to_allocate,
+                     external_host_ptrs, unsafe_skip_buffer_lock, parallelism,
                      std::move(device_arrays)) {}
 
 KVCacheManager::KVCacheManager(
@@ -111,10 +46,14 @@ KVCacheManager::KVCacheManager(
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     std::optional<std::vector<uintptr_t>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism, nanobind::list device_arrays)
-    : KVCacheManagerBase(
-          layer_buffers, block_size, local_port, host_blocks_to_allocate,
-          CastExternalPointers(external_host_ptrs), unsafe_skip_buffer_lock,
-          parallelism, JaxPinnedHostAllocator(layer_buffers)),
+    : KVCacheManagerBase(layer_buffers, block_size, local_port,
+                         host_blocks_to_allocate,
+                         tpu_raiden::CastExternalPointers(external_host_ptrs),
+                         unsafe_skip_buffer_lock, parallelism,
+                         tpu_raiden::CreatePinnedHostAllocator(
+                             layer_buffers.empty() || layer_buffers[0].empty()
+                                 ? nullptr
+                                 : layer_buffers[0][0]->device()->client())),
       device_arrays_(std::move(device_arrays)) {}
 
 KVCacheManager::~KVCacheManager() = default;

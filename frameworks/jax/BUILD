@@ -35,7 +35,9 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":jax_utils",
+        ":utils",
         "//core:host_memory_allocator",
+        "//core:utils",
         "//kv_cache:kv_cache_manager_base",
         "@nanobind",
     ],
@@ -60,6 +62,26 @@ cc_library(
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/python/ifrt",
         "@xla//xla/python/pjrt_ifrt",
+    ],
+)
+
+cc_library(
+    name = "utils",
+    hdrs = [
+        "utils.h",
+    ],
+    copts = [
+        "-fexceptions",
+    ],
+    features = [
+        "-use_header_modules",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":jax_utils",
+        "@nanobind",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/python/ifrt",
     ],
 )
 
@@ -237,6 +259,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":jax_utils",
+        ":utils",
         "//weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",

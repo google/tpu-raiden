@@ -137,6 +137,7 @@ cc_library(
         ":torch_tpu_utils",
         ":torch_utils",
         "//core:host_memory_allocator",
+        "//core:utils",
         "//core:xla_raw_transfer_headers",
         "//kv_cache:kv_cache_manager_base",
         "@com_google_absl//absl/status:statusor",

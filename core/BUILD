@@ -105,6 +105,24 @@ cc_library(
 )
 
 cc_library(
+    name = "utils",
+    hdrs = [
+        "utils.h",
+    ],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":host_memory_allocator",
+        "@com_google_absl//absl/status:statusor",
+        "@xla//xla/pjrt:pjrt_client",
+    ],
+)
+
+cc_library(
     name = "raw_transfer_core",
     hdrs = [
         "raw_transfer_core.h",
