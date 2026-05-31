@@ -36,7 +36,6 @@ cc_library(
     deps = [
         ":jax_utils",
         ":utils",
-        "//core:host_memory_allocator",
         "//core:utils",
         "//kv_cache:kv_cache_manager_base",
         "@nanobind",
@@ -303,7 +302,11 @@ nanobind_extension(
     visibility = ["//visibility:public"],
     deps = [
         ":jax_utils",
+        "//base:profiler",
         "//core:raw_transfer_impl",
+        "//perftools/profiles/proto:builder",
+        "//perftools/profiles/proto:encoder",
+        "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@xla//xla/pjrt:status_casters",
     ],

@@ -24,7 +24,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from frameworks.jax import _raw_transfer_profiled as raw_transfer_profiled
 from raiden_lib.raw_transfer.jax import raw_transfer
 from raiden_lib.raw_transfer.jax import utils
 
@@ -927,58 +926,61 @@ class RawTransferPerfTest(parameterized.TestCase):
       )
     jax.block_until_ready(tpu_dst_arrs)
 
-    print("Running profiled transfer_d2h_batch_async...")
-    start = time.time()
-    futures = raw_transfer_profiled.transfer_d2h_batch_async(src_arrs, dst_arrs)
-    dispatch_time = time.time() - start
+    # Enable profiling
+    os.environ["RAIDEN_ENABLE_PROFILING"] = "1"
+    try:
+      print("Running profiled transfer_d2h_batch_async...")
+      start = time.time()
+      futures = raw_transfer.transfer_d2h_batch_async(src_arrs, dst_arrs)
+      dispatch_time = time.time() - start
 
-    start = time.time()
-    futures.Await()
-    wait_time = time.time() - start
-    print(
-        f"Profiled D2H completed. Dispatch: {dispatch_time:.6f}s, Wait:"
-        f" {wait_time:.6f}s"
-    )
+      start = time.time()
+      futures.Await()
+      wait_time = time.time() - start
+      print(
+          f"Profiled D2H completed. Dispatch: {dispatch_time:.6f}s, Wait:"
+          f" {wait_time:.6f}s"
+      )
 
-    # Verify Profiled Async D2H
-    verify_data_integrity(src_arrs, dst_arrs, "Profiled Async D2H")
+      # Verify Profiled Async D2H
+      verify_data_integrity(src_arrs, dst_arrs, "Profiled Async D2H")
 
-    print("Running profiled transfer_h2d_batch_async...")
-    start = time.time()
-    futures = raw_transfer_profiled.transfer_h2d_batch_async(
-        dst_arrs, tpu_dst_arrs
-    )
-    dispatch_time = time.time() - start
+      print("Running profiled transfer_h2d_batch_async...")
+      start = time.time()
+      futures = raw_transfer.transfer_h2d_batch_async(dst_arrs, tpu_dst_arrs)
+      dispatch_time = time.time() - start
 
-    start = time.time()
-    futures.Await()
-    wait_time = time.time() - start
-    print(
-        f"Profiled H2D completed. Dispatch: {dispatch_time:.6f}s, Wait:"
-        f" {wait_time:.6f}s"
-    )
+      start = time.time()
+      futures.Await()
+      wait_time = time.time() - start
+      print(
+          f"Profiled H2D completed. Dispatch: {dispatch_time:.6f}s, Wait:"
+          f" {wait_time:.6f}s"
+      )
 
-    # Verify Profiled Async H2D
-    verify_data_integrity(src_arrs, tpu_dst_arrs, "Profiled Async H2D")
+      # Verify Profiled Async H2D
+      verify_data_integrity(src_arrs, tpu_dst_arrs, "Profiled Async H2D")
 
-    print("Running profiled transfer_d2h_batch...")
-    start = time.time()
-    raw_transfer_profiled.transfer_d2h_batch(src_arrs, dst_arrs)
-    sync_time = time.time() - start
-    print(f"Profiled Sync D2H completed in {sync_time:.6f}s")
+      print("Running profiled transfer_d2h_batch...")
+      start = time.time()
+      raw_transfer.transfer_d2h_batch(src_arrs, dst_arrs)
+      sync_time = time.time() - start
+      print(f"Profiled Sync D2H completed in {sync_time:.6f}s")
 
-    # Verify Profiled Sync D2H
-    verify_data_integrity(src_arrs, dst_arrs, "Profiled Sync D2H")
+      # Verify Profiled Sync D2H
+      verify_data_integrity(src_arrs, dst_arrs, "Profiled Sync D2H")
 
-    print("Running profiled transfer_h2d_batch...")
-    start = time.time()
-    raw_transfer_profiled.transfer_h2d_batch(dst_arrs, tpu_dst_arrs)
-    sync_time = time.time() - start
-    print(f"Profiled Sync H2D completed in {sync_time:.6f}s")
+      print("Running profiled transfer_h2d_batch...")
+      start = time.time()
+      raw_transfer.transfer_h2d_batch(dst_arrs, tpu_dst_arrs)
+      sync_time = time.time() - start
+      print(f"Profiled Sync H2D completed in {sync_time:.6f}s")
 
-    # Verify Profiled Sync H2D
-    verify_data_integrity(src_arrs, tpu_dst_arrs, "Profiled Sync H2D")
-    print("Profiled Sync H2D verification passed")
+      # Verify Profiled Sync H2D
+      verify_data_integrity(src_arrs, tpu_dst_arrs, "Profiled Sync H2D")
+      print("Profiled Sync H2D verification passed")
+    finally:
+      os.environ.pop("RAIDEN_ENABLE_PROFILING", None)
 
 
 if __name__ == "__main__":

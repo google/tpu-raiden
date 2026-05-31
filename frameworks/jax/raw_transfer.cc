@@ -15,8 +15,22 @@
 /* Copyright 2026 The TPU Raiden Authors. All Rights Reserved.
 ==============================================================================*/
 
-#include "absl/status/status.h"
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/log/log.h"
+#include "absl/status/statusor.h"
+#include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
+#include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/status_casters.h"
+#include "xla/shape.h"
+#include "xla/tsl/platform/statusor.h"
+#include "core/raw_transfer_core.h"
 #include "core/raw_transfer_impl.h"
 #include "frameworks/jax/jax_utils.h"
 
@@ -160,9 +174,10 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async(
     const nb::list& dst_offsets_major_dim = nb::list(),
     const nb::list& copy_sizes_major_dim = nb::list(),
     bool unsafe_skip_buffer_lock = false) {
-  return transfer_d2h_batch_async_impl(
+  PjRtCopyFuture acc = xla::ValueOrThrow(transfer_d2h_batch_async_impl(
       src_arrs, dst_arrs, src_offsets_major_dim, dst_offsets_major_dim,
-      copy_sizes_major_dim, unsafe_skip_buffer_lock);
+      copy_sizes_major_dim, unsafe_skip_buffer_lock));
+  return acc;
 }
 
 inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async(
@@ -171,9 +186,10 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async(
     const nb::list& dst_offsets_major_dim = nb::list(),
     const nb::list& copy_sizes_major_dim = nb::list(),
     bool unsafe_skip_buffer_lock = false) {
-  return transfer_h2d_batch_async_impl(
+  PjRtCopyFuture acc = xla::ValueOrThrow(transfer_h2d_batch_async_impl(
       src_arrs, dst_arrs, src_offsets_major_dim, dst_offsets_major_dim,
-      copy_sizes_major_dim, unsafe_skip_buffer_lock);
+      copy_sizes_major_dim, unsafe_skip_buffer_lock));
+  return acc;
 }
 
 inline void transfer_d2h_batch(
