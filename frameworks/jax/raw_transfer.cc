@@ -33,7 +33,6 @@
 #include "core/raw_transfer_core.h"
 #include "core/raw_transfer_impl.h"
 #include "frameworks/jax/jax_utils.h"
-#include "frameworks/jax/mock_nanobind.h"
 #include "frameworks/jax/raw_transfer_internal.h"
 
 namespace raiden {

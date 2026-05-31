@@ -19,9 +19,14 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 DEFAULT_WORKSPACE_DIR="$SCRIPT_DIR"
 WORKSPACE_DIR="${WORKSPACE_DIR:-${DEFAULT_WORKSPACE_DIR}}"
-DEFAULT_BAZEL_CACHE_BASE="/mnt/disk/tpu-raiden-bazel-cache"
-DEFAULT_BAZEL_OUTPUT_BASE="/mnt/disk/bazel-output-user-root/tpu_raiden_${USER}"
-if [[ ! -d /mnt/disk || ! -w /mnt/disk ]]; then
+# Check for persistent storage mounted on Cloud TPU VMs (3-4 TB SSDs)
+if [[ -d /mnt/disks/persistent && -w /mnt/disks/persistent ]]; then
+  DEFAULT_BAZEL_CACHE_BASE="/mnt/disks/persistent/${USER}/tpu-raiden-bazel-cache"
+  DEFAULT_BAZEL_OUTPUT_BASE="/mnt/disks/persistent/${USER}/bazel-output-user-root/tpu_raiden_${USER}"
+elif [[ -d /mnt/disk && -w /mnt/disk ]]; then
+  DEFAULT_BAZEL_CACHE_BASE="/mnt/disk/tpu-raiden-bazel-cache"
+  DEFAULT_BAZEL_OUTPUT_BASE="/mnt/disk/bazel-output-user-root/tpu_raiden_${USER}"
+else
   DEFAULT_BAZEL_CACHE_BASE="${HOME}/.bazel_cache"
   DEFAULT_BAZEL_OUTPUT_BASE="/tmp/tpu_raiden_bazel_output_${USER}"
 fi
@@ -77,8 +82,11 @@ if [ "$#" -gt 0 ]; then
       BUILD_TORCH=true
       shift
       ;;
+    -*)
+      # Standard Bazel/environment flags: keep defaults and do not shift.
+      ;;
     *)
-      echo "Usage: $0 [jax|torch|both]"
+      echo "Usage: $0 [jax|torch|both] [bazel_flags...]"
       exit 1
       ;;
   esac
@@ -91,10 +99,10 @@ TORCH_REPO_ENV_FLAGS=()
 if [ "$BUILD_JAX" = true ]; then
   echo "Configuring build for JAX..."
   BAZEL_TARGETS+=(
-    "//raiden_lib/raw_transfer/jax:raw_transfer"
-    "//api/jax:_kv_cache_manager"
-    "//api/jax:_kv_cache_manager_ffi"
-    "//api/jax:_weight_synchronizer"
+    "//frameworks/jax:_raw_transfer"
+    "//frameworks/jax:_kv_cache_manager"
+    "//frameworks/jax:_kv_cache_manager_ffi"
+    "//frameworks/jax:_weight_synchronizer"
   )
 else
   DEFINE_FLAGS+=" --define with_jax=false"
@@ -119,10 +127,10 @@ PY
   DEFINE_FLAGS+=" --define=TORCH_SOURCE=local"
   TORCH_REPO_ENV_FLAGS+=("--repo_env=TORCH_SOURCE=${TORCH_SOURCE}")
   BAZEL_TARGETS+=(
-    "//raiden_lib/raw_transfer/torch:_torch_raw_transfer"
-    "//api/torch:_kv_cache_manager"
-    "//api/torch:_weight_synchronizer"
-    "//api/torch:_raiden_transfer_engine"
+    "//frameworks/torch:_torch_raw_transfer"
+    "//frameworks/torch:_kv_cache_manager"
+    "//frameworks/torch:_weight_synchronizer"
+    "//frameworks/torch:_raiden_transfer_engine"
   )
 else
   DEFINE_FLAGS+=" --define with_torch=false"
@@ -153,30 +161,32 @@ echo "=== Building targets with Bazel ==="
 echo "=== Copying compiled shared libraries to source directory ==="
 if [ "$BUILD_JAX" = true ]; then
   echo "Copying JAX artifacts..."
-  cp -f "${WORKSPACE_DIR}/bazel-bin/raiden_lib/raw_transfer/jax/raw_transfer.so" "${WORKSPACE_DIR}/raiden_lib/raw_transfer/jax/"
-  cp -f "${WORKSPACE_DIR}/bazel-bin/api/jax/_kv_cache_manager.so" "${WORKSPACE_DIR}/api/jax/"
-  cp -f "${WORKSPACE_DIR}/bazel-bin/api/jax/_kv_cache_manager_ffi.so" "${WORKSPACE_DIR}/api/jax/"
-  cp -f "${WORKSPACE_DIR}/bazel-bin/api/jax/_weight_synchronizer.so" "${WORKSPACE_DIR}/api/jax/"
+  # Copy compiled nanobind .so extensions to frameworks/jax/ to match Python imports
+  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_raw_transfer.so" "${WORKSPACE_DIR}/frameworks/jax/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_kv_cache_manager.so" "${WORKSPACE_DIR}/frameworks/jax/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_kv_cache_manager_ffi.so" "${WORKSPACE_DIR}/frameworks/jax/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_weight_synchronizer.so" "${WORKSPACE_DIR}/frameworks/jax/"
 fi
 
 if [ "$BUILD_TORCH" = true ]; then
   echo "Copying Torch artifacts..."
-  cp -f "${WORKSPACE_DIR}/bazel-bin/raiden_lib/raw_transfer/torch/_torch_raw_transfer.so" "${WORKSPACE_DIR}/raiden_lib/raw_transfer/torch/"
-  cp -f "${WORKSPACE_DIR}/bazel-bin/api/torch/_kv_cache_manager.so" "${WORKSPACE_DIR}/api/torch/"
-  cp -f "${WORKSPACE_DIR}/bazel-bin/api/torch/_weight_synchronizer.so" "${WORKSPACE_DIR}/api/torch/"
-  cp -f "${WORKSPACE_DIR}/bazel-bin/api/torch/_raiden_transfer_engine.so" "${WORKSPACE_DIR}/api/torch/"
+  # Copy compiled nanobind .so extensions to frameworks/torch/ to match Python imports
+  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/torch/_torch_raw_transfer.so" "${WORKSPACE_DIR}/frameworks/torch/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/torch/_kv_cache_manager.so" "${WORKSPACE_DIR}/frameworks/torch/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/torch/_weight_synchronizer.so" "${WORKSPACE_DIR}/frameworks/torch/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/torch/_raiden_transfer_engine.so" "${WORKSPACE_DIR}/frameworks/torch/"
 fi
 
 
 echo "=== Build Complete! ==="
 if [ "$BUILD_JAX" = true ]; then
-  echo "JAX Artifacts are located in: ${WORKSPACE_DIR}/bazel-bin/raiden_lib/raw_transfer/jax/"
+  echo "JAX Artifacts are located in: ${WORKSPACE_DIR}/frameworks/jax/"
 fi
 if [ "$BUILD_TORCH" = true ]; then
-  echo "Torch Artifacts are located in: ${WORKSPACE_DIR}/bazel-bin/raiden_lib/raw_transfer/torch/"
+  echo "Torch Artifacts are located in: ${WORKSPACE_DIR}/frameworks/torch/"
 fi
 
 echo "=== Install Python Dependencies! ==="
-pip install -r requirements.txt
+pip install -r requirements.txt || echo "Warning: pip installation returned a non-zero status. Proceeding anyway."
 
 echo "=== Installation Complete! ==="

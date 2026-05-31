@@ -291,6 +291,7 @@ nanobind_extension(
     name = "_raw_transfer",
     srcs = [
         "raw_transfer.cc",
+        "raw_transfer_internal.h",
     ],
     copts = [
         "-fno-strict-aliasing",
@@ -300,13 +301,11 @@ nanobind_extension(
     visibility = ["//visibility:public"],
     deps = [
         ":jax_utils",
-        "//base:profiler",
         "//core:raw_transfer_impl",
-        "//perftools/profiles/proto:builder",
-        "//perftools/profiles/proto:encoder",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@xla//xla/pjrt:status_casters",
+        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
     ],
 )
 
@@ -438,11 +437,8 @@ cc_library(
     defines = ["WITHOUT_PYTHON"],
     features = ["-use_header_modules"],
     deps = [
-        "//base:profiler",
         "//core:raw_transfer_core",
         "//core:raw_transfer_impl",
-        "//perftools/profiles/proto:builder",
-        "//perftools/profiles/proto:encoder",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",

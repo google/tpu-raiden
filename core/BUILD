@@ -13,7 +13,6 @@
 # limitations under the License.
 
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("//tools/build_defs/testing:bzl_library.bzl", "bzl_library")
 load(":header_only_cc_info.bzl", "header_only_cc_info")
 
 package(default_visibility = ["//visibility:public"])
@@ -192,14 +191,6 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],
-)
-
-bzl_library(
-    name = "header_only_cc_info_bzl",
-    srcs = ["header_only_cc_info.bzl"],
-    parse_tests = False,
-    visibility = ["//visibility:private"],
-    deps = ["//third_party/bazel_rules/rules_cc/cc/common"],
 )
 
 cc_library(
