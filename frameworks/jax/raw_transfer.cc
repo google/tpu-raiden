@@ -33,6 +33,8 @@
 #include "core/raw_transfer_core.h"
 #include "core/raw_transfer_impl.h"
 #include "frameworks/jax/jax_utils.h"
+#include "frameworks/jax/mock_nanobind.h"
+#include "frameworks/jax/raw_transfer_internal.h"
 
 namespace raiden {
 
@@ -41,12 +43,11 @@ using ::xla::PjRtCApiBuffer;
 using ::xla::Shape;
 
 // Unpack and forward to pure C++ transfer_d2h_core
-inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_async(
+absl::StatusOr<PjRtCopyFuture> transfer_d2h_async(
     const nb::object& src_arr, const nb::object& dst_arr,
-    const nb::list& src_offsets_major_dim = nb::list(),
-    const nb::list& dst_offsets_major_dim = nb::list(),
-    const nb::list& copy_sizes_major_dim = nb::list(),
-    bool unsafe_skip_buffer_lock = false) {
+    const nb::list& src_offsets_major_dim,
+    const nb::list& dst_offsets_major_dim, const nb::list& copy_sizes_major_dim,
+    bool unsafe_skip_buffer_lock) {
   std::vector<PjRtBuffer*> src_buffers =
       jax::ExtractPjRtBuffersFromPyArray(src_arr);
 
@@ -74,12 +75,11 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_async(
 }
 
 // Unpack and forward to pure C++ transfer_h2d_core
-inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_async(
+absl::StatusOr<PjRtCopyFuture> transfer_h2d_async(
     const nb::object& src_arr, const nb::object& dst_arr,
-    const nb::list& src_offsets_major_dim = nb::list(),
-    const nb::list& dst_offsets_major_dim = nb::list(),
-    const nb::list& copy_sizes_major_dim = nb::list(),
-    bool unsafe_skip_buffer_lock = false) {
+    const nb::list& src_offsets_major_dim,
+    const nb::list& dst_offsets_major_dim, const nb::list& copy_sizes_major_dim,
+    bool unsafe_skip_buffer_lock) {
   std::vector<PjRtBuffer*> dst_buffers =
       jax::ExtractPjRtBuffersFromPyArray(dst_arr);
 
@@ -168,24 +168,22 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async_impl(
   return acc;
 }
 
-inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async(
+absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async(
     const nb::list& src_arrs, const nb::list& dst_arrs,
-    const nb::list& src_offsets_major_dim = nb::list(),
-    const nb::list& dst_offsets_major_dim = nb::list(),
-    const nb::list& copy_sizes_major_dim = nb::list(),
-    bool unsafe_skip_buffer_lock = false) {
+    const nb::list& src_offsets_major_dim,
+    const nb::list& dst_offsets_major_dim, const nb::list& copy_sizes_major_dim,
+    bool unsafe_skip_buffer_lock) {
   PjRtCopyFuture acc = xla::ValueOrThrow(transfer_d2h_batch_async_impl(
       src_arrs, dst_arrs, src_offsets_major_dim, dst_offsets_major_dim,
       copy_sizes_major_dim, unsafe_skip_buffer_lock));
   return acc;
 }
 
-inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async(
+absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async(
     const nb::list& src_arrs, const nb::list& dst_arrs,
-    const nb::list& src_offsets_major_dim = nb::list(),
-    const nb::list& dst_offsets_major_dim = nb::list(),
-    const nb::list& copy_sizes_major_dim = nb::list(),
-    bool unsafe_skip_buffer_lock = false) {
+    const nb::list& src_offsets_major_dim,
+    const nb::list& dst_offsets_major_dim, const nb::list& copy_sizes_major_dim,
+    bool unsafe_skip_buffer_lock) {
   PjRtCopyFuture acc = xla::ValueOrThrow(transfer_h2d_batch_async_impl(
       src_arrs, dst_arrs, src_offsets_major_dim, dst_offsets_major_dim,
       copy_sizes_major_dim, unsafe_skip_buffer_lock));
@@ -242,12 +240,11 @@ inline void transfer_h2d(const nb::object& src_arr, const nb::object& dst_arr,
   future.Await();
 }
 
-inline PjRtCopyFuture transfer_d2h_batch_async_naive(
+PjRtCopyFuture transfer_d2h_batch_async_naive(
     const nb::list& src_arrs, const nb::list& dst_arrs,
-    const nb::list& src_offsets_major_dim = nb::list(),
-    const nb::list& dst_offsets_major_dim = nb::list(),
-    const nb::list& copy_sizes_major_dim = nb::list(),
-    bool unsafe_skip_buffer_lock = false) {
+    const nb::list& src_offsets_major_dim,
+    const nb::list& dst_offsets_major_dim, const nb::list& copy_sizes_major_dim,
+    bool unsafe_skip_buffer_lock) {
   if (nb::len(src_arrs) != nb::len(dst_arrs)) {
     throw std::runtime_error("Lengths of src_arrs and dst_arrs must match");
   }
@@ -261,12 +258,11 @@ inline PjRtCopyFuture transfer_d2h_batch_async_naive(
   return acc;
 }
 
-inline PjRtCopyFuture transfer_h2d_batch_async_naive(
+PjRtCopyFuture transfer_h2d_batch_async_naive(
     const nb::list& src_arrs, const nb::list& dst_arrs,
-    const nb::list& src_offsets_major_dim = nb::list(),
-    const nb::list& dst_offsets_major_dim = nb::list(),
-    const nb::list& copy_sizes_major_dim = nb::list(),
-    bool unsafe_skip_buffer_lock = false) {
+    const nb::list& src_offsets_major_dim,
+    const nb::list& dst_offsets_major_dim, const nb::list& copy_sizes_major_dim,
+    bool unsafe_skip_buffer_lock) {
   if (nb::len(src_arrs) != nb::len(dst_arrs)) {
     throw std::runtime_error("Lengths of src_arrs and dst_arrs must match");
   }
@@ -310,6 +306,7 @@ inline bool is_ready(const nb::object& future_obj) {
   return true;
 }
 
+#ifndef WITHOUT_PYTHON
 NB_MODULE(_raw_transfer, m) {
   nb::class_<PjRtCopyFuture>(m, "PjRtCopyFuture")
       .def("Await",
@@ -384,5 +381,6 @@ NB_MODULE(_raw_transfer, m) {
         nb::arg("copy_sizes_major_dim") = nb::list(),
         nb::arg("unsafe_skip_buffer_lock") = false);
 }
+#endif
 
 }  // namespace raiden

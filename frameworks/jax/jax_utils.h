@@ -18,23 +18,24 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_JAX_JAX_UTILS_H_
 #define THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_JAX_JAX_UTILS_H_
 
+#ifndef WITHOUT_PYTHON
 #include <Python.h>
-
-#include <memory>
-#include <stdexcept>
-#include <vector>
 
 #include <nanobind/nanobind.h>
 #include "jaxlib/py_array.h"
-#include "xla/pjrt/pjrt_client.h"
 #include "xla/python/ifrt/array.h"
 #include "xla/python/ifrt/client.h"
 #include "xla/python/pjrt_ifrt/pjrt_array.h"
+#else
+#include "frameworks/jax/mock_nanobind.h"
+#endif
+#include "xla/pjrt/pjrt_client.h"
 
 namespace nb = nanobind;
 
 namespace jax {
 
+#ifndef WITHOUT_PYTHON
 inline xla::ifrt::PjRtCompatibleArray* CastToPjRtCompatibleArray(
     xla::ifrt::Array* ifrt_array) {
   if (ifrt_array == nullptr) return nullptr;
@@ -109,6 +110,32 @@ inline std::vector<xla::PjRtBuffer*> ExtractPjRtBuffersFromPyArray(
   }
   return result;
 }
+#else   // WITHOUT_PYTHON (Mocks)
+
+inline std::vector<int64_t> UnpackListToVector(const nb::list& py_list) {
+  std::vector<int64_t> result;
+  result.reserve(py_list.size());
+  for (size_t i = 0; i < py_list.size(); ++i) {
+    result.push_back(nb::cast<int64_t>(py_list[i]));
+  }
+  return result;
+}
+
+inline std::vector<xla::PjRtBuffer*> ExtractPjRtBuffersFromPyArray(
+    const nb::object& jax_array) {
+  std::vector<xla::PjRtBuffer*> result;
+  nb::object addressable_shards = jax_array.attr("addressable_shards");
+  size_t num_shards = nb::len(addressable_shards);
+  result.reserve(num_shards);
+
+  for (size_t i = 0; i < num_shards; ++i) {
+    nb::object shard = addressable_shards[i];
+    nb::object shard_data = shard.attr("data");
+    result.push_back(reinterpret_cast<xla::PjRtBuffer*>(shard_data.ptr()));
+  }
+  return result;
+}
+#endif  // WITHOUT_PYTHON
 
 }  // namespace jax
 

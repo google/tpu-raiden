@@ -422,3 +422,54 @@ cc_test(
         "@xla//xla/tsl/platform:test_main",
     ],
 )
+
+cc_library(
+    name = "raw_transfer_jax_mock",
+    srcs = ["raw_transfer.cc"],
+    hdrs = [
+        "jax_utils.h",
+        "mock_nanobind.h",
+        "raw_transfer_internal.h",
+    ],
+    copts = [
+        "-fexceptions",
+        "-Wno-unused-variable",
+    ],
+    defines = ["WITHOUT_PYTHON"],
+    features = ["-use_header_modules"],
+    deps = [
+        "//base:profiler",
+        "//core:raw_transfer_core",
+        "//core:raw_transfer_impl",
+        "//perftools/profiles/proto:builder",
+        "//perftools/profiles/proto:encoder",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@xla//xla:shape_util",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/pjrt:status_casters",
+        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
+        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
+        "@xla//xla/python/ifrt",
+        "@xla//xla/python/pjrt_ifrt",
+        "@xla//xla/tsl/platform:statusor",
+    ],
+)
+
+cc_test(
+    name = "raw_transfer_test",
+    srcs = ["raw_transfer_test.cc"],
+    copts = ["-fexceptions"],
+    features = ["-use_header_modules"],
+    deps = [
+        ":raw_transfer_jax_mock",
+        "//core:raw_transfer_core",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/pjrt/plugin/xla_cpu:xla_cpu_pjrt_client",
+        "@xla//xla/stream_executor/host:host_platform",
+        "@xla//xla/tsl/platform:statusor",
+        "@xla//xla/tsl/platform:test",
+        "@xla//xla/tsl/platform:test_main",
+    ],
+)
