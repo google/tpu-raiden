@@ -20,6 +20,7 @@
 #include <memory>
 #include <utility>
 
+#include "absl/base/nullability.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
@@ -28,34 +29,32 @@
 
 namespace tpu_raiden {
 
-PinnedHostAllocator::PinnedHostAllocator(xla::PjRtClient* pjrt_client) {
+absl::StatusOr<std::unique_ptr<HostMemoryAllocator>>
+HostMemoryAllocator::Create(xla::PjRtClient* pjrt_client) {
   if (pjrt_client != nullptr) {
-    host_allocator_ = pjrt_client->GetHostMemoryAllocator();
+    return XlaHostMemoryAllocator::Create(pjrt_client);
   }
+  return std::unique_ptr<HostMemoryAllocator>(
+      std::make_unique<MallocHostMemoryAllocator>());
 }
 
-absl::StatusOr<HostBufferAllocation> PinnedHostAllocator::Allocate(
-    size_t size_bytes) {
-  if (host_allocator_ == nullptr) {
-    // Fallback to unpinned memalign memory if PJRT does not support host
-    // allocation
-    void* ptr = nullptr;
-    if (size_bytes > 0) {
-      if (posix_memalign(&ptr, 64, size_bytes) != 0) {
-        return absl::InternalError(
-            absl::StrCat("Failed to allocate unpinned fallback buffer via "
-                         "posix_memalign of size: ",
-                         size_bytes));
-      }
-      std::memset(ptr, 0, size_bytes);
-    }
-    HostBufferAllocation alloc;
-    alloc.ptr = static_cast<uint8_t*>(ptr);
-    alloc.size = size_bytes;
-    alloc.owner = std::shared_ptr<void>(ptr, [](void* p) { std::free(p); });
-    return alloc;
+absl::StatusOr<std::unique_ptr<XlaHostMemoryAllocator>>
+XlaHostMemoryAllocator::Create(xla::PjRtClient* absl_nonnull pjrt_client) {
+  xla::HostMemoryAllocator* host_allocator =
+      pjrt_client->GetHostMemoryAllocator();
+  if (host_allocator == nullptr) {
+    return absl::FailedPreconditionError("XLA HostMemoryAllocator is null.");
   }
+  return std::unique_ptr<XlaHostMemoryAllocator>(
+      new XlaHostMemoryAllocator(host_allocator));
+}
 
+XlaHostMemoryAllocator::XlaHostMemoryAllocator(
+    xla::HostMemoryAllocator* host_allocator)
+    : host_allocator_(host_allocator) {}
+
+absl::StatusOr<HostBufferAllocation> XlaHostMemoryAllocator::Allocate(
+    size_t size_bytes) {
   // Allocate high-performance DMA pinned memory directly from PJRT Client
   xla::HostMemoryAllocator::OwnedPtr data =
       host_allocator_->Allocate(size_bytes);
@@ -73,6 +72,26 @@ absl::StatusOr<HostBufferAllocation> PinnedHostAllocator::Allocate(
   auto shared_data =
       std::make_shared<xla::HostMemoryAllocator::OwnedPtr>(std::move(data));
   alloc.owner = std::shared_ptr<void>(shared_data, shared_data->get());
+  return alloc;
+}
+
+absl::StatusOr<HostBufferAllocation> MallocHostMemoryAllocator::Allocate(
+    size_t size_bytes) {
+  void* ptr = nullptr;
+  if (size_bytes > 0) {
+    int err = posix_memalign(&ptr, 64, size_bytes);
+    if (err != 0) {
+      return absl::InternalError(
+          absl::StrCat("Failed to allocate unpinned fallback buffer via "
+                       "posix_memalign of size: ",
+                       size_bytes));
+    }
+    std::memset(ptr, 0, size_bytes);
+  }
+  HostBufferAllocation alloc;
+  alloc.ptr = static_cast<uint8_t*>(ptr);
+  alloc.size = size_bytes;
+  alloc.owner = std::shared_ptr<void>(ptr, [](void* p) { std::free(p); });
   return alloc;
 }
 

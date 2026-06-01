@@ -42,7 +42,7 @@ KVCacheManager::KVCacheManager(
           host_blocks_to_allocate,
           tpu_raiden::CastExternalPointers(external_host_ptrs),
           unsafe_skip_buffer_lock, parallelism,
-          tpu_raiden::CreatePinnedHostAllocator(
+          tpu_raiden::CreateHostMemoryAllocator(
               device_tensors.empty() || device_tensors[0].empty()
                   ? nullptr
                   : UnpackTorchTensor(device_tensors[0][0])

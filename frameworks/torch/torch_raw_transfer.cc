@@ -106,8 +106,13 @@ class RawHostBuffer {
       }
     }
 
-    tpu_raiden::PinnedHostAllocator allocator(device->client());
-    auto status_or_alloc = allocator.Allocate(size_bytes_);
+    auto allocator_or = tpu_raiden::HostMemoryAllocator::Create(device->client());
+    if (!allocator_or.ok()) {
+      throw std::runtime_error("Failed to create TPU pinned host allocator: " +
+                               allocator_or.status().ToString());
+    }
+    auto allocator = std::move(allocator_or).value();
+    auto status_or_alloc = allocator->Allocate(size_bytes_);
     if (!status_or_alloc.ok()) {
       throw std::runtime_error("Failed to allocate TPU pinned host buffer: " +
                                status_or_alloc.status().ToString());

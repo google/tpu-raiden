@@ -20,6 +20,7 @@
 #include <functional>
 #include <memory>
 
+#include "absl/base/nullability.h"
 #include "absl/status/statusor.h"
 #include "xla/pjrt/host_memory_allocator.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -39,16 +40,33 @@ using HostBufferAllocator =
     std::function<absl::StatusOr<HostBufferAllocation>(size_t)>;
 
 // High-performance host memory allocator that allocates DMA-capable pinned
-// memory using PJRT APIs. Fallback to standard unpinned memory if PJRT does not
-// support it.
-class PinnedHostAllocator {
+// memory using PJRT APIs or standard fallback allocations.
+class HostMemoryAllocator {
  public:
-  explicit PinnedHostAllocator(xla::PjRtClient* pjrt_client);
+  virtual ~HostMemoryAllocator() = default;
 
-  absl::StatusOr<HostBufferAllocation> Allocate(size_t size_bytes);
+  static absl::StatusOr<std::unique_ptr<HostMemoryAllocator>> Create(
+      xla::PjRtClient* pjrt_client);
+
+  virtual absl::StatusOr<HostBufferAllocation> Allocate(size_t size_bytes) = 0;
+};
+
+class XlaHostMemoryAllocator : public HostMemoryAllocator {
+ public:
+  static absl::StatusOr<std::unique_ptr<XlaHostMemoryAllocator>> Create(
+      xla::PjRtClient* absl_nonnull pjrt_client);
+
+  absl::StatusOr<HostBufferAllocation> Allocate(size_t size_bytes) override;
 
  private:
+  explicit XlaHostMemoryAllocator(xla::HostMemoryAllocator* host_allocator);
+
   xla::HostMemoryAllocator* host_allocator_ = nullptr;
+};
+
+class MallocHostMemoryAllocator : public HostMemoryAllocator {
+ public:
+  absl::StatusOr<HostBufferAllocation> Allocate(size_t size_bytes) override;
 };
 
 }  // namespace tpu_raiden

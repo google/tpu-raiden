@@ -78,8 +78,8 @@ TEST(RaidenManagerBaseTest, SetExternalHostPointersWithPinnedAllocator) {
   // Setup TPU PJRT and Pinned Host Allocator
   TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
                           TpuPjrtManager::GetDefault());
-  ASSERT_NE(pjrt_manager->client(), nullptr);
-  PinnedHostAllocator allocator(pjrt_manager->client());
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto allocator, HostMemoryAllocator::Create(pjrt_manager->client()));
 
   // Setup Manager
   size_t num_layers = 2;
@@ -99,7 +99,7 @@ TEST(RaidenManagerBaseTest, SetExternalHostPointersWithPinnedAllocator) {
 
   for (size_t i = 0; i < total_buffers; ++i) {
     TF_ASSERT_OK_AND_ASSIGN(HostBufferAllocation alloc,
-                            allocator.Allocate(slice_size));
+                            allocator->Allocate(slice_size));
     allocations.push_back(std::move(alloc));
     host_ptrs.push_back(allocations.back().ptr);
     host_sizes.push_back(slice_size);
@@ -122,7 +122,8 @@ TEST(RaidenManagerBaseTest, E2eLoopbackTransferH2h) {
   // Setup TPU PJRT and Allocator
   TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
                           TpuPjrtManager::GetDefault());
-  PinnedHostAllocator allocator(pjrt_manager->client());
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto allocator, HostMemoryAllocator::Create(pjrt_manager->client()));
 
   size_t num_layers = 1;
   size_t num_shards = 1;
@@ -137,9 +138,9 @@ TEST(RaidenManagerBaseTest, E2eLoopbackTransferH2h) {
 
   // Allocate pinned buffers for sender and receiver
   TF_ASSERT_OK_AND_ASSIGN(HostBufferAllocation send_alloc,
-                          allocator.Allocate(slice_size));
+                          allocator->Allocate(slice_size));
   TF_ASSERT_OK_AND_ASSIGN(HostBufferAllocation recv_alloc,
-                          allocator.Allocate(slice_size));
+                          allocator->Allocate(slice_size));
 
   sender.SetExternalHostPointers({send_alloc.ptr}, {slice_size});
   receiver.SetExternalHostPointers({recv_alloc.ptr}, {slice_size});

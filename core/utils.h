@@ -43,8 +43,16 @@ inline std::optional<std::vector<const uint8_t*>> CastExternalPointers(
   return cast_ptrs;
 }
 
-inline HostBufferAllocator CreatePinnedHostAllocator(xla::PjRtClient* client) {
-  auto allocator = std::make_shared<PinnedHostAllocator>(client);
+inline HostBufferAllocator CreateHostMemoryAllocator(xla::PjRtClient* client) {
+  auto allocator_or = HostMemoryAllocator::Create(client);
+  if (!allocator_or.ok()) {
+    absl::Status status = allocator_or.status();
+    return [status](size_t size_bytes) -> absl::StatusOr<HostBufferAllocation> {
+      return status;
+    };
+  }
+  std::shared_ptr<HostMemoryAllocator> allocator =
+      std::move(allocator_or).value();
   return
       [allocator](size_t size_bytes) -> absl::StatusOr<HostBufferAllocation> {
         return allocator->Allocate(size_bytes);

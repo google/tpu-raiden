@@ -27,11 +27,12 @@ namespace {
 
 using ::absl_testing::IsOk;
 
-TEST(PinnedHostAllocatorTest, FallbackAllocationWithoutClient) {
-  PinnedHostAllocator allocator(nullptr);
+TEST(HostMemoryAllocatorTest, FallbackAllocationWithoutClient) {
+  TF_ASSERT_OK_AND_ASSIGN(auto allocator, HostMemoryAllocator::Create(nullptr));
 
   // Allocate 1024 bytes
-  TF_ASSERT_OK_AND_ASSIGN(HostBufferAllocation alloc, allocator.Allocate(1024));
+  TF_ASSERT_OK_AND_ASSIGN(HostBufferAllocation alloc,
+                          allocator->Allocate(1024));
   EXPECT_NE(alloc.ptr, nullptr);
   EXPECT_EQ(alloc.size, 1024);
   EXPECT_NE(alloc.owner, nullptr);
@@ -47,20 +48,22 @@ TEST(PinnedHostAllocatorTest, FallbackAllocationWithoutClient) {
 
   // Zero allocation should work and return a nullptr or empty alloc safely
   TF_ASSERT_OK_AND_ASSIGN(HostBufferAllocation zero_alloc,
-                          allocator.Allocate(0));
+                          allocator->Allocate(0));
   EXPECT_EQ(zero_alloc.ptr, nullptr);
   EXPECT_EQ(zero_alloc.size, 0);
 }
 
-TEST(PinnedHostAllocatorTest, AllocationWithTpuClient) {
+TEST(HostMemoryAllocatorTest, AllocationWithTpuClient) {
   TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * manager,
                           TpuPjrtManager::GetDefault());
   ASSERT_NE(manager->client(), nullptr);
 
-  PinnedHostAllocator allocator(manager->client());
+  TF_ASSERT_OK_AND_ASSIGN(auto allocator,
+                          HostMemoryAllocator::Create(manager->client()));
 
   // Allocate 4096 bytes
-  TF_ASSERT_OK_AND_ASSIGN(HostBufferAllocation alloc, allocator.Allocate(4096));
+  TF_ASSERT_OK_AND_ASSIGN(HostBufferAllocation alloc,
+                          allocator->Allocate(4096));
   EXPECT_NE(alloc.ptr, nullptr);
   EXPECT_EQ(alloc.size, 4096);
   EXPECT_NE(alloc.owner, nullptr);

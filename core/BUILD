@@ -94,6 +94,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":xla_raw_transfer_headers",
+        "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",

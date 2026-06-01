@@ -46,7 +46,7 @@ KVCacheManager::KVCacheManager(
                          host_blocks_to_allocate,
                          tpu_raiden::CastExternalPointers(external_host_ptrs),
                          unsafe_skip_buffer_lock, parallelism,
-                         tpu_raiden::CreatePinnedHostAllocator(
+                         tpu_raiden::CreateHostMemoryAllocator(
                              layer_buffers.empty() || layer_buffers[0].empty()
                                  ? nullptr
                                  : layer_buffers[0][0]->device()->client())),
