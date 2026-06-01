@@ -19,6 +19,7 @@
 #include <cstring>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>  // NOLINT
 #include <utility>
@@ -42,6 +43,54 @@ namespace {
 zmq::context_t& GetGlobalZmqContext() {
   static auto* context = new zmq::context_t(1);
   return *context;
+}
+
+// Expands the parallel chunk arrays (src/dst offsets + sizes) of a D2H/H2D
+// request into unit-block arrays where every size == block_size. A chunk whose
+// size is n*block_size becomes n consecutive single-block entries, emitted in
+// chunk order so the prefill and decode sides stay aligned block-for-block.
+// src is expanded in lockstep with dst when present; an empty src (a DecodeH2D
+// whose source offsets are filled later from the peer's block ids) is left
+// empty. After this every downstream stage (staging block-id derivation, H2H
+// transport, NOTIFY, H2D src reconstruction, Unlock) sees exactly one block per
+// entry, which is the invariant the rest of the orchestrator already assumes.
+// Requires sizes[i] > 0 and sizes[i] % block_size == 0.
+absl::Status ExpandChunksToBlocks(DisaggTransferRequest& req,
+                                  int64_t block_size) {
+  if (block_size <= 0) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("block_size must be positive, got ", block_size));
+  }
+  if (req.dst_offsets.size() != req.sizes.size()) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "dst_offsets and sizes must have equal length, got ",
+        req.dst_offsets.size(), " vs ", req.sizes.size()));
+  }
+  const bool have_src = !req.src_offsets.empty();
+  if (have_src && req.src_offsets.size() != req.dst_offsets.size()) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "src_offsets and dst_offsets must have equal length, got ",
+        req.src_offsets.size(), " vs ", req.dst_offsets.size()));
+  }
+  std::vector<int64_t> esrc, edst, esize;
+  for (size_t i = 0; i < req.dst_offsets.size(); ++i) {
+    const int64_t size = req.sizes[i];
+    if (size <= 0 || size % block_size != 0) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "sizes[", i, "]=", size,
+          " must be a positive multiple of block_size=", block_size));
+    }
+    const int64_t n = size / block_size;
+    for (int64_t b = 0; b < n; ++b) {
+      if (have_src) esrc.push_back(req.src_offsets[i] + b * block_size);
+      edst.push_back(req.dst_offsets[i] + b * block_size);
+      esize.push_back(block_size);
+    }
+  }
+  if (have_src) req.src_offsets = std::move(esrc);
+  req.dst_offsets = std::move(edst);
+  req.sizes = std::move(esize);
+  return absl::OkStatus();
 }
 }  // namespace
 
@@ -132,11 +181,11 @@ absl::Status DisaggKVCacheManagerBase::SubmitRequest(
   if (!running_) {
     return absl::FailedPreconditionError("Manager is not running");
   }
-  int64_t req_id = request.request_id;
-  LOG(INFO) << "[Orchestrator] Submitting request " << req_id
+  uint64_t uuid = request.uuid;
+  LOG(INFO) << "[Orchestrator] Submitting request " << uuid
             << " (type: " << static_cast<int>(request.type) << ")";
   orchestrator_queue_.Push({Event::Type::kExternalRequest,
-                            req_id,
+                            uuid,
                             absl::OkStatus(),
                             std::move(request),
                             {},
@@ -211,35 +260,64 @@ absl::Status DisaggKVCacheManagerBase::SendZmqReply(const std::string& reply) {
 }
 
 void DisaggKVCacheManagerBase::InvokeCallback(
-    std::function<void(absl::Status)> callback, absl::Status status) {
+    std::function<void(std::optional<std::string>)> callback,
+    absl::Status status) {
   if (callback) {
-    callback(status);
+    callback(status.ok() ? std::nullopt
+                         : std::optional<std::string>(
+                               std::string(status.message())));
   }
 }
 
 void DisaggKVCacheManagerBase::OrchestrationLoop() {
-  absl::flat_hash_map<int64_t, DisaggTransferRequest> active_requests;
+  absl::flat_hash_map<uint64_t, DisaggTransferRequest> active_requests;
 
   Event event;
   while (orchestrator_queue_.Pop(event)) {
     LOG(INFO) << "[Orchestrator] Popped event type: "
               << static_cast<int>(event.type) << " for request "
-              << event.request_id;
+              << event.uuid;
     switch (event.type) {
       case Event::Type::kExternalRequest: {
-        int64_t req_id = event.request_id;
-        active_requests[req_id] = std::move(event.request);
-        const auto& req = active_requests[req_id];
+        uint64_t uuid = event.uuid;
+        active_requests[uuid] = std::move(event.request);
+        auto& req = active_requests[uuid];
+
+        // Normalize the chunk plan into per-block form so all downstream stages
+        // see one block per entry. Two cases for D2H/H2D requests:
+        //   - await_pull producer (kPrefillD2H + pull + empty dst_offsets): the
+        //     manager owns the staging, so AUTO-ALLOCATE the host blocks and
+        //     synthesize dst_offsets from them.
+        //   - everything else (caller-supplied dst_offsets): just expand
+        //     multi-block chunks (sizes[i] a multiple of block_size).
+        // Raw H2H requests address blocks directly and are left untouched.
+        if (req.type == DisaggTransferRequest::Type::kPrefillD2H ||
+            req.type == DisaggTransferRequest::Type::kDecodeH2D) {
+          absl::Status norm_status;
+          if (req.type == DisaggTransferRequest::Type::kPrefillD2H &&
+              req.pull_mode && req.dst_offsets.empty()) {
+            norm_status = AutoAllocateStaging(req);
+          } else {
+            norm_status = ExpandChunksToBlocks(req, block_size_);
+          }
+          if (!norm_status.ok()) {
+            LOG(ERROR) << "[Orchestrator] Request " << uuid
+                       << ": invalid transfer plan: " << norm_status;
+            InvokeCallback(req.callback, norm_status);
+            active_requests.erase(uuid);
+            break;
+          }
+        }
 
         if (req.type == DisaggTransferRequest::Type::kPrefillD2H) {
-          LOG(INFO) << "[Orchestrator] Request " << req_id
+          LOG(INFO) << "[Orchestrator] Request " << uuid
                     << ": Triggering Prefill D2H";
           local_work_queue_.Push(req);
         } else if (req.type == DisaggTransferRequest::Type::kDecodeH2D) {
           // Check if we already have peer notification with block IDs
-          auto it = active_requests.find(req_id);
+          auto it = active_requests.find(uuid);
           if (it != active_requests.end() && !it->second.block_ids.empty()) {
-            LOG(INFO) << "[Orchestrator] Request " << req_id
+            LOG(INFO) << "[Orchestrator] Request " << uuid
                       << ": Peer notification already arrived. Triggering H2D.";
             auto& existing = it->second;
             existing.src_offsets.clear();
@@ -251,26 +329,26 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
             existing.callback = std::move(req.callback);
             local_work_queue_.Push(existing);
           } else {
-            LOG(INFO) << "[Orchestrator] Request " << req_id
+            LOG(INFO) << "[Orchestrator] Request " << uuid
                       << ": Waiting for peer notification to trigger H2D.";
           }
         } else if (req.type == DisaggTransferRequest::Type::kH2HWrite ||
                    req.type == DisaggTransferRequest::Type::kH2HRead) {
-          LOG(INFO) << "[Orchestrator] Request " << req_id
+          LOG(INFO) << "[Orchestrator] Request " << uuid
                     << ": Triggering H2H transfer";
           h2h_work_queue_.Push(req);
         }
         break;
       }
       case Event::Type::kLocalComplete: {
-        auto it = active_requests.find(event.request_id);
+        auto it = active_requests.find(event.uuid);
         if (it == active_requests.end()) {
           LOG(ERROR) << "[Orchestrator] Unknown request ID completed locally: "
-                     << event.request_id;
+                     << event.uuid;
           continue;
         }
         auto& req = it->second;
-        LOG(INFO) << "[Orchestrator] Request " << event.request_id
+        LOG(INFO) << "[Orchestrator] Request " << event.uuid
                   << ": Local transfer completed with status: " << event.status;
         if (!event.status.ok()) {
           InvokeCallback(req.callback, event.status);
@@ -288,14 +366,22 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
             // PULL: don't transfer; tell the decode the data is staged and
             // where to read it. Keep the request pending until PULL_COMPLETE so
             // the staging buffer isn't reused before the decode has pulled.
-            LOG(INFO) << "[Orchestrator] Request " << event.request_id
+            LOG(INFO) << "[Orchestrator] Request " << event.uuid
                       << ": D2H complete (pull), sending NOTIFY_READY to "
                       << req.peer;
+            // Wire format: NOTIFY_READY:<uuid>:<staging_block_ids>:<src_offsets>
+            // The trailing src_offsets (our expanded source region) lets the
+            // consumer validate it is pulling the region its pull() asked for.
             std::string msg =
-                absl::StrCat("NOTIFY_READY:", req.request_id, ":");
+                absl::StrCat("NOTIFY_READY:", req.uuid, ":");
             for (size_t i = 0; i < req.block_ids.size(); ++i) {
               absl::StrAppend(&msg, req.block_ids[i]);
               if (i + 1 < req.block_ids.size()) absl::StrAppend(&msg, ",");
+            }
+            absl::StrAppend(&msg, ":");
+            for (size_t i = 0; i < req.src_offsets.size(); ++i) {
+              absl::StrAppend(&msg, req.src_offsets[i]);
+              if (i + 1 < req.src_offsets.size()) absl::StrAppend(&msg, ",");
             }
             absl::Status mq_status = SendZmqMessage(req.peer, msg).status();
             if (!mq_status.ok()) {
@@ -306,18 +392,18 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
             }
             // else: leave pending; completion happens on kPullComplete.
           } else {
-            LOG(INFO) << "[Orchestrator] Request " << event.request_id
+            LOG(INFO) << "[Orchestrator] Request " << event.uuid
                       << ": D2H complete, triggering H2H Write";
             req.type = DisaggTransferRequest::Type::kH2HWrite;
             h2h_work_queue_.Push(req);
           }
         } else if (req.type == DisaggTransferRequest::Type::kDecodeH2D) {
-          LOG(INFO) << "[Orchestrator] Request " << event.request_id
+          LOG(INFO) << "[Orchestrator] Request " << event.uuid
                     << ": H2D complete, request fully done!";
           // PULL: ack the prefill so it can release its staging buffer.
           if (req.pull_mode) {
             std::string msg =
-                absl::StrCat("PULL_COMPLETE:", req.request_id, ":");
+                absl::StrCat("PULL_COMPLETE:", req.uuid, ":");
             absl::Status mq_status = SendZmqMessage(req.peer, msg).status();
             if (!mq_status.ok()) {
               LOG(ERROR) << "[Orchestrator] Failed to send PULL_COMPLETE to "
@@ -343,14 +429,14 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
         break;
       }
       case Event::Type::kH2hComplete: {
-        auto it = active_requests.find(event.request_id);
+        auto it = active_requests.find(event.uuid);
         if (it == active_requests.end()) {
           LOG(ERROR) << "[Orchestrator] Unknown request ID completed H2H: "
-                     << event.request_id;
+                     << event.uuid;
           continue;
         }
         auto& req = it->second;
-        LOG(INFO) << "[Orchestrator] Request " << event.request_id
+        LOG(INFO) << "[Orchestrator] Request " << event.uuid
                   << ": H2H transfer completed with status: " << event.status;
         if (!event.status.ok()) {
           InvokeCallback(req.callback, event.status);
@@ -359,7 +445,7 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
         }
 
         if (req.type == DisaggTransferRequest::Type::kH2HWrite) {
-          LOG(INFO) << "[Orchestrator] Request " << event.request_id
+          LOG(INFO) << "[Orchestrator] Request " << event.uuid
                     << ": H2H Write complete, sending ZMQ notification to "
                     << req.peer;
           // The push returned the RECEIVER's allocated block ids (which the
@@ -371,7 +457,7 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
           req.block_ids = event.request.block_ids;
           // Notify peer via ZMQ
           std::string msg =
-              absl::StrCat("NOTIFY_COMPLETE:", req.request_id, ":");
+              absl::StrCat("NOTIFY_COMPLETE:", req.uuid, ":");
           for (size_t i = 0; i < req.block_ids.size(); ++i) {
             absl::StrAppend(&msg, req.block_ids[i]);
             if (i + 1 < req.block_ids.size()) absl::StrAppend(&msg, ",");
@@ -390,7 +476,7 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
           }
           active_requests.erase(it);
         } else if (req.type == DisaggTransferRequest::Type::kH2HRead) {
-          LOG(INFO) << "[Orchestrator] Request " << event.request_id
+          LOG(INFO) << "[Orchestrator] Request " << event.uuid
                     << ": H2H Read complete, triggering local H2D";
           // The pull returned the decode-LOCAL block ids where the data landed
           // (active_requests still holds the remote/prefill ids we pulled from),
@@ -406,18 +492,18 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
         break;
       }
       case Event::Type::kPeerNotification: {
-        int64_t req_id = event.request_id;
+        uint64_t uuid = event.uuid;
         LOG(INFO) << "[Orchestrator] Received peer notification for request "
-                  << req_id << " with block IDs: ";
+                  << uuid << " with block IDs: ";
         for (int bid : event.block_ids) LOG(INFO) << "  " << bid;
 
-        auto it = active_requests.find(req_id);
+        auto it = active_requests.find(uuid);
         if (it != active_requests.end()) {
           auto& existing = it->second;
           existing.block_ids = std::move(event.block_ids);
           if (existing.type == DisaggTransferRequest::Type::kDecodeH2D &&
               !existing.dst_offsets.empty()) {
-            LOG(INFO) << "[Orchestrator] Request " << req_id
+            LOG(INFO) << "[Orchestrator] Request " << uuid
                       << ": Target offsets already present. Triggering H2D.";
             existing.src_offsets.clear();
             for (int bid : existing.block_ids) {
@@ -425,18 +511,18 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
             }
             local_work_queue_.Push(existing);
           } else {
-            LOG(INFO) << "[Orchestrator] Request " << req_id
+            LOG(INFO) << "[Orchestrator] Request " << uuid
                       << ": Target offsets not present yet.";
           }
         } else {
-          LOG(INFO) << "[Orchestrator] Request " << req_id
+          LOG(INFO) << "[Orchestrator] Request " << uuid
                     << ": JAX request not arrived yet. Storing notification.";
           // Notification arrived before JAX request, store it
           DisaggTransferRequest pending_req;
-          pending_req.request_id = req_id;
+          pending_req.uuid = uuid;
           pending_req.type = DisaggTransferRequest::Type::kDecodeH2D;
           pending_req.block_ids = std::move(event.block_ids);
-          active_requests[req_id] = std::move(pending_req);
+          active_requests[uuid] = std::move(pending_req);
         }
         break;
       }
@@ -445,17 +531,34 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
         // remote block ids. Pull them via H2H Read. Assumes the DECODE_H2D
         // request was already submitted (the decode is the puller; it sets up
         // first), so it is present in active_requests with peer + dst_offsets.
-        int64_t req_id = event.request_id;
-        auto it = active_requests.find(req_id);
+        uint64_t uuid = event.uuid;
+        auto it = active_requests.find(uuid);
         if (it == active_requests.end()) {
           LOG(ERROR) << "[Orchestrator] kPullReady for unknown request "
-                     << req_id << " (decode request not submitted yet?)";
+                     << uuid << " (decode request not submitted yet?)";
           break;
         }
         auto& existing = it->second;
+        // Identity validation: the source region the producer staged (carried in
+        // NOTIFY_READY) must match the source region this consumer's pull()
+        // asked for. Both are expanded per-block, so a direct compare suffices.
+        // Only enforced when the consumer actually supplied src_offsets (the
+        // public pull() always does); the low-level path may omit them and opt
+        // out of the check.
+        if (!existing.src_offsets.empty() &&
+            existing.src_offsets != event.src_offsets) {
+          absl::Status mismatch = absl::InvalidArgumentError(absl::StrCat(
+              "pull(uuid=", uuid, ") source region does not match the "
+              "producer's await_pull (consumer ", existing.src_offsets.size(),
+              " blocks vs producer ", event.src_offsets.size(), ")"));
+          LOG(ERROR) << "[Orchestrator] " << mismatch;
+          InvokeCallback(existing.callback, mismatch);
+          active_requests.erase(it);
+          break;
+        }
         existing.block_ids = std::move(event.block_ids);  // remote (prefill) ids
         existing.type = DisaggTransferRequest::Type::kH2HRead;
-        LOG(INFO) << "[Orchestrator] Request " << req_id
+        LOG(INFO) << "[Orchestrator] Request " << uuid
                   << ": peer ready, triggering H2H Read (pull) from "
                   << existing.peer;
         h2h_work_queue_.Push(existing);
@@ -464,15 +567,31 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
       case Event::Type::kPullComplete: {
         // PULL (prefill side): the decode finished pulling and acked. The
         // staging buffer can be released; complete the request.
-        int64_t req_id = event.request_id;
-        auto it = active_requests.find(req_id);
+        uint64_t uuid = event.uuid;
+        auto it = active_requests.find(uuid);
         if (it == active_requests.end()) {
           LOG(ERROR) << "[Orchestrator] kPullComplete for unknown request "
-                     << req_id;
+                     << uuid;
           break;
         }
-        LOG(INFO) << "[Orchestrator] Request " << req_id
+        LOG(INFO) << "[Orchestrator] Request " << uuid
                   << ": pull complete ack received, request fully done!";
+        // Release the producer-side staging blocks we allocated in
+        // AutoAllocateStaging (await_pull). Gated on owns_staging so the
+        // low-level path (caller-supplied, un-locked staging) is never
+        // unlocked. No block_manager_mutex_ needed here (unlike the decode-side
+        // Unlock): on the producer the transport only READS its host blocks to
+        // serve the pull and never calls AllocateBlocks, so the orchestrator is
+        // the sole thread touching block_manager_ for this manager.
+        if (it->second.owns_staging && block_manager_) {
+          absl::Status unlock_status =
+              block_manager_->Unlock(it->second.block_ids);
+          if (!unlock_status.ok()) {
+            LOG(ERROR) << "[Orchestrator] Failed to unlock staging blocks on "
+                          "Prefill: "
+                       << unlock_status;
+          }
+        }
         InvokeCallback(it->second.callback, absl::OkStatus());
         active_requests.erase(it);
         break;
@@ -482,6 +601,60 @@ void DisaggKVCacheManagerBase::OrchestrationLoop() {
   LOG(INFO) << "[Orchestrator] OrchestrationLoop exiting";
 }
 
+absl::Status DisaggKVCacheManagerBase::AutoAllocateStaging(
+    DisaggTransferRequest& req) {
+  if (block_size_ <= 0) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("block_size must be positive, got ", block_size_));
+  }
+  if (req.src_offsets.size() != req.sizes.size()) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "src_offsets and sizes must have equal length, got ",
+        req.src_offsets.size(), " vs ", req.sizes.size()));
+  }
+  int64_t total_blocks = 0;
+  for (size_t i = 0; i < req.sizes.size(); ++i) {
+    if (req.sizes[i] <= 0 || req.sizes[i] % block_size_ != 0) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "sizes[", i, "]=", req.sizes[i],
+          " must be a positive multiple of block_size=", block_size_));
+    }
+    total_blocks += req.sizes[i] / block_size_;
+  }
+
+  // Allocate (and lock) the host staging blocks. AllocateBlocks takes the
+  // block_manager_mutex_ internally and releases it on return; the block-level
+  // lock (lock=true) is what persists, holding the staging until the matching
+  // Unlock on kPullComplete (gated by owns_staging) so it is not reused before
+  // the decode has pulled.
+  std::vector<int> staging_ids;
+  {
+    auto ids_or = AllocateBlocks(total_blocks, req.entity_id);
+    if (!ids_or.ok()) return ids_or.status();
+    staging_ids = std::move(ids_or.value());
+  }
+
+  std::vector<int64_t> esrc, edst, esize;
+  esrc.reserve(total_blocks);
+  edst.reserve(total_blocks);
+  esize.reserve(total_blocks);
+  size_t idx = 0;
+  for (size_t i = 0; i < req.sizes.size(); ++i) {
+    const int64_t n = req.sizes[i] / block_size_;
+    for (int64_t b = 0; b < n; ++b) {
+      esrc.push_back(req.src_offsets[i] + b * block_size_);
+      edst.push_back(static_cast<int64_t>(staging_ids[idx]) * block_size_);
+      esize.push_back(block_size_);
+      ++idx;
+    }
+  }
+  req.src_offsets = std::move(esrc);
+  req.dst_offsets = std::move(edst);
+  req.sizes = std::move(esize);
+  req.owns_staging = true;
+  return absl::OkStatus();
+}
+
 void DisaggKVCacheManagerBase::LocalTransferLoop() {
   DisaggTransferRequest req;
   while (local_work_queue_.Pop(req)) {
@@ -489,7 +662,7 @@ void DisaggKVCacheManagerBase::LocalTransferLoop() {
       auto future_or = D2h(req.src_offsets, req.dst_offsets, req.sizes);
       if (!future_or.ok()) {
         orchestrator_queue_.Push({Event::Type::kLocalComplete,
-                                  req.request_id,
+                                  req.uuid,
                                   future_or.status(),
                                   req,
                                   {},
@@ -497,7 +670,7 @@ void DisaggKVCacheManagerBase::LocalTransferLoop() {
       } else {
         future_or.value().OnReady([this, req](absl::Status status) {
           orchestrator_queue_.Push({Event::Type::kLocalComplete,
-                                    req.request_id,
+                                    req.uuid,
                                     status,
                                     req,
                                     {},
@@ -508,7 +681,7 @@ void DisaggKVCacheManagerBase::LocalTransferLoop() {
       auto future_or = H2d(req.src_offsets, req.dst_offsets, req.sizes);
       if (!future_or.ok()) {
         orchestrator_queue_.Push({Event::Type::kLocalComplete,
-                                  req.request_id,
+                                  req.uuid,
                                   future_or.status(),
                                   req,
                                   {},
@@ -516,7 +689,7 @@ void DisaggKVCacheManagerBase::LocalTransferLoop() {
       } else {
         future_or.value().OnReady([this, req](absl::Status status) {
           orchestrator_queue_.Push({Event::Type::kLocalComplete,
-                                    req.request_id,
+                                    req.uuid,
                                     status,
                                     req,
                                     {},
@@ -569,7 +742,7 @@ void DisaggKVCacheManagerBase::H2hTransferLoop() {
       }
     }
     orchestrator_queue_.Push(
-        {Event::Type::kH2hComplete, req.request_id, status, req, {}, ""});
+        {Event::Type::kH2hComplete, req.uuid, status, req, {}, ""});
   }
   LOG(INFO) << "[H2H] H2hTransferLoop exiting";
 }
@@ -648,7 +821,7 @@ void DisaggKVCacheManagerBase::ListenerLoop() {
             if (!s.ok()) LOG(ERROR) << s;
             continue;
           }
-          int64_t req_id = std::stoll(parts[1]);
+          uint64_t uuid = std::stoull(parts[1]);
           std::vector<std::string> block_strs = absl::StrSplit(parts[2], ',');
           std::vector<int> block_ids;
           for (const auto& s : block_strs) {
@@ -659,7 +832,7 @@ void DisaggKVCacheManagerBase::ListenerLoop() {
 
           Event event;
           event.type = Event::Type::kPeerNotification;
-          event.request_id = req_id;
+          event.uuid = uuid;
           event.block_ids = std::move(block_ids);
           orchestrator_queue_.Push(std::move(event));
 
@@ -667,23 +840,30 @@ void DisaggKVCacheManagerBase::ListenerLoop() {
           if (!s.ok()) LOG(ERROR) << s;
         } else if (cmd == "NOTIFY_READY") {
           // PULL: prefill staged data and is advertising its remote block ids
-          // for the decode to pull. Same wire format as NOTIFY_COMPLETE.
-          if (parts.size() != 3) {
+          // (and its source region for validation) for the decode to pull.
+          // Wire format: NOTIFY_READY:<uuid>:<block_ids>:<src_offsets>
+          if (parts.size() != 4) {
             absl::Status s = SendZmqReply("ERROR:Invalid NOTIFY_READY");
             if (!s.ok()) LOG(ERROR) << s;
             continue;
           }
-          int64_t req_id = std::stoll(parts[1]);
-          std::vector<std::string> block_strs = absl::StrSplit(parts[2], ',');
+          uint64_t uuid = std::stoull(parts[1]);
           std::vector<int> block_ids;
-          for (const auto& s : block_strs) {
+          for (const std::string& s :
+               std::vector<std::string>(absl::StrSplit(parts[2], ','))) {
             if (!s.empty()) block_ids.push_back(std::stoi(s));
+          }
+          std::vector<int64_t> src_offsets;
+          for (const std::string& s :
+               std::vector<std::string>(absl::StrSplit(parts[3], ','))) {
+            if (!s.empty()) src_offsets.push_back(std::stoll(s));
           }
 
           Event event;
           event.type = Event::Type::kPullReady;
-          event.request_id = req_id;
+          event.uuid = uuid;
           event.block_ids = std::move(block_ids);
+          event.src_offsets = std::move(src_offsets);
           orchestrator_queue_.Push(std::move(event));
 
           absl::Status s = SendZmqReply("OK");
@@ -697,7 +877,7 @@ void DisaggKVCacheManagerBase::ListenerLoop() {
           }
           Event event;
           event.type = Event::Type::kPullComplete;
-          event.request_id = std::stoll(parts[1]);
+          event.uuid = std::stoull(parts[1]);
           orchestrator_queue_.Push(std::move(event));
 
           absl::Status s = SendZmqReply("OK");

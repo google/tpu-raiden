@@ -220,7 +220,7 @@ sequenceDiagram
 - *Decode → Prefill:* `OK`.
 
 **Step 3 — H2H Read / Pull (data plane).** On `NOTIFY_READY`, the decode issues an H2H Read. It **allocates its own local blocks** (`local_ids`), then pulls the prefill's blocks into them.
-- *Decode → Prefill:* `BlockPacketHeader{op=Pull, remote_block_id = prefill_block_ids[0], num_blocks}` (one request per `transport_parallelism` stream). The current `Pull` reads **consecutive** remote blocks from that base.
+- *Decode → Prefill:* one or more `BlockPacketHeader{op=Pull, remote_block_id, num_blocks}` requests. The data-plane `Pull` (op=2) server still reads `num_blocks` **consecutive** remote blocks from `remote_block_id`, but the client-side `H2hReadWorker` now **coalesces** the requested `prefill_block_ids` into maximal consecutive runs and issues one Pull per run (each run lands at the matching `local_ids`). So a **non-contiguous** staging layout pulls correctly — it just costs one request per run instead of one overall. The `transport_parallelism` streams partition the local blocks first, then each stream coalesces its own slice.
 - *Prefill → Decode:* the raw KV bytes for the requested remote blocks (every `layer × shard`).
 - The pull returns the decode-local `local_ids` (where the data landed locally) — the analogue of push's receiver-allocated ids, but here both produced and consumed on the **decode** side, so there is no cross-engine round-trip.
 
@@ -242,9 +242,56 @@ sequenceDiagram
 | Block ids in the control msg | the **decode's** (round-tripped via the push) | the **prefill's** (the remote source to read) |
 | `peer` on `DECODE_H2D` | not needed | required (the prefill) |
 
-#### Pull-mode limitations
+#### Non-contiguous pull: how the H2H Read coalesces (worked examples)
 
-- **Pull reads *consecutive* remote blocks.** The data-plane `Pull` (op=2) sends a single base `remote_block_id = prefill_block_ids[0]` plus `num_blocks` and the server reads `remote_block_id + k` for each `k`. So a pull request's prefill staging blocks **must be contiguous** — which holds when `dst_offsets` are consecutive multiples of `block_size`, but a non-contiguous staging layout would pull the wrong blocks. Push has no such constraint (it sends every block explicitly). Lifting this requires extending the `Pull` header to carry the explicit remote block-id list instead of a single base.
+The data-plane `Pull` (op=2) is intentionally simple: one request carries a
+single base `remote_block_id` + `num_blocks`, and the **server reads
+`num_blocks` consecutive remote blocks** from that base (per `layer × shard`).
+To pull an *arbitrary* id list, the decode-side `H2hReadWorker`
+(`transport/block_transport.cc`) splits the requested `src_block_ids` into
+**maximal consecutive runs** and issues **one op=2 request per run**, each run
+landing in the matching slice of the decode's freshly-allocated `local_ids`.
+
+Per stream (`transport_parallelism` partitions the local blocks first, so each
+stream coalesces only its own slice):
+
+```
+runs = []
+start a run at src_block_ids[0]
+for each subsequent id:
+    if id == prev_id + 1:  extend the current run
+    else:                  close the run, start a new one at id
+# each run -> Pull{ remote_block_id = run.first, num_blocks = run.length },
+#             written into local_ids[run.local_start .. +run.length]
+```
+
+Examples (block_size and `shard_factor`=1; `local_ids` are whatever the
+decode's `LogicalBlockManager` hands out, here shown as `{…}`):
+
+| `Pull(src_block_ids, P)` | runs (coalesced) | op=2 requests sent | result (`local ← remote`) |
+| :--- | :--- | :--- | :--- |
+| `{5,6,7}, P=1` | `[5,6,7]` | 1 req: `base=5, n=3` | `{a,a+1,a+2} ← {5,6,7}` — **contiguous, unchanged** |
+| `{0,2}, P=1` | `[0]`,`[2]` | 2 reqs: `base=0,n=1` then `base=2,n=1` | `local[0]←0`, `local[1]←2` |
+| `{0,1,3}, P=1` | `[0,1]`,`[3]` | 2 reqs: `base=0,n=2` then `base=3,n=1` | `{0,1,_}←{0,1}`, `_,_,2 ← 3` |
+| `{0,1,3,4}, P=2` | s0:`[0,1]`, s1:`[3,4]` | s0: `base=0,n=2`; s1: `base=3,n=2` | s0 `local[0,1]←{0,1}`, s1 `local[2,3]←{3,4}` — gap falls **between** streams |
+
+Key points the examples illustrate:
+
+- A **contiguous** list still produces exactly one request — no regression vs.
+  the old single-base behaviour.
+- A **gap** (`{0,2}`) splits into two single-block reads at the *correct* ids.
+  The old code sent `base=src_block_ids[0]=0, n=2` and the server read `0,1`,
+  silently pulling block 1 instead of 2 — the bug this fixes.
+- An **interior run** (`{0,1,3}`) is preserved as a 2-block read, so coalescing
+  costs one request per run, not per block. A fully scattered list degenerates
+  to one request per block.
+- Under `transport_parallelism>1` each stream coalesces independently; the
+  delegate hook `GetRemoteReadBlockId(base, 0)` (identity by default) lets a
+  sharded layout remap each run's base remote id.
+
+#### Pull-mode notes & limitations
+
+- **Non-contiguous pull is supported** (as of 2026-05-31). The data-plane `Pull` (op=2) still reads *consecutive* blocks per request, but `H2hReadWorker` coalesces the requested remote ids into maximal consecutive runs and issues one Pull per run, so a non-contiguous staging layout (e.g. `dst_offsets` that skip a block) pulls correctly. Coverage: `block_transport_test` (`PullNonContiguous`, `PullNonContiguousCoalesced`), `disagg_kv_cache_manager_base_test::E2EPullWorkflowNonContiguousMocked`, `disagg_kv_cache_manager_test::test_e2e_disagg_pull_noncontiguous`, and two-node E2E (`disagg_scripts` `MODE=pull` with gapped `DST_OFFSETS`, incl. `transport_parallelism>1`). The per-run cost is one request per run rather than one overall; a fully scattered layout degenerates to one request per block.
 - **Pull requires both-direction peer registration** (decode↔prefill), versus push's single direction (prefill→decode).
 - **H2H Read is the only pull primitive wired up.** `kH2HRead` now drives decode-side pulls; there is no standalone "pull weights" path here (that lives in `PullWeightsChunk`, op=3, used by resharding).
 

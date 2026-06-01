@@ -81,7 +81,12 @@ Edit `disagg_node_runner.py`:
 - `build_reference_layer(shape, dtype, layer_idx)` — the deterministic payload
   both hosts compute independently (default: `arange + layer_idx`, int32).
 - `verify_decode(...)` — assertions on what landed on the decode device.
-- transfer plan via `--src-offsets/--dst-offsets/--sizes` (major-dim units).
+- transfer plan via `--src-offsets/--dst-offsets/--sizes` (major-dim slice
+  units). `--block-size` (env `BLOCK_SIZE`, default **1**) is the page size along
+  the major dim; the manager stages one block per chunk, so **each `--sizes`
+  entry must equal `--block-size`**. At `BLOCK_SIZE=1` every chunk is one slice
+  and `--dst-offsets` are the staging block ids (gaps there → non-contiguous
+  pull). A `SIZES` entry larger than `BLOCK_SIZE` silently drops the remainder.
 
 The orchestration (manager lifecycle, proxy rendezvous, peer registration,
 callbacks, exit codes) is reused, so a new scenario is usually just new

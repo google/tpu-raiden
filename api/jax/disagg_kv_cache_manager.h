@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include <nanobind/nanobind.h>
@@ -42,7 +43,7 @@ class DisaggKVCacheManager : public DisaggKVCacheManagerBase {
   ~DisaggKVCacheManager() override;
 
  protected:
-  void InvokeCallback(std::function<void(absl::Status)> callback,
+  void InvokeCallback(std::function<void(std::optional<std::string>)> callback,
                       absl::Status status) override;
 
  private:

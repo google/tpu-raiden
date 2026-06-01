@@ -86,8 +86,8 @@ NB_MODULE(_kv_cache_manager, m) {
   nb::class_<tpu_raiden::kv_cache::DisaggTransferRequest>(
       m, "DisaggTransferRequest")
       .def(nb::init<>())
-      .def_rw("request_id",
-              &tpu_raiden::kv_cache::DisaggTransferRequest::request_id)
+      .def_rw("uuid", &tpu_raiden::kv_cache::DisaggTransferRequest::uuid)
+      .def_rw("req_id", &tpu_raiden::kv_cache::DisaggTransferRequest::req_id)
       .def_rw("type", &tpu_raiden::kv_cache::DisaggTransferRequest::type)
       .def_rw("pull_mode",
               &tpu_raiden::kv_cache::DisaggTransferRequest::pull_mode)
@@ -116,12 +116,17 @@ NB_MODULE(_kv_cache_manager, m) {
            nb::arg("unsafe_skip_buffer_lock") = false,
            nb::arg("transport_parallelism") = 1,
            nb::arg("worker_parallelism") = 1)
-      .def("start", &tpu_raiden::kv_cache::DisaggKVCacheManagerBase::Start)
+      // Release the GIL across these blocking C++ calls: background threads
+      // (orchestrator / H2H workers) acquire the GIL to invoke Python
+      // completion callbacks, so holding the GIL here while Stop() joins them
+      // -- or while submit contends on running_mutex_ -- can deadlock.
+      .def("start", &tpu_raiden::kv_cache::DisaggKVCacheManagerBase::Start,
+           nb::call_guard<nb::gil_scoped_release>())
       .def("stop", &tpu_raiden::kv_cache::DisaggKVCacheManagerBase::Stop,
            nb::call_guard<nb::gil_scoped_release>())
       .def("submit_request",
            &tpu_raiden::kv_cache::DisaggKVCacheManagerBase::SubmitRequest,
-           nb::arg("request"))
+           nb::arg("request"), nb::call_guard<nb::gil_scoped_release>())
       .def("register_peer",
            &tpu_raiden::kv_cache::DisaggKVCacheManagerBase::RegisterPeer,
            nb::arg("name"), nb::arg("ip"), nb::arg("zmq_port"),

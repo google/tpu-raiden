@@ -171,11 +171,13 @@ def main():
                   help="address the peer dials this engine on")
   ap.add_argument("--peer-name", default="decode",
                   help="prefill: name of the decode peer to resolve")
-  ap.add_argument("--mode", default="push", choices=["push", "pull"],
-                  help="push: prefill pushes to decode; pull: decode pulls "
-                       "from prefill")
+  ap.add_argument("--mode", default="pull", choices=["pull"],
+                  help="pull: decode pulls from prefill (await_pull/pull). "
+                       "Push is no longer supported by this harness.")
   ap.add_argument("--n-layers", type=int, default=2)
-  ap.add_argument("--block-size", type=int, default=2)
+  ap.add_argument("--block-size", type=int, default=1,
+                  help="page size along the major dim (slices/block); each "
+                       "--sizes entry must equal this (one block per chunk)")
   ap.add_argument("--dtype", default="int32",
                   choices=["int32", "bf16", "fp32", "fp8"])
   ap.add_argument("--device", default="tpu", choices=["tpu", "cpu"])
@@ -190,10 +192,10 @@ def main():
   ap.add_argument("--shape", default="8,128,8,8,128",
                   help="per-layer KV array shape (comma-separated); the major "
                        "dim auto-grows to fit all requests")
-  ap.add_argument("--src-offsets", default="4,6",
+  ap.add_argument("--src-offsets", default="4,5",
                   help="per-request src chunks; subsequent requests are shifted")
-  ap.add_argument("--dst-offsets", default="0,2")
-  ap.add_argument("--sizes", default="2,2")
+  ap.add_argument("--dst-offsets", default="0,1")
+  ap.add_argument("--sizes", default="1,1")
   ap.add_argument("--timeout", type=float, default=30.0)
   args = ap.parse_args()
 
@@ -276,7 +278,6 @@ def main():
     return cb
 
   n = len(requests)
-  pull = (args.mode == "pull")
   peer_name = "prefill" if args.role == "decode" else "decode"
 
   def register_self():
@@ -292,17 +293,16 @@ def main():
   rc = 0
   try:
     if args.role == "decode":
-      if pull:
-        # PULL: the prefill registers up front; resolve+connect to it, queue
-        # the pull receives, THEN advertise readiness so the prefill only
-        # stages (and sends NOTIFY_READY) once our receives are pending.
-        connect_to(peer_name)
-      for rid, _src_i, dst_i, szs in requests:
-        manager.submit_request(
-            request_id=rid,
-            req_type=dm.DisaggTransferRequestType.DECODE_H2D,
-            dst_offsets=dst_i, sizes=szs,
-            peer=(peer_name if pull else ""), pull=pull,
+      # The prefill registers up front; resolve+connect to it, queue the pull
+      # receives, THEN advertise readiness so the prefill only stages (and sends
+      # NOTIFY_READY) once our receives are pending. The decode supplies only
+      # the destination device offsets; its local staging is manager-allocated.
+      connect_to(peer_name)
+      for rid, src_i, dst_i, szs in requests:
+        manager.pull(
+            uuid=rid, req_id=rid,
+            src_offsets=src_i, dst_offsets=dst_i, sizes=szs,
+            peer=peer_name,
             callback=make_cb(rid))
       register_self()  # readiness signal (prefill's RESOLVE unblocks on this)
       print(f"[decode] {n} request(s) queued ({args.mode}); waiting...",
@@ -316,17 +316,17 @@ def main():
       rc = 0 if ok else 1
 
     else:  # prefill
-      if pull:
-        register_self()  # decode must be able to resolve+pull from us
+      register_self()  # decode must be able to resolve+pull from us
       connect_to(peer_name)  # blocks until the decode has queued its receives
-      for rid, src_i, dst_i, szs in requests:
-        manager.submit_request(
-            request_id=rid,
-            req_type=dm.DisaggTransferRequestType.PREFILL_D2H,
-            src_offsets=src_i, dst_offsets=dst_i, sizes=szs,
-            peer=peer_name, pull=pull,
+      # The prefill supplies only the source device offsets; the host staging
+      # blocks are manager-allocated (await_pull).
+      for rid, src_i, _dst_i, szs in requests:
+        manager.await_pull(
+            uuid=rid, req_id=rid,
+            src_offsets=src_i, sizes=szs,
+            peer=peer_name,
             callback=make_cb(rid))
-      print(f"[prefill] submitted {n} PREFILL_D2H ({args.mode}); waiting...",
+      print(f"[prefill] staged {n} await_pull ({args.mode}); waiting...",
             flush=True)
       if not all_done.wait(timeout=args.timeout):
         raise TimeoutError(f"prefill incomplete; pending={sorted(pending)}")

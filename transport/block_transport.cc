@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <functional>
 #include <string>
 #include <thread>  // NOLINT
 #include <vector>
@@ -417,17 +418,17 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
 
   size_t blocks_per_stream = local_blocks / P;
   size_t remote_blocks_per_stream = num_blocks / P;
-  int base_remote_id = src_block_ids[0];
 
   std::vector<std::thread> threads;
   std::vector<absl::Status> statuses(P, absl::OkStatus());
 
   threads.reserve(P);
   for (int i = 0; i < P; ++i) {
-    threads.push_back(std::thread(&BlockTransport::H2hReadWorker, this, i, peer,
-                                  blocks_per_stream, remote_blocks_per_stream,
-                                  base_remote_id, std::ref(allocated_ids),
-                                  std::ref(statuses)));
+    threads.push_back(
+        std::thread(&BlockTransport::H2hReadWorker, this, i, peer,
+                    blocks_per_stream, remote_blocks_per_stream,
+                    std::ref(src_block_ids), std::ref(allocated_ids),
+                    std::ref(statuses)));
   }
 
   for (auto& t : threads) {
@@ -476,6 +477,8 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
   }
 
   for (size_t k = 0; k < blocks_per_stream; ++k) {
+    ABSL_DCHECK_LT(offset + k, allocated_ids.size());
+    ABSL_DCHECK_LT(k, stream_allocated_ids.size());
     allocated_ids[offset + k] = stream_allocated_ids[k];
   }
 
@@ -487,6 +490,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
       const uint8_t* base_host_ptr = delegate_->GetHostPointer(l, sh);
 
       for (size_t k = 0; k < blocks_per_stream; ++k) {
+        ABSL_DCHECK_LT(offset + k, src_block_ids.size());
         int src_id = src_block_ids[offset + k];
         const uint8_t* src_ptr = base_host_ptr + src_id * bytes_per_block;
         s = WriteExact(fd, src_ptr, bytes_per_block);
@@ -506,12 +510,11 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
   }
 }
 
-void BlockTransport::H2hReadWorker(int stream_idx, const std::string& peer,
-                                   size_t blocks_per_stream,
-                                   size_t remote_blocks_per_stream,
-                                   int base_remote_id,
-                                   const std::vector<int>& allocated_ids,
-                                   std::vector<absl::Status>& statuses) {
+void BlockTransport::H2hReadWorker(
+    int stream_idx, const std::string& peer, size_t blocks_per_stream,
+    size_t remote_blocks_per_stream, const std::vector<int>& src_block_ids,
+    const std::vector<int>& allocated_ids,
+    std::vector<absl::Status>& statuses) {
   size_t offset = stream_idx * blocks_per_stream;
   size_t remote_offset = stream_idx * remote_blocks_per_stream;
 
@@ -523,40 +526,81 @@ void BlockTransport::H2hReadWorker(int stream_idx, const std::string& peer,
   int fd = status_or_fd.value();
   auto fd_cleaner = absl::MakeCleanup([fd] { close(fd); });
 
-  BlockPacketHeader header;
-  header.op = 2;  // Pull request
-  header.remote_block_id =
-      delegate_->GetRemoteReadBlockId(base_remote_id, remote_offset);
-  header.local_block_id = allocated_ids[offset];
-  header.num_blocks = remote_blocks_per_stream;
+  size_t SF = delegate_->shard_factor();
 
-  absl::Status s = WriteExact(fd, &header, sizeof(header));
-  if (!s.ok()) {
-    statuses[stream_idx] = s;
-    return;
-  }
+  struct PullChunk {
+    size_t local_start_idx;
+    size_t local_count;
+    int base_remote_id;
+    size_t remote_count;
+  };
+  std::vector<PullChunk> chunks;
 
-  BlockPacketHeader resp_header;
-  s = ReadExact(fd, &resp_header, sizeof(resp_header));
-  if (!s.ok()) {
-    statuses[stream_idx] = s;
-    return;
+  if (blocks_per_stream > 0) {
+    size_t curr_local_start = 0;
+    size_t curr_local_count = 1;
+    ABSL_DCHECK_LT(remote_offset, src_block_ids.size());
+    int curr_base_remote_id = src_block_ids[remote_offset];
+
+    for (size_t k = 1; k < blocks_per_stream; ++k) {
+      ABSL_DCHECK_LT(remote_offset + k * SF - 1, src_block_ids.size());
+      int prev_last_remote = src_block_ids[remote_offset + k * SF - 1];
+      ABSL_DCHECK_LT(remote_offset + k * SF, src_block_ids.size());
+      int curr_first_remote = src_block_ids[remote_offset + k * SF];
+
+      if (curr_first_remote == prev_last_remote + 1) {
+        curr_local_count++;
+      } else {
+        chunks.push_back({curr_local_start, curr_local_count,
+                          curr_base_remote_id, curr_local_count * SF});
+        curr_local_start = k;
+        curr_local_count = 1;
+        curr_base_remote_id = curr_first_remote;
+      }
+    }
+    chunks.push_back({curr_local_start, curr_local_count, curr_base_remote_id,
+                      curr_local_count * SF});
   }
 
   size_t bytes_per_block =
       delegate_->block_size() * delegate_->slice_byte_size();
 
-  for (size_t l = 0; l < delegate_->num_layers(); ++l) {
-    for (size_t sh = 0; sh < delegate_->num_shards(); ++sh) {
-      uint8_t* base_host_ptr = delegate_->GetHostPointer(l, sh);
+  for (const auto& chunk : chunks) {
+    BlockPacketHeader header;
+    header.op = 2;  // Pull request
+    header.remote_block_id =
+        delegate_->GetRemoteReadBlockId(chunk.base_remote_id, 0);
+    ABSL_DCHECK_LT(offset + chunk.local_start_idx, allocated_ids.size());
+    header.local_block_id = allocated_ids[offset + chunk.local_start_idx];
+    header.num_blocks = chunk.remote_count;
 
-      for (size_t k = 0; k < blocks_per_stream; ++k) {
-        int dst_id = allocated_ids[offset + k];
-        uint8_t* dest_ptr = base_host_ptr + dst_id * bytes_per_block;
-        s = ReadExact(fd, dest_ptr, bytes_per_block);
-        if (!s.ok()) {
-          statuses[stream_idx] = s;
-          return;
+    absl::Status s = WriteExact(fd, &header, sizeof(header));
+    if (!s.ok()) {
+      statuses[stream_idx] = s;
+      return;
+    }
+
+    BlockPacketHeader resp_header;
+    s = ReadExact(fd, &resp_header, sizeof(resp_header));
+    if (!s.ok()) {
+      statuses[stream_idx] = s;
+      return;
+    }
+
+    for (size_t l = 0; l < delegate_->num_layers(); ++l) {
+      for (size_t sh = 0; sh < delegate_->num_shards(); ++sh) {
+        uint8_t* base_host_ptr = delegate_->GetHostPointer(l, sh);
+
+        for (size_t k = 0; k < chunk.local_count; ++k) {
+          ABSL_DCHECK_LT(offset + chunk.local_start_idx + k,
+                         allocated_ids.size());
+          int dst_id = allocated_ids[offset + chunk.local_start_idx + k];
+          uint8_t* dest_ptr = base_host_ptr + dst_id * bytes_per_block;
+          s = ReadExact(fd, dest_ptr, bytes_per_block);
+          if (!s.ok()) {
+            statuses[stream_idx] = s;
+            return;
+          }
         }
       }
     }

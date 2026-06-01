@@ -14,8 +14,10 @@
 
 #include "transport/block_transport.h"
 
+#include <chrono>  // NOLINT
 #include <cstddef>
 #include <cstring>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -23,6 +25,7 @@
 
 #include <gtest/gtest.h>
 #include "absl/status/statusor.h"
+#include "absl/status/status.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -30,8 +33,9 @@ namespace {
 
 class MockDelegate : public BlockTransportDelegate {
  public:
-  MockDelegate(size_t slice_size) : slice_size_(slice_size) {
-    buffer_.resize(slice_size_, 0);
+  MockDelegate(size_t slice_size, int max_blocks = 1)
+      : slice_size_(slice_size), max_blocks_(max_blocks) {
+    buffer_.resize(slice_size_ * max_blocks_, 0);
   }
 
   absl::StatusOr<std::vector<int>> AllocateBlocks(size_t num_blocks,
@@ -64,9 +68,13 @@ class MockDelegate : public BlockTransportDelegate {
   size_t shard_factor() const override { return 1; }
 
   uint8_t* data() { return buffer_.data(); }
+  uint8_t* block_data(int block_id) {
+    return buffer_.data() + block_id * slice_size_;
+  }
 
  private:
   size_t slice_size_;
+  int max_blocks_;
   std::vector<uint8_t> buffer_;
 };
 
@@ -135,6 +143,113 @@ TEST(BlockTransportTest, PullWeightsChunk) {
   EXPECT_EQ(delegate2.data()[2047], 0xEF);
   EXPECT_EQ(delegate2.data()[2048], 0x00);
 }
+
+TEST(BlockTransportTest, PullNonContiguous) {
+  size_t size = 1024;
+  // Delegate 1 has 3 blocks capacity
+  MockDelegate delegate1(size, 3);
+  // Delegate 2 has 2 blocks capacity (we want to pull 2 blocks)
+  MockDelegate delegate2(size, 2);
+
+  // Populate source blocks with different patterns
+  std::memset(delegate1.block_data(0), 0xAA, size);
+  std::memset(delegate1.block_data(1), 0xBB, size);
+  std::memset(delegate1.block_data(2), 0xCC, size);
+
+  std::memset(delegate2.block_data(0), 0x00, size);
+  std::memset(delegate2.block_data(1), 0x00, size);
+
+  BlockTransport transport1(&delegate1, 0);
+  BlockTransport transport2(&delegate2, 0);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::string peer1 = "localhost:" + std::to_string(transport1.local_port());
+
+  // Pull block 0 and 2 (non-contiguous) from transport1 using transport2
+  // We expect they will be written to local block 0 and 1 respectively.
+  auto pull_res = transport2.Pull(peer1, {0, 2});
+  ASSERT_TRUE(pull_res.ok()) << pull_res.status().message();
+
+  // Verify pull parity
+  // Local Block 0 should have 0xAA (from remote Block 0)
+  EXPECT_EQ(delegate2.block_data(0)[0], 0xAA);
+  EXPECT_EQ(delegate2.block_data(0)[size - 1], 0xAA);
+
+  // Local Block 1 should have 0xCC (from remote Block 2)
+  EXPECT_EQ(delegate2.block_data(1)[0], 0xCC);
+  EXPECT_EQ(delegate2.block_data(1)[size - 1], 0xCC);
+}
+
+TEST(BlockTransportTest, PullNonContiguousCoalesced) {
+  // Mix a consecutive run with a gap: pull remote blocks {0, 1, 3}. The H2H
+  // Read worker must coalesce {0, 1} into one consecutive read and issue a
+  // separate read for {3}, while still landing them in local blocks {0, 1, 2}.
+  size_t size = 1024;
+  MockDelegate delegate1(size, 4);  // remote has 4 blocks
+  MockDelegate delegate2(size, 3);  // local pulls 3 blocks
+
+  std::memset(delegate1.block_data(0), 0xA0, size);
+  std::memset(delegate1.block_data(1), 0xA1, size);
+  std::memset(delegate1.block_data(2), 0xA2, size);
+  std::memset(delegate1.block_data(3), 0xA3, size);
+
+  std::memset(delegate2.block_data(0), 0x00, size);
+  std::memset(delegate2.block_data(1), 0x00, size);
+  std::memset(delegate2.block_data(2), 0x00, size);
+
+  BlockTransport transport1(&delegate1, 0);
+  BlockTransport transport2(&delegate2, 0);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::string peer1 = "localhost:" + std::to_string(transport1.local_port());
+  auto pull_res = transport2.Pull(peer1, {0, 1, 3});
+  ASSERT_TRUE(pull_res.ok()) << pull_res.status().message();
+
+  // Local 0 <- remote 0, local 1 <- remote 1, local 2 <- remote 3.
+  EXPECT_EQ(delegate2.block_data(0)[0], 0xA0);
+  EXPECT_EQ(delegate2.block_data(0)[size - 1], 0xA0);
+  EXPECT_EQ(delegate2.block_data(1)[0], 0xA1);
+  EXPECT_EQ(delegate2.block_data(1)[size - 1], 0xA1);
+  EXPECT_EQ(delegate2.block_data(2)[0], 0xA3);
+  EXPECT_EQ(delegate2.block_data(2)[size - 1], 0xA3);
+}
+
+TEST(BlockTransportTest, PullNonContiguousParallel) {
+  // Non-contiguous pull striped over 2 TCP streams: pull remote {0,1,3,4} with
+  // parallelism=2. The worker partitions the 4 local blocks into two streams
+  // (local [0,1] and [2,3]), and each stream coalesces its own remote slice
+  // ({0,1} and {3,4}) into one consecutive read. The gap (remote block 2)
+  // falls between the streams.
+  size_t size = 1024;
+  MockDelegate delegate1(size, 5);  // remote has 5 blocks (ids 0..4)
+  MockDelegate delegate2(size, 4);  // local pulls 4 blocks
+
+  std::memset(delegate1.block_data(0), 0xB0, size);
+  std::memset(delegate1.block_data(1), 0xB1, size);
+  std::memset(delegate1.block_data(2), 0xB2, size);  // skipped
+  std::memset(delegate1.block_data(3), 0xB3, size);
+  std::memset(delegate1.block_data(4), 0xB4, size);
+  for (int b = 0; b < 4; ++b) std::memset(delegate2.block_data(b), 0x00, size);
+
+  BlockTransport transport1(&delegate1, 0);
+  BlockTransport transport2(&delegate2, 0);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::string peer1 = "localhost:" + std::to_string(transport1.local_port());
+  auto pull_res = transport2.Pull(peer1, {0, 1, 3, 4}, /*parallelism=*/2);
+  ASSERT_TRUE(pull_res.ok()) << pull_res.status().message();
+
+  // local {0,1,2,3} <- remote {0,1,3,4}.
+  EXPECT_EQ(delegate2.block_data(0)[0], 0xB0);
+  EXPECT_EQ(delegate2.block_data(1)[0], 0xB1);
+  EXPECT_EQ(delegate2.block_data(2)[0], 0xB3);
+  EXPECT_EQ(delegate2.block_data(3)[0], 0xB4);
+  EXPECT_EQ(delegate2.block_data(3)[size - 1], 0xB4);
+}
+
 
 }  // namespace
 }  // namespace transport

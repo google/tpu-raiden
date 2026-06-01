@@ -82,11 +82,11 @@ class DisaggTransferRequestBindingTest(parameterized.TestCase):
     req.src_offsets = [0, 2, 4]
     req.dst_offsets = [1, 3, 5]
     req.sizes = [2, 2, 2]
-    req.block_ids = [10, 11]
+    req.block_ids = [10, 11, 12, 13, 14, 15]
     self.assertEqual(list(req.src_offsets), [0, 2, 4])
     self.assertEqual(list(req.dst_offsets), [1, 3, 5])
     self.assertEqual(list(req.sizes), [2, 2, 2])
-    self.assertEqual(list(req.block_ids), [10, 11])
+    self.assertEqual(list(req.block_ids), [10, 11, 12, 13, 14, 15])
 
   def test_peer_and_entity_id_round_trip(self):
     req = ext.DisaggTransferRequest()

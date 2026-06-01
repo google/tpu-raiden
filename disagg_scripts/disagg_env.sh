@@ -35,12 +35,16 @@ export PROXY_ENDPOINT="tcp://${LOCAL_IP}:${PROXY_PORT}"
 # --- Test shape / transfer plan (shared by both roles) -----------------------
 # Defaults mirror the known-good single-process test_e2e_disagg_push.
 export N_LAYERS="${N_LAYERS:-2}"
-export BLOCK_SIZE="${BLOCK_SIZE:-2}"
+# BLOCK_SIZE = page granularity along the MAJOR dim (slices per block). The
+# manager stages one block per (offset,size) chunk, so each SIZES entry must
+# equal BLOCK_SIZE (one block per chunk). With BLOCK_SIZE=1 each chunk is a
+# single major-dim slice and DST_OFFSETS double as the staging block ids.
+export BLOCK_SIZE="${BLOCK_SIZE:-1}"
 export DTYPE="${DTYPE:-int32}"
 export DEVICE="${DEVICE:-tpu}"
-# Transfer direction: "push" (prefill pushes to decode) or "pull" (decode pulls
-# from prefill).
-export MODE="${MODE:-push}"
+# Transfer direction. Only "pull" (decode pulls from prefill via await_pull/pull)
+# is supported; push was removed from this harness.
+export MODE="${MODE:-pull}"
 # Two distinct H2H parallelism knobs (see disagg_kv_cache_manager.py):
 #   TRANSPORT_PARALLELISM = parallel TCP streams per single Push/Pull (BlockTransport)
 #   WORKER_PARALLELISM    = concurrent H2H worker threads (transfers in flight)
@@ -49,10 +53,12 @@ export WORKER_PARALLELISM="${WORKER_PARALLELISM:-1}"
 # Number of concurrent requests; each gets a disjoint, independently-verified
 # region (request i is shifted by i*sum(SIZES) on both src and dst).
 export NUM_REQUESTS="${NUM_REQUESTS:-1}"
-# Transfer plan: prefill copies src->dst chunks of these sizes (major-dim units).
-export SRC_OFFSETS="${SRC_OFFSETS:-4,6}"
-export DST_OFFSETS="${DST_OFFSETS:-0,2}"
-export SIZES="${SIZES:-2,2}"
+# Transfer plan: prefill copies src->dst chunks of these sizes (major-dim slice
+# units). With BLOCK_SIZE=1 each chunk is one block, so the default is 2 unit
+# blocks (SIZES all 1); DST_OFFSETS are the staging block ids.
+export SRC_OFFSETS="${SRC_OFFSETS:-4,5}"
+export DST_OFFSETS="${DST_OFFSETS:-0,1}"
+export SIZES="${SIZES:-1,1}"
 
 # Run a python module on the REMOTE host inside the conda env, via an
 # interactive login shell so `conda activate` works (mirrors run_all.sh).

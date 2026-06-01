@@ -17,6 +17,7 @@
 #include <chrono>  // NOLINT
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>  // NOLINT
 #include <utility>
@@ -56,27 +57,30 @@ class MockDisaggKVCacheManager : public DisaggKVCacheManagerBase {
     return dummy_host_buffer_;
   }
   size_t GetHostSize(size_t layer_idx, size_t shard_idx) override {
-    return 4096;
+    return kDummyHostBufferSize;
   }
 
   bool d2h_called() const { return d2h_called_; }
   bool h2d_called() const { return h2d_called_; }
 
  private:
+  // 16 blocks at block_size=1 * slice_byte_size=1024 = 1024 bytes/block, so
+  // non-contiguous staging block ids (e.g. {0, 2}) stay in bounds.
+  static constexpr size_t kDummyHostBufferSize = 16384;
   bool d2h_called_ = false;
   bool h2d_called_ = false;
-  uint8_t dummy_host_buffer_[4096] = {0};
+  uint8_t dummy_host_buffer_[kDummyHostBufferSize] = {0};
 };
 
 TEST(DisaggKVCacheManagerBaseTest, E2EPushWorkflowMocked) {
   MockDisaggKVCacheManager prefill(
       /*num_layers=*/1, /*num_shards=*/1, /*slice_byte_size=*/1024,
-      /*block_size=*/2, /*local_port=*/0, /*host_blocks_to_allocate=*/4,
+      /*block_size=*/1, /*local_port=*/0, /*host_blocks_to_allocate=*/4,
       /*parallelism=*/1);
 
   MockDisaggKVCacheManager decode(
       /*num_layers=*/1, /*num_shards=*/1, /*slice_byte_size=*/1024,
-      /*block_size=*/2, /*local_port=*/0, /*host_blocks_to_allocate=*/4,
+      /*block_size=*/1, /*local_port=*/0, /*host_blocks_to_allocate=*/4,
       /*parallelism=*/1);
 
   ASSERT_TRUE(prefill.Start().ok());
@@ -95,26 +99,26 @@ TEST(DisaggKVCacheManagerBaseTest, E2EPushWorkflowMocked) {
 
   // 1. Submit Decode H2D Receive Request
   DisaggTransferRequest decode_req;
-  decode_req.request_id = 2001;
+  decode_req.uuid = 2001;
   decode_req.type = DisaggTransferRequest::Type::kDecodeH2D;
-  decode_req.dst_offsets = {0, 2};
-  decode_req.sizes = {2, 2};
-  decode_req.callback = [&](absl::Status s) {
-    EXPECT_TRUE(s.ok());
+  decode_req.dst_offsets = {0, 1};  // block_size=1: each chunk is one block
+  decode_req.sizes = {1, 1};
+  decode_req.callback = [&](std::optional<std::string> s) {
+    EXPECT_FALSE(s.has_value());
     decode_done.Notify();
   };
   ASSERT_TRUE(decode.SubmitRequest(decode_req).ok());
 
   // 2. Submit Prefill D2H Send Request
   DisaggTransferRequest prefill_req;
-  prefill_req.request_id = 2001;
+  prefill_req.uuid = 2001;
   prefill_req.type = DisaggTransferRequest::Type::kPrefillD2H;
-  prefill_req.src_offsets = {4, 6};
-  prefill_req.dst_offsets = {0, 2};
-  prefill_req.sizes = {2, 2};
+  prefill_req.src_offsets = {4, 5};
+  prefill_req.dst_offsets = {0, 1};
+  prefill_req.sizes = {1, 1};
   prefill_req.peer = "decode";
-  prefill_req.callback = [&](absl::Status s) {
-    EXPECT_TRUE(s.ok());
+  prefill_req.callback = [&](std::optional<std::string> s) {
+    EXPECT_FALSE(s.has_value());
     prefill_done.Notify();
   };
   ASSERT_TRUE(prefill.SubmitRequest(prefill_req).ok());
@@ -136,11 +140,11 @@ TEST(DisaggKVCacheManagerBaseTest, E2EPullWorkflowMocked) {
   // mocked; the H2H Read + the NOTIFY_READY/PULL_COMPLETE zmq handshake are real.
   MockDisaggKVCacheManager prefill(
       /*num_layers=*/1, /*num_shards=*/1, /*slice_byte_size=*/1024,
-      /*block_size=*/2, /*local_port=*/0, /*host_blocks_to_allocate=*/4,
+      /*block_size=*/1, /*local_port=*/0, /*host_blocks_to_allocate=*/4,
       /*parallelism=*/1);
   MockDisaggKVCacheManager decode(
       /*num_layers=*/1, /*num_shards=*/1, /*slice_byte_size=*/1024,
-      /*block_size=*/2, /*local_port=*/0, /*host_blocks_to_allocate=*/4,
+      /*block_size=*/1, /*local_port=*/0, /*host_blocks_to_allocate=*/4,
       /*parallelism=*/1);
 
   ASSERT_TRUE(prefill.Start().ok());
@@ -159,29 +163,29 @@ TEST(DisaggKVCacheManagerBaseTest, E2EPullWorkflowMocked) {
 
   // 1. Decode submits a PULL receive (peer = the prefill to pull from).
   DisaggTransferRequest decode_req;
-  decode_req.request_id = 3001;
+  decode_req.uuid = 3001;
   decode_req.type = DisaggTransferRequest::Type::kDecodeH2D;
   decode_req.pull_mode = true;
-  decode_req.dst_offsets = {0, 2};
-  decode_req.sizes = {2, 2};
+  decode_req.dst_offsets = {0, 1};  // block_size=1: each chunk is one block
+  decode_req.sizes = {1, 1};
   decode_req.peer = "prefill";
-  decode_req.callback = [&](absl::Status s) {
-    EXPECT_TRUE(s.ok());
+  decode_req.callback = [&](std::optional<std::string> s) {
+    EXPECT_FALSE(s.has_value());
     decode_done.Notify();
   };
   ASSERT_TRUE(decode.SubmitRequest(decode_req).ok());
 
   // 2. Prefill submits a PULL stage (peer = the decode to notify).
   DisaggTransferRequest prefill_req;
-  prefill_req.request_id = 3001;
+  prefill_req.uuid = 3001;
   prefill_req.type = DisaggTransferRequest::Type::kPrefillD2H;
   prefill_req.pull_mode = true;
-  prefill_req.src_offsets = {4, 6};
-  prefill_req.dst_offsets = {0, 2};
-  prefill_req.sizes = {2, 2};
+  prefill_req.src_offsets = {4, 5};
+  prefill_req.dst_offsets = {0, 1};
+  prefill_req.sizes = {1, 1};
   prefill_req.peer = "decode";
-  prefill_req.callback = [&](absl::Status s) {
-    EXPECT_TRUE(s.ok());
+  prefill_req.callback = [&](std::optional<std::string> s) {
+    EXPECT_FALSE(s.has_value());
     prefill_done.Notify();
   };
   ASSERT_TRUE(prefill.SubmitRequest(prefill_req).ok());
@@ -196,6 +200,72 @@ TEST(DisaggKVCacheManagerBaseTest, E2EPullWorkflowMocked) {
   EXPECT_TRUE(decode.h2d_called());   // decode loaded host -> device after pull
 }
 
+TEST(DisaggKVCacheManagerBaseTest, E2EPullWorkflowNonContiguousMocked) {
+  // PULL mode with NON-CONTIGUOUS remote staging blocks: the prefill stages at
+  // dst_offsets {0, 2} (block_size=1 -> staging block ids {0, 2}, skipping
+  // block 1). In pull mode those ids are advertised in NOTIFY_READY and become
+  // the remote ids the decode pulls, so the real H2H Read must coalesce the
+  // request into two separate single-block reads (remote 0 and remote 2). D2h/
+  // H2d are mocked; this verifies the manager drives the non-contiguous pull to
+  // completion without erroring or hanging.
+  MockDisaggKVCacheManager prefill(
+      /*num_layers=*/1, /*num_shards=*/1, /*slice_byte_size=*/1024,
+      /*block_size=*/1, /*local_port=*/0, /*host_blocks_to_allocate=*/8,
+      /*parallelism=*/1);
+  MockDisaggKVCacheManager decode(
+      /*num_layers=*/1, /*num_shards=*/1, /*slice_byte_size=*/1024,
+      /*block_size=*/1, /*local_port=*/0, /*host_blocks_to_allocate=*/8,
+      /*parallelism=*/1);
+
+  ASSERT_TRUE(prefill.Start().ok());
+  ASSERT_TRUE(decode.Start().ok());
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  prefill.RegisterPeer("decode", "127.0.0.1", decode.zmq_control_port(),
+                       decode.local_port().value());
+  decode.RegisterPeer("prefill", "127.0.0.1", prefill.zmq_control_port(),
+                      prefill.local_port().value());
+
+  absl::Notification prefill_done;
+  absl::Notification decode_done;
+
+  DisaggTransferRequest decode_req;
+  decode_req.uuid = 3002;
+  decode_req.type = DisaggTransferRequest::Type::kDecodeH2D;
+  decode_req.pull_mode = true;
+  decode_req.dst_offsets = {0, 2};  // staging blocks {0, 2}: non-contiguous
+  decode_req.sizes = {1, 1};
+  decode_req.peer = "prefill";
+  decode_req.callback = [&](std::optional<std::string> s) {
+    EXPECT_FALSE(s.has_value());
+    decode_done.Notify();
+  };
+  ASSERT_TRUE(decode.SubmitRequest(decode_req).ok());
+
+  DisaggTransferRequest prefill_req;
+  prefill_req.uuid = 3002;
+  prefill_req.type = DisaggTransferRequest::Type::kPrefillD2H;
+  prefill_req.pull_mode = true;
+  prefill_req.src_offsets = {4, 6};
+  prefill_req.dst_offsets = {0, 2};
+  prefill_req.sizes = {1, 1};
+  prefill_req.peer = "decode";
+  prefill_req.callback = [&](std::optional<std::string> s) {
+    EXPECT_FALSE(s.has_value());
+    prefill_done.Notify();
+  };
+  ASSERT_TRUE(prefill.SubmitRequest(prefill_req).ok());
+
+  EXPECT_TRUE(prefill_done.WaitForNotificationWithTimeout(absl::Seconds(5)));
+  EXPECT_TRUE(decode_done.WaitForNotificationWithTimeout(absl::Seconds(5)));
+
+  prefill.Stop();
+  decode.Stop();
+
+  EXPECT_TRUE(prefill.d2h_called());
+  EXPECT_TRUE(decode.h2d_called());
+}
+
 // -----------------------------------------------------------------------------
 // CPU-only unit tests that exercise individual base-class surfaces without
 // needing the full E2E push flow (and without PJRT). They use the same
@@ -206,7 +276,7 @@ namespace {
 std::unique_ptr<MockDisaggKVCacheManager> MakeMock() {
   return std::make_unique<MockDisaggKVCacheManager>(
       /*num_layers=*/1, /*num_shards=*/1, /*slice_byte_size=*/1024,
-      /*block_size=*/2, /*local_port=*/0, /*host_blocks_to_allocate=*/4,
+      /*block_size=*/1, /*local_port=*/0, /*host_blocks_to_allocate=*/4,
       /*parallelism=*/1);
 }
 }  // namespace
@@ -267,7 +337,7 @@ TEST(DisaggKVCacheManagerBaseTest, RepeatedStartStopCyclesAreSafe) {
 TEST(DisaggKVCacheManagerBaseTest, SubmitBeforeStartReturnsFailedPrecondition) {
   auto m = MakeMock();
   DisaggTransferRequest req;
-  req.request_id = 1;
+  req.uuid = 1;
   req.type = DisaggTransferRequest::Type::kDecodeH2D;
   req.dst_offsets = {0};
   req.sizes = {1};
@@ -281,7 +351,7 @@ TEST(DisaggKVCacheManagerBaseTest, SubmitAfterStopReturnsFailedPrecondition) {
   ASSERT_TRUE(m->Start().ok());
   m->Stop();
   DisaggTransferRequest req;
-  req.request_id = 2;
+  req.uuid = 2;
   req.type = DisaggTransferRequest::Type::kDecodeH2D;
   req.dst_offsets = {0};
   req.sizes = {1};
@@ -328,11 +398,11 @@ TEST(DisaggKVCacheManagerBaseTest, DecodeRequestPendsUntilPeerNotification) {
   ASSERT_TRUE(m->Start().ok());
   absl::Notification done;
   DisaggTransferRequest req;
-  req.request_id = 4242;
+  req.uuid = 4242;
   req.type = DisaggTransferRequest::Type::kDecodeH2D;
   req.dst_offsets = {0};
   req.sizes = {1};
-  req.callback = [&](absl::Status s) { done.Notify(); };
+  req.callback = [&](std::optional<std::string> s) { done.Notify(); };
   ASSERT_TRUE(m->SubmitRequest(req).ok());
   // Without a peer notification, the request stays pending.
   EXPECT_FALSE(done.WaitForNotificationWithTimeout(absl::Milliseconds(200)));

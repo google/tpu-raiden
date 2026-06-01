@@ -18,7 +18,9 @@
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -103,11 +105,18 @@ DisaggKVCacheManager::DisaggKVCacheManager(
 DisaggKVCacheManager::~DisaggKVCacheManager() = default;
 
 void DisaggKVCacheManager::InvokeCallback(
-    std::function<void(absl::Status)> callback, absl::Status status) {
+    std::function<void(std::optional<std::string>)> callback,
+    absl::Status status) {
   if (callback) {
     try {
       nanobind::gil_scoped_acquire gil;
-      callback(status);
+      // Pass None on success, the error message on failure. (We must not hand a
+      // non-OK absl::Status straight to the Python callable: the nanobind
+      // absl::Status caster raises instead of passing it, so the callback would
+      // never run on error.)
+      callback(status.ok() ? std::nullopt
+                           : std::optional<std::string>(
+                                 std::string(status.message())));
     } catch (const std::exception& e) {
       LOG(ERROR) << "Python callback invocation failed: " << e.what();
     }

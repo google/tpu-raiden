@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <string>
 #include <thread>
@@ -37,7 +38,15 @@ namespace kv_cache {
 struct DisaggTransferRequest {
   enum class Type { kPrefillD2H, kDecodeH2D, kH2HWrite, kH2HRead };
 
-  int64_t request_id;
+  // uuid: globally-unique key that pairs a producer's await_pull with the
+  //   matching consumer's pull during the handshake. Both sides must pass the
+  //   SAME uuid; it is the correlation id used for active_requests, the ZMQ
+  //   NOTIFY_READY / PULL_COMPLETE messages, and event routing.
+  // req_id: opaque caller bookkeeping tag (e.g. an inference request id) carried
+  //   through unchanged; NOT used for matching and never crosses the wire (each
+  //   side tags its own).
+  uint64_t uuid = 0;
+  int64_t req_id = 0;
   Type type;
 
   // Transfer direction for the H2H stage:
@@ -61,8 +70,18 @@ struct DisaggTransferRequest {
   std::vector<int> block_ids;
   int64_t entity_id = 0;
 
-  // Callback for completion
-  std::function<void(absl::Status)> callback;
+  // Internal (not exposed to callers): true when the manager allocated the
+  // producer-side host staging blocks for this request (the await_pull path,
+  // signalled by an empty dst_offsets on a pull kPrefillD2H). Drives the
+  // staging Unlock on kPullComplete so caller-supplied (un-locked) blocks on
+  // the low-level path are never unlocked.
+  bool owns_staging = false;
+
+  // Completion callback. The argument is std::nullopt on success, or the error
+  // message on failure (NOT absl::Status: the nanobind absl::Status caster
+  // raises on a non-OK status instead of passing it, which would prevent the
+  // Python callback from ever observing an error -- see InvokeCallback).
+  std::function<void(std::optional<std::string>)> callback;
 };
 
 template <typename T>
@@ -126,15 +145,19 @@ class DisaggKVCacheManagerBase : public KVCacheManagerBase {
       kPullComplete       // PULL: decode finished pulling (PULL_COMPLETE)
     };
     Type type;
-    int64_t request_id;
+    uint64_t uuid;
     absl::Status status;
 
     // For ExternalRequest
     DisaggTransferRequest request;
 
-    // For PeerNotification
+    // For PeerNotification / PullReady
     std::vector<int> block_ids;
     std::string peer_name;
+    // For PullReady: the producer's (expanded) src_offsets, carried in
+    // NOTIFY_READY so the consumer can validate it is pulling the source region
+    // its pull() asked for (identity check against the matching await_pull).
+    std::vector<int64_t> src_offsets;
   };
 
   // Thread loops
@@ -143,14 +166,25 @@ class DisaggKVCacheManagerBase : public KVCacheManagerBase {
   void H2hTransferLoop();
   void ListenerLoop();
 
+  // Producer-side (await_pull) staging auto-allocation. Given a request that
+  // carries only src_offsets + sizes (device source), allocates the host
+  // staging blocks via AllocateBlocks and rewrites the request into per-block
+  // form: src_offsets expanded in lockstep, dst_offsets = allocated_id *
+  // block_size_, sizes = block_size_, owns_staging = true. Mirrors
+  // KVCacheManagerBase::D2hAutoAllocate but feeds the disagg orchestration.
+  absl::Status AutoAllocateStaging(DisaggTransferRequest& req);
+
   // ZMQ helper
   absl::StatusOr<std::string> SendZmqMessage(const std::string& peer,
                                              const std::string& message);
   absl::Status SendZmqReply(const std::string& reply);
 
-  // Callback invoker to protect GIL in subclasses (JAX)
-  virtual void InvokeCallback(std::function<void(absl::Status)> callback,
-                              absl::Status status);
+  // Callback invoker to protect GIL in subclasses (JAX). Translates `status`
+  // into the callback's argument: std::nullopt on success, the error message
+  // on failure.
+  virtual void InvokeCallback(
+      std::function<void(std::optional<std::string>)> callback,
+      absl::Status status);
 
   // Queues
   ThreadSafeQueue<Event> orchestrator_queue_;

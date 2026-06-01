@@ -78,10 +78,95 @@ class DisaggKVCacheManager:
     """Manually registers peer control plane (ZMQ) and data plane (TCP) endpoints."""
     self._impl.register_peer(name, ip, zmq_port, transport_port)
 
-  def submit_request(
+  def await_pull(
       self,
-      request_id: int,
+      uuid: int,
+      req_id: int,
+      src_offsets: List[int],
+      sizes: List[int],
+      peer: str,
+      entity_id: int = 0,
+      callback: Optional[Callable[[Any], None]] = None,
+  ):
+    """Producer (prefill) side of a pull transfer.
+
+    Stages the source device data into manager-allocated host staging blocks and
+    waits for `peer` to pull them. The caller specifies ONLY the source device
+    region; the staging host buffer is allocated (and released) by the manager.
+
+    Args:
+      uuid: Globally-unique transfer key; must equal the consumer `pull()`'s
+        uuid. This is what the handshake uses to pair producer and consumer.
+      req_id: Opaque caller bookkeeping tag (e.g. an inference request id);
+        carried through unchanged and not used for matching.
+      src_offsets: Source offsets (major dim) of the device KV to stage. The
+        consumer's pull() must name the same source region (validated).
+      sizes: Copy sizes (major dim); each must be a multiple of `block_size`.
+      peer: Consumer engine name, registered via `register_peer` (bidirectional).
+      entity_id: Entity id passed to the staging allocator / transport.
+      callback: `cb(err)` invoked on completion (None on success).
+    """
+    self._submit(
+        uuid=uuid,
+        req_id=req_id,
+        req_type=DisaggTransferRequestType.PREFILL_D2H,
+        src_offsets=src_offsets,
+        dst_offsets=[],  # empty -> manager auto-allocates the staging blocks
+        sizes=sizes,
+        peer=peer,
+        entity_id=entity_id,
+        pull=True,
+        callback=callback,
+    )
+
+  def pull(
+      self,
+      uuid: int,
+      req_id: int,
+      src_offsets: List[int],
+      dst_offsets: List[int],
+      sizes: List[int],
+      peer: str,
+      entity_id: int = 0,
+      callback: Optional[Callable[[Any], None]] = None,
+  ):
+    """Consumer (decode) side of a pull transfer.
+
+    Pulls the producer's staged data into manager-allocated local host staging,
+    then writes it into the destination device offsets. The caller specifies the
+    source region (for identity validation against the producer) and the local
+    destination region; staging is allocated by the manager.
+
+    Args:
+      uuid: Globally-unique transfer key; must equal the producer
+        `await_pull()`'s uuid (the handshake match key).
+      req_id: Opaque caller bookkeeping tag; carried through, not used to match.
+      src_offsets: Source offsets (major dim) at the producer that this pull
+        expects; validated against the producer's await_pull (must match).
+      dst_offsets: Destination offsets (major dim) in the local device KV.
+      sizes: Copy sizes (major dim); each must be a multiple of `block_size`.
+      peer: Producer engine name, registered via `register_peer` (bidirectional).
+      entity_id: Entity id passed to the staging allocator / transport.
+      callback: `cb(err)` invoked on completion (None on success).
+    """
+    self._submit(
+        uuid=uuid,
+        req_id=req_id,
+        req_type=DisaggTransferRequestType.DECODE_H2D,
+        src_offsets=src_offsets,
+        dst_offsets=dst_offsets,
+        sizes=sizes,
+        peer=peer,
+        entity_id=entity_id,
+        pull=True,
+        callback=callback,
+    )
+
+  def _submit(
+      self,
+      uuid: int,
       req_type: Any,
+      req_id: int = 0,
       src_offsets: List[int] = [],
       dst_offsets: List[int] = [],
       sizes: List[int] = [],
@@ -91,26 +176,10 @@ class DisaggKVCacheManager:
       pull: bool = False,
       callback: Optional[Callable[[Any], None]] = None,
   ):
-    """Submits a disaggregated transfer request.
-
-    Args:
-      request_id: Globally unique identifier of this request.
-      req_type: Type of transfer (PREFILL_D2H, DECODE_H2D, H2H_WRITE, H2H_READ).
-      src_offsets: Source offsets major dimension (local memory).
-      dst_offsets: Target offsets major dimension (local/peer memory).
-      sizes: Copy sizes major dimension.
-      peer: Target peer name registered via `register_peer`.
-      block_ids: Block IDs list (host blocks).
-      entity_id: Entity ID (passed to TCP BlockTransport).
-      pull: If True, use PULL mode (decode pulls from prefill) instead of the
-        default PUSH mode (prefill pushes to decode). Both the prefill
-        (PREFILL_D2H) and decode (DECODE_H2D) requests of one transfer must set
-        this identically, and in pull mode both must set `peer` to the other
-        engine (registered on both sides).
-      callback: User Python callback `cb(err)` invoked upon completion.
-    """
+    """Low-level transfer submission. Internal: prefer await_pull() / pull()."""
     req = DisaggTransferRequest()
-    req.request_id = request_id
+    req.uuid = uuid
+    req.req_id = req_id
     req.type = req_type
     req.pull_mode = pull
     req.src_offsets = src_offsets

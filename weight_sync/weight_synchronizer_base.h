@@ -94,7 +94,7 @@ class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
 
   int GetRemoteReadBlockId(int base_remote_id, int chunk_k) override {
     // Symmetrical identity read maps E2E
-    return chunk_k;
+    return base_remote_id + chunk_k;
   }
 
   absl::Status OnDataReceived() override;
