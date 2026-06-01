@@ -287,7 +287,7 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
       return absl::InvalidArgumentError(
           "Requested remote block count is not divisible by shard_factor");
     }
-    BlockPacketHeader resp_header;
+    BlockPacketHeader resp_header = {};
     resp_header.op = 2;
     resp_header.remote_block_id = header.local_block_id;
     resp_header.local_block_id = 0;
@@ -534,7 +534,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
   int fd = status_or_fd.value();
   auto fd_cleaner = absl::MakeCleanup([fd] { close(fd); });
 
-  BlockPacketHeader header;
+  BlockPacketHeader header = {};
   header.op = 1;  // Push
   header.remote_block_id = 0;
   header.local_block_id = 0;
@@ -657,7 +657,7 @@ void BlockTransport::H2hReadWorker(
   size_t bytes_per_block = delegate_->bytes_per_block();
 
   for (const auto& chunk : chunks) {
-    BlockPacketHeader header;
+    BlockPacketHeader header = {};
     header.op = 2;  // Pull request
     int remote_read_block_id =
         delegate_->GetRemoteReadBlockId(chunk.base_remote_id, 0);
@@ -761,7 +761,7 @@ absl::Status BlockTransport::PullWeightsChunk(
   TF_ASSIGN_OR_RETURN(int fd, ConnectToPeer(source));
 
   // Send our customized resharding pull header (op = 3)
-  BlockPacketHeader header;
+  BlockPacketHeader header = {};
   header.op = 3;
   header.remote_block_id = static_cast<uint32_t>(src_offset_bytes);
   header.local_block_id = static_cast<uint32_t>(src_shard_idx);
