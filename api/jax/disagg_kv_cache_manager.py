@@ -115,7 +115,6 @@ class DisaggKVCacheManager:
         sizes=sizes,
         peer=peer,
         entity_id=entity_id,
-        pull=True,
         callback=callback,
     )
 
@@ -158,7 +157,6 @@ class DisaggKVCacheManager:
         sizes=sizes,
         peer=peer,
         entity_id=entity_id,
-        pull=True,
         callback=callback,
     )
 
@@ -173,7 +171,6 @@ class DisaggKVCacheManager:
       peer: str = "",
       block_ids: List[int] = [],
       entity_id: int = 0,
-      pull: bool = False,
       callback: Optional[Callable[[Any], None]] = None,
   ):
     """Low-level transfer submission. Internal: prefer await_pull() / pull()."""
@@ -181,7 +178,6 @@ class DisaggKVCacheManager:
     req.uuid = uuid
     req.req_id = req_id
     req.type = req_type
-    req.pull_mode = pull
     req.src_offsets = src_offsets
     req.dst_offsets = dst_offsets
     req.sizes = sizes
@@ -189,8 +185,8 @@ class DisaggKVCacheManager:
     req.block_ids = block_ids
     req.entity_id = entity_id
     if callback:
-      # nanobind automatically casts C++ absl::Status to None on success,
-      # or raises RuntimeError on non-OK status in Python.
+      # The callback receives None on success, or the error message string on
+      # failure (the C++ side passes std::optional<std::string>).
       req.callback = callback
     else:
       req.callback = lambda status: None

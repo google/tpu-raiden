@@ -72,68 +72,6 @@ class MockDisaggKVCacheManager : public DisaggKVCacheManagerBase {
   uint8_t dummy_host_buffer_[kDummyHostBufferSize] = {0};
 };
 
-TEST(DisaggKVCacheManagerBaseTest, E2EPushWorkflowMocked) {
-  MockDisaggKVCacheManager prefill(
-      /*num_layers=*/1, /*num_shards=*/1, /*slice_byte_size=*/1024,
-      /*block_size=*/1, /*local_port=*/0, /*host_blocks_to_allocate=*/4,
-      /*parallelism=*/1);
-
-  MockDisaggKVCacheManager decode(
-      /*num_layers=*/1, /*num_shards=*/1, /*slice_byte_size=*/1024,
-      /*block_size=*/1, /*local_port=*/0, /*host_blocks_to_allocate=*/4,
-      /*parallelism=*/1);
-
-  ASSERT_TRUE(prefill.Start().ok());
-  ASSERT_TRUE(decode.Start().ok());
-
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  int decode_zmq_port = decode.zmq_control_port();
-  int decode_trans_port = decode.local_port().value();
-
-  // Bootstrap peer registration
-  prefill.RegisterPeer("decode", "127.0.0.1", decode_zmq_port,
-                       decode_trans_port);
-
-  absl::Notification prefill_done;
-  absl::Notification decode_done;
-
-  // 1. Submit Decode H2D Receive Request
-  DisaggTransferRequest decode_req;
-  decode_req.uuid = 2001;
-  decode_req.type = DisaggTransferRequest::Type::kDecodeH2D;
-  decode_req.dst_offsets = {0, 1};  // block_size=1: each chunk is one block
-  decode_req.sizes = {1, 1};
-  decode_req.callback = [&](std::optional<std::string> s) {
-    EXPECT_FALSE(s.has_value());
-    decode_done.Notify();
-  };
-  ASSERT_TRUE(decode.SubmitRequest(decode_req).ok());
-
-  // 2. Submit Prefill D2H Send Request
-  DisaggTransferRequest prefill_req;
-  prefill_req.uuid = 2001;
-  prefill_req.type = DisaggTransferRequest::Type::kPrefillD2H;
-  prefill_req.src_offsets = {4, 5};
-  prefill_req.dst_offsets = {0, 1};
-  prefill_req.sizes = {1, 1};
-  prefill_req.peer = "decode";
-  prefill_req.callback = [&](std::optional<std::string> s) {
-    EXPECT_FALSE(s.has_value());
-    prefill_done.Notify();
-  };
-  ASSERT_TRUE(prefill.SubmitRequest(prefill_req).ok());
-
-  // Wait for both to complete successfully E2E!
-  EXPECT_TRUE(prefill_done.WaitForNotificationWithTimeout(absl::Seconds(5)));
-  EXPECT_TRUE(decode_done.WaitForNotificationWithTimeout(absl::Seconds(5)));
-
-  prefill.Stop();
-  decode.Stop();
-
-  EXPECT_TRUE(prefill.d2h_called());
-  EXPECT_TRUE(decode.h2d_called());
-}
-
 TEST(DisaggKVCacheManagerBaseTest, E2EPullWorkflowMocked) {
   // PULL mode: prefill stages (D2H) and advertises readiness; the decode pulls
   // the blocks (real H2H Read over loopback) then loads them (H2D). D2h/H2d are
@@ -165,7 +103,6 @@ TEST(DisaggKVCacheManagerBaseTest, E2EPullWorkflowMocked) {
   DisaggTransferRequest decode_req;
   decode_req.uuid = 3001;
   decode_req.type = DisaggTransferRequest::Type::kDecodeH2D;
-  decode_req.pull_mode = true;
   decode_req.dst_offsets = {0, 1};  // block_size=1: each chunk is one block
   decode_req.sizes = {1, 1};
   decode_req.peer = "prefill";
@@ -179,7 +116,6 @@ TEST(DisaggKVCacheManagerBaseTest, E2EPullWorkflowMocked) {
   DisaggTransferRequest prefill_req;
   prefill_req.uuid = 3001;
   prefill_req.type = DisaggTransferRequest::Type::kPrefillD2H;
-  prefill_req.pull_mode = true;
   prefill_req.src_offsets = {4, 5};
   prefill_req.dst_offsets = {0, 1};
   prefill_req.sizes = {1, 1};
@@ -232,7 +168,6 @@ TEST(DisaggKVCacheManagerBaseTest, E2EPullWorkflowNonContiguousMocked) {
   DisaggTransferRequest decode_req;
   decode_req.uuid = 3002;
   decode_req.type = DisaggTransferRequest::Type::kDecodeH2D;
-  decode_req.pull_mode = true;
   decode_req.dst_offsets = {0, 2};  // staging blocks {0, 2}: non-contiguous
   decode_req.sizes = {1, 1};
   decode_req.peer = "prefill";
@@ -245,7 +180,6 @@ TEST(DisaggKVCacheManagerBaseTest, E2EPullWorkflowNonContiguousMocked) {
   DisaggTransferRequest prefill_req;
   prefill_req.uuid = 3002;
   prefill_req.type = DisaggTransferRequest::Type::kPrefillD2H;
-  prefill_req.pull_mode = true;
   prefill_req.src_offsets = {4, 6};
   prefill_req.dst_offsets = {0, 2};
   prefill_req.sizes = {1, 1};
@@ -390,10 +324,10 @@ TEST(DisaggKVCacheManagerBaseTest, DestructorStopsRunningManager) {
   }
 }
 
-TEST(DisaggKVCacheManagerBaseTest, DecodeRequestPendsUntilPeerNotification) {
-  // Per the orchestrator contract, a DECODE_H2D request is queued and held
-  // pending the peer's NOTIFY_COMPLETE; it must NOT fire H2d on its own.
-  // (See OrchestrationLoop: "Waiting for peer notification to trigger H2D".)
+TEST(DisaggKVCacheManagerBaseTest, DecodeRequestPendsUntilPullReady) {
+  // Per the orchestrator contract, a DECODE_H2D (pull) request is queued and
+  // held pending the producer's NOTIFY_READY; it must NOT fire H2d on its own.
+  // (See OrchestrationLoop: "Waiting for NOTIFY_READY to trigger the pull".)
   auto m = MakeMock();
   ASSERT_TRUE(m->Start().ok());
   absl::Notification done;

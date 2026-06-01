@@ -84,8 +84,8 @@ class DisaggKVCacheManagerTest(parameterized.TestCase):
 
     The decode initiates the data movement: prefill stages (D2H) and advertises
     readiness via NOTIFY_READY, the decode pulls the blocks (H2H Read) then
-    loads them (H2D) and acks with PULL_COMPLETE. Pull needs BOTH directions
-    registered, and both requests set pull=True and peer=<other engine>.
+    loads them (H2D) and acks with PULL_COMPLETE. Needs BOTH directions
+    registered, and both sides pass the same uuid and peer=<other engine>.
     """
     tpu_sharding = self.setup_shardings()
     key = jax.random.key(404)

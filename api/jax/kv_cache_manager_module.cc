@@ -78,8 +78,6 @@ NB_MODULE(_kv_cache_manager, m) {
              tpu_raiden::kv_cache::DisaggTransferRequest::Type::kPrefillD2H)
       .value("DECODE_H2D",
              tpu_raiden::kv_cache::DisaggTransferRequest::Type::kDecodeH2D)
-      .value("H2H_WRITE",
-             tpu_raiden::kv_cache::DisaggTransferRequest::Type::kH2HWrite)
       .value("H2H_READ",
              tpu_raiden::kv_cache::DisaggTransferRequest::Type::kH2HRead);
 
@@ -89,8 +87,6 @@ NB_MODULE(_kv_cache_manager, m) {
       .def_rw("uuid", &tpu_raiden::kv_cache::DisaggTransferRequest::uuid)
       .def_rw("req_id", &tpu_raiden::kv_cache::DisaggTransferRequest::req_id)
       .def_rw("type", &tpu_raiden::kv_cache::DisaggTransferRequest::type)
-      .def_rw("pull_mode",
-              &tpu_raiden::kv_cache::DisaggTransferRequest::pull_mode)
       .def_rw("src_offsets",
               &tpu_raiden::kv_cache::DisaggTransferRequest::src_offsets)
       .def_rw("dst_offsets",

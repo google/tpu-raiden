@@ -44,31 +44,28 @@ class DisaggTransferRequestBindingTest(parameterized.TestCase):
 
   def test_default_construction(self):
     req = ext.DisaggTransferRequest()
-    self.assertEqual(req.request_id, 0)
+    self.assertEqual(req.uuid, 0)
+    self.assertEqual(req.req_id, 0)
     self.assertEqual(list(req.src_offsets), [])
     self.assertEqual(list(req.dst_offsets), [])
     self.assertEqual(list(req.sizes), [])
     self.assertEqual(list(req.block_ids), [])
     self.assertEqual(req.peer, "")
     self.assertEqual(req.entity_id, 0)
-    self.assertFalse(req.pull_mode)  # PUSH is the default
 
-  def test_pull_mode_round_trip(self):
+  def test_uuid_round_trip_large(self):
     req = ext.DisaggTransferRequest()
-    req.pull_mode = True
-    self.assertTrue(req.pull_mode)
-    req.pull_mode = False
-    self.assertFalse(req.pull_mode)
+    req.uuid = 2**63 + 1  # uuid is uint64
+    self.assertEqual(req.uuid, 2**63 + 1)
 
-  def test_request_id_round_trip_large(self):
+  def test_req_id_round_trip(self):
     req = ext.DisaggTransferRequest()
-    req.request_id = 2**62
-    self.assertEqual(req.request_id, 2**62)
+    req.req_id = 12345
+    self.assertEqual(req.req_id, 12345)
 
   @parameterized.named_parameters(
       ("prefill_d2h", "PREFILL_D2H"),
       ("decode_h2d", "DECODE_H2D"),
-      ("h2h_write", "H2H_WRITE"),
       ("h2h_read", "H2H_READ"),
   )
   def test_type_field_accepts_each_enum(self, name):
@@ -119,18 +116,15 @@ class DisaggTransferRequestTypeTest(absltest.TestCase):
 
   def test_all_members_present(self):
     members = {m for m in dir(ext.DisaggTransferRequestType) if m.isupper()}
-    self.assertEqual(
-        members, {"PREFILL_D2H", "DECODE_H2D", "H2H_WRITE", "H2H_READ"}
-    )
+    self.assertEqual(members, {"PREFILL_D2H", "DECODE_H2D", "H2H_READ"})
 
   def test_members_are_distinct(self):
     values = {
         ext.DisaggTransferRequestType.PREFILL_D2H,
         ext.DisaggTransferRequestType.DECODE_H2D,
-        ext.DisaggTransferRequestType.H2H_WRITE,
         ext.DisaggTransferRequestType.H2H_READ,
     }
-    self.assertLen(values, 4)
+    self.assertLen(values, 3)
 
   def test_member_equality(self):
     self.assertEqual(
