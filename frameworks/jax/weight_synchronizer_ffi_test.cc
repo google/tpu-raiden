@@ -71,7 +71,26 @@ class WeightSynchronizerFfiTest : public ::testing::Test {
   }
 };
 
-TEST_F(WeightSynchronizerFfiTest, TriggerWSInitSucceeds) {
+enum class FfiType { kInit, kInitAndD2h };
+
+class WeightSynchronizerFfiParamTest : public WeightSynchronizerFfiTest,
+                                       public ::testing::WithParamInterface<FfiType> {
+ protected:
+  xla::ffi::Error CallInit(xla::ffi::AnyBuffer x, xla::ffi::AnyBuffer shard_idx_buf,
+                            int64_t slice_byte_size, int32_t local_port,
+                            int32_t parallelism, int32_t num_layers,
+                            xla::ffi::Result<xla::ffi::AnyBuffer> out) {
+    if (GetParam() == FfiType::kInit) {
+      return TriggerWeightSynchronizerInitImpl(x, shard_idx_buf, slice_byte_size,
+                                                local_port, parallelism, num_layers, out);
+    } else {
+      return TriggerWeightSynchronizerInitAndD2hImpl(x, shard_idx_buf, slice_byte_size,
+                                                      local_port, parallelism, num_layers, out);
+    }
+  }
+};
+
+TEST_P(WeightSynchronizerFfiParamTest, TriggerWSInitSucceeds) {
   int32_t shard_idx = 0;
   FfiBufferFixture shard_idx_fixture(XLA_FFI_DataType_S32, &shard_idx, {1});
 
@@ -91,7 +110,7 @@ TEST_F(WeightSynchronizerFfiTest, TriggerWSInitSucceeds) {
   FfiBufferFixture out_fixture(XLA_FFI_DataType_S32, out_data.data(), {5});
   xla::ffi::Result<xla::ffi::AnyBuffer> out = out_fixture.AsAnyBuffer();
 
-  xla::ffi::Error err = TriggerWeightSynchronizerInitImpl(
+  xla::ffi::Error err = CallInit(
       x, shard_idx_buf, slice_byte_size, local_port, parallelism, num_layers,
       out);
 
@@ -106,7 +125,7 @@ TEST_F(WeightSynchronizerFfiTest, TriggerWSInitSucceeds) {
   VLOG(1) << "Assigned port: " << port;
 }
 
-TEST_F(WeightSynchronizerFfiTest, TriggerExecuteReshardingDMAOrchestration) {
+TEST_P(WeightSynchronizerFfiParamTest, TriggerExecuteReshardingDMAOrchestration) {
   int64_t slice_byte_size = 1024;
   int32_t parallelism = 1;
   int32_t num_layers = 1;
@@ -119,7 +138,7 @@ TEST_F(WeightSynchronizerFfiTest, TriggerExecuteReshardingDMAOrchestration) {
   std::vector<int32_t> out_data_0(5, 0);
   FfiBufferFixture out_0_fixture(XLA_FFI_DataType_S32, out_data_0.data(), {5});
 
-  xla::ffi::Error init_err_0 = TriggerWeightSynchronizerInitImpl(
+  xla::ffi::Error init_err_0 = CallInit(
       anchor_0_fixture.AsAnyBuffer(), shard_idx_0_fixture.AsAnyBuffer(),
       slice_byte_size, /*local_port=*/0, parallelism, num_layers,
       out_0_fixture.AsAnyBuffer());
@@ -136,7 +155,7 @@ TEST_F(WeightSynchronizerFfiTest, TriggerExecuteReshardingDMAOrchestration) {
   std::vector<int32_t> out_data_1(5, 0);
   FfiBufferFixture out_1_fixture(XLA_FFI_DataType_S32, out_data_1.data(), {5});
 
-  xla::ffi::Error init_err_1 = TriggerWeightSynchronizerInitImpl(
+  xla::ffi::Error init_err_1 = CallInit(
       anchor_1_fixture.AsAnyBuffer(), shard_idx_1_fixture.AsAnyBuffer(),
       slice_byte_size, /*local_port=*/0, parallelism, num_layers,
       out_1_fixture.AsAnyBuffer());
@@ -206,6 +225,9 @@ TEST_F(WeightSynchronizerFfiTest, TriggerExecuteReshardingDMAOrchestration) {
         << "Mismatch at index " << i;
   }
 }
+
+INSTANTIATE_TEST_SUITE_P(FfiTypeTests, WeightSynchronizerFfiParamTest,
+                         ::testing::Values(FfiType::kInit, FfiType::kInitAndD2h));
 
 }  // namespace
 }  // namespace weight_sync

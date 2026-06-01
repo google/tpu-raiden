@@ -65,30 +65,44 @@ def init_weight_synchronizer(
   )(device_array, shard_idx)
 
 
-def weight_synchronizer_d2h(
-    device_array: jax.Array,
-    shard_idx: jax.Array,
-    mesh: jax.sharding.Mesh,
+def init_weight_synchronizer_and_d2h(
+    device_array,
+    shard_idx,
+    mesh,
+    slice_byte_size: int = 0,
+    local_port: int = 0,
+    parallelism: int = 1,
+    num_layers: int = 1,
 ) -> jax.Array:
-  """Calls weight_synchronizer_d2h FFI."""
+  """Registers and executes init_weight_synchronizer_and_d2h FFI custom call."""
 
   @compute_on.compute_on("device_host")
-  def _local_d2h(anchor, s_idx):
+  def _local_init_and_d2h(anchor, s_idx):
+    axis_names = mesh.axis_names
+    out_shape = tuple([1] * len(axis_names)) + (5,)
     return jax.ffi.ffi_call(
-        "weight_synchronizer_d2h",
-        jax.ShapeDtypeStruct((), jnp.int32),
+        "init_weight_synchronizer_and_d2h",
+        jax.ShapeDtypeStruct(out_shape, jnp.int32),
         has_side_effect=True,
-    )(anchor, s_idx)
+    )(
+        anchor,
+        s_idx,
+        slice_byte_size=slice_byte_size,
+        local_port=np.int32(local_port),
+        parallelism=np.int32(parallelism),
+        num_layers=np.int32(num_layers),
+    )
 
   axis_names = mesh.axis_names
   anchor_spec = device_array.sharding.spec
   index_spec = jax.sharding.PartitionSpec(*axis_names)
+  out_spec = jax.sharding.PartitionSpec(*axis_names, None)
 
   return jax.shard_map(
-      _local_d2h,
+      _local_init_and_d2h,
       mesh=mesh,
       in_specs=(anchor_spec, index_spec),
-      out_specs=jax.sharding.PartitionSpec(),
+      out_specs=out_spec,
   )(device_array, shard_idx)
 
 

@@ -70,19 +70,13 @@ def prepare_reshard(src_sharded_array: jax.Array) -> str:
 
   src_slice_byte_size = src_sharded_array.addressable_shards[0].data.nbytes
 
-  src_ws_info = raiden_ffi.init_weight_synchronizer(
+  src_ws_info = raiden_ffi.init_weight_synchronizer_and_d2h(
       device_array=src_sharded_array,
       shard_idx=src_shard_idx,
       mesh=src_mesh,
       slice_byte_size=src_slice_byte_size,
       parallelism=1,
       num_layers=1,
-  )
-
-  raiden_ffi.weight_synchronizer_d2h(
-      device_array=src_sharded_array,
-      shard_idx=src_shard_idx,
-      mesh=src_mesh,
   )
 
   local_src_ws_info = multihost_utils.global_array_to_host_local_array(

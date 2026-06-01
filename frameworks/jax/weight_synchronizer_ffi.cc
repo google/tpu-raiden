@@ -31,7 +31,9 @@
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
 #include "xla/ffi/api/ffi.h"
+#include "xla/stream_executor/device_address.h"
 #include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/platform_manager.h"
 #include "xla/stream_executor/stream.h"
@@ -60,7 +62,7 @@ xla::ffi::Error TriggerWeightSynchronizerInitImpl(
   if (shard_idx < 0 || shard_idx >= 32) {
     return xla::ffi::Error(
         xla::ffi::ErrorCode::kInvalidArgument,
-        "shard_idx out of bounds [0, 32): " + std::to_string(shard_idx));
+        absl::StrCat("shard_idx out of bounds [0, 32): ", shard_idx));
   }
 
   if (g_weight_synchronizers[shard_idx] == nullptr) {
@@ -167,54 +169,147 @@ xla::ffi::Error TriggerWeightSynchronizerInitImpl(
   return xla::ffi::Error::Success();
 }
 
-// FFI execution handler for WeightSynchronizer D2H (Host CPU Executed)
-xla::ffi::Error TriggerWeightSynchronizerD2hImpl(
-    xla::ffi::AnyBuffer anchor, xla::ffi::AnyBuffer shard_idx_buf,
-    xla::ffi::Result<xla::ffi::AnyBuffer> out) {
-  (void)out;
-
-  const int32_t* p_shard_idx =
-      reinterpret_cast<const int32_t*>(shard_idx_buf.untyped_data());
-  int32_t shard_idx = *p_shard_idx;
-
-  if (shard_idx < 0 || shard_idx >= 32) {
+// FFI execution handler for WeightSynchronizer Init and D2H (Host CPU Executed)
+xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
+    xla::ffi::AnyBuffer x, xla::ffi::AnyBuffer shard_idx_buf,
+    int64_t slice_byte_size, int32_t local_port, int32_t parallelism,
+    int32_t num_layers, xla::ffi::Result<xla::ffi::AnyBuffer> out) {
+  // --- Init Part ---
+  if (shard_idx_buf.untyped_data() == nullptr) {
     return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
-                           "Invalid shard_idx");
+                           "shard_idx_buf has null untyped data.");
+  }
+  int32_t shard_idx =
+      *reinterpret_cast<const int32_t*>(shard_idx_buf.untyped_data());
+  if (shard_idx < 0 || shard_idx >= 32) {
+    return xla::ffi::Error(
+        xla::ffi::ErrorCode::kInvalidArgument,
+        absl::StrCat("shard_idx out of bounds [0, 32): ", shard_idx));
   }
 
   if (g_weight_synchronizers[shard_idx] == nullptr) {
-    return xla::ffi::Error(xla::ffi::ErrorCode::kFailedPrecondition,
-                           "WeightSynchronizer not initialized for shard.");
+    VLOG(1)
+        << "[TPU Worker FFI] >>> WS LAZY INITIALIZATION TRIGGERED <<< Shard: "
+        << shard_idx;
+
+    g_weight_synchronizers[shard_idx] = new tpu_raiden::jax::WeightSynchronizer(
+        static_cast<size_t>(num_layers), static_cast<size_t>(parallelism),
+        static_cast<size_t>(slice_byte_size), std::make_optional(local_port),
+        std::nullopt,  // host_blocks_to_allocate
+        parallelism);
+
+    int64_t dev_id = static_cast<int64_t>(shard_idx);
+    auto platform_or =
+        stream_executor::PlatformManager::PlatformWithName("TPU");
+    if (!platform_or.ok()) {
+      platform_or =
+          stream_executor::PlatformManager::PlatformWithName("Deepsea");
+    }
+    if (!platform_or.ok()) {
+      platform_or = stream_executor::PlatformManager::PlatformWithName("Host");
+    }
+    if (!platform_or.ok()) {
+      std::cerr << "[C++ FFI] Failed to resolve platform, skipping stream init "
+                   "for CPU test."
+                << std::endl;
+    } else {
+      auto platform = platform_or.value();
+      auto executor_or = platform->ExecutorForDevice(dev_id);
+      if (!executor_or.ok()) {
+        return xla::ffi::Error(
+            xla::ffi::ErrorCode::kInternal,
+            "Failed to retrieve StreamExecutor for device: " +
+                std::string(executor_or.status().message()));
+      }
+      auto executor = executor_or.value();
+      auto stream_or = executor->CreateStream();
+      if (!stream_or.ok()) {
+        return xla::ffi::Error(xla::ffi::ErrorCode::kInternal,
+                               "Failed to allocate execution Stream: " +
+                                   std::string(stream_or.status().message()));
+      }
+      g_streams[shard_idx] = std::move(stream_or.value());
+    }
   }
 
+  // --- Extract IP/Port Part ---
+  auto port_opt = g_weight_synchronizers[shard_idx]->local_port();
+  if (!port_opt.has_value()) {
+    return xla::ffi::Error(xla::ffi::ErrorCode::kInternal,
+                           "WS has no local port assigned.");
+  }
+  int32_t port = port_opt.value();
+
+  uint8_t ipv6[16] = {0};
+  struct ifaddrs *ifaddr, *ifa;
+  bool found = false;
+  if (getifaddrs(&ifaddr) == 0) {
+    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+      if (ifa->ifa_addr == nullptr) continue;
+      if (ifa->ifa_addr->sa_family == AF_INET6) {
+        struct sockaddr_in6* ipv6_addr =
+            reinterpret_cast<struct sockaddr_in6*>(ifa->ifa_addr);
+        if (std::strcmp(ifa->ifa_name, "lo") != 0) {
+          std::memcpy(ipv6, &ipv6_addr->sin6_addr, 16);
+          found = true;
+          break;
+        }
+      }
+    }
+    if (!found) {
+      for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == nullptr) continue;
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+          struct sockaddr_in* ipv4 =
+              reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
+          if (std::strcmp(ifa->ifa_name, "lo") != 0) {
+            ipv6[10] = 0xff;
+            ipv6[11] = 0xff;
+            std::memcpy(ipv6 + 12, &ipv4->sin_addr.s_addr, 4);
+            found = true;
+            break;
+          }
+        }
+      }
+    }
+    freeifaddrs(ifaddr);
+  }
+
+  if (out->element_count() < 5) {
+    return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
+                           "Output buffer too small for IPv6 and port.");
+  }
+  int32_t* out_ptr = reinterpret_cast<int32_t*>(out->untyped_data());
+  std::memcpy(out_ptr, ipv6, 16);
+  out_ptr[4] = port;
+
+  // --- D2H Part ---
   size_t size = g_weight_synchronizers[shard_idx]->slice_byte_size();
   uint8_t* dst_host_ptr = const_cast<uint8_t*>(
       g_weight_synchronizers[shard_idx]->GetHostBufferPtr(0, 0));
   const uint8_t* src_device_ptr =
-      reinterpret_cast<const uint8_t*>(anchor.untyped_data());
+      reinterpret_cast<const uint8_t*>(x.untyped_data());
 
   if (g_streams[shard_idx] == nullptr) {
     std::memcpy(dst_host_ptr, src_device_ptr, size);
-    return xla::ffi::Error::Success();
-  }
+  } else {
+    stream_executor::Stream* stream = g_streams[shard_idx].get();
+    stream_executor::DeviceAddressBase device_src(
+        const_cast<uint8_t*>(src_device_ptr), size);
 
-  stream_executor::Stream* stream = g_streams[shard_idx].get();
+    absl::Status status = stream->Memcpy(dst_host_ptr, device_src, size);
+    if (!status.ok()) {
+      return xla::ffi::Error(
+          xla::ffi::ErrorCode::kInternal,
+          "D2H Memcpy failed: " + std::string(status.message()));
+    }
 
-  stream_executor::DeviceAddressBase device_src(
-      const_cast<uint8_t*>(src_device_ptr), size);
-
-  absl::Status status = stream->Memcpy(dst_host_ptr, device_src, size);
-  if (!status.ok()) {
-    return xla::ffi::Error(
-        xla::ffi::ErrorCode::kInternal,
-        "D2H Memcpy failed: " + std::string(status.message()));
-  }
-
-  absl::Status sync_status = stream->BlockHostUntilDone();
-  if (!sync_status.ok()) {
-    return xla::ffi::Error(
-        xla::ffi::ErrorCode::kInternal,
-        "Stream sync failed: " + std::string(sync_status.message()));
+    absl::Status sync_status = stream->BlockHostUntilDone();
+    if (!sync_status.ok()) {
+      return xla::ffi::Error(
+          xla::ffi::ErrorCode::kInternal,
+          "Stream sync failed: " + std::string(sync_status.message()));
+    }
   }
 
   return xla::ffi::Error::Success();
@@ -356,6 +451,17 @@ XLA_FFI_DEFINE_HANDLER(
         .Ret<xla::ffi::AnyBuffer>());  // return result buffer
 
 XLA_FFI_DEFINE_HANDLER(
+    kWSInitWeightSynchronizerAndD2h, TriggerWeightSynchronizerInitAndD2hImpl,
+    xla::ffi::Ffi::Bind()
+        .Arg<xla::ffi::AnyBuffer>()  // anchor JAX input array (Arg 0)
+        .Arg<xla::ffi::AnyBuffer>()  // shard_idx JAX input array (Arg 1)
+        .Attr<int64_t>("slice_byte_size")
+        .Attr<int32_t>("local_port")
+        .Attr<int32_t>("parallelism")
+        .Attr<int32_t>("num_layers")
+        .Ret<xla::ffi::AnyBuffer>());  // return result buffer
+
+XLA_FFI_DEFINE_HANDLER(
     kExecuteResharding, TriggerExecuteReshardingImpl,
     xla::ffi::Ffi::Bind()
         .Arg<xla::ffi::AnyBuffer>()  // anchor
@@ -369,22 +475,19 @@ XLA_FFI_DEFINE_HANDLER(
         .Ret<xla::ffi::AnyBuffer>()  // result (aliased to anchor)
 );
 
-XLA_FFI_DEFINE_HANDLER(kWeightSynchronizerD2h, TriggerWeightSynchronizerD2hImpl,
-                       xla::ffi::Ffi::Bind()
-                           .Arg<xla::ffi::AnyBuffer>()  // anchor
-                           .Arg<xla::ffi::AnyBuffer>()  // shard_idx_buf
-                           .Ret<xla::ffi::AnyBuffer>()  // dummy result
-);
 
-XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "weight_synchronizer_d2h",
-                         "Host", kWeightSynchronizerD2h);
-XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "weight_synchronizer_d2h",
-                         "TPU", kWeightSynchronizerD2h);
 
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "init_weight_synchronizer",
                          "Host", kWSInit);
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "init_weight_synchronizer",
                          "TPU", kWSInit);
+
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(),
+                         "init_weight_synchronizer_and_d2h", "Host",
+                         kWSInitWeightSynchronizerAndD2h);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(),
+                         "init_weight_synchronizer_and_d2h", "TPU",
+                         kWSInitWeightSynchronizerAndD2h);
 
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "execute_resharding", "Host",
                          kExecuteResharding);
