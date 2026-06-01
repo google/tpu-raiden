@@ -94,8 +94,8 @@ TEST_P(WeightSynchronizerFfiParamTest, TriggerWSInitSucceeds) {
   int32_t shard_idx = 0;
   FfiBufferFixture shard_idx_fixture(XLA_FFI_DataType_S32, &shard_idx, {1});
 
-  int32_t anchor = 0;
-  FfiBufferFixture anchor_fixture(XLA_FFI_DataType_S32, &anchor, {1});
+  std::vector<int32_t> anchor(256, 0);
+  FfiBufferFixture anchor_fixture(XLA_FFI_DataType_S32, anchor.data(), {256});
 
   xla::ffi::AnyBuffer x = anchor_fixture.AsAnyBuffer();
   xla::ffi::AnyBuffer shard_idx_buf = shard_idx_fixture.AsAnyBuffer();
@@ -133,8 +133,9 @@ TEST_P(WeightSynchronizerFfiParamTest, TriggerExecuteReshardingDMAOrchestration)
   // 1. Initialize Source Synchronizer (Shard 0)
   int32_t shard_idx_0 = 0;
   FfiBufferFixture shard_idx_0_fixture(XLA_FFI_DataType_S32, &shard_idx_0, {1});
-  int32_t anchor_0 = 0;
-  FfiBufferFixture anchor_0_fixture(XLA_FFI_DataType_S32, &anchor_0, {1});
+  std::vector<int32_t> anchor_0(256, 0);
+  FfiBufferFixture anchor_0_fixture(XLA_FFI_DataType_S32, anchor_0.data(),
+                                    {256});
   std::vector<int32_t> out_data_0(5, 0);
   FfiBufferFixture out_0_fixture(XLA_FFI_DataType_S32, out_data_0.data(), {5});
 
@@ -150,8 +151,9 @@ TEST_P(WeightSynchronizerFfiParamTest, TriggerExecuteReshardingDMAOrchestration)
   // 2. Initialize Destination Synchronizer (Shard 1)
   int32_t shard_idx_1 = 1;
   FfiBufferFixture shard_idx_1_fixture(XLA_FFI_DataType_S32, &shard_idx_1, {1});
-  int32_t anchor_1 = 0;
-  FfiBufferFixture anchor_1_fixture(XLA_FFI_DataType_S32, &anchor_1, {1});
+  std::vector<int32_t> anchor_1(256, 0);
+  FfiBufferFixture anchor_1_fixture(XLA_FFI_DataType_S32, anchor_1.data(),
+                                    {256});
   std::vector<int32_t> out_data_1(5, 0);
   FfiBufferFixture out_1_fixture(XLA_FFI_DataType_S32, out_data_1.data(), {5});
 

@@ -210,6 +210,7 @@ cc_library(
         ":weight_synchronizer_jax",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
         "@xla//xla/ffi/api:ffi",
         "@xla//xla/stream_executor:device_address",
         "@xla//xla/stream_executor:platform",

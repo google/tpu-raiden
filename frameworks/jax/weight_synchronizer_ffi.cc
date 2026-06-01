@@ -354,8 +354,7 @@ xla::ffi::Error TriggerExecuteReshardingImpl(
   const int32_t* p_dst_shard_indices =
       reinterpret_cast<const int32_t*>(dst_shard_indices.untyped_data());
 
-  std::memcpy(out->untyped_data(), anchor.untyped_data(),
-              anchor.element_count() * 4);
+  std::memcpy(out->untyped_data(), anchor.untyped_data(), anchor.size_bytes());
 
   for (int64_t i = 0; i < num_chunks; ++i) {
     int32_t dst_device_id = p_dst_shard_indices[i];
