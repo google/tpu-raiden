@@ -300,6 +300,8 @@ cc_library(
     hdrs = [
         "mock_nanobind.h",
     ],
+    copts = ["-fexceptions"],
+    features = ["-use_header_modules"],
     visibility = ["//visibility:private"],
 )
 
@@ -326,6 +328,7 @@ nanobind_extension(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
         "@nanobind",
+        "@xla//xla:future",
         "@xla//xla:shape_util",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:status_casters",
@@ -423,6 +426,7 @@ cc_library(
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+        "@xla//xla/ffi/api:c_api",
         "@xla//xla/ffi/api:ffi",
         "@xla//xla/stream_executor:device_address",
         "@xla//xla/stream_executor:platform",
@@ -470,6 +474,7 @@ cc_library(
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
+        "@xla//xla:future",
         "@xla//xla:shape_util",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:status_casters",

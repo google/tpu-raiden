@@ -29,9 +29,11 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
+#include "core/raw_transfer_core.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
@@ -275,7 +277,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
     }
   }
 
-  raiden::PjRtCopyFuture acc({});
+  std::vector<xla::Future<raiden::BufferHolder>> shard_futures_to_join;
   for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
     const auto& layer_info = layers_[layer_idx];
     const auto& layer_holds = buffer_holds_[layer_idx];
@@ -313,10 +315,11 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
           shard_futures.push_back(std::move(future));
         }
       }
-      acc.Append(std::move(shard_futures), shard_hold);
+      shard_futures_to_join.push_back(raiden::CreateBufferFuture(
+          std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
     }
   }
-  return acc;
+  return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::DispatchD2hChunks(
@@ -324,7 +327,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::DispatchD2hChunks(
     const std::vector<int64_t>& dst_offsets,
     const std::vector<int64_t>& copy_sizes, int64_t device_id) {
   bool is_partial = !src_offsets.empty();
-  raiden::PjRtCopyFuture acc({});
+  std::vector<xla::Future<raiden::BufferHolder>> shard_futures_to_join;
 
   for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
     const auto& layer_info = layers_[layer_idx];
@@ -372,10 +375,11 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::DispatchD2hChunks(
           shard_futures.push_back(std::move(future));
         }
       }
-      acc.Append(std::move(shard_futures), shard_hold);
+      shard_futures_to_join.push_back(raiden::CreateBufferFuture(
+          std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
     }
   }
-  return acc;
+  return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2h(
@@ -452,7 +456,9 @@ KVCacheManagerBase::H2hWrite(std::string peer,
                              int64_t entity_id) {
   TF_ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
                       H2hWriteDirect(peer, src_block_ids, entity_id));
-  return std::make_pair(allocated_ids, raiden::PjRtCopyFuture({}));
+  return std::make_pair(
+      allocated_ids,
+      raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{}));
 }
 
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
@@ -461,7 +467,9 @@ KVCacheManagerBase::H2hRead(std::string peer,
                             int64_t entity_id) {
   TF_ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
                       H2hReadDirect(peer, src_block_ids, entity_id));
-  return std::make_pair(allocated_ids, raiden::PjRtCopyFuture({}));
+  return std::make_pair(
+      allocated_ids,
+      raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{}));
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2hReadExplicit(
@@ -474,7 +482,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2hReadExplicit(
   TF_ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
                       server_->Pull(peer, src_block_ids, local_block_ids,
                                     explicit_dst_ptrs, parallelism_));
-  return raiden::PjRtCopyFuture({});
+  return raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{});
 }
 
 void KVCacheManagerBase::SetExternalHostBuffer(
@@ -597,7 +605,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dDirect(
     }
   }
 
-  raiden::PjRtCopyFuture acc({});
+  std::vector<xla::Future<raiden::BufferHolder>> shard_futures_to_join;
   for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
     const auto& layer_info = layers_[layer_idx];
     const auto& layer_holds = buffer_holds_[layer_idx];
@@ -645,10 +653,11 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dDirect(
           shard_futures.push_back(std::move(future));
         }
       }
-      acc.Append(std::move(shard_futures), shard_hold);
+      shard_futures_to_join.push_back(raiden::CreateBufferFuture(
+          std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
     }
   }
-  return acc;
+  return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hDirect(
@@ -707,9 +716,10 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hTo(
     }
   }
 
-  raiden::PjRtCopyFuture future({});
-  future.Append(std::move(futures), shard_hold);
-  return future;
+  std::vector<xla::Future<raiden::BufferHolder>> shard_futures_to_join = {
+      raiden::CreateBufferFuture(std::move(futures), shard_hold.c_hold,
+                                 shard_hold.common_hold)};
+  return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dFrom(
@@ -761,9 +771,10 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dFrom(
     }
   }
 
-  raiden::PjRtCopyFuture future({});
-  future.Append(std::move(futures), shard_hold);
-  return future;
+  std::vector<xla::Future<raiden::BufferHolder>> shard_futures_to_join = {
+      raiden::CreateBufferFuture(std::move(futures), shard_hold.c_hold,
+                                 shard_hold.common_hold)};
+  return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
 }
 
 absl::Status KVCacheManagerBase::ConfigureHostStagingSlots(

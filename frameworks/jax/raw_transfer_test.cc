@@ -116,7 +116,7 @@ TEST_F(RawTransferTest, TestTransferD2HAsync) {
                           transfer_d2h_async(src_arr, dst_arr));
 
   // Wait
-  future.Await();
+  ASSERT_OK(future.Await().status());
 
   // Verify data
   EXPECT_EQ(dst_data, src_data);
@@ -154,7 +154,7 @@ TEST_F(RawTransferTest, TestTransferH2DAsync) {
                           transfer_h2d_async(src_arr, dst_arr));
 
   // Wait
-  future.Await();
+  ASSERT_OK(future.Await().status());
 
   // Verify data by reading back from PJRT buffer
   std::vector<uint8_t> dst_data(kSize, 0);
@@ -207,7 +207,7 @@ TEST_F(RawTransferTest, TestTransferD2HBatchAsync) {
                           transfer_d2h_batch_async(src_arrs, dst_arrs));
 
   // Wait
-  future.Await();
+  ASSERT_OK(future.Await().status());
 
   // Verify all
   for (size_t b = 0; b < kBatch; ++b) {
@@ -259,7 +259,7 @@ TEST_F(RawTransferTest, TestTransferH2DBatchAsync) {
                           transfer_h2d_batch_async(src_arrs, dst_arrs));
 
   // Wait
-  future.Await();
+  ASSERT_OK(future.Await().status());
 
   // Verify all by reading back
   for (size_t b = 0; b < kBatch; ++b) {

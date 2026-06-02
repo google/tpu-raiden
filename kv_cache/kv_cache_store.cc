@@ -130,7 +130,7 @@ KVCacheStore::LookupAndFetch(const std::vector<uint64_t>& block_hashes,
   }
 
   std::vector<bool> hits(num_chunks, false);
-  raiden::PjRtCopyFuture acc({});
+  std::vector<raiden::PjRtCopyFuture> futures_to_join;
 
   {
     absl::MutexLock lock(&mutex_);
@@ -149,7 +149,7 @@ KVCacheStore::LookupAndFetch(const std::vector<uint64_t>& block_hashes,
     uint64_t hash = block_hashes[i];
     std::shared_ptr<std::vector<std::vector<uint8_t>>> host_buffers;
     std::vector<int> host_block_ids;
-    std::shared_ptr<raiden::PjRtCopyFuture> insert_future;
+    raiden::PjRtCopyFuture insert_future;
 
     {
       absl::MutexLock lock(&mutex_);
@@ -165,8 +165,8 @@ KVCacheStore::LookupAndFetch(const std::vector<uint64_t>& block_hashes,
     }
 
     if (hits[i]) {
-      if (insert_future) {
-        insert_future->Await();
+      if (insert_future.IsValid()) {
+        (void)insert_future.Await();
       }
       int needed = copy_sizes_major_dim[i] / block_size_;
       if (host_block_ids.size() < needed) {
@@ -202,7 +202,7 @@ KVCacheStore::LookupAndFetch(const std::vector<uint64_t>& block_hashes,
       if (!fut_or.ok()) {
         return fut_or.status();
       }
-      acc.Append(std::move(fut_or.value()));
+      futures_to_join.push_back(std::move(fut_or.value()));
     } else {
       miss_index = i;
       break;
@@ -210,13 +210,14 @@ KVCacheStore::LookupAndFetch(const std::vector<uint64_t>& block_hashes,
   }
 
   if (miss_index == 0 && num_chunks > 0 && registry_client_) {
-    RETURN_IF_ERROR(LookupAndFetchRemote(block_hashes, manager,
-                                         dst_offsets_major_dim,
-                                         copy_sizes_major_dim, hits, acc));
+    RETURN_IF_ERROR(
+        LookupAndFetchRemote(block_hashes, manager, dst_offsets_major_dim,
+                             copy_sizes_major_dim, hits, futures_to_join));
   }
 
-  return std::pair<std::vector<bool>, raiden::PjRtCopyFuture>{std::move(hits),
-                                                              std::move(acc)};
+  return std::pair<std::vector<bool>, raiden::PjRtCopyFuture>{
+      std::move(hits), raiden::FlattenPjRtFutures(
+                           xla::JoinFutures(absl::MakeSpan(futures_to_join)))};
 }
 
 absl::Status KVCacheStore::Insert(
@@ -284,9 +285,7 @@ absl::Status KVCacheStore::Insert(
     return fut_or.status();
   }
 
-  auto [dummy_block_ids, future] = fut_or.value();
-  auto insert_future =
-      std::make_shared<raiden::PjRtCopyFuture>(std::move(future));
+  auto [dummy_block_ids, insert_future] = std::move(fut_or).value();
 
   size_t block_idx = 0;
   for (size_t i = 0; i < num_chunks; ++i) {
@@ -348,7 +347,7 @@ absl::Status KVCacheStore::LookupAndFetchRemote(
     const std::vector<uint64_t>& block_hashes, KVCacheManagerBase& manager,
     const std::vector<int>& dst_offsets_major_dim,
     const std::vector<int>& copy_sizes_major_dim, std::vector<bool>& hits,
-    raiden::PjRtCopyFuture& acc) {
+    std::vector<raiden::PjRtCopyFuture>& futures_to_join) {
   size_t num_chunks = block_hashes.size();
   std::vector<std::string> remaining_hashes;
   remaining_hashes.reserve(num_chunks);
@@ -449,22 +448,33 @@ absl::Status KVCacheStore::LookupAndFetchRemote(
           static_cast<int64_t>(dst_offsets_major_dim[chunk_idx])};
       copy_spec.sizes = {static_cast<int64_t>(needed)};
 
-      raiden::PjRtCopyFuture chunk_h2d_future({});
+      std::vector<raiden::PjRtCopyFuture> shard_futures;
       for (size_t l = 0; l < num_layers_; ++l) {
         for (size_t sh = 0; sh < num_shards_; ++sh) {
           ASSIGN_OR_RETURN(
               auto fut,
               manager.H2dFrom(l, (*host_buffers)[l * num_shards_ + sh].data(),
                               needed * bytes_per_block, copy_spec, sh));
-          chunk_h2d_future.Append(std::move(fut));
+          shard_futures.push_back(std::move(fut));
         }
       }
 
-      auto chunk_insert_future =
-          std::make_shared<raiden::PjRtCopyFuture>(std::move(chunk_h2d_future));
-      chunk_insert_future->AddUserHold(host_buffers);
+      raiden::PjRtCopyFuture chunk_insert_future = raiden::FlattenPjRtFutures(
+          xla::JoinFutures(absl::MakeSpan(shard_futures)));
 
-      acc.Append(*chunk_insert_future);
+      // To add user hold, we need to map the future
+      chunk_insert_future = chunk_insert_future.Map(
+          [host_buffers](std::vector<raiden::BufferHolder> holders) {
+            // host_buffers is captured by value, keeping it alive until this
+            // map completes. We need to store host_buffers in at least one
+            // holder to be sure it stays alive if holders are moved.
+            if (!holders.empty()) {
+              holders[0].user_hold = host_buffers;
+            }
+            return holders;
+          });
+
+      futures_to_join.push_back(chunk_insert_future);
       hits[chunk_idx] = true;
       chunk_block_offset_in_task += needed;
     }
@@ -501,8 +511,8 @@ absl::Status KVCacheStore::RegisterBlocksInGlobalRegistry(
 
 void KVCacheStore::CleanupCompletedFuturesLocked() {
   for (auto it = lru_list_.begin(); it != lru_list_.end();) {
-    if (it->insert_future && it->insert_future->IsReady()) {
-      it->insert_future.reset();
+    if (it->insert_future.IsValid() && it->insert_future.IsReady()) {
+      it->insert_future = raiden::PjRtCopyFuture();
     }
     ++it;
   }

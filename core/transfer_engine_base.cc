@@ -533,7 +533,10 @@ int64_t TransferEngineBase::SubmitLoad(
           if (!h2h_future_or.ok()) {
             ThrowStatus("BlockTransport pull failed", h2h_future_or.status());
           }
-          h2h_future_or.value().Await();
+          absl::Status h2h_status = h2h_future_or.value().Await().status();
+          if (!h2h_status.ok()) {
+            ThrowStatus("BlockTransport pull failed", h2h_status);
+          }
           h2h_ms += DurationMs(h2h_start, std::chrono::steady_clock::now());
 
           if (load_plan.RequiresHostReorder()) {

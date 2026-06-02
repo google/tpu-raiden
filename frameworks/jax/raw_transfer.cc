@@ -26,6 +26,7 @@
 #include "absl/log/log.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "xla/future.h"
 #include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/status_casters.h"
@@ -133,8 +134,10 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async_impl(
     throw std::runtime_error("Lengths of src_arrs and dst_arrs must match");
   }
   size_t n = nb::len(src_arrs);
-  PjRtCopyFuture acc({});
-  if (n == 0) return acc;
+  if (n == 0) return PjRtCopyFuture(std::vector<BufferHolder>{});
+
+  std::vector<PjRtCopyFuture> futures;
+  futures.reserve(n);
 
   std::vector<int64_t> s_offsets =
       jax::UnpackListToVector(src_offsets_major_dim);
@@ -147,9 +150,9 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async_impl(
                         transfer_d2h_async_internal(
                             src_arrs[i], dst_arrs[i], s_offsets, d_offsets,
                             c_sizes, unsafe_skip_buffer_lock));
-    acc.Append(std::move(f));
+    futures.push_back(std::move(f));
   }
-  return acc;
+  return FlattenPjRtFutures(xla::JoinFutures(absl::MakeSpan(futures)));
 }
 
 // Pure FFI JAX helper to run parallel batch transfers using pure C++ core
@@ -163,8 +166,10 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async_impl(
     throw std::runtime_error("Lengths of src_arrs and dst_arrs must match");
   }
   size_t n = nb::len(src_arrs);
-  PjRtCopyFuture acc({});
-  if (n == 0) return acc;
+  if (n == 0) return PjRtCopyFuture(std::vector<BufferHolder>{});
+
+  std::vector<PjRtCopyFuture> futures;
+  futures.reserve(n);
 
   std::vector<int64_t> s_offsets =
       jax::UnpackListToVector(src_offsets_major_dim);
@@ -177,9 +182,9 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async_impl(
                         transfer_h2d_async_internal(
                             src_arrs[i], dst_arrs[i], s_offsets, d_offsets,
                             c_sizes, unsafe_skip_buffer_lock));
-    acc.Append(std::move(f));
+    futures.push_back(std::move(f));
   }
-  return acc;
+  return FlattenPjRtFutures(xla::JoinFutures(absl::MakeSpan(futures)));
 }
 
 absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async(
@@ -214,7 +219,11 @@ inline void transfer_d2h_batch(
       src_arrs, dst_arrs, src_offsets_major_dim, dst_offsets_major_dim,
       copy_sizes_major_dim, unsafe_skip_buffer_lock));
   nb::gil_scoped_release release;
-  future.Await();
+  absl::Status status = future.Await().status();
+  if (!status.ok()) {
+    throw std::runtime_error(std::string("Async copy failed: ") +
+                             std::string(status.message()));
+  }
 }
 
 inline void transfer_h2d_batch(
@@ -227,7 +236,11 @@ inline void transfer_h2d_batch(
       src_arrs, dst_arrs, src_offsets_major_dim, dst_offsets_major_dim,
       copy_sizes_major_dim, unsafe_skip_buffer_lock));
   nb::gil_scoped_release release;
-  future.Await();
+  absl::Status status = future.Await().status();
+  if (!status.ok()) {
+    throw std::runtime_error(std::string("Async copy failed: ") +
+                             std::string(status.message()));
+  }
 }
 
 inline void transfer_d2h(const nb::object& src_arr, const nb::object& dst_arr,
@@ -239,7 +252,11 @@ inline void transfer_d2h(const nb::object& src_arr, const nb::object& dst_arr,
       src_arr, dst_arr, src_offsets_major_dim, dst_offsets_major_dim,
       copy_sizes_major_dim, unsafe_skip_buffer_lock));
   nb::gil_scoped_release release;
-  future.Await();
+  absl::Status status = future.Await().status();
+  if (!status.ok()) {
+    throw std::runtime_error(std::string("Async copy failed: ") +
+                             std::string(status.message()));
+  }
 }
 
 inline void transfer_h2d(const nb::object& src_arr, const nb::object& dst_arr,
@@ -251,7 +268,11 @@ inline void transfer_h2d(const nb::object& src_arr, const nb::object& dst_arr,
       src_arr, dst_arr, src_offsets_major_dim, dst_offsets_major_dim,
       copy_sizes_major_dim, unsafe_skip_buffer_lock));
   nb::gil_scoped_release release;
-  future.Await();
+  absl::Status status = future.Await().status();
+  if (!status.ok()) {
+    throw std::runtime_error(std::string("Async copy failed: ") +
+                             std::string(status.message()));
+  }
 }
 
 PjRtCopyFuture transfer_d2h_batch_async_naive(
@@ -263,13 +284,17 @@ PjRtCopyFuture transfer_d2h_batch_async_naive(
     throw std::runtime_error("Lengths of src_arrs and dst_arrs must match");
   }
   size_t n = nb::len(src_arrs);
-  PjRtCopyFuture acc({});
+  if (n == 0) return PjRtCopyFuture(std::vector<BufferHolder>{});
+
+  std::vector<PjRtCopyFuture> futures;
+  futures.reserve(n);
+
   for (size_t i = 0; i < n; ++i) {
-    acc.Append(xla::ValueOrThrow(transfer_d2h_async(
+    futures.push_back(xla::ValueOrThrow(transfer_d2h_async(
         src_arrs[i], dst_arrs[i], src_offsets_major_dim, dst_offsets_major_dim,
         copy_sizes_major_dim, unsafe_skip_buffer_lock)));
   }
-  return acc;
+  return FlattenPjRtFutures(xla::JoinFutures(absl::MakeSpan(futures)));
 }
 
 PjRtCopyFuture transfer_h2d_batch_async_naive(
@@ -281,26 +306,38 @@ PjRtCopyFuture transfer_h2d_batch_async_naive(
     throw std::runtime_error("Lengths of src_arrs and dst_arrs must match");
   }
   size_t n = nb::len(src_arrs);
-  PjRtCopyFuture acc({});
+  if (n == 0) return PjRtCopyFuture(std::vector<BufferHolder>{});
+
+  std::vector<PjRtCopyFuture> futures;
+  futures.reserve(n);
+
   for (size_t i = 0; i < n; ++i) {
-    acc.Append(xla::ValueOrThrow(transfer_h2d_async(
+    futures.push_back(xla::ValueOrThrow(transfer_h2d_async(
         src_arrs[i], dst_arrs[i], src_offsets_major_dim, dst_offsets_major_dim,
         copy_sizes_major_dim, unsafe_skip_buffer_lock)));
   }
-  return acc;
+  return FlattenPjRtFutures(xla::JoinFutures(absl::MakeSpan(futures)));
 }
 
 inline void await_all(const nb::object& future_obj) {
   if (nb::isinstance<PjRtCopyFuture>(future_obj)) {
     PjRtCopyFuture& future = nb::cast<PjRtCopyFuture&>(future_obj);
     nb::gil_scoped_release release;
-    future.Await();
+    absl::Status status = future.Await().status();
+    if (!status.ok()) {
+      throw std::runtime_error(std::string("Async copy failed: ") +
+                               std::string(status.message()));
+    }
   } else if (nb::isinstance<nb::list>(future_obj)) {
     nb::list futures = nb::cast<nb::list>(future_obj);
     for (size_t i = 0; i < futures.size(); ++i) {
       PjRtCopyFuture& future = nb::cast<PjRtCopyFuture&>(futures[i]);
       nb::gil_scoped_release release;
-      future.Await();
+      absl::Status status = future.Await().status();
+      if (!status.ok()) {
+        throw std::runtime_error(std::string("Async copy failed: ") +
+                                 std::string(status.message()));
+      }
     }
   }
 }
@@ -326,7 +363,11 @@ NB_MODULE(_raw_transfer, m) {
       .def("Await",
            [](PjRtCopyFuture& future) {
              nb::gil_scoped_release release;
-             future.Await();
+             absl::Status status = future.Await().status();
+             if (!status.ok()) {
+               throw std::runtime_error(std::string("Async copy failed: ") +
+                                        std::string(status.message()));
+             }
            })
       .def("IsReady", &PjRtCopyFuture::IsReady);
   m.def("await_all", &await_all, nb::arg("futures"));

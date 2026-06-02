@@ -84,7 +84,7 @@ class KVCacheStore : public tpu_raiden::transport::BlockTransportDelegate {
     uint64_t block_hash;
     std::vector<int> internal_block_ids;
     std::shared_ptr<std::vector<std::vector<uint8_t>>> host_buffers;
-    std::shared_ptr<raiden::PjRtCopyFuture> insert_future;
+    raiden::PjRtCopyFuture insert_future;
   };
 
   class BlockUnlocker;
@@ -93,7 +93,7 @@ class KVCacheStore : public tpu_raiden::transport::BlockTransportDelegate {
       const std::vector<uint64_t>& block_hashes, KVCacheManagerBase& manager,
       const std::vector<int>& dst_offsets_major_dim,
       const std::vector<int>& copy_sizes_major_dim, std::vector<bool>& hits,
-      raiden::PjRtCopyFuture& acc);
+      std::vector<raiden::PjRtCopyFuture>& futures_to_join);
 
   absl::Status RegisterBlocksInGlobalRegistry(
       const std::vector<uint64_t>& block_hashes,

@@ -89,7 +89,7 @@ TEST(KVCacheStoreTest, LocalInsertAndLookup) {
   EXPECT_TRUE(hits[0]);
 
   // Await the fetch to complete
-  future.Await();
+  ASSERT_OK(future.Await().status());
 
   // 3. Verify buffer content: slice 1 should now match slice 0 (0, 1, 2...)
   TF_ASSERT_OK_AND_ASSIGN(auto literal, buffer->ToLiteral().Await());
@@ -145,14 +145,14 @@ TEST(KVCacheStoreTest, LruEviction) {
     TF_ASSERT_OK_AND_ASSIGN(
         auto res, store->LookupAndFetch({101}, *kv_manager3, {0}, {1}));
     EXPECT_TRUE(res.first[0]);
-    res.second.Await();
+    ASSERT_OK(res.second.Await().status());
   }
   {
     auto kv_manager4 = make_manager(buffer.get());
     TF_ASSERT_OK_AND_ASSIGN(
         auto res, store->LookupAndFetch({102}, *kv_manager4, {1}, {1}));
     EXPECT_TRUE(res.first[0]);
-    res.second.Await();
+    ASSERT_OK(res.second.Await().status());
   }
 
   // Insert hash 103 (slice 0) -> should evict the least recently used (101)
@@ -171,14 +171,14 @@ TEST(KVCacheStoreTest, LruEviction) {
     TF_ASSERT_OK_AND_ASSIGN(
         auto res, store->LookupAndFetch({102}, *kv_manager7, {1}, {1}));
     EXPECT_TRUE(res.first[0]);
-    res.second.Await();
+    ASSERT_OK(res.second.Await().status());
   }
   {
     auto kv_manager8 = make_manager(buffer.get());
     TF_ASSERT_OK_AND_ASSIGN(
         auto res, store->LookupAndFetch({103}, *kv_manager8, {0}, {1}));
     EXPECT_TRUE(res.first[0]);
-    res.second.Await();
+    ASSERT_OK(res.second.Await().status());
   }
 }
 

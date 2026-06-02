@@ -66,7 +66,11 @@ NB_MODULE(_weight_synchronizer, m) {
                   "Weight sync D2H failed: " +
                   std::string(status_or_future.status().message()));
             }
-            status_or_future.value().Await();
+            absl::Status status = status_or_future.value().Await().status();
+            if (!status.ok()) {
+              throw std::runtime_error("Weight sync D2H copy failed: " +
+                                       std::string(status.message()));
+            }
           },
           nb::call_guard<nb::gil_scoped_release>())
       .def(
@@ -82,7 +86,11 @@ NB_MODULE(_weight_synchronizer, m) {
                   "Weight sync H2DChunk failed: " +
                   std::string(status_or_future.status().message()));
             }
-            status_or_future.value().Await();
+            absl::Status status = status_or_future.value().Await().status();
+            if (!status.ok()) {
+              throw std::runtime_error("Weight sync H2DChunk copy failed: " +
+                                       std::string(status.message()));
+            }
           },
           nb::arg("shard_idx"), nb::arg("host_offset_bytes"),
           nb::arg("device_offset_bytes"), nb::arg("size_bytes"),

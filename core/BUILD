@@ -98,9 +98,7 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
-        "@xla//xla/pjrt:common_pjrt_client",
         "@xla//xla/pjrt:host_memory_allocator",
-        "@xla//xla/pjrt:pjrt_client",
     ],
 )
 
@@ -317,10 +315,9 @@ cc_test(
     deps = [
         ":raw_transfer_core",
         ":tpu_pjrt_manager",
+        "@com_google_absl//absl/types:span",
         "@xla//xla:future",
         "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
-        "@xla//xla/tsl/platform:status_matchers",
         "@xla//xla/tsl/platform:statusor",
         "@xla//xla/tsl/platform:test",
         "@xla//xla/tsl/platform:test_main",
@@ -347,8 +344,6 @@ cc_test(
         ":raw_transfer_impl",
         ":tpu_pjrt_manager",
         "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
-        "@xla//xla/tsl/platform:status_matchers",
         "@xla//xla/tsl/platform:statusor",
         "@xla//xla/tsl/platform:test",
         "@xla//xla/tsl/platform:test_main",

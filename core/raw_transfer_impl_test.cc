@@ -61,7 +61,7 @@ TEST(RawTransferImplTest, FullTransferD2HAndH2D) {
                         /*src_offsets_major_dim=*/{0},
                         /*dst_offsets_major_dim=*/{0},
                         /*copy_sizes_major_dim=*/{4}));  // major dim size is 4
-  d2h_future.Await();
+  ASSERT_THAT(d2h_future.Await().status(), IsOk());
 
   // Verify logical data at the beginning (assuming no tiling for 1D)
   float* dst_floats = reinterpret_cast<float*>(dst_data.data());
@@ -87,7 +87,7 @@ TEST(RawTransferImplTest, FullTransferD2HAndH2D) {
                                             /*src_offsets_major_dim=*/{0},
                                             /*dst_offsets_major_dim=*/{0},
                                             /*copy_sizes_major_dim=*/{4}));
-  h2d_future.Await();
+  ASSERT_THAT(h2d_future.Await().status(), IsOk());
 
   // Verify H2D worked using normal ToLiteralSync
   TF_ASSERT_OK_AND_ASSIGN(auto literal, buffer->ToLiteral().Await());
@@ -145,7 +145,7 @@ TEST(RawTransferImplTest, PartialTransferD2HAndH2D) {
                         /*src_offsets_major_dim=*/{1},
                         /*dst_offsets_major_dim=*/{0},
                         /*copy_sizes_major_dim=*/{1}));
-  d2h_future.Await();
+  ASSERT_THAT(d2h_future.Await().status(), IsOk());
 
   // 2. Partial H2D: Copy host_holder to the first slice (index 0 of major dim)
   // of buffer2
@@ -158,7 +158,7 @@ TEST(RawTransferImplTest, PartialTransferD2HAndH2D) {
                         /*src_offsets_major_dim=*/{0},
                         /*dst_offsets_major_dim=*/{0},
                         /*copy_sizes_major_dim=*/{1}));
-  h2d_future.Await();
+  ASSERT_THAT(h2d_future.Await().status(), IsOk());
 
   // 3. Verify buffer2 using normal ToLiteralSync
   TF_ASSERT_OK_AND_ASSIGN(auto literal, buffer2->ToLiteral().Await());

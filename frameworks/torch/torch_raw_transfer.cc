@@ -162,17 +162,12 @@ void AwaitReady(xla::PjRtBuffer* buffer, const char* role) {
   (void)role;
 }
 
-void KeepTensorAlive(const std::shared_ptr<PjRtCopyFuture>& future,
-                     const at::Tensor& tensor) {
-  future->AddUserHold(std::make_shared<at::Tensor>(tensor));
-}
-
-void IssueD2HCopy(const std::shared_ptr<PjRtCopyFuture>& acc,
-                  xla::PjRtBuffer* src_buffer, uint8_t* dst_data,
-                  size_t dst_size,
-                  const std::vector<int64_t>& src_offsets_major_dim,
-                  const std::vector<int64_t>& dst_offsets_major_dim,
-                  const std::vector<int64_t>& copy_sizes_major_dim) {
+xla::Future<BufferHolder> IssueD2HCopy(
+    xla::PjRtBuffer* src_buffer, uint8_t* dst_data, size_t dst_size,
+    const std::vector<int64_t>& src_offsets_major_dim,
+    const std::vector<int64_t>& dst_offsets_major_dim,
+    const std::vector<int64_t>& copy_sizes_major_dim,
+    std::shared_ptr<void> user_hold = nullptr) {
   const bool is_partial = tpu_raiden::IsPartialCopy(
       src_buffer->on_device_shape(), src_offsets_major_dim,
       dst_offsets_major_dim, copy_sizes_major_dim);
@@ -202,15 +197,16 @@ void IssueD2HCopy(const std::shared_ptr<PjRtCopyFuture>& acc,
     futures.push_back(hold.CopyRawDeviceToHost(
         dst_data + chunk.dst_offset, chunk.src_offset, chunk.size_bytes));
   }
-  acc->Append(std::move(futures), hold);
+  return CreateBufferFuture(std::move(futures), hold.c_hold, hold.common_hold,
+                            /*ext_hold=*/nullptr, std::move(user_hold));
 }
 
-void IssueH2DCopy(const std::shared_ptr<PjRtCopyFuture>& acc,
-                  const uint8_t* src_data, size_t src_size,
-                  xla::PjRtBuffer* dst_buffer,
-                  const std::vector<int64_t>& src_offsets_major_dim,
-                  const std::vector<int64_t>& dst_offsets_major_dim,
-                  const std::vector<int64_t>& copy_sizes_major_dim) {
+xla::Future<BufferHolder> IssueH2DCopy(
+    const uint8_t* src_data, size_t src_size, xla::PjRtBuffer* dst_buffer,
+    const std::vector<int64_t>& src_offsets_major_dim,
+    const std::vector<int64_t>& dst_offsets_major_dim,
+    const std::vector<int64_t>& copy_sizes_major_dim,
+    std::shared_ptr<void> user_hold = nullptr) {
   const bool is_partial = tpu_raiden::IsPartialCopy(
       dst_buffer->on_device_shape(), src_offsets_major_dim,
       dst_offsets_major_dim, copy_sizes_major_dim);
@@ -240,10 +236,11 @@ void IssueH2DCopy(const std::shared_ptr<PjRtCopyFuture>& acc,
     futures.push_back(hold.CopyRawHostToDevice(
         src_data + chunk.src_offset, chunk.dst_offset, chunk.size_bytes));
   }
-  acc->Append(std::move(futures), hold);
+  return CreateBufferFuture(std::move(futures), hold.c_hold, hold.common_hold,
+                            /*ext_hold=*/nullptr, std::move(user_hold));
 }
 
-std::shared_ptr<PjRtCopyFuture> TransferD2HBatchAsync(
+PjRtCopyFuture TransferD2HBatchAsync(
     const TensorList& src_arrs, const TensorList& dst_arrs,
     const std::vector<int64_t>& src_offsets_major_dim,
     const std::vector<int64_t>& dst_offsets_major_dim,
@@ -253,22 +250,25 @@ std::shared_ptr<PjRtCopyFuture> TransferD2HBatchAsync(
   }
   tpu_raiden::ValidatePartialSpec(src_offsets_major_dim, dst_offsets_major_dim,
                                   copy_sizes_major_dim);
-  auto acc = std::make_shared<PjRtCopyFuture>(std::vector<xla::Future<>>{});
+  std::vector<xla::Future<BufferHolder>> futures;
   for (size_t i = 0; i < src_arrs.size(); ++i) {
     ValidateCpuTensor(dst_arrs[i], "Destination");
     xla::PjRtBuffer* src_buffer = UnpackTorchTensor(src_arrs[i]);
     AwaitReady(src_buffer, "Source");
-    IssueD2HCopy(acc, src_buffer,
-                 reinterpret_cast<uint8_t*>(dst_arrs[i].data_ptr()),
-                 dst_arrs[i].nbytes(), src_offsets_major_dim,
-                 dst_offsets_major_dim, copy_sizes_major_dim);
-    KeepTensorAlive(acc, src_arrs[i]);
-    KeepTensorAlive(acc, dst_arrs[i]);
+
+    auto torch_holds = std::make_shared<std::vector<at::Tensor>>();
+    torch_holds->push_back(src_arrs[i]);
+    torch_holds->push_back(dst_arrs[i]);
+
+    futures.push_back(IssueD2HCopy(
+        src_buffer, reinterpret_cast<uint8_t*>(dst_arrs[i].data_ptr()),
+        dst_arrs[i].nbytes(), src_offsets_major_dim, dst_offsets_major_dim,
+        copy_sizes_major_dim, std::move(torch_holds)));
   }
-  return acc;
+  return xla::JoinFutures(absl::MakeSpan(futures));
 }
 
-std::shared_ptr<PjRtCopyFuture> TransferH2DBatchAsync(
+PjRtCopyFuture TransferH2DBatchAsync(
     const TensorList& src_arrs, const TensorList& dst_arrs,
     const std::vector<int64_t>& src_offsets_major_dim,
     const std::vector<int64_t>& dst_offsets_major_dim,
@@ -278,21 +278,25 @@ std::shared_ptr<PjRtCopyFuture> TransferH2DBatchAsync(
   }
   tpu_raiden::ValidatePartialSpec(src_offsets_major_dim, dst_offsets_major_dim,
                                   copy_sizes_major_dim);
-  auto acc = std::make_shared<PjRtCopyFuture>(std::vector<xla::Future<>>{});
+  std::vector<xla::Future<BufferHolder>> futures;
   for (size_t i = 0; i < src_arrs.size(); ++i) {
     ValidateCpuTensor(src_arrs[i], "Source");
     xla::PjRtBuffer* dst_buffer = UnpackTorchTensor(dst_arrs[i]);
     AwaitReady(dst_buffer, "Destination");
-    IssueH2DCopy(acc, reinterpret_cast<const uint8_t*>(src_arrs[i].data_ptr()),
-                 src_arrs[i].nbytes(), dst_buffer, src_offsets_major_dim,
-                 dst_offsets_major_dim, copy_sizes_major_dim);
-    KeepTensorAlive(acc, src_arrs[i]);
-    KeepTensorAlive(acc, dst_arrs[i]);
+
+    auto torch_holds = std::make_shared<std::vector<at::Tensor>>();
+    torch_holds->push_back(src_arrs[i]);
+    torch_holds->push_back(dst_arrs[i]);
+
+    futures.push_back(IssueH2DCopy(
+        reinterpret_cast<const uint8_t*>(src_arrs[i].data_ptr()),
+        src_arrs[i].nbytes(), dst_buffer, src_offsets_major_dim,
+        dst_offsets_major_dim, copy_sizes_major_dim, std::move(torch_holds)));
   }
-  return acc;
+  return xla::JoinFutures(absl::MakeSpan(futures));
 }
 
-std::shared_ptr<PjRtCopyFuture> TransferD2HAsync(
+PjRtCopyFuture TransferD2HAsync(
     const at::Tensor& src_arr, const at::Tensor& dst_arr,
     const std::vector<int64_t>& src_offsets_major_dim,
     const std::vector<int64_t>& dst_offsets_major_dim,
@@ -301,7 +305,7 @@ std::shared_ptr<PjRtCopyFuture> TransferD2HAsync(
                                dst_offsets_major_dim, copy_sizes_major_dim);
 }
 
-std::shared_ptr<PjRtCopyFuture> TransferH2DAsync(
+PjRtCopyFuture TransferH2DAsync(
     const at::Tensor& src_arr, const at::Tensor& dst_arr,
     const std::vector<int64_t>& src_offsets_major_dim,
     const std::vector<int64_t>& dst_offsets_major_dim,
@@ -341,48 +345,48 @@ class PreparedTorchRawTransfer
 
   std::shared_ptr<RawHostBuffer> HostBuffer() const { return host_buffer_; }
 
-  std::shared_ptr<PjRtCopyFuture> D2HAsync() {
-    auto future =
-        std::make_shared<PjRtCopyFuture>(std::vector<xla::Future<>>{});
+  PjRtCopyFuture D2HAsync() {
     xla::Future<> copy_future;
     {
       nb::gil_scoped_release release;
       copy_future = hold_.CopyRawDeviceToHost(host_buffer_->MutableData(), 0,
                                               physical_size_);
     }
-    std::vector<xla::Future<>> futures;
-    futures.push_back(std::move(copy_future));
-    future->Append(std::move(futures));
-    future->AddUserHold(shared_from_this());
-    return future;
+    std::vector<xla::Future<BufferHolder>> futures = {CreateBufferFuture(
+        {std::move(copy_future)}, hold_.c_hold, hold_.common_hold,
+        /*ext_hold=*/nullptr, shared_from_this())};
+    return xla::JoinFutures(absl::MakeSpan(futures));
   }
 
-  std::shared_ptr<PjRtCopyFuture> H2DAsync() {
-    auto future =
-        std::make_shared<PjRtCopyFuture>(std::vector<xla::Future<>>{});
+  PjRtCopyFuture H2DAsync() {
     xla::Future<> copy_future;
     {
       nb::gil_scoped_release release;
       copy_future =
           hold_.CopyRawHostToDevice(host_buffer_->Data(), 0, physical_size_);
     }
-    std::vector<xla::Future<>> futures;
-    futures.push_back(std::move(copy_future));
-    future->Append(std::move(futures));
-    future->AddUserHold(shared_from_this());
-    return future;
+    std::vector<xla::Future<BufferHolder>> futures = {CreateBufferFuture(
+        {std::move(copy_future)}, hold_.c_hold, hold_.common_hold,
+        /*ext_hold=*/nullptr, shared_from_this())};
+    return xla::JoinFutures(absl::MakeSpan(futures));
   }
 
   void D2H() {
-    auto future = D2HAsync();
+    PjRtCopyFuture future = D2HAsync();
     nb::gil_scoped_release release;
-    future->Await();
+    absl::Status status = future.Await().status();
+    if (!status.ok()) {
+      ThrowStatus("D2H copy failed", status);
+    }
   }
 
   void H2D() {
-    auto future = H2DAsync();
+    PjRtCopyFuture future = H2DAsync();
     nb::gil_scoped_release release;
-    future->Await();
+    absl::Status status = future.Await().status();
+    if (!status.ok()) {
+      ThrowStatus("H2D copy failed", status);
+    }
   }
 
  private:
@@ -394,24 +398,32 @@ class PreparedTorchRawTransfer
 
 void AwaitAll(nb::object futures) {
   if (nb::isinstance<PjRtCopyFuture>(futures)) {
-    auto future = nb::cast<std::shared_ptr<PjRtCopyFuture>>(futures);
+    PjRtCopyFuture& future = nb::cast<PjRtCopyFuture&>(futures);
     nb::gil_scoped_release release;
-    future->Await();
+    absl::Status status = future.Await().status();
+    if (!status.ok()) {
+      throw std::runtime_error(std::string("Async copy failed: ") +
+                               std::string(status.message()));
+    }
     return;
   }
   for (nb::handle item : futures) {
-    auto future = nb::cast<std::shared_ptr<PjRtCopyFuture>>(item);
+    PjRtCopyFuture& future = nb::cast<PjRtCopyFuture&>(item);
     nb::gil_scoped_release release;
-    future->Await();
+    absl::Status status = future.Await().status();
+    if (!status.ok()) {
+      throw std::runtime_error(std::string("Async copy failed: ") +
+                               std::string(status.message()));
+    }
   }
 }
 
 bool IsReady(nb::object futures) {
   if (nb::isinstance<PjRtCopyFuture>(futures)) {
-    return nb::cast<std::shared_ptr<PjRtCopyFuture>>(futures)->IsReady();
+    return nb::cast<PjRtCopyFuture&>(futures).IsReady();
   }
   for (nb::handle item : futures) {
-    if (!nb::cast<std::shared_ptr<PjRtCopyFuture>>(item)->IsReady()) {
+    if (!nb::cast<PjRtCopyFuture&>(item).IsReady()) {
       return false;
     }
   }
@@ -427,13 +439,28 @@ NB_MODULE(_torch_raw_transfer, m) {
       .def_prop_ro("data_ptr", &RawHostBuffer::DataPtr)
       .def_prop_ro("is_pjrt_backed", &RawHostBuffer::IsPjRtBacked);
 
-  auto future_cls = nb::class_<PjRtCopyFuture>(m, "PjRtCopyFuture")
-                        .def("Await", &PjRtCopyFuture::Await,
-                             nb::call_guard<nb::gil_scoped_release>())
-                        .def("wait", &PjRtCopyFuture::Await,
-                             nb::call_guard<nb::gil_scoped_release>())
-                        .def("IsReady", &PjRtCopyFuture::IsReady)
-                        .def("is_ready", &PjRtCopyFuture::IsReady);
+  auto future_cls =
+      nb::class_<PjRtCopyFuture>(m, "PjRtCopyFuture")
+          .def("Await",
+               [](PjRtCopyFuture& future) {
+                 nb::gil_scoped_release release;
+                 absl::Status status = future.Await().status();
+                 if (!status.ok()) {
+                   throw std::runtime_error(std::string("Async copy failed: ") +
+                                            std::string(status.message()));
+                 }
+               })
+          .def("wait",
+               [](PjRtCopyFuture& future) {
+                 nb::gil_scoped_release release;
+                 absl::Status status = future.Await().status();
+                 if (!status.ok()) {
+                   throw std::runtime_error(std::string("Async copy failed: ") +
+                                            std::string(status.message()));
+                 }
+               })
+          .def("IsReady", &PjRtCopyFuture::IsReady)
+          .def("is_ready", &PjRtCopyFuture::IsReady);
   m.attr("PjRtCopyFuture") = future_cls;
 
   nb::class_<PreparedTorchRawTransfer>(m, "PreparedTorchRawTransfer")
@@ -476,7 +503,11 @@ NB_MODULE(_torch_raw_transfer, m) {
             TransferD2HAsync(src_arr, dst_arr, src_offsets_major_dim,
                              dst_offsets_major_dim, copy_sizes_major_dim);
         nb::gil_scoped_release release;
-        future->Await();
+        absl::Status status = future.Await().status();
+        if (!status.ok()) {
+          throw std::runtime_error(std::string("Async copy failed: ") +
+                                   std::string(status.message()));
+        }
       },
       nb::arg("src_arr"), nb::arg("dst_arr"), nb::kw_only(),
       nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
@@ -492,7 +523,11 @@ NB_MODULE(_torch_raw_transfer, m) {
             TransferH2DAsync(src_arr, dst_arr, src_offsets_major_dim,
                              dst_offsets_major_dim, copy_sizes_major_dim);
         nb::gil_scoped_release release;
-        future->Await();
+        absl::Status status = future.Await().status();
+        if (!status.ok()) {
+          throw std::runtime_error(std::string("Async copy failed: ") +
+                                   std::string(status.message()));
+        }
       },
       nb::arg("src_arr"), nb::arg("dst_arr"), nb::kw_only(),
       nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
@@ -519,7 +554,11 @@ NB_MODULE(_torch_raw_transfer, m) {
             TransferD2HBatchAsync(src_arrs, dst_arrs, src_offsets_major_dim,
                                   dst_offsets_major_dim, copy_sizes_major_dim);
         nb::gil_scoped_release release;
-        future->Await();
+        absl::Status status = future.Await().status();
+        if (!status.ok()) {
+          throw std::runtime_error(std::string("Async copy failed: ") +
+                                   std::string(status.message()));
+        }
       },
       nb::arg("src_arrs"), nb::arg("dst_arrs"), nb::kw_only(),
       nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
@@ -535,7 +574,11 @@ NB_MODULE(_torch_raw_transfer, m) {
             TransferH2DBatchAsync(src_arrs, dst_arrs, src_offsets_major_dim,
                                   dst_offsets_major_dim, copy_sizes_major_dim);
         nb::gil_scoped_release release;
-        future->Await();
+        absl::Status status = future.Await().status();
+        if (!status.ok()) {
+          throw std::runtime_error(std::string("Async copy failed: ") +
+                                   std::string(status.message()));
+        }
       },
       nb::arg("src_arrs"), nb::arg("dst_arrs"), nb::kw_only(),
       nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},

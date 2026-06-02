@@ -200,122 +200,52 @@ struct BufferHoldAndAlias {
   }
 };
 
-class PjRtCopyFuture {
- public:
-  explicit PjRtCopyFuture(
-      std::vector<xla::Future<>> futures,
-      std::vector<std::shared_ptr<RawBufferHolder>> c_api_holds = {},
-      std::vector<std::shared_ptr<xla::CommonPjRtBuffer::ScopedHold>> holds =
-          {})
-      : futures_(std::move(futures)),
-        c_api_holds_(std::move(c_api_holds)),
-        holds_(std::move(holds)) {}
-
-  explicit PjRtCopyFuture(
-      std::vector<xla::Future<>> futures,
-      std::shared_ptr<RawBufferHolder> c_api_hold,
-      std::shared_ptr<xla::CommonPjRtBuffer::ScopedHold> hold = nullptr)
-      : futures_(std::move(futures)) {
-    if (c_api_hold) c_api_holds_.push_back(std::move(c_api_hold));
-    if (hold) holds_.push_back(std::move(hold));
-  }
-
-  void Await() {
-    for (auto& f : futures_) {
-      if (!f.IsValid()) {
-        continue;
-      }
-      absl::Status status = f.Await();
-      if (!status.ok()) {
-        throw std::runtime_error(std::string("Async copy failed: ") +
-                                 std::string(status.message()));
-      }
-    }
-    futures_.clear();
-    c_api_holds_.clear();
-    holds_.clear();
-    ext_holds_.clear();
-    user_holds_.clear();
-  }
-
-  bool IsReady() const {
-    for (const auto& f : futures_) {
-      if (!f.IsValid()) {
-        continue;
-      }
-      if (!f.IsReady()) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  void Append(PjRtCopyFuture other) {
-    futures_.insert(futures_.end(),
-                    std::make_move_iterator(other.futures_.begin()),
-                    std::make_move_iterator(other.futures_.end()));
-    c_api_holds_.insert(c_api_holds_.end(),
-                        std::make_move_iterator(other.c_api_holds_.begin()),
-                        std::make_move_iterator(other.c_api_holds_.end()));
-    holds_.insert(holds_.end(), std::make_move_iterator(other.holds_.begin()),
-                  std::make_move_iterator(other.holds_.end()));
-    ext_holds_.insert(ext_holds_.end(),
-                      std::make_move_iterator(other.ext_holds_.begin()),
-                      std::make_move_iterator(other.ext_holds_.end()));
-    user_holds_.insert(user_holds_.end(),
-                       std::make_move_iterator(other.user_holds_.begin()),
-                       std::make_move_iterator(other.user_holds_.end()));
-  }
-
-  void Append(
-      std::vector<xla::Future<>> other_futures,
-      std::shared_ptr<RawBufferHolder> other_c_api_hold = nullptr,
-      std::shared_ptr<xla::CommonPjRtBuffer::ScopedHold> other_hold = nullptr) {
-    futures_.insert(futures_.end(),
-                    std::make_move_iterator(other_futures.begin()),
-                    std::make_move_iterator(other_futures.end()));
-    if (other_c_api_hold) c_api_holds_.push_back(std::move(other_c_api_hold));
-    if (other_hold) holds_.push_back(std::move(other_hold));
-  }
-
-  void Append(std::vector<xla::Future<>> other_futures,
-              std::vector<std::shared_ptr<RawBufferHolder>> other_c_api_holds,
-              std::vector<std::shared_ptr<xla::CommonPjRtBuffer::ScopedHold>>
-                  other_holds) {
-    futures_.insert(futures_.end(),
-                    std::make_move_iterator(other_futures.begin()),
-                    std::make_move_iterator(other_futures.end()));
-    c_api_holds_.insert(c_api_holds_.end(),
-                        std::make_move_iterator(other_c_api_holds.begin()),
-                        std::make_move_iterator(other_c_api_holds.end()));
-    holds_.insert(holds_.end(), std::make_move_iterator(other_holds.begin()),
-                  std::make_move_iterator(other_holds.end()));
-  }
-
-  void Append(std::vector<xla::Future<>> other_futures,
-              const BufferHoldAndAlias& hold) {
-    futures_.insert(futures_.end(),
-                    std::make_move_iterator(other_futures.begin()),
-                    std::make_move_iterator(other_futures.end()));
-    if (hold.c_hold) c_api_holds_.push_back(hold.c_hold);
-    if (hold.common_hold) holds_.push_back(hold.common_hold);
-  }
-
-  void AddExtHold(std::unique_ptr<xla::PjRtBuffer::ExternalReference> hold) {
-    ext_holds_.push_back(std::move(hold));
-  }
-
-  void AddUserHold(std::shared_ptr<void> hold) {
-    user_holds_.push_back(std::move(hold));
-  }
-
- private:
-  std::vector<xla::Future<>> futures_;
-  std::vector<std::shared_ptr<RawBufferHolder>> c_api_holds_;
-  std::vector<std::shared_ptr<xla::CommonPjRtBuffer::ScopedHold>> holds_;
-  std::vector<std::shared_ptr<xla::PjRtBuffer::ExternalReference>> ext_holds_;
-  std::vector<std::shared_ptr<void>> user_holds_;
+struct BufferHolder {
+  std::shared_ptr<RawBufferHolder> c_api_hold;
+  std::shared_ptr<xla::CommonPjRtBuffer::ScopedHold> hold;
+  std::shared_ptr<xla::PjRtBuffer::ExternalReference> ext_hold;
+  std::shared_ptr<void> user_hold;
 };
+
+using BufferHolders = std::vector<BufferHolder>;
+using PjRtCopyFuture = xla::Future<BufferHolders>;
+
+inline xla::Future<BufferHolder> CreateBufferFuture(
+    std::vector<xla::Future<>> futures,
+    std::shared_ptr<RawBufferHolder> c_api_hold = nullptr,
+    std::shared_ptr<xla::CommonPjRtBuffer::ScopedHold> hold = nullptr,
+    std::shared_ptr<xla::PjRtBuffer::ExternalReference> ext_hold = nullptr,
+    std::shared_ptr<void> user_hold = nullptr) {
+  auto join_future = xla::JoinFutures(futures);
+  if (!join_future.IsValid()) {
+    return xla::Future<BufferHolder>(
+        BufferHolder{std::move(c_api_hold), std::move(hold),
+                     std::move(ext_hold), std::move(user_hold)});
+  }
+  return join_future.Map([c_api_hold = std::move(c_api_hold),
+                          hold = std::move(hold),
+                          ext_hold = std::move(ext_hold),
+                          user_hold = std::move(user_hold)]() mutable {
+    return BufferHolder{std::move(c_api_hold), std::move(hold),
+                        std::move(ext_hold), std::move(user_hold)};
+  });
+}
+
+inline xla::Future<BufferHolders> FlattenPjRtFutures(
+    xla::Future<std::vector<BufferHolders>> futures) {
+  if (!futures.IsValid()) {
+    return xla::Future<BufferHolders>(BufferHolders{});
+  }
+  return futures.Map([](std::vector<BufferHolders> vecs) {
+    std::vector<BufferHolder> result;
+    for (auto& vec : vecs) {
+      for (auto& h : vec) {
+        result.push_back(std::move(h));
+      }
+    }
+    return result;
+  });
+}
 
 }  // namespace raiden
 

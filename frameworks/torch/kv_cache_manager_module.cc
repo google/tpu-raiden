@@ -35,8 +35,15 @@ using ::tpu_raiden::torch::KVCacheManager;
 // Nanobind FFI bindings module definition for PyTorch E2E
 NB_MODULE(_kv_cache_manager, m) {
   nb::class_<::raiden::PjRtCopyFuture>(m, "PjRtCopyFuture")
-      .def("Await", &::raiden::PjRtCopyFuture::Await,
-           nb::call_guard<nb::gil_scoped_release>())
+      .def("Await",
+           [](::raiden::PjRtCopyFuture& future) {
+             nb::gil_scoped_release release;
+             absl::Status status = future.Await().status();
+             if (!status.ok()) {
+               throw std::runtime_error(std::string("Async copy failed: ") +
+                                        std::string(status.message()));
+             }
+           })
       .def("IsReady", &::raiden::PjRtCopyFuture::IsReady);
 
   nb::class_<KVCacheManager>(m, "KVCacheManager")

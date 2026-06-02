@@ -14,14 +14,15 @@
 
 #include "core/raw_transfer_core.h"
 
-#include "xla/tsl/platform/test.h"
-
 #include <memory>
+#include <utility>
 #include <vector>
 
+#include "absl/types/span.h"
 #include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/statusor.h"
+#include "xla/tsl/platform/test.h"
 #include "core/tpu_pjrt_manager.h"
 
 namespace raiden {
@@ -75,8 +76,12 @@ TEST(RawTransferCoreTest, AcquireHoldAndRawCopy) {
   xla::Future<> read_future = hold.CopyRawDeviceToHost(
       read_data.data(), /*device_offset=*/0, /*size=*/4 * sizeof(float));
 
-  PjRtCopyFuture read_copy_future({read_future}, hold.c_hold, hold.common_hold);
-  read_copy_future.Await();
+  std::vector<xla::Future<raiden::BufferHolder>> read_futures = {
+      raiden::CreateBufferFuture({std::move(read_future)}, hold.c_hold,
+                                 hold.common_hold)};
+  PjRtCopyFuture read_copy_future =
+      xla::JoinFutures(absl::MakeSpan(read_futures));
+  ASSERT_OK(read_copy_future.Await().status());
 
   EXPECT_EQ(read_data[0], 1.1f);
   EXPECT_EQ(read_data[1], 2.2f);
@@ -88,9 +93,12 @@ TEST(RawTransferCoreTest, AcquireHoldAndRawCopy) {
   xla::Future<> write_future = hold.CopyRawHostToDevice(
       write_data.data(), /*device_offset=*/0, /*size=*/4 * sizeof(float));
 
-  PjRtCopyFuture write_copy_future({write_future}, hold.c_hold,
-                                   hold.common_hold);
-  write_copy_future.Await();
+  std::vector<xla::Future<raiden::BufferHolder>> write_futures = {
+      raiden::CreateBufferFuture({std::move(write_future)}, hold.c_hold,
+                                 hold.common_hold)};
+  PjRtCopyFuture write_copy_future =
+      xla::JoinFutures(absl::MakeSpan(write_futures));
+  ASSERT_OK(write_copy_future.Await().status());
 
   // 5. Read back again using normal ToLiteralSync to verify it actually
   // modified the buffer!

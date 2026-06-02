@@ -55,13 +55,8 @@ class TransferFuture {
  public:
   TransferFuture() = default;
 
-  void Add(std::shared_ptr<raiden::PjRtCopyFuture> future) {
-    futures_.push_back(std::move(future));
-  }
-
   void Add(raiden::PjRtCopyFuture future) {
-    futures_.push_back(
-        std::make_shared<raiden::PjRtCopyFuture>(std::move(future)));
+    futures_.push_back(std::move(future));
   }
 
   void AddAll(const std::shared_ptr<TransferFuture>& other) {
@@ -70,9 +65,13 @@ class TransferFuture {
   }
 
   void Await() {
-    for (const auto& future : futures_) {
-      if (future) {
-        future->Await();
+    for (auto& future : futures_) {
+      if (future.IsValid()) {
+        absl::Status status = future.Await().status();
+        if (!status.ok()) {
+          throw std::runtime_error("Async transfer failed: " +
+                                   std::string(status.message()));
+        }
       }
     }
     futures_.clear();
@@ -80,7 +79,7 @@ class TransferFuture {
 
   bool IsReady() const {
     for (const auto& future : futures_) {
-      if (future && !future->IsReady()) {
+      if (future.IsValid() && !future.IsReady()) {
         return false;
       }
     }
@@ -88,7 +87,7 @@ class TransferFuture {
   }
 
  private:
-  std::vector<std::shared_ptr<raiden::PjRtCopyFuture>> futures_;
+  std::vector<raiden::PjRtCopyFuture> futures_;
 };
 
 struct CopySpec {

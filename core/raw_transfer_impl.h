@@ -44,18 +44,17 @@ using ::xla::PjRtCApiBuffer;
 using ::xla::Shape;
 
 // Pure C++ implementation of D2H transfer core
-inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_core(
+inline absl::StatusOr<xla::Future<BufferHolders>> transfer_d2h_core(
     const std::vector<PjRtBuffer*>& src_buffers,
     const std::vector<uint8_t*>& dst_ptrs, const std::vector<size_t>& dst_sizes,
     absl::Span<const int64_t> src_offsets_major_dim,
     absl::Span<const int64_t> dst_offsets_major_dim,
     absl::Span<const int64_t> copy_sizes_major_dim,
     bool unsafe_skip_buffer_lock = false) {
-  PjRtCopyFuture acc({});
   size_t num_shards = src_buffers.size();
 
   if (num_shards == 0) {
-    return acc;
+    return xla::Future<BufferHolders>(std::vector<BufferHolder>{});
   }
 
   if (src_offsets_major_dim.size() != dst_offsets_major_dim.size() ||
@@ -111,6 +110,8 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_core(
         "of tile size (4KB) on device for partial copies");
   }
 
+  std::vector<xla::Future<BufferHolder>> shard_futures_to_join;
+  shard_futures_to_join.reserve(num_shards);
   for (size_t i = 0; i < num_shards; ++i) {
     uint8_t* dst_data = dst_ptrs[i];
     size_t dst_size = dst_sizes[i];
@@ -158,9 +159,10 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_core(
         shard_futures.push_back(std::move(future));
       }
     }
-    acc.Append(std::move(shard_futures), hold);
+    shard_futures_to_join.push_back(raiden::CreateBufferFuture(
+        std::move(shard_futures), hold.c_hold, hold.common_hold));
   }
-  return acc;
+  return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
 }
 
 // Pure C++ implementation of H2D transfer core
@@ -172,11 +174,10 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_core(
     absl::Span<const int64_t> dst_offsets_major_dim,
     absl::Span<const int64_t> copy_sizes_major_dim,
     bool unsafe_skip_buffer_lock = false) {
-  PjRtCopyFuture acc({});
   size_t num_shards = dst_buffers.size();
 
   if (num_shards == 0) {
-    return acc;
+    return PjRtCopyFuture(std::vector<BufferHolder>{});
   }
 
   if (src_offsets_major_dim.size() != dst_offsets_major_dim.size() ||
@@ -235,6 +236,8 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_core(
         "of tile size (4KB) on device for partial copies");
   }
 
+  std::vector<xla::Future<BufferHolder>> shard_futures_to_join;
+  shard_futures_to_join.reserve(num_shards);
   for (size_t i = 0; i < num_shards; ++i) {
     const uint8_t* src_data = src_ptrs[i];
     size_t src_size = src_sizes[i];
@@ -279,9 +282,10 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_core(
         shard_futures.push_back(std::move(future));
       }
     }
-    acc.Append(std::move(shard_futures), hold);
+    shard_futures_to_join.push_back(raiden::CreateBufferFuture(
+        std::move(shard_futures), hold.c_hold, hold.common_hold));
   }
-  return acc;
+  return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
 }
 
 }  // namespace raiden
