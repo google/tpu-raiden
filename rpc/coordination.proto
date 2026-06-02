@@ -17,8 +17,21 @@ syntax = "proto3";
 package tpu_raiden.rpc;
 
 service CoordinationService {
-  rpc GetTransferMetadata(MetadataRequest) returns (MetadataResponse);
-  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+  // Queries peer server and returns metadata (port, block_ids, host_ip).
+  rpc GetTransferMetadata(MetadataRequest) returns (MetadataResponse) {
+    option deadline = 60.0;
+  }
+
+  // Signals peer CoordinationServer to shut down and exit.
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse) {
+    option deadline = 10.0;
+  }
+
+  // Collects the metadata info across all replicas.
+  rpc CollectReplicaInfo(CollectReplicaInfoRequest)
+      returns (CollectReplicaInfoResponse) {
+    option deadline = 300.0;
+  }
 }
 
 message MetadataRequest {
@@ -37,4 +50,27 @@ message ShutdownRequest {
 
 message ShutdownResponse {
   bool success = 1;
+}
+
+message CollectReplicaInfoRequest {
+  int32 device_id = 1;
+  int32 expected_count = 2;
+  // Metadata to be shared with other replicas.
+  // For weight synchronizer, this is a 5-integer vector:
+  // - info[0:4]: 16 bytes of IPv6 address (or IPv4-mapped IPv6)
+  // - info[4]: port number
+  repeated int32 info = 3;
+}
+
+message CollectReplicaInfoResponse {
+  repeated ReplicaInfoEntry entries = 1;
+}
+
+message ReplicaInfoEntry {
+  int32 device_id = 1;
+  // Metadata shared by this replica.
+  // For weight synchronizer, this is a 5-integer vector:
+  // - info[0:4]: 16 bytes of IPv6 address (or IPv4-mapped IPv6)
+  // - info[4]: port number
+  repeated int32 info = 2;
 }

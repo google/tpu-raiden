@@ -29,6 +29,9 @@ class CoordinationServicer(coordination_pb2_grpc.CoordinationServiceServicer):
     self._port = 0
     self._block_ids = []
     self._host_ip = ''
+    self._barrier = None
+    self._entries = {}
+    self._lock = threading.Lock()
 
   def set_metadata(self, port: int, block_ids: List[int], host_ip: str):
     self._port = port
@@ -46,6 +49,28 @@ class CoordinationServicer(coordination_pb2_grpc.CoordinationServiceServicer):
   def Shutdown(self, request, context):
     self._shutdown_event.set()
     return coordination_pb2.ShutdownResponse(success=True)
+
+  def CollectReplicaInfo(self, request, context):
+    with self._lock:
+      if self._barrier is None:
+        self._barrier = threading.Barrier(request.expected_count)
+
+      self._entries[request.device_id] = list(request.info)
+
+    try:
+      self._barrier.wait()
+    except threading.BrokenBarrierError:
+      context.abort(grpc.StatusCode.INTERNAL, 'Barrier broken')
+
+    with self._lock:
+      sorted_entries = sorted(self._entries.items())
+      response_entries = [
+          coordination_pb2.ReplicaInfoEntry(device_id=k, info=v)
+          for k, v in sorted_entries
+      ]
+      return coordination_pb2.CollectReplicaInfoResponse(
+          entries=response_entries
+      )
 
 
 class CoordinationServer:
@@ -95,6 +120,27 @@ class CoordinationClient:
       # Call RPC blocking until server is ready and replies.
       response = stub.GetTransferMetadata(request)
       return response.port, list(response.block_ids), response.host_ip
+
+  def collect_replica_info(
+      self, device_id: int, expected_count: int, info: List[int]
+  ) -> List[Tuple[int, List[int]]]:
+    """Collects metadata from all replicas.
+
+    Args:
+      device_id: The ID of the calling device.
+      expected_count: The total number of devices participating.
+      info: The metadata to share from this device.
+
+    Returns:
+      A list of tuples containing (device_id, info) from all devices.
+    """
+      with grpc.insecure_channel(self._server_address) as channel:
+      stub = coordination_pb2_grpc.CoordinationServiceStub(channel)
+      request = coordination_pb2.CollectReplicaInfoRequest(
+          device_id=device_id, expected_count=expected_count, info=info
+      )
+      response = stub.CollectReplicaInfo(request)
+      return [(e.device_id, list(e.info)) for e in response.entries]
 
   def shutdown(self):
     """Signals peer CoordinationServer to shut down and exit."""
