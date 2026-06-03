@@ -58,8 +58,27 @@ class MockDelegate : public BlockTransportDelegate {
     return absl::OkStatus();
   }
 
+  absl::Status OnSingleBlockReceived(int block_id, size_t size_bytes) override {
+    on_single_block_received_called_ = true;
+    received_block_id_ = block_id;
+    received_size_bytes_ = size_bytes;
+    return OnDataReceived();
+  }
+
   bool on_data_received_called() const { return on_data_received_called_; }
   void reset_data_received() { on_data_received_called_ = false; }
+
+  bool on_single_block_received_called() const {
+    return on_single_block_received_called_;
+  }
+  int received_block_id() const { return received_block_id_; }
+  size_t received_size_bytes() const { return received_size_bytes_; }
+
+  void reset_single_block_received() {
+    on_single_block_received_called_ = false;
+    received_block_id_ = -1;
+    received_size_bytes_ = 0;
+  }
 
   uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) override {
     return buffers_[BufferIndex(layer_idx, shard_idx)].data();
@@ -98,6 +117,9 @@ class MockDelegate : public BlockTransportDelegate {
   size_t num_shards_;
   std::vector<std::vector<uint8_t>> buffers_;
   bool on_data_received_called_ = false;
+  bool on_single_block_received_called_ = false;
+  int received_block_id_ = -1;
+  size_t received_size_bytes_ = 0;
 };
 
 TEST(BlockTransportTest, PushAndPullCorrectness) {
@@ -289,6 +311,11 @@ TEST(BlockTransportTest, WriteBlockDirectCorrectness) {
 
   // Verify OnDataReceived was called
   EXPECT_TRUE(delegate2.on_data_received_called());
+
+  // Verify OnSingleBlockReceived was called with correct arguments
+  EXPECT_TRUE(delegate2.on_single_block_received_called());
+  EXPECT_EQ(delegate2.received_block_id(), 0);
+  EXPECT_EQ(delegate2.received_size_bytes(), size);
 }
 
 }  // namespace

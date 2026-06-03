@@ -72,6 +72,7 @@ class KVCacheStore : public tpu_raiden::transport::BlockTransportDelegate {
     return base_remote_id + chunk_k;
   }
   absl::Status OnDataReceived() override { return absl::OkStatus(); }
+  absl::Status OnSingleBlockReceived(int block_id, size_t size_bytes) override;
 
   size_t num_layers() const override { return num_layers_; }
   size_t num_shards() const override { return num_shards_; }

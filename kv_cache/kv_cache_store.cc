@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <numeric>
 #include <string>
@@ -116,6 +117,11 @@ absl::StatusOr<std::vector<int>> KVCacheStore::AllocateBlocks(
     return absl::FailedPreconditionError("Block manager is not initialized");
   }
   return block_manager_->Allocate(num_blocks, entity_id);
+}
+
+absl::Status KVCacheStore::OnSingleBlockReceived(int block_id,
+                                                 size_t size_bytes) {
+  return absl::OkStatus();
 }
 
 absl::StatusOr<std::pair<std::vector<bool>, raiden::PjRtCopyFuture>>

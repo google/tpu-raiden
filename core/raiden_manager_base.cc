@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <string>
@@ -27,6 +28,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/mutex.h"
 #include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/semaphore.h"
@@ -229,4 +231,74 @@ xla::Future<> RaidenManagerBase::DoD2DTransfer(const BlockMetadata& src,
 
   return future;
 }
+absl::Status RaidenManagerBase::OnSingleBlockReceived(int block_id,
+                                                      size_t size_bytes) {
+  RecvCallback cb;
+  {
+    absl::MutexLock l(recv_mu_);
+    auto it = recv_callbacks_.find(block_id);
+    if (it != recv_callbacks_.end()) {
+      cb = std::move(it->second);
+      recv_callbacks_.erase(it);
+    }
+  }
+  if (cb) {
+    return cb(block_id, size_bytes);
+  }
+  return absl::OkStatus();
+}
+
+xla::Future<> RaidenManagerBase::RemoteD2DBlockReceive(
+    int block_id, raiden::BufferHoldAndAlias hold, size_t size_bytes) {
+  if (size_bytes != bytes_per_block()) {
+    return xla::Future<>(absl::InvalidArgumentError(absl::StrCat(
+        "size_bytes (", size_bytes, ") must match bytes_per_block (",
+        bytes_per_block(), ")")));
+  }
+  if (!hold.buffer) {
+    return xla::Future<>(absl::FailedPreconditionError(
+        "Destination PjRtBuffer in hold is null"));
+  }
+
+  auto [promise, future] = xla::MakePromise<void>();
+  auto shared_promise =
+      std::make_shared<xla::Promise<void>>(std::move(promise));
+
+  auto callback = [this, hold, size_bytes, shared_promise](
+                      int block_id_received,
+                      size_t size_bytes_received) -> absl::Status {
+    if (size_bytes_received != size_bytes) {
+      auto status = absl::InvalidArgumentError("Received size mismatch");
+      shared_promise->Set(status);
+      return status;
+    }
+
+    uint8_t* host_ptr = GetBlockHostPointer(0, 0, block_id_received);
+    if (host_ptr == nullptr) {
+      auto status = absl::FailedPreconditionError("Host pointer is null");
+      shared_promise->Set(status);
+      return status;
+    }
+
+    int64_t device_offset_bytes =
+        static_cast<int64_t>(block_id_received) * bytes_per_block();
+
+    xla::Future<> copy_future =
+        hold.CopyRawHostToDevice(host_ptr, device_offset_bytes, size_bytes);
+
+    copy_future.OnReady([hold, shared_promise](const absl::Status& status) {
+      shared_promise->Set(status);
+    });
+
+    return absl::OkStatus();
+  };
+
+  {
+    absl::MutexLock l(recv_mu_);
+    recv_callbacks_[block_id] = std::move(callback);
+  }
+
+  return future;
+}
+
 }  // namespace tpu_raiden

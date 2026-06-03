@@ -15,6 +15,7 @@
 #include "core/raiden_manager_base.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -28,16 +29,17 @@
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "xla/future.h"
+#include "xla/literal.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
 #include "core/host_memory_allocator.h"
+#include "core/raw_transfer_core.h"
 #include "core/tpu_pjrt_manager.h"
 #include "transport/block_transport.h"
 
 namespace tpu_raiden {
 namespace {
-
 
 // Test subclass to populate protected layers_ and implement AllocateBlocks
 class TestRaidenManager : public RaidenManagerBase {
@@ -80,8 +82,8 @@ TEST(RaidenManagerBaseTest, SetExternalHostPointersWithPinnedAllocator) {
   // Setup TPU PJRT and Pinned Host Allocator
   TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
                           TpuPjrtManager::GetDefault());
-  TF_ASSERT_OK_AND_ASSIGN(
-      auto allocator, HostMemoryAllocator::Create(pjrt_manager->client()));
+  TF_ASSERT_OK_AND_ASSIGN(auto allocator,
+                          HostMemoryAllocator::Create(pjrt_manager->client()));
 
   // Setup Manager
   size_t num_layers = 2;
@@ -124,8 +126,8 @@ TEST(RaidenManagerBaseTest, E2eLoopbackTransferH2h) {
   // Setup TPU PJRT and Allocator
   TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
                           TpuPjrtManager::GetDefault());
-  TF_ASSERT_OK_AND_ASSIGN(
-      auto allocator, HostMemoryAllocator::Create(pjrt_manager->client()));
+  TF_ASSERT_OK_AND_ASSIGN(auto allocator,
+                          HostMemoryAllocator::Create(pjrt_manager->client()));
 
   size_t num_layers = 1;
   size_t num_shards = 1;
@@ -194,42 +196,6 @@ TEST(RaidenManagerBaseTest, E2eLoopbackTransferH2h) {
   }
 }
 
-class TestReceiverDelegate : public transport::BlockTransportDelegate {
- public:
-  TestReceiverDelegate(uint8_t* buffer_ptr, size_t buffer_size)
-      : buffer_ptr_(buffer_ptr), buffer_size_(buffer_size) {}
-
-  absl::StatusOr<std::vector<int>> AllocateBlocks(size_t num_blocks,
-                                                  int64_t entity_id) override {
-    std::vector<int> ids(num_blocks, 0);
-    return ids;
-  }
-
-  absl::Status OnDataReceived() override { return absl::OkStatus(); }
-
-  uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) override {
-    return buffer_ptr_;
-  }
-
-  size_t GetHostSize(size_t layer_idx, size_t shard_idx) override {
-    return buffer_size_;
-  }
-
-  int GetRemoteReadBlockId(int base_remote_id, int chunk_k) override {
-    return base_remote_id + chunk_k;
-  }
-
-  size_t num_layers() const override { return 1; }
-  size_t num_shards() const override { return 1; }
-  size_t slice_byte_size() const override { return buffer_size_; }
-  int block_size() const override { return 1; }
-  size_t shard_factor() const override { return 1; }
-
- private:
-  uint8_t* buffer_ptr_;
-  size_t buffer_size_;
-};
-
 TEST(RaidenManagerBaseTest, E2eRemoteD2DBlockWrite) {
   // 1. Initialize TPUPjRtManager to obtain the PjRtClient.
   TF_ASSERT_OK_AND_ASSIGN(tpu_raiden::TpuPjrtManager * manager,
@@ -250,12 +216,21 @@ TEST(RaidenManagerBaseTest, E2eRemoteD2DBlockWrite) {
   // 3. Allocate a receiver buffer in host memory based on the physical size.
   std::vector<uint8_t> receiver_buffer(physical_size, 0);
 
-  // 4. Start the receiver transport on a local port using a mock
-  //    receiver delegate.
-  TestReceiverDelegate receiver_delegate(receiver_buffer.data(), physical_size);
-  transport::BlockTransport receiver(&receiver_delegate, 0);
-  int receiver_port = receiver.local_port();
+  // 4. Start the receiver transport on a local port using TestRaidenManager.
+  TestRaidenManager receiver(/*num_layers=*/1, /*num_shards=*/1,
+                             /*slice_byte_size=*/physical_size);
+  receiver.SetExternalHostPointers({receiver_buffer.data()},
+                                   {static_cast<size_t>(physical_size)});
+  ASSERT_TRUE(receiver.local_port().has_value());
+  int receiver_port = receiver.local_port().value();
   std::string receiver_address = absl::StrCat("127.0.0.1:", receiver_port);
+
+  // Allocate destination device buffer on receiver
+  std::vector<float> zero_data(4, 0.0f);
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<xla::PjRtBuffer> dst_buffer,
+      manager->BufferFromHost(zero_data.data(), xla::F32, {4}));
+  ASSERT_THAT(dst_buffer->GetReadyFuture().Await(), absl_testing::IsOk());
 
   // 5. Create the RaidenManagerBase sender instance.
   RaidenManagerBase sender(/*num_layers=*/1, /*num_shards=*/1,
@@ -264,8 +239,8 @@ TEST(RaidenManagerBaseTest, E2eRemoteD2DBlockWrite) {
                            /*local_port=*/std::nullopt,
                            /*parallelism=*/1, /*max_staging_blocks=*/4);
 
-  // 6. Prepare the source (TPU buffer) and destination (receiver host
-  //    memory) metadata.
+  // 6. Prepare the source (TPU buffer) and destination (receiver TPU buffer)
+  // metadata.
   BlockMetadata src;
   src.block_id = 0;
   src.data_ptr = src_buffer.get();
@@ -274,23 +249,36 @@ TEST(RaidenManagerBaseTest, E2eRemoteD2DBlockWrite) {
 
   BlockMetadata dst;
   dst.block_id = 0;
-  dst.data_ptr = receiver_buffer.data();
+  dst.data_ptr = dst_buffer.get();
   dst.address = receiver_address;
+  dst.pjrt_client = client;
+
+  // Register receive on receiver
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto hold, raiden::BufferHoldAndAlias::Acquire(dst_buffer.get()));
+  xla::Future<> recv_future = receiver.RemoteD2DBlockReceive(
+      dst.block_id, std::move(hold), physical_size);
 
   // 7. Trigger the remote Device-to-Device (D2D) write transfer.
   xla::Future<> transfer_future =
       sender.RemoteD2DBlockWrite(src, dst, physical_size);
 
-  // 8. Await completion of the transfer.
+  // 8. Await completion of the transfer and receive.
   absl::Status status = transfer_future.Await();
   ASSERT_THAT(status, absl_testing::IsOk());
 
-  // 9. Verify that the transferred data matches the original mock host data.
-  float* received_floats = reinterpret_cast<float*>(receiver_buffer.data());
-  EXPECT_EQ(received_floats[0], 1.1f);
-  EXPECT_EQ(received_floats[1], 2.2f);
-  EXPECT_EQ(received_floats[2], 3.3f);
-  EXPECT_EQ(received_floats[3], 4.4f);
+  status = recv_future.Await();
+  ASSERT_THAT(status, absl_testing::IsOk());
+
+  // 9. Verify data on receiver's device buffer
+  TF_ASSERT_OK_AND_ASSIGN(std::shared_ptr<xla::Literal> literal,
+                          dst_buffer->ToLiteral().Await());
+  auto read_data = literal->data<float>();
+  ASSERT_EQ(read_data.size(), 4);
+  EXPECT_EQ(read_data[0], 1.1f);
+  EXPECT_EQ(read_data[1], 2.2f);
+  EXPECT_EQ(read_data[2], 3.3f);
+  EXPECT_EQ(read_data[3], 4.4f);
 }
 
 TEST(RaidenManagerBaseTest, E2eRemoteD2DBlockWriteConcurrent) {
@@ -317,12 +305,23 @@ TEST(RaidenManagerBaseTest, E2eRemoteD2DBlockWriteConcurrent) {
   // 3. Allocate a large receiver buffer in host memory for 10 blocks.
   std::vector<uint8_t> receiver_buffer(10 * single_buffer_size, 0);
 
-  // 4. Start the receiver transport with mock delegate using the large buffer.
-  TestReceiverDelegate receiver_delegate(receiver_buffer.data(),
-                                         single_buffer_size);
-  transport::BlockTransport receiver(&receiver_delegate, 0);
-  int receiver_port = receiver.local_port();
+  // 4. Start the receiver transport using TestRaidenManager.
+  TestRaidenManager receiver(/*num_layers=*/1, /*num_shards=*/1,
+                             /*slice_byte_size=*/single_buffer_size);
+  receiver.SetExternalHostPointers(
+      {receiver_buffer.data()}, {static_cast<size_t>(receiver_buffer.size())});
+  ASSERT_TRUE(receiver.local_port().has_value());
+  int receiver_port = receiver.local_port().value();
   std::string receiver_address = absl::StrCat("127.0.0.1:", receiver_port);
+
+  // Allocate a single large destination device buffer on receiver.
+  size_t total_floats = (10 * single_buffer_size) / sizeof(float);
+  std::vector<float> zero_data(total_floats, 0.0f);
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<xla::PjRtBuffer> dst_buffer,
+      manager->BufferFromHost(zero_data.data(), xla::F32,
+                              {static_cast<int64_t>(total_floats)}));
+  ASSERT_THAT(dst_buffer->GetReadyFuture().Await(), absl_testing::IsOk());
 
   // 5. Create the RaidenManagerBase sender instance.
   RaidenManagerBase sender(/*num_layers=*/1, /*num_shards=*/1,
@@ -330,6 +329,16 @@ TEST(RaidenManagerBaseTest, E2eRemoteD2DBlockWriteConcurrent) {
                            /*block_size=*/1,
                            /*local_port=*/std::nullopt,
                            /*parallelism=*/1, /*max_staging_blocks=*/4);
+
+  // Register receive on receiver for all 10 blocks using the same dst_buffer.
+  std::vector<xla::Future<>> recv_futures;
+  recv_futures.reserve(10);
+  for (int i = 0; i < 10; ++i) {
+    TF_ASSERT_OK_AND_ASSIGN(
+        auto hold, raiden::BufferHoldAndAlias::Acquire(dst_buffer.get()));
+    recv_futures.push_back(
+        receiver.RemoteD2DBlockReceive(i, std::move(hold), single_buffer_size));
+  }
 
   // 6. Prepare metadata and trigger all 10 async transfers concurrently.
   std::vector<xla::Future<>> futures;
@@ -343,24 +352,31 @@ TEST(RaidenManagerBaseTest, E2eRemoteD2DBlockWriteConcurrent) {
 
     BlockMetadata dst;
     dst.block_id = i;
-    dst.data_ptr = receiver_buffer.data() + i * single_buffer_size;
+    dst.data_ptr = dst_buffer.get();
     dst.address = receiver_address;
+    dst.pjrt_client = client;
 
     futures.push_back(sender.RemoteD2DBlockWrite(src, dst, single_buffer_size));
   }
 
-  // 7. Join all 10 futures and await completion.
+  // 7. Join all 10 futures and await completion of transfers and receives.
   absl::Status status = xla::JoinFutures(futures).Await();
   ASSERT_THAT(status, absl_testing::IsOk());
 
-  // 8. Verify that each of the 10 blocks contains the correct received values.
+  status = xla::JoinFutures(recv_futures).Await();
+  ASSERT_THAT(status, absl_testing::IsOk());
+
+  // 8. Verify that the destination device buffer contains the correct values.
+  TF_ASSERT_OK_AND_ASSIGN(std::shared_ptr<xla::Literal> literal,
+                          dst_buffer->ToLiteral().Await());
+  auto read_data = literal->data<float>();
+  ASSERT_EQ(read_data.size(), total_floats);
+  size_t floats_per_block = single_buffer_size / sizeof(float);
   for (int i = 0; i < 10; ++i) {
-    float* received_floats = reinterpret_cast<float*>(receiver_buffer.data() +
-                                                      i * single_buffer_size);
-    EXPECT_EQ(received_floats[0], i + 1.0f);
-    EXPECT_EQ(received_floats[1], i + 2.0f);
-    EXPECT_EQ(received_floats[2], i + 3.0f);
-    EXPECT_EQ(received_floats[3], i + 4.0f);
+    EXPECT_EQ(read_data[i * floats_per_block + 0], i + 1.0f);
+    EXPECT_EQ(read_data[i * floats_per_block + 1], i + 2.0f);
+    EXPECT_EQ(read_data[i * floats_per_block + 2], i + 3.0f);
+    EXPECT_EQ(read_data[i * floats_per_block + 3], i + 4.0f);
   }
 }
 

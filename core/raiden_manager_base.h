@@ -17,16 +17,21 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/synchronization/mutex.h"
 #include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/semaphore.h"
+#include "core/raw_transfer_core.h"
 #include "transport/block_transport.h"
 
 namespace tpu_raiden {
@@ -38,6 +43,9 @@ struct BlockMetadata {
   xla::PjRtClient* pjrt_client = nullptr;
 };
 
+using RecvCallback =
+    std::function<absl::Status(int block_id, size_t size_bytes)>;
+
 class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
  public:
   RaidenManagerBase(size_t num_layers, size_t num_shards,
@@ -48,6 +56,10 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   xla::Future<> RemoteD2DBlockWrite(const BlockMetadata& src,
                                     const BlockMetadata& dst,
                                     size_t size_bytes);
+
+  xla::Future<> RemoteD2DBlockReceive(int block_id,
+                                      raiden::BufferHoldAndAlias hold,
+                                      size_t size_bytes);
 
   ~RaidenManagerBase() override;
 
@@ -121,11 +133,17 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
 
   absl::Status OnDataReceived() override { return absl::OkStatus(); }
 
+  absl::Status OnSingleBlockReceived(int block_id, size_t size_bytes) override;
+
  private:
   xla::Future<> DoD2DTransfer(const BlockMetadata& src,
                               const BlockMetadata& dst, size_t size_bytes);
 
   std::unique_ptr<xla::Semaphore> semaphore_;
+
+  absl::Mutex recv_mu_;
+  absl::flat_hash_map<int, RecvCallback> recv_callbacks_
+      ABSL_GUARDED_BY(recv_mu_);
 };
 
 }  // namespace tpu_raiden

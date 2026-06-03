@@ -30,7 +30,6 @@ namespace tpu_raiden {
 struct HostBufferAllocation {
   uint8_t* ptr = nullptr;
   size_t size = 0;
-  // Keeps the underlying allocation alive.
   std::shared_ptr<void> owner;
 };
 

@@ -41,6 +41,10 @@ class BlockTransportDelegate {
 
   virtual absl::Status OnDataReceived() = 0;
 
+  virtual absl::Status OnSingleBlockReceived(int block_id, size_t size_bytes) {
+    return OnDataReceived();
+  }
+
   virtual uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) = 0;
 
   virtual size_t GetHostSize(size_t layer_idx, size_t shard_idx) = 0;
