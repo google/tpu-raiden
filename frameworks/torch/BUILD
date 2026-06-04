@@ -161,16 +161,60 @@ nanobind_extension(
     ],
 )
 
-nanobind_extension(
-    name = "_raiden_transfer_engine",
+cc_library(
+    name = "raiden_transfer_engine_torch",
     srcs = ["raiden_transfer_engine.cc"],
+    hdrs = ["raiden_transfer_engine.h"],
+    copts = [
+        "-std=c++20",
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
     features = [
         "-use_header_modules",
     ],
     visibility = ["//visibility:public"],
     deps = [
         ":kv_cache_manager_torch",
+        "//core:transfer_engine_base",
+        "//kv_cache:kv_cache_manager_base",
+        "@torch_tpu//shims/torch:aten_headers",
+    ],
+    alwayslink = 1,
+)
+
+nanobind_extension(
+    name = "_raiden_transfer_engine",
+    srcs = ["raiden_transfer_engine_module.cc"],
+    features = [
+        "-use_header_modules",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":raiden_transfer_engine_torch",
         ":torch_nanobind_utils",
+        "//core:transfer_engine_base",
+        "//kv_cache:kv_cache_manager_base",
+        "@torch_tpu//shims/torch:aten_headers",
+    ],
+)
+
+cc_library(
+    name = "raiden_transfer_engine_torch_mock",
+    srcs = ["raiden_transfer_engine.cc"],
+    hdrs = ["raiden_transfer_engine.h"],
+    copts = [
+        "-std=c++20",
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
+    defines = ["RAIDEN_TORCH_USE_MOCKS"],
+    features = [
+        "-use_header_modules",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":kv_cache_manager_torch_mock",
         "//core:transfer_engine_base",
         "//kv_cache:kv_cache_manager_base",
         "@torch_tpu//shims/torch:aten_headers",
@@ -290,6 +334,27 @@ cc_test(
     features = ["-use_header_modules"],
     deps = [
         ":kv_cache_manager_torch_mock",
+        ":torch_tpu_utils_mock",
+        "@torch_tpu//shims/torch",
+        "@torch_tpu//shims/torch:torch_headers",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/pjrt/plugin/xla_cpu:xla_cpu_pjrt_client",
+        "@xla//xla/tsl/platform:statusor",
+        "@xla//xla/tsl/platform:test",
+        "@xla//xla/tsl/platform:test_main",
+    ],
+)
+
+cc_test(
+    name = "raiden_transfer_engine_test",
+    srcs = ["raiden_transfer_engine_test.cc"],
+    copts = [
+        "-std=c++20",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":raiden_transfer_engine_torch_mock",
         ":torch_tpu_utils_mock",
         "@torch_tpu//shims/torch",
         "@torch_tpu//shims/torch:torch_headers",
