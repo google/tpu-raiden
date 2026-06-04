@@ -38,7 +38,7 @@ TpuPjrtManager* g_default_manager ABSL_GUARDED_BY(g_manager_mutex) = nullptr;
 }  // namespace
 
 absl::StatusOr<TpuPjrtManager*> TpuPjrtManager::GetDefault() {
-  absl::MutexLock lock(&g_manager_mutex);
+  absl::MutexLock lock(g_manager_mutex);
   if (g_default_manager == nullptr) {
     auto manager = std::unique_ptr<TpuPjrtManager>(new TpuPjrtManager());
     absl::Status status = manager->Initialize();
