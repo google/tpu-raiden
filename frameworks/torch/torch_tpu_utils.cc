@@ -19,7 +19,6 @@
 #include <utility>
 
 #include "torch_tpu/eager/device_buffer.h"
-#include "torch_tpu/eager/tensor_to_buffer.h"
 
 namespace tpu_raiden {
 namespace torch {
@@ -32,16 +31,20 @@ xla::PjRtBuffer* UnpackTorchTensor(const at::Tensor& tensor) {
   if (!tensor.is_contiguous()) {
     throw std::invalid_argument("Tensor must be contiguous");
   }
-
-  auto status_or_ref = torch_tpu::MaterializeAndReturn(
-      tensor, torch_tpu::MaterializationReason::kCpuTransfer);
-  if (!status_or_ref.ok()) {
-    throw std::runtime_error("Failed to materialize TPU tensor: " +
-                             std::string(status_or_ref.status().message()));
+  if (tensor.storage_offset() != 0) {
+    throw std::invalid_argument(
+        "Tensor must be a contiguous base tensor with zero storage offset");
   }
-  torch_tpu::DeviceBufferRef buffer_ref = std::move(status_or_ref.value());
 
-  auto status_or_buf = buffer_ref.AwaitBuffer();
+  const torch_tpu::DeviceBufferRef* base_buffer_ref =
+      static_cast<const torch_tpu::DeviceBufferRef*>(
+          tensor.storage().data_ptr().get_context());
+  if (base_buffer_ref == nullptr) {
+    throw std::runtime_error(
+        "Tensor storage does not contain a TorchTPU DeviceBufferRef");
+  }
+
+  auto status_or_buf = base_buffer_ref->GetOrMaterializeBuffer();
   if (!status_or_buf.ok()) {
     throw std::runtime_error("Failed to fetch PjRtBuffer from TPU reference: " +
                              std::string(status_or_buf.status().message()));

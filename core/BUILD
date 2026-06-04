@@ -26,6 +26,23 @@ header_only_cc_info(
 )
 
 cc_library(
+    name = "status_macros",
+    hdrs = [
+        "status_macros.h",
+    ],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+    ],
+)
+
+cc_library(
     name = "raiden_manager_base",
     srcs = [
         "raiden_manager_base.cc",
@@ -48,13 +65,11 @@ cc_library(
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:status_macros",
+        ":status_macros",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
-        "@xla//xla:future",
-        "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt:semaphore",
+        ":xla_raw_transfer_headers",
     ],
     alwayslink = 1,
 )
@@ -65,9 +80,11 @@ header_only_cc_info(
         "@xla//xla:future",
         "@xla//xla:shape_util",
         "@xla//xla/pjrt:common_pjrt_client",
+        "@xla//xla/pjrt:host_memory_allocator",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:pjrt_layout",
         "@xla//xla/pjrt:raw_buffer",
+        "@xla//xla/pjrt:semaphore",
         "@xla//xla/pjrt:status_casters",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_extension_hdrs",
@@ -103,7 +120,6 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
-        "@xla//xla/pjrt:host_memory_allocator",
     ],
 )
 
@@ -120,9 +136,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":host_memory_allocator",
+        ":xla_raw_transfer_headers",
         "@com_google_absl//absl/status:statusor",
-        "@xla//xla:shape_util",
-        "@xla//xla/pjrt:pjrt_client",
     ],
 )
 
@@ -164,19 +179,11 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":raw_transfer_core",
+        ":xla_raw_transfer_headers",
         "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:status_macros",
+        ":status_macros",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
-        "@xla//xla:future",
-        "@xla//xla:shape_util",
-        "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt:raw_buffer",
-        "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
-        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_extension_hdrs",
-        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
-        "@xla//xla/tsl/platform:logging",
-        "@xla//xla/tsl/platform:statusor",
     ],
 )
 

@@ -42,12 +42,22 @@ git_override(
 )
 
 bazel_dep(name = "rules_python", version = "1.8.5")
+bazel_dep(name = "torch_tpu", version = "0.1.1", dev_dependency = True)
 
-raiden_imports = use_extension(
-    "//third_party/torch_tpu_configure:extension.bzl",
-    "raiden_imports",
+local_path_override(
+    module_name = "torch_tpu",
+    path = "../torch_tpu",
 )
-use_repo(raiden_imports, "torch_tpu", "torch_tpu_headers")
+
+torch_tpu_headers_repository = use_repo_rule(
+    "//third_party/torch_tpu_headers:repository.bzl",
+    "torch_tpu_headers_repository",
+)
+
+torch_tpu_headers_repository(
+    name = "torch_tpu_headers",
+    path = "../torch_tpu/torch_tpu",
+)
 
 single_version_override(
     module_name = "rules_python",

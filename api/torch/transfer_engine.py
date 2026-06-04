@@ -28,29 +28,17 @@
 
 """Standalone Raiden transfer engine for TorchTPU KV-cache movement."""
 
-import ctypes
-import os
-from pathlib import Path
-
 import torch  # noqa: F401  # Load torch shared libraries before the extension.
-import torch_tpu
 from torch_tpu import _loader as _torch_tpu_loader
 
-
-def _load_torch_tpu_common() -> None:
-  _torch_tpu_loader.load()
-  common = Path(torch_tpu.__file__).resolve().parent / "common"
-  lib = common / "libpywrap_torch_tpu_common.so"
-  if lib.exists():
-    ctypes.CDLL(str(lib), mode=os.RTLD_GLOBAL | os.RTLD_NOW)
-
-
-_load_torch_tpu_common()
+_torch_tpu_loader.load()
 
 from frameworks.torch import _transfer_engine as _impl
 
 TransferEngine = _impl.TransferEngine
+RaidenTransferEngine = TransferEngine
 
 __all__ = [
+    "RaidenTransferEngine",
     "TransferEngine",
 ]
