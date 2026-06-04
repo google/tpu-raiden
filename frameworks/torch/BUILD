@@ -221,14 +221,61 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "torch_raw_transfer_torch",
+    srcs = ["torch_raw_transfer.cc"],
+    hdrs = ["torch_raw_transfer.h"],
+    copts = [
+        "-std=c++20",
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":torch_tpu_utils",
+        "//core:host_memory_allocator",
+        "//core:raw_transfer_core",
+        "//core:utils",
+        "//core:xla_raw_transfer_headers",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@torch_tpu//shims/torch:aten_headers",
+    ],
+    alwayslink = 1,
+)
+
 nanobind_extension(
     name = "_torch_raw_transfer",
-    srcs = ["torch_raw_transfer.cc"],
+    srcs = ["torch_raw_transfer_module.cc"],
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
         ":torch_nanobind_utils",
-        ":torch_tpu_utils",
+        ":torch_raw_transfer_torch",
+        "//core:host_memory_allocator",
+        "//core:raw_transfer_core",
+        "//core:utils",
+        "//core:xla_raw_transfer_headers",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@torch_tpu//shims/torch:aten_headers",
+    ],
+)
+
+cc_library(
+    name = "torch_raw_transfer_torch_mock",
+    srcs = ["torch_raw_transfer.cc"],
+    hdrs = ["torch_raw_transfer.h"],
+    copts = [
+        "-std=c++20",
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":torch_tpu_utils_mock",
         "//core:host_memory_allocator",
         "//core:raw_transfer_core",
         "//core:utils",
@@ -355,6 +402,27 @@ cc_test(
     features = ["-use_header_modules"],
     deps = [
         ":raiden_transfer_engine_torch_mock",
+        ":torch_tpu_utils_mock",
+        "@torch_tpu//shims/torch",
+        "@torch_tpu//shims/torch:torch_headers",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/pjrt/plugin/xla_cpu:xla_cpu_pjrt_client",
+        "@xla//xla/tsl/platform:statusor",
+        "@xla//xla/tsl/platform:test",
+        "@xla//xla/tsl/platform:test_main",
+    ],
+)
+
+cc_test(
+    name = "torch_raw_transfer_test",
+    srcs = ["torch_raw_transfer_test.cc"],
+    copts = [
+        "-std=c++20",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":torch_raw_transfer_torch_mock",
         ":torch_tpu_utils_mock",
         "@torch_tpu//shims/torch",
         "@torch_tpu//shims/torch:torch_headers",
