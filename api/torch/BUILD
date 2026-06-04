@@ -53,7 +53,6 @@ py_test(
     ],
     deps = [
         ":kv_cache_manager_torch_py",
-        ":weight_synchronizer_torch_py",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
         "@pypi//numpy",
@@ -94,10 +93,10 @@ py_test(
 )
 
 py_library(
-    name = "raiden_transfer_engine",
-    srcs = ["raiden_transfer_engine.py"],
+    name = "transfer_engine",
+    srcs = ["transfer_engine.py"],
     data = [
-        "raiden_transfer_engine.pyi",
+        "transfer_engine.pyi",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -109,8 +108,8 @@ py_library(
 )
 
 py_test(
-    name = "raiden_transfer_engine_test",
-    srcs = ["raiden_transfer_engine_test.py"],
+    name = "transfer_engine_test",
+    srcs = ["transfer_engine_test.py"],
     tags = [
         "cpu:8",
         "notap",
@@ -119,7 +118,7 @@ py_test(
         "requires-net:external",
     ],
     deps = [
-        ":raiden_transfer_engine",
+        ":transfer_engine",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
         "@pypi//numpy",

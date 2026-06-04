@@ -388,7 +388,7 @@ int64_t TransferEngineBase::SubmitH2D(
   return StorePending(std::move(op));
 }
 
-int64_t TransferEngineBase::RegisterSend(
+int64_t TransferEngineBase::NotifyForRead(
     const std::string& req_id, uint64_t uuid,
     const std::vector<int64_t>& block_ids) {
   const auto register_start = std::chrono::steady_clock::now();
@@ -431,7 +431,7 @@ int64_t TransferEngineBase::RegisterSend(
   return static_cast<int64_t>(uuid);
 }
 
-int64_t TransferEngineBase::SubmitLoad(
+int64_t TransferEngineBase::StartRead(
     const std::string& req_id, uint64_t uuid,
     const std::string& remote_endpoint,
     const std::vector<int64_t>& remote_block_ids,
@@ -658,7 +658,7 @@ void TransferEngineBase::WaitTransfer(int64_t op_id) {
 
 std::tuple<std::vector<std::string>, std::vector<std::string>,
            std::vector<std::string>>
-TransferEngineBase::PollFinishedRaw() {
+TransferEngineBase::CompleteReadRaw() {
   std::vector<std::string> done_sending;
   std::vector<std::string> done_recving;
   std::vector<std::string> failed_recving;

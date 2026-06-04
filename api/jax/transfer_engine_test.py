@@ -37,7 +37,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from api.jax.raiden_transfer_engine import RaidenTransferEngine
+from api.jax.transfer_engine import RaidenTransferEngine
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 
@@ -156,10 +156,10 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
 
     req_id = "test_req_poll_jax"
     uuid = 12345
-    producer.register_send(req_id, uuid, [0, 1])
+    producer.notify_for_read(req_id, uuid, [0, 1])
 
     remote_endpoint = f"127.0.0.1:{port}"
-    consumer.submit_load(
+    consumer.start_read(
         req_id=req_id,
         uuid=uuid,
         remote_endpoint=remote_endpoint,
@@ -170,7 +170,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
     # Poll until consumer is done receiving
     done = False
     for _ in range(50):
-      _, done_recving, failed_recving = consumer.poll_finished()
+      _, done_recving, failed_recving = consumer.complete_read()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
@@ -187,7 +187,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
     # Poll producer until it's done sending
     done_prod = False
     for _ in range(50):
-      done_sending, _, _ = producer.poll_finished()
+      done_sending, _, _ = producer.complete_read()
       if req_id in done_sending:
         done_prod = True
         break
@@ -242,10 +242,10 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
 
     req_id = "test_req_non_contig"
     uuid = 54321
-    producer.register_send(req_id, uuid, [0, 2])
+    producer.notify_for_read(req_id, uuid, [0, 2])
 
     remote_endpoint = f"127.0.0.1:{port}"
-    consumer.submit_load(
+    consumer.start_read(
         req_id=req_id,
         uuid=uuid,
         remote_endpoint=remote_endpoint,
@@ -255,7 +255,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
 
     done = False
     for _ in range(50):
-      _, done_recving, failed_recving = consumer.poll_finished()
+      _, done_recving, failed_recving = consumer.complete_read()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
@@ -275,7 +275,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
 
     done_prod = False
     for _ in range(50):
-      done_sending, _, _ = producer.poll_finished()
+      done_sending, _, _ = producer.complete_read()
       if req_id in done_sending:
         done_prod = True
         break
@@ -330,10 +330,10 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
 
     req_id = "test_req_reorder"
     uuid = 98765
-    producer.register_send(req_id, uuid, [0, 1])
+    producer.notify_for_read(req_id, uuid, [0, 1])
 
     remote_endpoint = f"127.0.0.1:{port}"
-    consumer.submit_load(
+    consumer.start_read(
         req_id=req_id,
         uuid=uuid,
         remote_endpoint=remote_endpoint,
@@ -343,7 +343,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
 
     done = False
     for _ in range(50):
-      _, done_recving, failed_recving = consumer.poll_finished()
+      _, done_recving, failed_recving = consumer.complete_read()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
@@ -361,7 +361,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
 
     done_prod = False
     for _ in range(50):
-      done_sending, _, _ = producer.poll_finished()
+      done_sending, _, _ = producer.complete_read()
       if req_id in done_sending:
         done_prod = True
         break
@@ -421,10 +421,10 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
     requested_remote = list(reversed(remote_blocks))
     local_blocks = list(range(len(remote_blocks)))
 
-    producer.register_send(req_id, uuid, remote_blocks)
+    producer.notify_for_read(req_id, uuid, remote_blocks)
 
     remote_endpoint = f"127.0.0.1:{port}"
-    consumer.submit_load(
+    consumer.start_read(
         req_id=req_id,
         uuid=uuid,
         remote_endpoint=remote_endpoint,
@@ -434,7 +434,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
 
     done = False
     for _ in range(100):
-      _, done_recving, failed_recving = consumer.poll_finished()
+      _, done_recving, failed_recving = consumer.complete_read()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
@@ -454,7 +454,7 @@ class RaidenTransferEngineJaxTest(parameterized.TestCase):
 
     done_prod = False
     for _ in range(50):
-      done_sending, _, _ = producer.poll_finished()
+      done_sending, _, _ = producer.complete_read()
       if req_id in done_sending:
         done_prod = True
         break

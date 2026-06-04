@@ -20,10 +20,7 @@ py_library(
     name = "kv_cache_manager_jax_py",
     srcs = ["kv_cache_manager.py"],
     visibility = ["//visibility:public"],
-    deps = [
-        "//frameworks/jax:_kv_cache_manager",
-        "//raiden_lib/raw_transfer/jax:raw_transfer",
-    ],
+    deps = ["//frameworks/jax:_kv_cache_manager"],
 )
 
 py_library(
@@ -170,8 +167,8 @@ py_test(
 )
 
 py_library(
-    name = "raiden_transfer_engine_jax_py",
-    srcs = ["raiden_transfer_engine.py"],
+    name = "transfer_engine_jax_py",
+    srcs = ["transfer_engine.py"],
     visibility = ["//visibility:public"],
     deps = [
         "//frameworks/jax:_raiden_transfer_engine",

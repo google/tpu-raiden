@@ -22,7 +22,7 @@ from absl.testing import parameterized
 import numpy as np
 import torch
 
-from api.torch.raiden_transfer_engine import RaidenTransferEngine
+from api.torch.transfer_engine import RaidenTransferEngine
 
 
 class RaidenTransferEngineTest(parameterized.TestCase):
@@ -88,10 +88,10 @@ class RaidenTransferEngineTest(parameterized.TestCase):
 
     req_id = "test_req_poll"
     uuid = 12345
-    producer.register_send(req_id, uuid, [0, 1])
+    producer.notify_for_read(req_id, uuid, [0, 1])
 
     remote_endpoint = f"127.0.0.1:{port}"
-    consumer.submit_load(
+    consumer.start_read(
         req_id=req_id,
         uuid=uuid,
         remote_endpoint=remote_endpoint,
@@ -102,14 +102,14 @@ class RaidenTransferEngineTest(parameterized.TestCase):
     # Poll until consumer is done receiving
     done = False
     for _ in range(50):
-      done_sending, done_recving, failed_recving = consumer.poll_finished()
+      done_sending, done_recving, failed_recving = consumer.complete_read()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
         done = True
         break
       time.sleep(0.1)
-    
+
     self.assertTrue(done, "Consumer did not finish transfer in time")
 
     # Check that consumer correctly loaded the values
@@ -119,12 +119,12 @@ class RaidenTransferEngineTest(parameterized.TestCase):
     # Poll producer until it's done sending
     done_prod = False
     for _ in range(50):
-      done_sending, done_recving, failed_recving = producer.poll_finished()
+      done_sending, done_recving, failed_recving = producer.complete_read()
       if req_id in done_sending:
         done_prod = True
         break
       time.sleep(0.1)
-    
+
     self.assertTrue(done_prod, "Producer did not finish sending in time")
 
 

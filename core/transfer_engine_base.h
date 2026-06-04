@@ -140,13 +140,13 @@ class TransferEngineBase {
   int64_t SubmitH2D(int64_t slot_idx, int64_t num_blocks,
                     const std::vector<int64_t>& local_block_ids);
 
-  int64_t RegisterSend(const std::string& req_id, uint64_t uuid,
-                       const std::vector<int64_t>& block_ids);
+  int64_t NotifyForRead(const std::string& req_id, uint64_t uuid,
+                        const std::vector<int64_t>& block_ids);
 
-  int64_t SubmitLoad(const std::string& req_id, uint64_t uuid,
-                     const std::string& remote_endpoint,
-                     const std::vector<int64_t>& remote_block_ids,
-                     const std::vector<int64_t>& local_block_ids);
+  int64_t StartRead(const std::string& req_id, uint64_t uuid,
+                    const std::string& remote_endpoint,
+                    const std::vector<int64_t>& remote_block_ids,
+                    const std::vector<int64_t>& local_block_ids);
 
   std::vector<int64_t> PollTransferOps();
 
@@ -154,7 +154,7 @@ class TransferEngineBase {
 
   std::tuple<std::vector<std::string>, std::vector<std::string>,
              std::vector<std::string>>
-  PollFinishedRaw();
+  CompleteReadRaw();
 
   // Helpers for subclasses / nanobindings
   virtual StageResult IssueD2H(int64_t slot_idx, int64_t num_blocks,

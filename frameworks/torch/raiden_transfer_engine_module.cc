@@ -124,9 +124,9 @@ NB_MODULE(_raiden_transfer_engine, m) {
           [](RaidenTransferEngine& self, nb::object /*host_pool*/,
              int64_t tp_rank) { self.RegisterHostBuffers(tp_rank); },
           nb::arg("host_pool"), nb::arg("tp_rank"))
-      .def("register_send", &RaidenTransferEngine::RegisterSend,
+      .def("notify_for_read", &RaidenTransferEngine::NotifyForRead,
            nb::arg("req_id"), nb::arg("uuid"), nb::arg("block_ids"))
-      .def("submit_load", &RaidenTransferEngine::SubmitLoad, nb::arg("req_id"),
+      .def("start_read", &RaidenTransferEngine::StartRead, nb::arg("req_id"),
            nb::arg("uuid"), nb::arg("remote_endpoint"),
            nb::arg("remote_block_ids"), nb::arg("local_block_ids"))
       .def(
@@ -204,10 +204,10 @@ NB_MODULE(_raiden_transfer_engine, m) {
       .def("submit_h2d", &RaidenTransferEngine::SubmitH2D, nb::kw_only(),
            nb::arg("slot_idx"), nb::arg("num_blocks"),
            nb::arg("local_block_ids"))
-      .def("poll_finished",
+      .def("complete_read",
            [](RaidenTransferEngine& self) {
              auto [done_sending, done_recving, failed_recving] =
-                 self.PollFinishedRaw();
+                 self.CompleteReadRaw();
              return nb::make_tuple(done_sending, done_recving, failed_recving);
            })
       .def("poll_transfer_ops", &RaidenTransferEngine::PollTransferOps)

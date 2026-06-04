@@ -9,13 +9,13 @@ class RaidenTransferEngine:
       timeout_s: float = ...,
       unsafe_skip_buffer_lock: bool = ...,
   ) -> None: ...
-  def register_send(
+  def notify_for_read(
       self,
       req_id: str,
       uuid: int,
       block_ids: list[int],
   ) -> int: ...
-  def submit_load(
+  def start_read(
       self,
       req_id: str,
       uuid: int,
@@ -23,4 +23,4 @@ class RaidenTransferEngine:
       remote_block_ids: list[int],
       local_block_ids: list[int],
   ) -> int: ...
-  def poll_finished(self) -> tuple[list[str], list[str], list[str]]: ...
+  def complete_read(self) -> tuple[list[str], list[str], list[str]]: ...
