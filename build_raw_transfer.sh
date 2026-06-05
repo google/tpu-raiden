@@ -66,7 +66,7 @@ fi
 BAZEL_BIN="/tmp/bazel-bootstrap-${BAZEL_VERSION}"
 if [[ ! -f "${BAZEL_BIN}" ]]; then
   echo "Bootstrapping standalone Bazel ${BAZEL_VERSION} to temporary folder ${BAZEL_BIN}..."
-  download_file "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-x86_64" "${BAZEL_BIN}"
+  download_file "https://storage.googleapis.com/bazel/${BAZEL_VERSION}/release/bazel-${BAZEL_VERSION}-linux-x86_64" "${BAZEL_BIN}"
   chmod +x "${BAZEL_BIN}"
 fi
 
