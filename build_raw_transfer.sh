@@ -15,6 +15,23 @@
 #!/bin/bash
 set -e
 
+download_file() {
+  local url="$1"
+  local dest="$2"
+  if command -v curl > /dev/null; then
+    curl -Lo "$dest" "$url"
+  elif command -v wget > /dev/null; then
+    wget -O "$dest" "$url"
+  elif command -v python3 > /dev/null; then
+    python3 -c "import urllib.request; urllib.request.urlretrieve('$url', '$dest')"
+  elif command -v python > /dev/null; then
+    python -c "import urllib; urllib.urlretrieve('$url', '$dest')"
+  else
+    echo "Error: No download tool found (curl, wget, python3, python)." >&2
+    return 1
+  fi
+}
+
 # Define directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 DEFAULT_WORKSPACE_DIR="$SCRIPT_DIR"
@@ -49,7 +66,7 @@ fi
 BAZEL_BIN="/tmp/bazel-bootstrap-${BAZEL_VERSION}"
 if [[ ! -f "${BAZEL_BIN}" ]]; then
   echo "Bootstrapping standalone Bazel ${BAZEL_VERSION} to temporary folder ${BAZEL_BIN}..."
-  curl -Lo "${BAZEL_BIN}" "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-x86_64"
+  download_file "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-x86_64" "${BAZEL_BIN}"
   chmod +x "${BAZEL_BIN}"
 fi
 
