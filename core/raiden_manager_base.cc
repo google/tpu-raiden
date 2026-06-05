@@ -112,6 +112,26 @@ void RaidenManagerBase::SetExternalHostPointers(
   }
 }
 
+void RaidenManagerBase::SetBlockReadinessCallback(
+    BlockReadinessCallback callback) {
+  absl::MutexLock l(&block_readiness_mu_);
+  block_readiness_callback_ = std::move(callback);
+}
+
+absl::Status RaidenManagerBase::WaitForBlockRead(size_t layer_idx,
+                                                 size_t shard_idx,
+                                                 int block_id) {
+  BlockReadinessCallback callback;
+  {
+    absl::MutexLock l(&block_readiness_mu_);
+    callback = block_readiness_callback_;
+  }
+  if (!callback) {
+    return absl::OkStatus();
+  }
+  return callback(layer_idx, shard_idx, block_id);
+}
+
 absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hWriteDirect(
     const std::string& peer, const std::vector<int>& src_block_ids,
     int64_t entity_id) {

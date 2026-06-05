@@ -45,6 +45,9 @@ struct BlockMetadata {
 
 using RecvCallback =
     std::function<absl::Status(int block_id, size_t size_bytes)>;
+using BlockReadinessCallback =
+    std::function<absl::Status(size_t layer_idx, size_t shard_idx,
+                               int block_id)>;
 
 class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
  public:
@@ -87,6 +90,8 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   void SetExternalHostPointers(const std::vector<const uint8_t*>& host_ptrs,
                                const std::vector<size_t>& host_sizes);
 
+  void SetBlockReadinessCallback(BlockReadinessCallback callback);
+
   // Delegate overrides E2E
   size_t num_layers() const override { return num_layers_; }
   size_t num_shards() const override { return num_shards_; }
@@ -94,6 +99,8 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   int block_size() const override { return block_size_; }
   size_t bytes_per_block() const override;
   size_t shard_factor() const override { return shard_factor_; }
+  absl::Status WaitForBlockRead(size_t layer_idx, size_t shard_idx,
+                                int block_id) override;
 
  protected:
   struct ShardBufferInfoBase {
@@ -144,6 +151,10 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   absl::Mutex recv_mu_;
   absl::flat_hash_map<int, RecvCallback> recv_callbacks_
       ABSL_GUARDED_BY(recv_mu_);
+
+  absl::Mutex block_readiness_mu_;
+  BlockReadinessCallback block_readiness_callback_
+      ABSL_GUARDED_BY(block_readiness_mu_);
 };
 
 }  // namespace tpu_raiden

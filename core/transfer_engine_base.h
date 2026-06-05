@@ -210,6 +210,21 @@ class TransferEngineBase {
     std::chrono::steady_clock::time_point deadline;
   };
 
+  struct StagingLayerReady {
+    bool done = false;
+    absl::Status status = absl::OkStatus();
+  };
+
+  struct StagingReadinessState {
+    int64_t slot_idx = -1;
+    int64_t num_blocks = 0;
+    size_t num_layers = 0;
+    size_t num_shards = 0;
+    std::mutex mu;
+    std::condition_variable cv;
+    std::vector<StagingLayerReady> layers;
+  };
+
   struct PullBlockDescriptor {
     uint64_t remote_block_base = 0;
     uint64_t num_blocks = 0;
@@ -256,6 +271,14 @@ class TransferEngineBase {
   void HandleControlConnection(int fd);
   void ProcessPullStream(int fd, const ControlRequestHeader& req);
   void AckRemote(const std::string& remote_endpoint, uint64_t uuid);
+  absl::Status WaitForStagingBlockRead(size_t layer_idx, size_t shard_idx,
+                                       int block_id);
+  std::shared_ptr<StagingReadinessState> CreateStagingReadiness(
+      int64_t slot_idx, int64_t num_blocks);
+  void MarkStagingLayerReady(
+      const std::shared_ptr<StagingReadinessState>& state, size_t layer_idx,
+      size_t shard_idx, const absl::Status& status);
+  void RemoveStagingReadinessLocked(int64_t slot_idx);
 
   int64_t StorePending(PendingOperation op);
   std::chrono::steady_clock::time_point DeadlineFromNow() const;
@@ -281,6 +304,8 @@ class TransferEngineBase {
   std::set<std::string> done_sending_;
   std::set<std::string> done_recving_;
   std::set<std::string> failed_recving_;
+  std::map<int64_t, std::shared_ptr<StagingReadinessState>>
+      staging_readiness_;
 
   std::mutex mu_;
   std::condition_variable cv_;

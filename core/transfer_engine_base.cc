@@ -371,7 +371,12 @@ TransferEngineBase::TransferEngineBase(
   StartControlServer();
 }
 
-TransferEngineBase::~TransferEngineBase() { StopControlServer(); }
+TransferEngineBase::~TransferEngineBase() {
+  StopControlServer();
+  if (kv_transfer_) {
+    kv_transfer_->SetBlockReadinessCallback(nullptr);
+  }
+}
 
 int64_t TransferEngineBase::SubmitD2H(int64_t slot_idx, int64_t num_blocks,
                                       const std::vector<int64_t>& block_ids) {
@@ -525,11 +530,66 @@ int64_t TransferEngineBase::StartRead(
               block_descriptor.remote_block_base, block_descriptor.num_blocks);
           std::vector<int> local_compact_block_ids =
               ContiguousBlockIds(/*base=*/0, block_descriptor.num_blocks);
+          const bool overlap_h2d = !load_plan.RequiresHostReorder();
+          kv_cache::KVCacheCopySpec h2d_transfer_spec =
+              ToKVCacheCopySpec(load_plan.h2d_copy);
+          auto h2d_future = std::make_shared<TransferFuture>();
+          std::mutex h2d_mu;
+          std::vector<size_t> h2d_received_counts(local_spans.size(), 0);
+          std::vector<bool> h2d_issued(local_spans.size(), false);
+          bool h2d_started = false;
+          std::chrono::steady_clock::time_point h2d_started_at;
+          transport::BlockReceivedCallback on_block_received;
+          if (overlap_h2d) {
+            h2d_segments =
+                static_cast<int64_t>(load_plan.h2d_copy.sizes.size());
+            on_block_received =
+                [&](size_t layer_idx, size_t shard_idx, int /*block_id*/,
+                    size_t /*size_bytes*/) -> absl::Status {
+              const size_t span_idx = layer_idx * kv_transfer_->num_shards() +
+                                      shard_idx;
+              if (span_idx >= local_spans.size()) {
+                return absl::OutOfRangeError(
+                    "received block layer or shard out of range");
+              }
+              std::lock_guard<std::mutex> lock(h2d_mu);
+              size_t received = ++h2d_received_counts[span_idx];
+              if (received < static_cast<size_t>(load_plan.num_blocks)) {
+                return absl::OkStatus();
+              }
+              if (received > static_cast<size_t>(load_plan.num_blocks)) {
+                return absl::FailedPreconditionError(
+                    "received too many blocks for H2D layer");
+              }
+              if (h2d_issued[span_idx]) {
+                return absl::OkStatus();
+              }
+              const auto issue_one_start = std::chrono::steady_clock::now();
+              if (!h2d_started) {
+                h2d_started = true;
+                h2d_started_at = issue_one_start;
+              }
+              absl::StatusOr<raiden::PjRtCopyFuture> future_or =
+                  kv_transfer_->H2dFromHostSlot(
+                      layer_idx, slot_idx, load_plan.num_blocks,
+                      h2d_transfer_spec, shard_idx);
+              if (!future_or.ok()) {
+                return future_or.status();
+              }
+              h2d_future->Add(std::move(future_or).value());
+              h2d_issued[span_idx] = true;
+              h2d_bytes += static_cast<int64_t>(local_spans[span_idx].nbytes);
+              h2d_issue_ms += DurationMs(issue_one_start,
+                                         std::chrono::steady_clock::now());
+              return absl::OkStatus();
+            };
+          }
           const auto h2h_start = std::chrono::steady_clock::now();
           auto h2h_future_or = kv_transfer_->H2hReadExplicit(
               EndpointWithPort(remote_endpoint, response.data_port),
               remote_staging_block_ids, local_compact_block_ids,
-              explicit_dst_ptrs);
+              explicit_dst_ptrs, transport::MajorOrder::kLayerMajor,
+              on_block_received);
           if (!h2h_future_or.ok()) {
             ThrowStatus("BlockTransport pull failed", h2h_future_or.status());
           }
@@ -546,21 +606,32 @@ int64_t TransferEngineBase::StartRead(
             }
             host_reorder_ms +=
                 DurationMs(reorder_start, std::chrono::steady_clock::now());
+            const auto h2d_start = std::chrono::steady_clock::now();
+            StageResult h2d =
+                IssueH2D(slot_idx, static_cast<int64_t>(load_plan.num_blocks),
+                         load_plan.h2d_local_block_ids);
+            const auto h2d_issued = std::chrono::steady_clock::now();
+            h2d.future->Await();
+            const auto h2d_done = std::chrono::steady_clock::now();
+
+            h2d_bytes = h2d.total_bytes;
+            h2d_segments = h2d.copy_segments;
+            h2d_issue_ms = DurationMs(h2d_start, h2d_issued);
+            h2d_wait_ms = DurationMs(h2d_issued, h2d_done);
+            h2d_total_ms = DurationMs(h2d_start, h2d_done);
+          } else {
+            for (size_t i = 0; i < h2d_issued.size(); ++i) {
+              if (!h2d_issued[i]) {
+                throw std::runtime_error("H2D layer was not issued");
+              }
+            }
+            const auto h2d_wait_start = std::chrono::steady_clock::now();
+            h2d_future->Await();
+            const auto h2d_done = std::chrono::steady_clock::now();
+            h2d_wait_ms = DurationMs(h2d_wait_start, h2d_done);
+            h2d_total_ms =
+                h2d_started ? DurationMs(h2d_started_at, h2d_done) : 0.0;
           }
-
-          const auto h2d_start = std::chrono::steady_clock::now();
-          StageResult h2d =
-              IssueH2D(slot_idx, static_cast<int64_t>(load_plan.num_blocks),
-                       load_plan.h2d_local_block_ids);
-          const auto h2d_issued = std::chrono::steady_clock::now();
-          h2d.future->Await();
-          const auto h2d_done = std::chrono::steady_clock::now();
-
-          h2d_bytes = h2d.total_bytes;
-          h2d_segments = h2d.copy_segments;
-          h2d_issue_ms = DurationMs(h2d_start, h2d_issued);
-          h2d_wait_ms = DurationMs(h2d_issued, h2d_done);
-          h2d_total_ms = DurationMs(h2d_start, h2d_done);
 
           const auto ack_start = std::chrono::steady_clock::now();
           ControlRequestHeader ack_request;
@@ -799,8 +870,90 @@ void TransferEngineBase::ReleaseSlotLocked(int64_t slot_idx) {
 void TransferEngineBase::ReleaseEntrySlotLocked(
     const std::shared_ptr<SendEntry>& entry) {
   if (!entry || entry->slot_idx < 0 || entry->slot_released) return;
+  RemoveStagingReadinessLocked(entry->slot_idx);
   ReleaseSlotLocked(entry->slot_idx);
   entry->slot_released = true;
+}
+
+std::shared_ptr<TransferEngineBase::StagingReadinessState>
+TransferEngineBase::CreateStagingReadiness(int64_t slot_idx,
+                                           int64_t num_blocks) {
+  auto state = std::make_shared<StagingReadinessState>();
+  state->slot_idx = slot_idx;
+  state->num_blocks = num_blocks;
+  state->num_layers = kv_transfer_->num_layers();
+  state->num_shards = kv_transfer_->num_shards();
+  state->layers.resize(state->num_layers * state->num_shards);
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    staging_readiness_[slot_idx] = state;
+  }
+  return state;
+}
+
+void TransferEngineBase::MarkStagingLayerReady(
+    const std::shared_ptr<StagingReadinessState>& state, size_t layer_idx,
+    size_t shard_idx, const absl::Status& status) {
+  if (!state) return;
+  const size_t layer_state_idx = layer_idx * state->num_shards + shard_idx;
+  if (layer_state_idx >= state->layers.size()) return;
+  {
+    std::lock_guard<std::mutex> lock(state->mu);
+    state->layers[layer_state_idx].done = true;
+    state->layers[layer_state_idx].status = status;
+  }
+  state->cv.notify_all();
+}
+
+void TransferEngineBase::RemoveStagingReadinessLocked(int64_t slot_idx) {
+  auto it = staging_readiness_.find(slot_idx);
+  if (it == staging_readiness_.end()) return;
+  std::shared_ptr<StagingReadinessState> state = it->second;
+  staging_readiness_.erase(it);
+  {
+    std::lock_guard<std::mutex> state_lock(state->mu);
+    for (StagingLayerReady& layer : state->layers) {
+      if (!layer.done) {
+        layer.done = true;
+        layer.status = absl::CancelledError("staging slot was released");
+      }
+    }
+  }
+  state->cv.notify_all();
+}
+
+absl::Status TransferEngineBase::WaitForStagingBlockRead(size_t layer_idx,
+                                                         size_t shard_idx,
+                                                         int block_id) {
+  if (block_id < 0 || max_blocks_ <= 0) {
+    return absl::OkStatus();
+  }
+  const int64_t slot_idx = static_cast<int64_t>(block_id) / max_blocks_;
+  const int64_t local_block_idx = static_cast<int64_t>(block_id) % max_blocks_;
+  std::shared_ptr<StagingReadinessState> state;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = staging_readiness_.find(slot_idx);
+    if (it == staging_readiness_.end()) {
+      return absl::OkStatus();
+    }
+    state = it->second;
+  }
+  if (local_block_idx < 0 || local_block_idx >= state->num_blocks) {
+    return absl::OkStatus();
+  }
+  if (layer_idx >= state->num_layers || shard_idx >= state->num_shards) {
+    return absl::OutOfRangeError("staging readiness layer or shard out of range");
+  }
+  const size_t layer_state_idx = layer_idx * state->num_shards + shard_idx;
+  std::unique_lock<std::mutex> lock(state->mu);
+  state->cv.wait(lock, [&]() {
+    return state->layers[layer_state_idx].done || stopping_.load();
+  });
+  if (stopping_.load() && !state->layers[layer_state_idx].done) {
+    return absl::CancelledError("Raiden transfer engine is stopping");
+  }
+  return state->layers[layer_state_idx].status;
 }
 
 void TransferEngineBase::StartControlServer() {
@@ -847,6 +1000,12 @@ void TransferEngineBase::StartControlServer() {
 
 void TransferEngineBase::StopControlServer() {
   stopping_ = true;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    while (!staging_readiness_.empty()) {
+      RemoveStagingReadinessLocked(staging_readiness_.begin()->first);
+    }
+  }
   if (control_fd_ >= 0) {
     shutdown(control_fd_, SHUT_RDWR);
     close(control_fd_);
@@ -964,24 +1123,45 @@ void TransferEngineBase::ProcessPullStream(int fd,
   const auto slot_ms = DurationMs(slot_start, std::chrono::steady_clock::now());
 
   const auto issue_start = std::chrono::steady_clock::now();
-  StageResult d2h = IssueD2H(slot_idx, entry->num_blocks, requested_block_ids);
-  entry->total_bytes = d2h.total_bytes;
-  entry->copy_segments = d2h.copy_segments;
+  CopySpec d2h_copy = Offsets(requested_block_ids, /*source_is_compact=*/false);
+  kv_cache::KVCacheCopySpec d2h_transfer_spec = ToKVCacheCopySpec(d2h_copy);
+  std::vector<kv_cache::KVCacheHostSpan> host_spans =
+      LayerSpans(slot_idx, entry->num_blocks);
+  auto readiness = CreateStagingReadiness(slot_idx, entry->num_blocks);
+  auto d2h_future = std::make_shared<TransferFuture>();
+  int64_t d2h_total_bytes = 0;
+  for (const kv_cache::KVCacheHostSpan& span : host_spans) {
+    d2h_total_bytes += static_cast<int64_t>(span.nbytes);
+    absl::StatusOr<raiden::PjRtCopyFuture> future_or =
+        kv_transfer_->D2hToHostSlot(span.layer_idx, slot_idx,
+                                    entry->num_blocks, d2h_transfer_spec,
+                                    span.shard_idx);
+    if (!future_or.ok()) {
+      MarkStagingLayerReady(readiness, span.layer_idx, span.shard_idx,
+                            future_or.status());
+      ThrowStatus("Failed to issue D2H transfer", future_or.status());
+    }
+    raiden::PjRtCopyFuture future = std::move(future_or).value();
+    future.OnReady(
+        [this, readiness, layer_idx = span.layer_idx,
+         shard_idx = span.shard_idx](
+            const absl::StatusOr<raiden::BufferHolders>& status_or) {
+          MarkStagingLayerReady(readiness, layer_idx, shard_idx,
+                                status_or.ok() ? absl::OkStatus()
+                                               : status_or.status());
+        });
+    d2h_future->Add(std::move(future));
+  }
+  entry->total_bytes = d2h_total_bytes;
+  entry->copy_segments = static_cast<int64_t>(d2h_copy.sizes.size());
   const auto issue_ms =
       DurationMs(issue_start, std::chrono::steady_clock::now());
-  d2h.future->Await();
-  const auto d2h_ms = DurationMs(issue_start, std::chrono::steady_clock::now());
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    entry->stage_done = true;
-    entry->d2h_done = std::chrono::steady_clock::now();
-  }
 
   const auto response_start = std::chrono::steady_clock::now();
   ControlResponseHeader response;
   response.magic = kResponseMagic;
   response.status = 0;
-  response.num_layers = static_cast<uint32_t>(d2h.host_spans.size());
+  response.num_layers = static_cast<uint32_t>(host_spans.size());
   response.data_port = static_cast<uint32_t>(local_data_port_);
   CheckStatus("control stream response header write",
               WriteExact(fd, &response, sizeof(response)));
@@ -993,6 +1173,14 @@ void TransferEngineBase::ProcessPullStream(int fd,
               WriteExact(fd, &descriptor, sizeof(descriptor)));
   const auto response_ms =
       DurationMs(response_start, std::chrono::steady_clock::now());
+
+  d2h_future->Await();
+  const auto d2h_ms = DurationMs(issue_start, std::chrono::steady_clock::now());
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    entry->stage_done = true;
+    entry->d2h_done = std::chrono::steady_clock::now();
+  }
 
   const auto wait_ack_start = std::chrono::steady_clock::now();
   ControlRequestHeader ack_req;
@@ -1010,7 +1198,7 @@ void TransferEngineBase::ProcessPullStream(int fd,
          << " req_id=" << entry->req_id << " uuid=" << entry->uuid
          << " rank=" << tp_rank_ << " total_blocks=" << entry->num_blocks
          << " total_bytes=" << entry->total_bytes
-         << " total_layers=" << d2h.host_spans.size()
+         << " total_layers=" << host_spans.size()
          << " copy_segments=" << entry->copy_segments
          << " wait_producer_ms=" << wait_producer_ms << " parse_ms=" << parse_ms
          << " slot_acquire_ms=" << slot_ms << " d2h_issue_ms=" << issue_ms
@@ -1130,6 +1318,10 @@ void TransferEngineBase::ConfigureDataPortFromKvTransfer() {
     throw std::runtime_error("KVCacheManager BlockTransport is not running");
   }
   local_data_port_ = *data_port;
+  kv_transfer_->SetBlockReadinessCallback(
+      [this](size_t layer_idx, size_t shard_idx, int block_id) {
+        return WaitForStagingBlockRead(layer_idx, shard_idx, block_id);
+      });
 }
 
 uint64_t TransferEngineBase::StagingBlockBase(int64_t slot_idx) const {

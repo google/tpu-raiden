@@ -476,13 +476,16 @@ KVCacheManagerBase::H2hRead(std::string peer,
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2hReadExplicit(
     std::string peer, const std::vector<int>& src_block_ids,
     const std::vector<int>& local_block_ids,
-    const std::vector<uint8_t*>& explicit_dst_ptrs) {
+    const std::vector<uint8_t*>& explicit_dst_ptrs,
+    tpu_raiden::transport::MajorOrder major_order,
+    tpu_raiden::transport::BlockReceivedCallback on_block_received) {
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
   ABSL_ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
                         server_->Pull(peer, src_block_ids, local_block_ids,
-                                      explicit_dst_ptrs, parallelism_));
+                                      explicit_dst_ptrs, parallelism_,
+                                      major_order, on_block_received));
   return raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{});
 }
 
