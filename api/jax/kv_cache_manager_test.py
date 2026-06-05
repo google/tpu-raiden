@@ -552,6 +552,72 @@ class KVCacheManagerTest(parameterized.TestCase):
       np.testing.assert_array_equal(tpu_np[0:4], 1.0)
       np.testing.assert_array_equal(tpu_np[4:8], 2.0)
 
+  @parameterized.named_parameters(
+      ("fp32", jnp.float32),
+  )
+  def test_h2h_read_parallelism(self, dtype):
+    tpu_sharding = self.setup_shardings()
+    key = jax.random.key(808)
+
+    n_layers = 2
+    block_size = 2
+    test_shape = (8, 128, 8, 8, 128)
+    ref_arrs = []
+    tpu_src_arrs = []
+
+    for i in range(n_layers):
+      sub_key = jax.random.fold_in(key, i)
+      base = jax.random.uniform(sub_key, test_shape, dtype=dtype)
+      ref_arrs.append(base)
+      tpu_src_arrs.append(jax.device_put(base, tpu_sharding))
+
+    jax.block_until_ready(tpu_src_arrs)
+
+    tpu_dst_arrs = [
+        jax.device_put(jnp.empty(test_shape, dtype=dtype), tpu_sharding)
+        for _ in range(n_layers)
+    ]
+    jax.block_until_ready(tpu_dst_arrs)
+
+    remote_manager = kv_cache_manager.KVCacheManager(
+        device_arrays=tpu_src_arrs,
+        block_size=block_size,
+        local_port=0,
+        host_blocks_to_allocate=8,
+        unsafe_skip_buffer_lock=self.skip_lock,
+        parallelism=2,
+    )
+    remote_manager.d2h().Await()
+    time.sleep(0.05)
+    port = remote_manager.local_port()
+    self.assertIsNotNone(port)
+
+    local_manager = kv_cache_manager.KVCacheManager(
+        device_arrays=tpu_dst_arrs,
+        block_size=block_size,
+        host_blocks_to_allocate=8,
+        unsafe_skip_buffer_lock=self.skip_lock,
+        parallelism=2,
+    )
+
+    peer = f"127.0.0.1:{port}"
+    allocated_ids, future = local_manager.h2h_read(
+        peer=peer, src_block_ids=[2, 3], entity_id=404
+    )
+    self.assertEqual(allocated_ids, [0, 1])
+    future.Await()
+
+    local_manager.h2d(
+        src_offsets_major_dim=[0],
+        dst_offsets_major_dim=[0],
+        copy_sizes_major_dim=[2],
+    ).Await()
+
+    for i in range(n_layers):
+      tpu_dst_np = np.asarray(tpu_dst_arrs[i])
+      ref_np = np.asarray(ref_arrs[i])
+      np.testing.assert_array_equal(tpu_dst_np[0:2], ref_np[2:4])
+
 
 if __name__ == "__main__":
   absltest.main()

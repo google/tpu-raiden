@@ -99,6 +99,18 @@ TEST(KVCacheManagerTest, D2hToFailsWithNullPointerWhenSizeIsPositive) {
               testing::HasSubstr("device-backed KVCacheManagerBase"));
 }
 
+TEST(KVCacheManagerTest, H2hReadExplicitAcceptsParallelism) {
+  KVCacheManagerBase manager(/*num_layers=*/1, /*num_shards=*/1,
+                             /*slice_byte_size=*/128);
+  std::vector<uint8_t*> ptrs = {nullptr};
+  auto status = manager.H2hReadExplicit("127.0.0.1:8080", {0}, {0}, ptrs,
+                                        /*parallelism=*/2);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.status().code(), absl::StatusCode::kUnavailable);
+  EXPECT_THAT(status.status().message(),
+              testing::HasSubstr("Failed to connect to peer"));
+}
+
 }  // namespace
 }  // namespace kv_cache
 }  // namespace tpu_raiden

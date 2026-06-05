@@ -118,5 +118,31 @@ TEST(TransferEngineBaseTest, LocalD2HAndH2D) {
   }
 }
 
+TEST(TransferEngineBaseTest, StartReadAcceptsParallelism) {
+  TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
+                          TpuPjrtManager::GetDefault());
+  std::vector<int64_t> shape_dims = {2, 32, 32};
+  std::vector<float> host_data(2 * 32 * 32, 0.0f);
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<xla::PjRtBuffer> buffer,
+      pjrt_manager->BufferFromHost(host_data.data(), xla::F32, shape_dims));
+  ASSERT_THAT(buffer->GetReadyFuture().Await(), IsOk());
+
+  std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers = {{buffer.get()}};
+  auto kv_manager = std::make_unique<kv_cache::KVCacheManagerBase>(
+      layer_buffers, /*block_size=*/1, /*local_port=*/std::nullopt,
+      /*host_blocks_to_allocate=*/4, std::nullopt, true);
+  ASSERT_THAT(kv_manager->ConfigureHostStagingSlots(2, 2), IsOk());
+
+  auto engine = std::make_unique<TransferEngineBase>(std::move(kv_manager), 0,
+                                                     0, 2, 2, 10.0, true);
+
+  // Calling StartRead with a non-existent port throws or returns an op that
+  // fails
+  int64_t op_id = engine->StartRead("req_parallel", 99999, "127.0.0.1:8888",
+                                    {0}, {0}, /*parallelism=*/2);
+  EXPECT_GT(op_id, 0);
+}
+
 }  // namespace
 }  // namespace tpu_raiden

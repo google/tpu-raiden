@@ -441,7 +441,7 @@ int64_t TransferEngineBase::StartRead(
     const std::string& req_id, uint64_t uuid,
     const std::string& remote_endpoint,
     const std::vector<int64_t>& remote_block_ids,
-    const std::vector<int64_t>& local_block_ids) {
+    const std::vector<int64_t>& local_block_ids, int parallelism) {
   auto load_promise = std::make_shared<std::promise<void>>();
   const auto submit_start = std::chrono::steady_clock::now();
   CopyPlan load_plan = BuildLoadCopyPlan(remote_block_ids, local_block_ids);
@@ -450,7 +450,7 @@ int64_t TransferEngineBase::StartRead(
     worker_threads_.emplace_back([this, req_id, uuid, remote_endpoint,
                                   submit_start,
                                   load_plan = std::move(load_plan),
-                                  load_promise]() {
+                                  load_promise, parallelism]() {
       const auto worker_start = std::chrono::steady_clock::now();
       bool failed = false;
       bool report_recv_done = true;
@@ -589,8 +589,8 @@ int64_t TransferEngineBase::StartRead(
           auto h2h_future_or = kv_transfer_->H2hReadExplicit(
               EndpointWithPort(remote_endpoint, response.data_port),
               remote_staging_block_ids, local_compact_block_ids,
-              explicit_dst_ptrs, transport::MajorOrder::kLayerMajor,
-              on_block_received);
+              explicit_dst_ptrs, parallelism,
+              transport::MajorOrder::kLayerMajor, on_block_received);
           if (!h2h_future_or.ok()) {
             ThrowStatus("BlockTransport pull failed", h2h_future_or.status());
           }

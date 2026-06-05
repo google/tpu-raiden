@@ -112,7 +112,7 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   absl::StatusOr<raiden::PjRtCopyFuture> H2hReadExplicit(
       std::string peer, const std::vector<int>& src_block_ids,
       const std::vector<int>& local_block_ids,
-      const std::vector<uint8_t*>& explicit_dst_ptrs,
+      const std::vector<uint8_t*>& explicit_dst_ptrs, int parallelism = 1,
       tpu_raiden::transport::MajorOrder major_order =
           tpu_raiden::transport::MajorOrder::kLayerMajor,
       tpu_raiden::transport::BlockReceivedCallback on_block_received = {});

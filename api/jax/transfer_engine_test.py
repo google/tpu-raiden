@@ -462,6 +462,90 @@ class TransferEngineJaxTest(parameterized.TestCase):
 
     self.assertTrue(done_prod, "Producer did not finish sending in time")
 
+  @parameterized.parameters(jnp.float32, jnp.bfloat16)
+  def test_parallel_pull(self, dtype):
+    tpu_sharding = self.setup_shardings()
+    num_blocks = 2
+    shape = (num_blocks, 128, 8, 8, 128)
+
+    src_refs = []
+    src_caches = []
+    key = jax.random.key(999)
+    for i in range(self.num_layers):
+      sub_key = jax.random.fold_in(key, i)
+      dev_arr, host_ref = self._generate_random_cache(
+          sub_key, shape, dtype, tpu_sharding
+      )
+      src_caches.append(dev_arr)
+      src_refs.append(host_ref)
+
+    dst_caches = []
+    for _ in range(self.num_layers):
+      dst_caches.append(
+          jax.device_put(jnp.zeros(shape, dtype=dtype), tpu_sharding)
+      )
+
+    jax.block_until_ready(src_caches)
+    jax.block_until_ready(dst_caches)
+
+    producer = TransferEngine(
+        kv_caches=src_caches,
+        local_control_port=0,
+        max_blocks=2,
+        num_slots=2,
+        unsafe_skip_buffer_lock=self.skip_lock,
+    )
+
+    consumer = TransferEngine(
+        kv_caches=dst_caches,
+        local_control_port=0,
+        max_blocks=2,
+        num_slots=2,
+        unsafe_skip_buffer_lock=self.skip_lock,
+    )
+
+    port = getattr(producer, "local_control_port", 0)
+    self.assertGreater(port, 0)
+
+    req_id = "test_req_parallel"
+    uuid = 77777
+    producer.notify_for_read(req_id, uuid, [0, 1])
+
+    remote_endpoint = f"127.0.0.1:{port}"
+    consumer.start_read(
+        req_id=req_id,
+        uuid=uuid,
+        remote_endpoint=remote_endpoint,
+        remote_block_ids=[0, 1],
+        local_block_ids=[0, 1],
+        parallelism=2,
+    )
+
+    done = False
+    for _ in range(50):
+      _, done_recving, failed_recving = consumer.complete_read()
+      if req_id in failed_recving:
+        self.fail("Transfer failed")
+      if req_id in done_recving:
+        done = True
+        break
+      time.sleep(0.1)
+
+    self.assertTrue(done, "Consumer did not finish transfer in time")
+
+    for idx, t in enumerate(dst_caches):
+      self._verify_cache_equal(t, src_refs[idx])
+
+    done_prod = False
+    for _ in range(50):
+      done_sending, _, _ = producer.complete_read()
+      if req_id in done_sending:
+        done_prod = True
+        break
+      time.sleep(0.1)
+
+    self.assertTrue(done_prod, "Producer did not finish sending in time")
+
 
 if __name__ == "__main__":
   absltest.main()

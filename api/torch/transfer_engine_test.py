@@ -127,6 +127,82 @@ class TransferEngineTest(parameterized.TestCase):
 
     self.assertTrue(done_prod, "Producer did not finish sending in time")
 
+  def test_parallel_pull(self):
+    num_blocks = 2
+    shape = (num_blocks, 128, 8)
+
+    src_caches = []
+    for _ in range(self.num_layers):
+      src_caches.append(
+          torch.full(
+              shape, fill_value=2.0, dtype=torch.float32, device=self.device
+          )
+      )
+
+    dst_caches = []
+    for _ in range(self.num_layers):
+      dst_caches.append(
+          torch.zeros(shape, dtype=torch.float32, device=self.device)
+      )
+
+    producer = TransferEngine(
+        kv_caches=src_caches,
+        tp_rank=0,
+        local_control_port=0,
+        max_blocks=2,
+        num_slots=2,
+    )
+
+    consumer = TransferEngine(
+        kv_caches=dst_caches,
+        tp_rank=0,
+        local_control_port=0,
+        max_blocks=2,
+        num_slots=2,
+    )
+
+    port = getattr(producer, "local_control_port", 0)
+    self.assertGreater(port, 0)
+
+    req_id = "test_req_parallel"
+    uuid = 99999
+    producer.notify_for_read(req_id, uuid, [0, 1])
+
+    remote_endpoint = f"127.0.0.1:{port}"
+    consumer.start_read(
+        req_id=req_id,
+        uuid=uuid,
+        remote_endpoint=remote_endpoint,
+        remote_block_ids=[0, 1],
+        local_block_ids=[0, 1],
+        parallelism=2,
+    )
+
+    done = False
+    for _ in range(50):
+      done_sending, done_recving, failed_recving = consumer.complete_read()
+      if req_id in failed_recving:
+        self.fail("Transfer failed")
+      if req_id in done_recving:
+        done = True
+        break
+      time.sleep(0.1)
+
+    self.assertTrue(done, "Consumer did not finish transfer in time")
+
+    for t in dst_caches:
+      np.testing.assert_allclose(t.cpu().numpy(), 2.0, atol=1e-5)
+
+    done_prod = False
+    for _ in range(50):
+      done_sending, done_recving, failed_recving = producer.complete_read()
+      if req_id in done_sending:
+        done_prod = True
+        break
+      time.sleep(0.1)
+
+    self.assertTrue(done_prod, "Producer did not finish sending in time")
+
 
 if __name__ == "__main__":
   absltest.main()

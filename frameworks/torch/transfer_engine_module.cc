@@ -19,6 +19,7 @@
 
 #include "nanobind/nanobind.h"
 #include "nanobind/ndarray.h"
+#include "nanobind/stl/optional.h"
 #include "nanobind/stl/shared_ptr.h"
 #include "nanobind/stl/string.h"
 #include "nanobind/stl/vector.h"
@@ -128,7 +129,8 @@ NB_MODULE(_transfer_engine, m) {
            nb::arg("uuid"), nb::arg("block_ids"))
       .def("start_read", &TransferEngine::StartRead, nb::arg("req_id"),
            nb::arg("uuid"), nb::arg("remote_endpoint"),
-           nb::arg("remote_block_ids"), nb::arg("local_block_ids"))
+           nb::arg("remote_block_ids"), nb::arg("local_block_ids"),
+           nb::arg("parallelism") = 1)
       .def(
           "stage_d2h",
           [](TransferEngine& self, int64_t slot_idx, int64_t num_blocks,

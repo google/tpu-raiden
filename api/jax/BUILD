@@ -20,7 +20,10 @@ py_library(
     name = "kv_cache_manager_jax_py",
     srcs = ["kv_cache_manager.py"],
     visibility = ["//visibility:public"],
-    deps = ["//frameworks/jax:_kv_cache_manager"],
+    deps = [
+        ":raw_transfer",
+        "//frameworks/jax:_kv_cache_manager",
+    ],
 )
 
 py_library(

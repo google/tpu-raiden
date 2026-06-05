@@ -38,6 +38,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -149,7 +150,8 @@ class TransferEngineBase {
   int64_t StartRead(const std::string& req_id, uint64_t uuid,
                     const std::string& remote_endpoint,
                     const std::vector<int64_t>& remote_block_ids,
-                    const std::vector<int64_t>& local_block_ids);
+                    const std::vector<int64_t>& local_block_ids,
+                    int parallelism = 1);
 
   std::vector<int64_t> PollTransferOps();
 
