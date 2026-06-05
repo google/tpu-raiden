@@ -34,6 +34,7 @@
 #include "core/raiden_manager_base.h"
 #include "core/raw_transfer_core.h"
 #include "kv_cache/logical_block_manager.h"
+#include "transport/block_transport.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
@@ -111,7 +112,10 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   absl::StatusOr<raiden::PjRtCopyFuture> H2hReadExplicit(
       std::string peer, const std::vector<int>& src_block_ids,
       const std::vector<int>& local_block_ids,
-      const std::vector<uint8_t*>& explicit_dst_ptrs);
+      const std::vector<uint8_t*>& explicit_dst_ptrs,
+      tpu_raiden::transport::MajorOrder major_order =
+          tpu_raiden::transport::MajorOrder::kLayerMajor,
+      tpu_raiden::transport::BlockReceivedCallback on_block_received = {});
 
   // Pure StreamExecutor H2D copy using raw C++ device pointers
   absl::Status H2dDirect(stream_executor::Stream* stream,

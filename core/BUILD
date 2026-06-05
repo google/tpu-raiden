@@ -197,6 +197,7 @@ cc_library(
     deps = [
         ":raw_transfer_core",
         "//kv_cache:kv_cache_manager_base",
+        "//transport:block_transport",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",

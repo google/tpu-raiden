@@ -110,6 +110,9 @@ struct CopyPlan {
 };
 
 struct StageResult {
+  // TransferFuture is shared because it is exported to Python via nanobind.
+  // Python garbage collection and C++ pending operations list share ownership
+  // of the future.
   std::shared_ptr<TransferFuture> future;
   std::vector<kv_cache::KVCacheHostSpan> host_spans;
   int64_t total_bytes = 0;
@@ -185,6 +188,9 @@ class TransferEngineBase {
 
  protected:
   struct PendingOperation {
+    // TransferFuture is shared because it is exported to Python via nanobind.
+    // Python garbage collection and C++ pending operations list share ownership
+    // of the future.
     std::shared_ptr<TransferFuture> future;
     std::shared_ptr<std::promise<void>> load_promise;
   };
@@ -208,6 +214,21 @@ class TransferEngineBase {
     bool pull_started = false;
     bool slot_released = false;
     std::chrono::steady_clock::time_point deadline;
+  };
+
+  struct StagingLayerReady {
+    bool done = false;
+    absl::Status status = absl::OkStatus();
+  };
+
+  struct StagingReadinessState {
+    int64_t slot_idx = -1;
+    int64_t num_blocks = 0;
+    size_t num_layers = 0;
+    size_t num_shards = 0;
+    std::mutex mu;
+    std::condition_variable cv;
+    std::vector<StagingLayerReady> layers;
   };
 
   struct PullBlockDescriptor {
@@ -256,6 +277,14 @@ class TransferEngineBase {
   void HandleControlConnection(int fd);
   void ProcessPullStream(int fd, const ControlRequestHeader& req);
   void AckRemote(const std::string& remote_endpoint, uint64_t uuid);
+  absl::Status WaitForStagingBlockRead(size_t layer_idx, size_t shard_idx,
+                                       int block_id);
+  std::shared_ptr<StagingReadinessState> CreateStagingReadiness(
+      int64_t slot_idx, int64_t num_blocks);
+  void MarkStagingLayerReady(
+      const std::shared_ptr<StagingReadinessState>& state, size_t layer_idx,
+      size_t shard_idx, absl::Status status);
+  void RemoveStagingReadinessLocked(int64_t slot_idx);
 
   int64_t StorePending(PendingOperation op);
   std::chrono::steady_clock::time_point DeadlineFromNow() const;
@@ -276,11 +305,21 @@ class TransferEngineBase {
   int64_t next_op_id_ = 1;
   std::map<int64_t, PendingOperation> pending_;
   std::deque<int64_t> free_slots_;
+  // SendEntry is shared across threads: created/timed-out/cleaned-up on the
+  // main thread, but accessed asynchronously in control worker threads
+  // handling pull connections.
   std::map<uint64_t, std::shared_ptr<SendEntry>> send_entries_;
   std::set<uint64_t> pending_acks_;
   std::set<std::string> done_sending_;
   std::set<std::string> done_recving_;
   std::set<std::string> failed_recving_;
+  // StagingReadinessState is shared because it is captured by value in the
+  // async PjRt copy callbacks (e.g. OnReady). A shared_ptr is required here
+  // to ensure the state stays alive even if the entry is removed from this
+  // map (e.g. on timeout, cancellation, or slot release) before the async
+  // callback runs.
+  std::map<int64_t, std::shared_ptr<StagingReadinessState>>
+      staging_readiness_;
 
   std::mutex mu_;
   std::condition_variable cv_;

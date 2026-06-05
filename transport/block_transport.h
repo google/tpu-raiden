@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <thread>  // NOLINT
 #include <vector>
@@ -29,6 +30,15 @@
 
 namespace tpu_raiden {
 namespace transport {
+
+enum class MajorOrder : uint8_t {
+  kLayerMajor = 0,
+  kBlockMajor = 1,
+};
+
+using BlockReceivedCallback =
+    std::function<absl::Status(size_t layer_idx, size_t shard_idx,
+                               int block_id, size_t size_bytes)>;
 
 // Delegate interface for BlockTransport to access layers/shards host memory
 // and allocate blocks on the receiver dynamically.
@@ -43,6 +53,11 @@ class BlockTransportDelegate {
 
   virtual absl::Status OnSingleBlockReceived(int block_id, size_t size_bytes) {
     return OnDataReceived();
+  }
+
+  virtual absl::Status WaitForBlockRead(size_t layer_idx, size_t shard_idx,
+                                        int block_id) {
+    return absl::OkStatus();
   }
 
   virtual uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) = 0;
@@ -73,6 +88,8 @@ class BlockTransport {
   // Binary packet header layout for H2H transfers.
   struct alignas(8) BlockPacketHeader {
     uint8_t op;  // 1 = Push, 2 = Pull, 3 = Byte-Range Pull
+    uint8_t major_order;  // See MajorOrder. Ignored by legacy ops.
+    uint16_t reserved = 0;
     uint32_t remote_block_id;
     uint32_t local_block_id;
     uint32_t num_blocks;
@@ -84,13 +101,17 @@ class BlockTransport {
   // Push block data to remote peer (H2H Write)
   absl::StatusOr<std::vector<int>> Push(const std::string& peer,
                                         const std::vector<int>& src_block_ids,
-                                        int parallelism = 1);
+                                        int parallelism = 1,
+                                        MajorOrder major_order =
+                                            MajorOrder::kLayerMajor);
 
   // Pull block data from remote peer (H2H Read)
   absl::StatusOr<std::vector<int>> Pull(
       const std::string& peer, const std::vector<int>& src_block_ids,
       const std::vector<int>& local_block_ids = {},
-      const std::vector<uint8_t*>& explicit_dst_ptrs = {}, int parallelism = 1);
+      const std::vector<uint8_t*>& explicit_dst_ptrs = {}, int parallelism = 1,
+      MajorOrder major_order = MajorOrder::kLayerMajor,
+      BlockReceivedCallback on_block_received = {});
 
   // Pull byte-range weights chunk directly (Resharding Pull)
   absl::Status PullWeightsChunk(const std::string& source, size_t src_shard_idx,
@@ -115,7 +136,8 @@ class BlockTransport {
                       size_t block_offset, size_t block_count,
                       const std::vector<int>& src_block_ids,
                       std::vector<int>& allocated_ids,
-                      std::vector<absl::Status>& statuses);
+                      std::vector<absl::Status>& statuses,
+                      MajorOrder major_order);
 
   void H2hReadWorker(int stream_idx, const std::string& peer,
                      size_t local_block_offset, size_t local_block_count,
@@ -123,7 +145,9 @@ class BlockTransport {
                      const std::vector<int>& src_block_ids,
                      const std::vector<int>& allocated_ids,
                      const std::vector<uint8_t*>& explicit_dst_ptrs,
-                     std::vector<absl::Status>& statuses);
+                     std::vector<absl::Status>& statuses,
+                     MajorOrder major_order,
+                     BlockReceivedCallback on_block_received);
 
   BlockTransportDelegate* delegate_;
   int local_port_;

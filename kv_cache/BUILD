@@ -60,6 +60,7 @@ cc_library(
         "//core:raiden_manager_base",
         "//core:raw_transfer_core",
         "//core:xla_raw_transfer_headers",
+        "//transport:block_transport",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_macros",

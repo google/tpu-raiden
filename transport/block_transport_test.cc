@@ -18,8 +18,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <mutex>  // NOLINT
 #include <string>
 #include <thread>  // NOLINT
+#include <tuple>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -65,6 +67,13 @@ class MockDelegate : public BlockTransportDelegate {
     return OnDataReceived();
   }
 
+  absl::Status WaitForBlockRead(size_t layer_idx, size_t shard_idx,
+                                int block_id) override {
+    std::lock_guard<std::mutex> lock(wait_events_mu_);
+    wait_events_.push_back(std::make_tuple(layer_idx, shard_idx, block_id));
+    return absl::OkStatus();
+  }
+
   bool on_data_received_called() const { return on_data_received_called_; }
   void reset_data_received() { on_data_received_called_ = false; }
 
@@ -105,6 +114,10 @@ class MockDelegate : public BlockTransportDelegate {
                       size_t shard_idx = 0) {
     return data(layer_idx, shard_idx) + block_id * slice_size_;
   }
+  std::vector<std::tuple<size_t, size_t, int>> wait_events() {
+    std::lock_guard<std::mutex> lock(wait_events_mu_);
+    return wait_events_;
+  }
 
  private:
   size_t BufferIndex(size_t layer_idx, size_t shard_idx) const {
@@ -120,6 +133,8 @@ class MockDelegate : public BlockTransportDelegate {
   bool on_single_block_received_called_ = false;
   int received_block_id_ = -1;
   size_t received_size_bytes_ = 0;
+  std::mutex wait_events_mu_;
+  std::vector<std::tuple<size_t, size_t, int>> wait_events_;
 };
 
 TEST(BlockTransportTest, PushAndPullCorrectness) {
@@ -279,6 +294,46 @@ TEST(BlockTransportTest, PullRejectsOutOfBoundsRemoteBlock) {
       "localhost:" + std::to_string(source_transport.local_port());
   auto pull_res = receiver_transport.Pull(source_peer, {1}, {0});
   EXPECT_FALSE(pull_res.ok());
+}
+
+TEST(BlockTransportTest, PullSupportsBlockMajorOrder) {
+  constexpr size_t kSliceSize = 16;
+  constexpr int kNumBlocks = 2;
+  constexpr size_t kNumLayers = 2;
+  MockDelegate source(kSliceSize, kNumBlocks, kNumLayers);
+  MockDelegate receiver(kSliceSize, kNumBlocks, kNumLayers);
+
+  for (size_t layer = 0; layer < kNumLayers; ++layer) {
+    for (int block = 0; block < kNumBlocks; ++block) {
+      std::memset(source.block_data(block, layer),
+                  static_cast<int>(0x10 + layer * 0x10 + block), kSliceSize);
+    }
+  }
+
+  BlockTransport source_transport(&source, 0);
+  BlockTransport receiver_transport(&receiver, 0);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::string source_peer =
+      "localhost:" + std::to_string(source_transport.local_port());
+  auto pull_res = receiver_transport.Pull(
+      source_peer, {0, 1}, {0, 1}, {}, /*parallelism=*/1,
+      MajorOrder::kBlockMajor);
+  ASSERT_TRUE(pull_res.ok()) << pull_res.status().message();
+
+  for (int block = 0; block < kNumBlocks; ++block) {
+    EXPECT_EQ(receiver.block_data(block, 0)[0], 0x10 + block);
+    EXPECT_EQ(receiver.block_data(block, 1)[0], 0x20 + block);
+  }
+
+  EXPECT_EQ(source.wait_events(),
+            (std::vector<std::tuple<size_t, size_t, int>>{
+                std::make_tuple(0, 0, 0),
+                std::make_tuple(1, 0, 0),
+                std::make_tuple(0, 0, 1),
+                std::make_tuple(1, 0, 1),
+            }));
 }
 
 TEST(BlockTransportTest, WriteBlockDirectCorrectness) {
