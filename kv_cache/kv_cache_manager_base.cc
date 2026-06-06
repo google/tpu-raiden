@@ -27,9 +27,9 @@
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "core/status_macros.h"
 #include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/errors.h"

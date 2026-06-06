@@ -14,8 +14,16 @@
 
 load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("//core:header_only_cc_info.bzl", "header_only_cc_info")
 
 package(default_visibility = ["//visibility:public"])
+
+header_only_cc_info(
+    name = "torch_tpu_tensor_to_buffer_headers",
+    deps = [
+        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
+    ],
+)
 
 cc_library(
     name = "weight_synchronizer_torch",
@@ -48,6 +56,7 @@ nanobind_extension(
     features = [
         "-use_header_modules",
     ],
+    linkopts = ["-Wl,--allow-shlib-undefined"],
     visibility = ["//visibility:public"],
     deps = [
         ":torch_nanobind_utils",
@@ -71,14 +80,12 @@ cc_library(
         "-use_header_modules",
     ],
     deps = [
+        ":torch_tpu_tensor_to_buffer_headers",
         "//core:xla_raw_transfer_headers",
         "@com_google_absl//absl/status",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
         "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
-        "@torch_tpu//torch_tpu/eager:device_buffer",
-        "@torch_tpu//torch_tpu/eager:materialize",
-        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
 
@@ -151,6 +158,7 @@ nanobind_extension(
     features = [
         "-use_header_modules",
     ],
+    linkopts = ["-Wl,--allow-shlib-undefined"],
     visibility = ["//visibility:public"],
     deps = [
         ":kv_cache_manager_torch",
@@ -189,6 +197,7 @@ nanobind_extension(
     features = [
         "-use_header_modules",
     ],
+    linkopts = ["-Wl,--allow-shlib-undefined"],
     visibility = ["//visibility:public"],
     deps = [
         ":torch_nanobind_utils",
@@ -249,6 +258,7 @@ nanobind_extension(
     name = "_torch_raw_transfer",
     srcs = ["torch_raw_transfer_module.cc"],
     features = ["-use_header_modules"],
+    linkopts = ["-Wl,--allow-shlib-undefined"],
     visibility = ["//visibility:public"],
     deps = [
         ":torch_nanobind_utils",

@@ -72,6 +72,13 @@ fi
 
 "${BAZEL_BIN}" --version
 
+if [[ -z "${CC:-}" ]] && command -v clang > /dev/null; then
+  export CC="$(command -v clang)"
+fi
+if [[ -z "${CXX:-}" ]] && command -v clang++ > /dev/null; then
+  export CXX="$(command -v clang++)"
+fi
+
 # Default behavior based on auto-detection
 BUILD_JAX=true
 BUILD_TORCH=true

@@ -18,7 +18,6 @@
 #include <string>
 #include <utility>
 
-#include "torch_tpu/eager/device_buffer.h"
 #include "torch_tpu/eager/tensor_to_buffer.h"
 
 namespace tpu_raiden {

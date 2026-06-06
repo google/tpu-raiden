@@ -17,7 +17,7 @@
 
 """Module extension to import TPU Raiden dependencies."""
 
-load("../torch_tpu_headers:repository.bzl", "torch_tpu_headers_repository")
+load("//third_party/torch_tpu_headers:repository.bzl", "torch_tpu_headers_repository")
 load(":repository.bzl", "torch_tpu_configure")
 
 def _raiden_imports_impl(_module_ctx):

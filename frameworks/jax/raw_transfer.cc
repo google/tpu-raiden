@@ -24,9 +24,9 @@
 #include <vector>
 
 #include "absl/log/log.h"
-#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "core/status_macros.h"
 #include "xla/future.h"
 #include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/pjrt_client.h"
