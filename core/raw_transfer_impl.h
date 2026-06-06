@@ -24,7 +24,7 @@
 #include <vector>
 
 #include "absl/status/status.h"
-#include "absl/status/status_macros.h"
+#include "core/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "xla/future.h"
@@ -89,7 +89,7 @@ inline absl::StatusOr<xla::Future<BufferHolders>> transfer_d2h_core(
         "Number of shards in source and destination must match");
   }
 
-  ABSL_ASSIGN_OR_RETURN(int64_t physical_size,
+  ASSIGN_OR_RETURN(int64_t physical_size,
                         first_buffer->GetOnDeviceSizeInBytes());
 
   const PJRT_Api* c_api = nullptr;
@@ -121,7 +121,7 @@ inline absl::StatusOr<xla::Future<BufferHolders>> transfer_d2h_core(
     std::vector<xla::Future<>> shard_futures;
 
     BufferHoldAndAlias hold;
-    ABSL_ASSIGN_OR_RETURN(
+    ASSIGN_OR_RETURN(
         hold, BufferHoldAndAlias::Acquire(src_buffer, c_api, extension,
                                           unsafe_skip_buffer_lock));
 
@@ -247,7 +247,7 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_core(
     std::vector<xla::Future<>> shard_futures;
 
     BufferHoldAndAlias hold;
-    ABSL_ASSIGN_OR_RETURN(
+    ASSIGN_OR_RETURN(
         hold, BufferHoldAndAlias::Acquire(dst_buffer, c_api, extension,
                                           unsafe_skip_buffer_lock));
 

@@ -26,7 +26,7 @@
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "absl/status/status_macros.h"
+#include "core/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
@@ -203,12 +203,12 @@ xla::Future<> RaidenManagerBase::DoD2DTransfer(const BlockMetadata& src,
                                                const BlockMetadata& dst,
                                                size_t size_bytes) {
   auto [promise, future] = xla::MakePromise<void>();
-  ABSL_ASSIGN_OR_RETURN(std::unique_ptr<HostMemoryAllocator> allocator,
+  ASSIGN_OR_RETURN(std::unique_ptr<HostMemoryAllocator> allocator,
                         HostMemoryAllocator::Create(src.pjrt_client),
                         _.LogError().With(ReturnFuture));
 
   // 1. Allocate local staging memory
-  ABSL_ASSIGN_OR_RETURN(auto host_allocation, allocator->Allocate(size_bytes),
+  ASSIGN_OR_RETURN(auto host_allocation, allocator->Allocate(size_bytes),
                         _.LogError().With(ReturnFuture));
 
   // 2. Copy data from device to host staging memory (D2H)
@@ -218,7 +218,7 @@ xla::Future<> RaidenManagerBase::DoD2DTransfer(const BlockMetadata& src,
   std::vector<uint8_t*> dst_ptrs = {host_allocation.ptr};
   std::vector<size_t> dst_sizes = {host_allocation.size};
 
-  ABSL_ASSIGN_OR_RETURN(
+  ASSIGN_OR_RETURN(
       raiden::PjRtCopyFuture d2h_future,
       raiden::transfer_d2h_core(src_buffers, dst_ptrs, dst_sizes,
                                 /*src_offsets_major_dim=*/{},

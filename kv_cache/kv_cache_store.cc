@@ -27,7 +27,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "absl/status/status_macros.h"
+#include "core/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "core/raw_transfer_core.h"
@@ -216,7 +216,7 @@ KVCacheStore::LookupAndFetch(const std::vector<uint64_t>& block_hashes,
   }
 
   if (miss_index == 0 && num_chunks > 0 && registry_client_) {
-    ABSL_RETURN_IF_ERROR(
+    RETURN_IF_ERROR(
         LookupAndFetchRemote(block_hashes, manager, dst_offsets_major_dim,
                              copy_sizes_major_dim, hits, futures_to_join));
   }
@@ -263,8 +263,8 @@ absl::Status KVCacheStore::Insert(
   int64_t entity_id = next_entity_id_++;
   {
     absl::MutexLock lock(mutex_);
-    ABSL_ASSIGN_OR_RETURN(store_block_ids, block_manager_->Allocate(
-                                               total_needed_blocks, entity_id));
+    ASSIGN_OR_RETURN(store_block_ids,
+                     block_manager_->Allocate(total_needed_blocks, entity_id));
   }
 
   size_t shard_alloc_size = total_needed_blocks * bytes_per_block;
@@ -343,7 +343,7 @@ absl::Status KVCacheStore::Insert(
     block_idx += needed;
   }
 
-  ABSL_RETURN_IF_ERROR(RegisterBlocksInGlobalRegistry(
+  RETURN_IF_ERROR(RegisterBlocksInGlobalRegistry(
       block_hashes, copy_sizes_major_dim, store_block_ids));
 
   return absl::OkStatus();
@@ -361,9 +361,9 @@ absl::Status KVCacheStore::LookupAndFetchRemote(
     remaining_hashes.push_back(std::to_string(block_hashes[i]));
   }
 
-  ABSL_ASSIGN_OR_RETURN(const auto& lookup_results,
-                        registry_client_->Lookup(remaining_hashes),
-                        absl::OkStatus());
+  ASSIGN_OR_RETURN(const auto& lookup_results,
+                   registry_client_->Lookup(remaining_hashes),
+                   absl::OkStatus());
   if (lookup_results.empty()) {
     return absl::OkStatus();
   }
@@ -419,9 +419,9 @@ absl::Status KVCacheStore::LookupAndFetchRemote(
     std::vector<int> dummy_local_ids(total_blocks);
     std::iota(dummy_local_ids.begin(), dummy_local_ids.end(), 0);
 
-    ABSL_ASSIGN_OR_RETURN(
-        auto fut, manager.H2hReadExplicit(peer, task.remote_block_ids,
-                                          dummy_local_ids, staging_ptrs));
+    ASSIGN_OR_RETURN(auto fut,
+                     manager.H2hReadExplicit(peer, task.remote_block_ids,
+                                             dummy_local_ids, staging_ptrs));
     active_fetches.push_back({std::move(task), std::move(staging_buffers)});
   }
 
@@ -457,7 +457,7 @@ absl::Status KVCacheStore::LookupAndFetchRemote(
       std::vector<raiden::PjRtCopyFuture> shard_futures;
       for (size_t l = 0; l < num_layers_; ++l) {
         for (size_t sh = 0; sh < num_shards_; ++sh) {
-          ABSL_ASSIGN_OR_RETURN(
+          ASSIGN_OR_RETURN(
               auto fut,
               manager.H2dFrom(l, (*host_buffers)[l * num_shards_ + sh].data(),
                               needed * bytes_per_block, copy_spec, sh));

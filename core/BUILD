@@ -26,6 +26,23 @@ header_only_cc_info(
 )
 
 cc_library(
+    name = "status_macros",
+    hdrs = [
+        "status_macros.h",
+    ],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+    ],
+)
+
+cc_library(
     name = "raiden_manager_base",
     srcs = [
         "raiden_manager_base.cc",
@@ -43,12 +60,12 @@ cc_library(
         ":host_memory_allocator",
         ":raw_transfer_core",
         ":raw_transfer_impl",
+        ":status_macros",
         "//transport:block_transport",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:status_macros",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
@@ -164,8 +181,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":raw_transfer_core",
+        ":status_macros",
         "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:status_macros",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
         "@xla//xla:future",
