@@ -157,6 +157,8 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         # buildcleaner: keep
+        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
+        # buildcleaner: keep
         "@com_google_absl//absl/synchronization",
     ],
 )
