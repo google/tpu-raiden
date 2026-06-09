@@ -46,12 +46,47 @@ XlaHostMemoryAllocator::Create(xla::PjRtClient* absl_nonnull pjrt_client) {
     return absl::FailedPreconditionError("XLA HostMemoryAllocator is null.");
   }
   return std::unique_ptr<XlaHostMemoryAllocator>(
-      new XlaHostMemoryAllocator(host_allocator));
+      new XlaHostMemoryAllocator(pjrt_client, host_allocator));
 }
 
 XlaHostMemoryAllocator::XlaHostMemoryAllocator(
-    xla::HostMemoryAllocator* host_allocator)
-    : host_allocator_(host_allocator) {}
+    xla::PjRtClient* client, xla::HostMemoryAllocator* host_allocator)
+    : client_(client), host_allocator_(host_allocator) {}
+
+absl::StatusOr<HostBufferAllocation> XlaHostMemoryAllocator::AllocateDmaMapped(
+    size_t size_bytes) {
+  HostBufferAllocation alloc;
+  if (size_bytes == 0) {
+    alloc.ptr = nullptr;
+    alloc.size = 0;
+    return alloc;
+  }
+  if (client_ == nullptr) {
+    return absl::FailedPreconditionError(
+        "XlaHostMemoryAllocator has no PjRt client for DmaMap");
+  }
+  // DmaMap requires page alignment on most backends.
+  constexpr size_t kPage = 4096;
+  const size_t mapped_size = ((size_bytes + kPage - 1) / kPage) * kPage;
+  void* ptr = nullptr;
+  if (posix_memalign(&ptr, kPage, mapped_size) != 0 || ptr == nullptr) {
+    return absl::ResourceExhaustedError(
+        absl::StrCat("posix_memalign failed for size: ", mapped_size));
+  }
+  absl::Status status = client_->DmaMap(ptr, mapped_size);
+  if (!status.ok()) {
+    std::free(ptr);
+    return status;
+  }
+  alloc.ptr = static_cast<uint8_t*>(ptr);
+  alloc.size = mapped_size;
+  xla::PjRtClient* client = client_;
+  alloc.owner = std::shared_ptr<void>(ptr, [client](void* p) {
+    (void)client->DmaUnmap(p);
+    std::free(p);
+  });
+  return alloc;
+}
 
 absl::StatusOr<HostBufferAllocation> XlaHostMemoryAllocator::Allocate(
     size_t size_bytes) {

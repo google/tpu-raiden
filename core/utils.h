@@ -20,6 +20,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -53,10 +55,16 @@ inline HostBufferAllocator CreateHostMemoryAllocator(xla::PjRtClient* client) {
   }
   std::shared_ptr<HostMemoryAllocator> allocator =
       std::move(allocator_or).value();
-  return
-      [allocator](size_t size_bytes) -> absl::StatusOr<HostBufferAllocation> {
-        return allocator->Allocate(size_bytes);
-      };
+  // RAIDEN_STAGING_MODE=dmamap: allocate DMA-registered staging so the raw
+  // C-API D2H/H2D run as async DMA. Default (unset): the original allocator.
+  const char* staging_mode = std::getenv("RAIDEN_STAGING_MODE");
+  const bool use_dmamap =
+      staging_mode != nullptr && std::strcmp(staging_mode, "dmamap") == 0;
+  return [allocator, use_dmamap](
+             size_t size_bytes) -> absl::StatusOr<HostBufferAllocation> {
+    return use_dmamap ? allocator->AllocateDmaMapped(size_bytes)
+                      : allocator->Allocate(size_bytes);
+  };
 }
 
 struct RawCopyChunk {

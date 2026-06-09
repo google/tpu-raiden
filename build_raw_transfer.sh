@@ -37,16 +37,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 DEFAULT_WORKSPACE_DIR="$SCRIPT_DIR"
 WORKSPACE_DIR="${WORKSPACE_DIR:-${DEFAULT_WORKSPACE_DIR}}"
 # Check for persistent storage mounted on Cloud TPU VMs (3-4 TB SSDs)
-if [[ -d /mnt/disks/persistent && -w /mnt/disks/persistent ]]; then
-  DEFAULT_BAZEL_CACHE_BASE="/mnt/disks/persistent/${USER}/tpu-raiden-bazel-cache"
-  DEFAULT_BAZEL_OUTPUT_BASE="/mnt/disks/persistent/${USER}/bazel-output-user-root/tpu_raiden_${USER}"
-elif [[ -d /mnt/disk && -w /mnt/disk ]]; then
-  DEFAULT_BAZEL_CACHE_BASE="/mnt/disk/tpu-raiden-bazel-cache"
-  DEFAULT_BAZEL_OUTPUT_BASE="/mnt/disk/bazel-output-user-root/tpu_raiden_${USER}"
-else
-  DEFAULT_BAZEL_CACHE_BASE="${HOME}/.bazel_cache"
-  DEFAULT_BAZEL_OUTPUT_BASE="/tmp/tpu_raiden_bazel_output_${USER}"
-fi
+# if [[ -d /mnt/disks/persistent && -w /mnt/disks/persistent ]]; then
+#   DEFAULT_BAZEL_CACHE_BASE="/mnt/disks/persistent/${USER}/tpu-raiden-bazel-cache"
+#   DEFAULT_BAZEL_OUTPUT_BASE="/mnt/disks/persistent/${USER}/bazel-output-user-root/tpu_raiden_${USER}"
+# elif [[ -d /mnt/disk && -w /mnt/disk ]]; then
+#   DEFAULT_BAZEL_CACHE_BASE="/mnt/disk/tpu-raiden-bazel-cache"
+#   DEFAULT_BAZEL_OUTPUT_BASE="/mnt/disk/bazel-output-user-root/tpu_raiden_${USER}"
+# else
+#   DEFAULT_BAZEL_CACHE_BASE="${HOME}/.bazel_cache"
+#   DEFAULT_BAZEL_OUTPUT_BASE="/tmp/tpu_raiden_bazel_output_${USER}"
+# fi
+DEFAULT_BAZEL_CACHE_BASE="/mnt/disks/jcgu/bazel_cache"
+DEFAULT_BAZEL_OUTPUT_BASE="/mnt/disks/jcgu/bazel_out"
+
 BAZEL_CACHE_BASE="${BAZEL_CACHE_DIR:-${DEFAULT_BAZEL_CACHE_BASE}}"
 BAZEL_DISK_CACHE="${BAZEL_CACHE_BASE}/disk_cache"
 BAZEL_REPO_CACHE="${BAZEL_CACHE_BASE}/repo_cache"

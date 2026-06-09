@@ -48,6 +48,15 @@ class HostMemoryAllocator {
       xla::PjRtClient* pjrt_client);
 
   virtual absl::StatusOr<HostBufferAllocation> Allocate(size_t size_bytes) = 0;
+
+  // Allocates host memory registered with the device DMA engine
+  // (PjRtClient::DmaMap), so raw C-API D2H/H2D into it run as a true async DMA
+  // instead of a synchronous staged copy (the producer-D2H bottleneck). The
+  // default implementation falls back to Allocate (e.g. CPU / no DMA support).
+  virtual absl::StatusOr<HostBufferAllocation> AllocateDmaMapped(
+      size_t size_bytes) {
+    return Allocate(size_bytes);
+  }
 };
 
 class XlaHostMemoryAllocator : public HostMemoryAllocator {
@@ -57,9 +66,14 @@ class XlaHostMemoryAllocator : public HostMemoryAllocator {
 
   absl::StatusOr<HostBufferAllocation> Allocate(size_t size_bytes) override;
 
- private:
-  explicit XlaHostMemoryAllocator(xla::HostMemoryAllocator* host_allocator);
+  absl::StatusOr<HostBufferAllocation> AllocateDmaMapped(
+      size_t size_bytes) override;
 
+ private:
+  XlaHostMemoryAllocator(xla::PjRtClient* client,
+                         xla::HostMemoryAllocator* host_allocator);
+
+  xla::PjRtClient* client_ = nullptr;
   xla::HostMemoryAllocator* host_allocator_ = nullptr;
 };
 
