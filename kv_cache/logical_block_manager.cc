@@ -189,3 +189,6 @@ int LogicalBlockManager::num_locked_blocks() const {
 
 }  // namespace kv_cache
 }  // namespace tpu_raiden
+
+// Dummy comment v2 to trigger Kokoro presubmit on the new raiden-presubmit-v2
+// pool after sync.
