@@ -53,10 +53,10 @@ inline HostBufferAllocator CreateHostMemoryAllocator(xla::PjRtClient* client) {
   }
   std::shared_ptr<HostMemoryAllocator> allocator =
       std::move(allocator_or).value();
-  return
-      [allocator](size_t size_bytes) -> absl::StatusOr<HostBufferAllocation> {
-        return allocator->Allocate(size_bytes);
-      };
+  return [allocator](
+             size_t size_bytes) -> absl::StatusOr<HostBufferAllocation> {
+    return allocator->AllocateDmaMapped(size_bytes);
+  };
 }
 
 struct RawCopyChunk {

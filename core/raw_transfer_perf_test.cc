@@ -30,9 +30,9 @@
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "xla/pjrt/pjrt_client.h"
-#include "xla/tsl/platform/logging.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
+#include "core/host_memory_allocator.h"
 #include "core/raw_transfer_impl.h"
 #include "core/tpu_pjrt_manager.h"
 
@@ -40,20 +40,6 @@ namespace raiden {
 namespace {
 
 using ::absl_testing::IsOk;
-
-// Helper to allocate page-aligned host memory (vital for direct PCIe DMA)
-std::unique_ptr<uint8_t, void (*)(void*)> AllocateAlignedHostMemory(
-    size_t size) {
-  void* ptr = nullptr;
-  // 4KB alignment is optimal for PCIe DMA page tables
-  int res = posix_memalign(&ptr, 4096, size);
-  if (res != 0) {
-    LOG(FATAL) << "Failed to allocate aligned host memory of size " << size;
-  }
-  std::memset(ptr, 0, size);
-  return std::unique_ptr<uint8_t, void (*)(void*)>(
-      reinterpret_cast<uint8_t*>(ptr), std::free);
-}
 
 // Helper to compute and print the distribution of bandwidth numbers
 void PrintDistribution(const std::string& label,
@@ -131,8 +117,12 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
             << " MB" << std::endl;
 
   // 1. Allocate Host Staging Buffers (Page Aligned, Zero-initialized)
-  std::vector<std::unique_ptr<uint8_t, void (*)(void*)>> host_src_buffers;
-  std::vector<std::unique_ptr<uint8_t, void (*)(void*)>> host_dst_buffers;
+  auto allocator_or = tpu_raiden::HostMemoryAllocator::Create(manager->client());
+  ASSERT_THAT(allocator_or.status(), IsOk());
+  auto host_allocator = std::move(allocator_or).value();
+
+  std::vector<tpu_raiden::HostBufferAllocation> host_src_buffers;
+  std::vector<tpu_raiden::HostBufferAllocation> host_dst_buffers;
   std::vector<const uint8_t*> host_src_ptrs;
   std::vector<uint8_t*> host_dst_ptrs;
   std::vector<size_t> host_sizes;
@@ -144,11 +134,18 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
   host_sizes.reserve(kNumLayers);
 
   for (int i = 0; i < kNumLayers; ++i) {
-    host_src_buffers.push_back(AllocateAlignedHostMemory(bytes_per_layer));
-    host_dst_buffers.push_back(AllocateAlignedHostMemory(bytes_per_layer));
+    auto src_alloc_or = host_allocator->AllocateDmaMapped(bytes_per_layer);
+    ASSERT_THAT(src_alloc_or.status(), IsOk());
+    host_src_buffers.push_back(std::move(src_alloc_or).value());
+    std::memset(host_src_buffers.back().ptr, 0, bytes_per_layer);
+
+    auto dst_alloc_or = host_allocator->AllocateDmaMapped(bytes_per_layer);
+    ASSERT_THAT(dst_alloc_or.status(), IsOk());
+    host_dst_buffers.push_back(std::move(dst_alloc_or).value());
+    std::memset(host_dst_buffers.back().ptr, 0, bytes_per_layer);
 
     // Initialize source host memory with dummy values
-    T* src_ptr = reinterpret_cast<T*>(host_src_buffers.back().get());
+    T* src_ptr = reinterpret_cast<T*>(host_src_buffers.back().ptr);
     for (int64_t e = 0; e < elements_per_layer; ++e) {
       if constexpr (std::is_same_v<T, float>) {
         src_ptr[e] = static_cast<float>((i + e) % 65536) / 1000.0f;
@@ -158,8 +155,8 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
       }
     }
 
-    host_src_ptrs.push_back(host_src_buffers.back().get());
-    host_dst_ptrs.push_back(host_dst_buffers.back().get());
+    host_src_ptrs.push_back(host_src_buffers.back().ptr);
+    host_dst_ptrs.push_back(host_dst_buffers.back().ptr);
     host_sizes.push_back(bytes_per_layer);
   }
 
@@ -318,11 +315,22 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
             << " MB" << std::endl;
 
   // 1. Allocate Host Staging Buffers (Page Aligned, Zero-initialized)
-  auto host_src = AllocateAlignedHostMemory(total_bytes);
-  auto host_dst = AllocateAlignedHostMemory(total_bytes);
+  auto allocator_or = tpu_raiden::HostMemoryAllocator::Create(manager->client());
+  ASSERT_THAT(allocator_or.status(), IsOk());
+  auto host_allocator = std::move(allocator_or).value();
+
+  auto src_alloc_or = host_allocator->AllocateDmaMapped(total_bytes);
+  ASSERT_THAT(src_alloc_or.status(), IsOk());
+  auto host_src = std::move(src_alloc_or).value();
+  std::memset(host_src.ptr, 0, total_bytes);
+
+  auto dst_alloc_or = host_allocator->AllocateDmaMapped(total_bytes);
+  ASSERT_THAT(dst_alloc_or.status(), IsOk());
+  auto host_dst = std::move(dst_alloc_or).value();
+  std::memset(host_dst.ptr, 0, total_bytes);
 
   // Initialize source host memory with dummy values
-  T* src_ptr = reinterpret_cast<T*>(host_src.get());
+  T* src_ptr = reinterpret_cast<T*>(host_src.ptr);
   for (int64_t e = 0; e < total_elements; ++e) {
     if constexpr (std::is_same_v<T, float>) {
       src_ptr[e] = static_cast<float>(e % 65536) / 1000.0f;
@@ -333,14 +341,14 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
 
   // 2. Allocate TPU Device Buffer (fully populated from host_src)
   auto device_buffer_or =
-      manager->BufferFromHost(host_src.get(), primitive_type, baked_shape);
+      manager->BufferFromHost(host_src.ptr, primitive_type, baked_shape);
   ASSERT_THAT(device_buffer_or.status(), IsOk());
   auto device_buffer = std::move(device_buffer_or).value();
   ASSERT_THAT(device_buffer->GetReadyFuture().Await(), IsOk());
 
   std::vector<xla::PjRtBuffer*> device_buffer_ptrs = {device_buffer.get()};
-  std::vector<uint8_t*> host_dst_ptrs = {host_dst.get()};
-  std::vector<const uint8_t*> host_src_ptrs = {host_src.get()};
+  std::vector<uint8_t*> host_dst_ptrs = {host_dst.ptr};
+  std::vector<const uint8_t*> host_src_ptrs = {host_src.ptr};
   std::vector<size_t> host_sizes = {total_bytes};
 
   // 3. Warmup Phase
@@ -404,8 +412,8 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
 
   // 6. Verify Correctness
   size_t bytes_per_block = total_bytes / kNumBlocks;
-  uint8_t* src_bytes = host_src.get();
-  uint8_t* dst_bytes = host_dst.get();
+  uint8_t* src_bytes = host_src.ptr;
+  uint8_t* dst_bytes = host_dst.ptr;
   for (int64_t b = 0; b < kNumBlocks; ++b) {
     if (b % 2 == 1) {
       int cmp = std::memcmp(src_bytes + b * bytes_per_block,

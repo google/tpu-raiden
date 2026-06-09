@@ -385,6 +385,7 @@ cc_test(
         "requires-ghostlite",  # Runs on physical TPU slices
     ],
     deps = [
+        ":host_memory_allocator",
         ":raw_transfer_core",
         ":raw_transfer_impl",
         ":tpu_pjrt_manager",

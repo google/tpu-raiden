@@ -334,6 +334,17 @@ NB_MODULE(_transfer_engine, m) {
           nb::kw_only(), nb::arg("slot_idx"), nb::arg("num_blocks"),
           nb::arg("block_ids"))
       .def(
+          "stage_h2d",
+          [](TransferEngine& self, int64_t slot_idx, int64_t num_blocks,
+             const std::vector<int64_t>& block_ids) {
+            auto result = self.IssueH2D(slot_idx, num_blocks, block_ids);
+            return nb::make_tuple(result.future, self.kv_caches(),
+                                  HostSpanMemoryViews(result.host_spans),
+                                  result.total_bytes);
+          },
+          nb::kw_only(), nb::arg("slot_idx"), nb::arg("num_blocks"),
+          nb::arg("block_ids"))
+      .def(
           "commit_h2d",
           [](TransferEngine& self, int64_t slot_idx, int64_t num_blocks,
              const std::vector<int64_t>& local_block_ids) {
