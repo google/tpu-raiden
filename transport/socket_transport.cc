@@ -28,10 +28,16 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <thread>  // NOLINT
+#include <vector>
 
+#include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
+#include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
 #include "third_party/peregrine/src/api/types.h"
 
 namespace tpu_raiden {
@@ -210,7 +216,15 @@ void SocketTransport::CloseConnection(std::string_view peer, int fd) {
 }
 
 absl::StatusOr<peregrine::Handle> SocketTransport::Post(
-    std::string_view peer, const peregrine::Request& request) {
+    std::string_view peer, absl::Span<const peregrine::Request> requests,
+    peregrine::Handle handle) {
+  if (handle.value() != 0) {
+    return absl::InvalidArgumentError("Non-zero handles are not supported.");
+  }
+  if (requests.size() != 1) {
+    return absl::InvalidArgumentError("Only single requests are supported.");
+  }
+  const peregrine::Request& request = requests[0];
   if (!request.IsValid()) {
     return absl::InvalidArgumentError(
         absl::StrCat("Invalid transport request: ", request.ToString()));
@@ -222,11 +236,11 @@ absl::StatusOr<peregrine::Handle> SocketTransport::Post(
   }
   int fd = status_or_fd.value();
 
-  peregrine::Handle handle;
+  peregrine::Handle h;
   {
     absl::MutexLock _(&mu_);
-    handle = peregrine::Handle(++handle_counter_);
-    status_map_[handle] = peregrine::Status::kInProgress;
+    h = peregrine::Handle(++handle_counter_);
+    status_map_[h] = peregrine::Status::kInProgress;
   }
 
   absl::Status op_status;
@@ -244,12 +258,12 @@ absl::StatusOr<peregrine::Handle> SocketTransport::Post(
 
   absl::MutexLock _(&mu_);
   if (op_status.ok()) {
-    status_map_[handle] = peregrine::Status::kSuccess;
+    status_map_[h] = peregrine::Status::kSuccess;
   } else {
-    status_map_[handle] = peregrine::Status::kFailure;
+    status_map_[h] = peregrine::Status::kFailure;
   }
 
-  return handle;
+  return h;
 }
 
 absl::Status SocketTransport::DispatchWrite(int fd,
@@ -295,7 +309,8 @@ absl::Status SocketTransport::DispatchReadRequest(
   return ReadExact(fd, request.laddr, resp_header.length);
 }
 
-absl::StatusOr<peregrine::Status> SocketTransport::Poll(peregrine::Handle handle) {
+absl::StatusOr<peregrine::Status> SocketTransport::Poll(
+    peregrine::Handle handle) {
   absl::MutexLock _(&mu_);
   auto it = status_map_.find(handle);
   if (it == status_map_.end()) {

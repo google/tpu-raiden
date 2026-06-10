@@ -16,10 +16,7 @@
 #define THIRD_PARTY_TPU_RAIDEN_TRANSPORT_SOCKET_TRANSPORT_H_
 
 #include <atomic>
-#include <cstddef>
 #include <cstdint>
-#include <memory>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>  // NOLINT
@@ -31,6 +28,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
 #include "third_party/peregrine/src/api/transport.h"
 #include "third_party/peregrine/src/api/types.h"
 
@@ -64,8 +62,9 @@ class SocketTransport final : public peregrine::Transport {
 
   // Posts an asynchronous transport request to communicate with `peer`.
   // Returns a process-unique handle to poll completion.
-  absl::StatusOr<peregrine::Handle> Post(std::string_view peer,
-                                    const peregrine::Request& request) override;
+  absl::StatusOr<peregrine::Handle> Post(
+      std::string_view peer, absl::Span<const peregrine::Request> requests,
+      peregrine::Handle handle = peregrine::Handle(0)) override;
 
   // Queries the completion status of `handle`. Removes handle if completed.
   absl::StatusOr<peregrine::Status> Poll(peregrine::Handle handle) override;
