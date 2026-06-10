@@ -1,0 +1,48 @@
+--- a/xla/ffi/attribute_map.cc
++++ b/xla/ffi/attribute_map.cc
+@@ -39,4 +39,8 @@
+ #include "xla/tsl/platform/statusor.h"
+ 
+ namespace xla::ffi {
++
++template <typename...>
++constexpr bool always_false = false;
++
+ template <typename OutputVariant, typename... InputTypes>
+@@ -286,7 +290,7 @@
+         } else if constexpr (std::is_same_v<U, AttributesDictionary>) {
+           *proto.mutable_dict() = value.ToProto();
+         } else {
+-          static_assert(false, "Unsupported attribute type");
++          static_assert(always_false<U>, "Unsupported attribute type");
+         }
+       },
+       AsVariant());
+@@ -321,7 +325,7 @@
+         } else if constexpr (std::is_same_v<U, double>) {
+           proto.set_f64(value);
+         } else {
+-          static_assert(false, "Unsupported scalar type");
++          static_assert(always_false<U>, "Unsupported scalar type");
+         }
+       },
+       AsVariant());
+@@ -409,8 +413,8 @@
+         } else if constexpr (std::is_same_v<U, std::vector<double>>) {
+           proto.mutable_f64()->mutable_values()->Assign(value.begin(),
+                                                         value.end());
+         } else {
+-          static_assert(false, "Unsupported array type");
++          static_assert(always_false<U>, "Unsupported array type");
+         }
+       },
+       AsVariant());
+@@ -481,7 +485,7 @@
+         } else if constexpr (std::is_same_v<U, std::string>) {
+           proto.set_str(value);
+         } else {
+-          static_assert(false, "Unsupported flat attribute type");
++          static_assert(always_false<U>, "Unsupported flat attribute type");
+         }
+       },
+       AsVariant());

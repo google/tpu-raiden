@@ -37,6 +37,8 @@ git_override(
     patch_strip = 1,
     patches = [
         "//:third_party/xla/future_sfinae.patch",
+        "//:third_party/xla/attribute_map_static_assert.patch",
+        "//:third_party/xla/attribute_map_cc_static_assert.patch",
     ],
     remote = "https://github.com/openxla/xla.git",
 )
