@@ -231,9 +231,9 @@ cc_library(
         "@com_google_absl//absl/types:span",
         "@xla//xla:literal",
         "@xla//xla:shape_util",
+        "@xla//xla/pjrt:pjrt_api",
         "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt/plugin/xla_tpu:tpu_static_registration",
-        "@xla//xla/pjrt/plugin/xla_tpu:xla_tpu_pjrt_client",
+        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
     ],
 )
 
@@ -391,6 +391,7 @@ cc_test(
         ":raw_transfer_core",
         ":raw_transfer_impl",
         ":tpu_pjrt_manager",
+        "@com_google_absl//absl/status:status_matchers",
         "@com_google_absl//absl/time",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/tsl/platform:statusor",

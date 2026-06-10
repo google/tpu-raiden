@@ -15,6 +15,7 @@
 #include "core/tpu_pjrt_manager.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -26,8 +27,9 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "xla/literal.h"
+#include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
+#include "xla/pjrt/pjrt_api.h"
 #include "xla/pjrt/pjrt_client.h"
-#include "xla/pjrt/plugin/xla_tpu/xla_tpu_pjrt_client.h"
 #include "xla/shape.h"
 
 namespace tpu_raiden {
@@ -55,8 +57,24 @@ absl::Status TpuPjrtManager::Initialize() {
     return absl::OkStatus();
   }
 
-  // Call the OpenXLA TPU client factory
-  auto client_or = xla::GetXlaPjrtTpuClient();
+  // Load the TPU PJRT plugin (libtpu) dynamically via the C-API -- the same way
+  // JAX does. This avoids the static GetXlaPjrtTpuClient()/GetTpuPjrtApi() entry
+  // point, which is not exported by the OSS libtpu wheel (only the C-API
+  // GetPjrtApi is), so the static path fails to link in an OSS build.
+  const char* lib_path = std::getenv("TPU_LIBRARY_PATH");
+  if (lib_path == nullptr || *lib_path == '\0') {
+    return absl::FailedPreconditionError(
+        "TPU_LIBRARY_PATH is not set; point it at libtpu.so, e.g. "
+        "<site-packages>/libtpu/libtpu.so");
+  }
+  if (absl::Status s = pjrt::LoadPjrtPlugin("tpu", lib_path).status();
+      !s.ok()) {
+    return s;
+  }
+  if (absl::Status s = pjrt::InitializePjrtPlugin("tpu"); !s.ok()) {
+    return s;
+  }
+  auto client_or = xla::GetCApiClient("tpu");
   if (!client_or.ok()) {
     return client_or.status();
   }

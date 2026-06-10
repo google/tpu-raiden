@@ -27,6 +27,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/status/status_matchers.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -84,10 +85,11 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
                            const std::string& type_label,
                            double min_d2h_bandwidth_gb_s,
                            double min_h2d_bandwidth_gb_s,
-                           bool should_gate_performance) {
-  constexpr int kNumLayers = 64;
+                           bool should_gate_performance,
+                           int64_t block_size = 128, int num_layers = 64) {
+  const int kNumLayers = num_layers;
   constexpr int64_t kNumBlocks = 16;
-  constexpr int64_t kBlockSize = 128;
+  const int64_t kBlockSize = block_size;
   constexpr int64_t kNumHeads = 8;
   constexpr int64_t kHeadDim = 128;
 
@@ -282,10 +284,11 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
                            const std::string& type_label,
                            double min_d2h_bandwidth_gb_s,
                            double min_h2d_bandwidth_gb_s,
-                           bool should_gate_performance) {
-  constexpr int kNumLayers = 64;
+                           bool should_gate_performance,
+                           int64_t block_size = 128, int num_layers = 64) {
+  const int kNumLayers = num_layers;
   constexpr int64_t kNumBlocks = 16;
-  constexpr int64_t kBlockSize = 128;
+  const int64_t kBlockSize = block_size;
   constexpr int64_t kNumHeads = 8;
   constexpr int64_t kHeadDim = 128;
 
@@ -488,6 +491,59 @@ TEST_F(RawTransferPerfTest, BenchmarkScenarioA_FragmentedBatch_F32) {
                                should_gate_performance_);
 }
 
+TEST_F(RawTransferPerfTest, BenchmarkScenarioA_FragmentedBatch_F8E4M3FN) {
+  // float8_e4m3fn is a 1-byte type; use uint8_t for host-side staging/sizing.
+  RunBenchmarkScenarioA<uint8_t>(
+      manager_, xla::F8E4M3FN, "F8E4M3FN", min_d2h_bandwidth_gb_s_,
+      min_h2d_bandwidth_gb_s_, should_gate_performance_);
+}
+
+TEST_F(RawTransferPerfTest, BenchmarkScenarioA_FragmentedBatch_BF16_BS256) {
+  RunBenchmarkScenarioA<uint16_t>(
+      manager_, xla::BF16, "BF16_BS256", min_d2h_bandwidth_gb_s_,
+      min_h2d_bandwidth_gb_s_, should_gate_performance_, /*block_size=*/256);
+}
+
+TEST_F(RawTransferPerfTest, BenchmarkScenarioA_FragmentedBatch_BF16_BS512) {
+  RunBenchmarkScenarioA<uint16_t>(
+      manager_, xla::BF16, "BF16_BS512", min_d2h_bandwidth_gb_s_,
+      min_h2d_bandwidth_gb_s_, should_gate_performance_, /*block_size=*/512);
+}
+
+TEST_F(RawTransferPerfTest, BenchmarkScenarioA_FragmentedBatch_F8E4M3FN_BS256) {
+  RunBenchmarkScenarioA<uint8_t>(
+      manager_, xla::F8E4M3FN, "F8E4M3FN_BS256", min_d2h_bandwidth_gb_s_,
+      min_h2d_bandwidth_gb_s_, should_gate_performance_, /*block_size=*/256);
+}
+
+TEST_F(RawTransferPerfTest, BenchmarkScenarioA_FragmentedBatch_F8E4M3FN_BS512) {
+  RunBenchmarkScenarioA<uint8_t>(
+      manager_, xla::F8E4M3FN, "F8E4M3FN_BS512", min_d2h_bandwidth_gb_s_,
+      min_h2d_bandwidth_gb_s_, should_gate_performance_, /*block_size=*/512);
+}
+
+// num_layers = 1024, block_size = 128 (all dtypes)
+TEST_F(RawTransferPerfTest, BenchmarkScenarioA_FragmentedBatch_BF16_L1024) {
+  RunBenchmarkScenarioA<uint16_t>(
+      manager_, xla::BF16, "BF16_L1024", min_d2h_bandwidth_gb_s_,
+      min_h2d_bandwidth_gb_s_, should_gate_performance_, /*block_size=*/128,
+      /*num_layers=*/1024);
+}
+
+TEST_F(RawTransferPerfTest, BenchmarkScenarioA_FragmentedBatch_F32_L1024) {
+  RunBenchmarkScenarioA<float>(
+      manager_, xla::F32, "F32_L1024", min_d2h_bandwidth_gb_s_,
+      min_h2d_bandwidth_gb_s_, should_gate_performance_, /*block_size=*/128,
+      /*num_layers=*/1024);
+}
+
+TEST_F(RawTransferPerfTest, BenchmarkScenarioA_FragmentedBatch_F8E4M3FN_L1024) {
+  RunBenchmarkScenarioA<uint8_t>(
+      manager_, xla::F8E4M3FN, "F8E4M3FN_L1024", min_d2h_bandwidth_gb_s_,
+      min_h2d_bandwidth_gb_s_, should_gate_performance_, /*block_size=*/128,
+      /*num_layers=*/1024);
+}
+
 // =============================================================================
 // Scenario B: Baked-in Layer Dimension (Single Massive Buffer)
 // =============================================================================
@@ -501,6 +557,59 @@ TEST_F(RawTransferPerfTest, BenchmarkScenarioB_BakedInTensor_F32) {
   RunBenchmarkScenarioB<float>(manager_, xla::F32, "F32",
                                min_d2h_bandwidth_gb_s_, min_h2d_bandwidth_gb_s_,
                                should_gate_performance_);
+}
+
+TEST_F(RawTransferPerfTest, BenchmarkScenarioB_BakedInTensor_F8E4M3FN) {
+  // float8_e4m3fn is a 1-byte type; use uint8_t for host-side staging/sizing.
+  RunBenchmarkScenarioB<uint8_t>(
+      manager_, xla::F8E4M3FN, "F8E4M3FN", min_d2h_bandwidth_gb_s_,
+      min_h2d_bandwidth_gb_s_, should_gate_performance_);
+}
+
+TEST_F(RawTransferPerfTest, BenchmarkScenarioB_BakedInTensor_BF16_BS256) {
+  RunBenchmarkScenarioB<uint16_t>(
+      manager_, xla::BF16, "BF16_BS256", min_d2h_bandwidth_gb_s_,
+      min_h2d_bandwidth_gb_s_, should_gate_performance_, /*block_size=*/256);
+}
+
+TEST_F(RawTransferPerfTest, BenchmarkScenarioB_BakedInTensor_BF16_BS512) {
+  RunBenchmarkScenarioB<uint16_t>(
+      manager_, xla::BF16, "BF16_BS512", min_d2h_bandwidth_gb_s_,
+      min_h2d_bandwidth_gb_s_, should_gate_performance_, /*block_size=*/512);
+}
+
+TEST_F(RawTransferPerfTest, BenchmarkScenarioB_BakedInTensor_F8E4M3FN_BS256) {
+  RunBenchmarkScenarioB<uint8_t>(
+      manager_, xla::F8E4M3FN, "F8E4M3FN_BS256", min_d2h_bandwidth_gb_s_,
+      min_h2d_bandwidth_gb_s_, should_gate_performance_, /*block_size=*/256);
+}
+
+TEST_F(RawTransferPerfTest, BenchmarkScenarioB_BakedInTensor_F8E4M3FN_BS512) {
+  RunBenchmarkScenarioB<uint8_t>(
+      manager_, xla::F8E4M3FN, "F8E4M3FN_BS512", min_d2h_bandwidth_gb_s_,
+      min_h2d_bandwidth_gb_s_, should_gate_performance_, /*block_size=*/512);
+}
+
+// num_layers = 1024, block_size = 128 (all dtypes)
+TEST_F(RawTransferPerfTest, BenchmarkScenarioB_BakedInTensor_BF16_L1024) {
+  RunBenchmarkScenarioB<uint16_t>(
+      manager_, xla::BF16, "BF16_L1024", min_d2h_bandwidth_gb_s_,
+      min_h2d_bandwidth_gb_s_, should_gate_performance_, /*block_size=*/128,
+      /*num_layers=*/1024);
+}
+
+TEST_F(RawTransferPerfTest, BenchmarkScenarioB_BakedInTensor_F32_L1024) {
+  RunBenchmarkScenarioB<float>(
+      manager_, xla::F32, "F32_L1024", min_d2h_bandwidth_gb_s_,
+      min_h2d_bandwidth_gb_s_, should_gate_performance_, /*block_size=*/128,
+      /*num_layers=*/1024);
+}
+
+TEST_F(RawTransferPerfTest, BenchmarkScenarioB_BakedInTensor_F8E4M3FN_L1024) {
+  RunBenchmarkScenarioB<uint8_t>(
+      manager_, xla::F8E4M3FN, "F8E4M3FN_L1024", min_d2h_bandwidth_gb_s_,
+      min_h2d_bandwidth_gb_s_, should_gate_performance_, /*block_size=*/128,
+      /*num_layers=*/1024);
 }
 
 }  // namespace
