@@ -6,6 +6,14 @@
 
 ## Prerequisites
 
+You will need a python environment to run the JAX or torch code. Our code has been verified with python3.12. So the following should set you up properly:
+
+```bash
+cd
+python3.12 -m venv .venv312
+source .venv312/bin/activate
+```
+
 ### Installing Bazel
 To compile the `raw_transfer` binaries, you will need **Bazel 7.7.0**.
 
