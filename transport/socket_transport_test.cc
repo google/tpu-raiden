@@ -73,7 +73,7 @@ TEST(SocketTransportTest, PointToPointWriteTransfer) {
 
   // Post write transfer from transport1 to transport2 endpoint string.
   std::string peer2 = absl::StrCat("127.0.0.1:", port2);
-  auto status_or_handle = transport1->Post(peer2, request);
+  auto status_or_handle = transport1->Post(peer2, {request});
   ASSERT_TRUE(status_or_handle.ok()) << status_or_handle.status().message();
 
   // Poll completion.
@@ -103,7 +103,7 @@ TEST(SocketTransportTest, PointToPointReadTransfer) {
   request.len = remote_payload.size();
 
   std::string peer2 = absl::StrCat("127.0.0.1:", port2);
-  auto status_or_handle = transport1->Post(peer2, request);
+  auto status_or_handle = transport1->Post(peer2, {request});
   ASSERT_TRUE(status_or_handle.ok()) << status_or_handle.status().message();
 
   EXPECT_TRUE(PollUntilDone(transport1.get(), status_or_handle.value()));
