@@ -59,6 +59,20 @@ py_library(
     ],
 )
 
+py_library(
+    name = "raiden_controller",
+    srcs = ["raiden_controller.py"],
+)
+
+py_test(
+    name = "raiden_controller_test",
+    srcs = ["raiden_controller_test.py"],
+    deps = [
+        ":raiden_controller",
+        "@com_google_absl_py//absl/testing:absltest",
+    ],
+)
+
 py_test(
     name = "coordination_helper_test",
     srcs = ["coordination_helper_test.py"],
