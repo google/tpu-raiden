@@ -384,7 +384,7 @@ cc_test(
     ],
     tags = [
         "no_oss",
-        "requires-ghostlite",  # Runs on physical TPU slices
+        "requires-ghostlite",  # Runs on GF TPU slices
     ],
     deps = [
         ":host_memory_allocator",

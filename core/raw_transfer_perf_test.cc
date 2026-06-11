@@ -36,10 +36,14 @@
 #include "core/raw_transfer_impl.h"
 #include "core/tpu_pjrt_manager.h"
 
+
+#ifndef ASSERT_OK
+#define ASSERT_OK(status) ASSERT_TRUE((status).ok())
+#endif
+
 namespace raiden {
 namespace {
 
-using ::absl_testing::IsOk;
 
 // Helper to compute and print the distribution of bandwidth numbers
 void PrintDistribution(const std::string& label,
@@ -82,11 +86,13 @@ template <typename T>
 void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
                            xla::PrimitiveType primitive_type,
                            const std::string& type_label,
+                           int num_layers,
+                           int64_t num_blocks,
                            double min_d2h_bandwidth_gb_s,
                            double min_h2d_bandwidth_gb_s,
                            bool should_gate_performance) {
-  constexpr int kNumLayers = 64;
-  constexpr int64_t kNumBlocks = 16;
+  const int kNumLayers = num_layers;
+  const int64_t kNumBlocks = num_blocks;
   constexpr int64_t kBlockSize = 128;
   constexpr int64_t kNumHeads = 8;
   constexpr int64_t kHeadDim = 128;
@@ -117,8 +123,9 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
             << " MB" << std::endl;
 
   // 1. Allocate Host Staging Buffers (Page Aligned, Zero-initialized)
-  auto allocator_or = tpu_raiden::HostMemoryAllocator::Create(manager->client());
-  ASSERT_THAT(allocator_or.status(), IsOk());
+  auto allocator_or =
+      tpu_raiden::HostMemoryAllocator::Create(manager->client());
+  ASSERT_OK(allocator_or.status());
   auto host_allocator = std::move(allocator_or).value();
 
   std::vector<tpu_raiden::HostBufferAllocation> host_src_buffers;
@@ -135,12 +142,12 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
 
   for (int i = 0; i < kNumLayers; ++i) {
     auto src_alloc_or = host_allocator->AllocateDmaMapped(bytes_per_layer);
-    ASSERT_THAT(src_alloc_or.status(), IsOk());
+    ASSERT_OK(src_alloc_or.status());
     host_src_buffers.push_back(std::move(src_alloc_or).value());
     std::memset(host_src_buffers.back().ptr, 0, bytes_per_layer);
 
     auto dst_alloc_or = host_allocator->AllocateDmaMapped(bytes_per_layer);
-    ASSERT_THAT(dst_alloc_or.status(), IsOk());
+    ASSERT_OK(dst_alloc_or.status());
     host_dst_buffers.push_back(std::move(dst_alloc_or).value());
     std::memset(host_dst_buffers.back().ptr, 0, bytes_per_layer);
 
@@ -169,14 +176,14 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
   for (int i = 0; i < kNumLayers; ++i) {
     auto buf_or =
         manager->BufferFromHost(host_src_ptrs[i], primitive_type, layer_shape);
-    ASSERT_THAT(buf_or.status(), IsOk());
+    ASSERT_OK(buf_or.status());
     device_buffers.push_back(std::move(buf_or).value());
     device_buffer_ptrs.push_back(device_buffers.back().get());
   }
 
   // Await TPU buffer allocation/copies to complete
   for (auto* buf : device_buffer_ptrs) {
-    ASSERT_THAT(buf->GetReadyFuture().Await(), IsOk());
+    ASSERT_OK(buf->GetReadyFuture().Await());
   }
 
   // 3. Warmup Phase
@@ -185,14 +192,14 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
     auto d2h_future_or =
         transfer_d2h_core(device_buffer_ptrs, host_dst_ptrs, host_sizes,
                           src_offsets, dst_offsets, copy_sizes);
-    ASSERT_THAT(d2h_future_or.status(), IsOk());
-    ASSERT_THAT(d2h_future_or.value().Await().status(), IsOk());
+    ASSERT_OK(d2h_future_or.status());
+    ASSERT_OK(d2h_future_or.value().Await().status());
 
     auto h2d_future_or =
         transfer_h2d_core(device_buffer_ptrs, host_src_ptrs, host_sizes,
                           src_offsets, dst_offsets, copy_sizes);
-    ASSERT_THAT(h2d_future_or.status(), IsOk());
-    ASSERT_THAT(h2d_future_or.value().Await().status(), IsOk());
+    ASSERT_OK(h2d_future_or.status());
+    ASSERT_OK(h2d_future_or.value().Await().status());
   }
 
   // 4. Timed Benchmark Loop (D2H) - Measure each iteration
@@ -205,8 +212,8 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
     auto d2h_future_or =
         transfer_d2h_core(device_buffer_ptrs, host_dst_ptrs, host_sizes,
                           src_offsets, dst_offsets, copy_sizes);
-    ASSERT_THAT(d2h_future_or.status(), IsOk());
-    ASSERT_THAT(d2h_future_or.value().Await().status(), IsOk());
+    ASSERT_OK(d2h_future_or.status());
+    ASSERT_OK(d2h_future_or.value().Await().status());
     absl::Duration duration = absl::Now() - start;
     double seconds = absl::ToDoubleSeconds(duration);
     double bandwidth =
@@ -226,8 +233,8 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
     auto h2d_future_or =
         transfer_h2d_core(device_buffer_ptrs, host_src_ptrs, host_sizes,
                           src_offsets, dst_offsets, copy_sizes);
-    ASSERT_THAT(h2d_future_or.status(), IsOk());
-    ASSERT_THAT(h2d_future_or.value().Await().status(), IsOk());
+    ASSERT_OK(h2d_future_or.status());
+    ASSERT_OK(h2d_future_or.value().Await().status());
     absl::Duration duration = absl::Now() - start;
     double seconds = absl::ToDoubleSeconds(duration);
     double bandwidth =
@@ -280,11 +287,13 @@ template <typename T>
 void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
                            xla::PrimitiveType primitive_type,
                            const std::string& type_label,
+                           int num_layers,
+                           int64_t num_blocks,
                            double min_d2h_bandwidth_gb_s,
                            double min_h2d_bandwidth_gb_s,
                            bool should_gate_performance) {
-  constexpr int kNumLayers = 64;
-  constexpr int64_t kNumBlocks = 16;
+  const int kNumLayers = num_layers;
+  const int64_t kNumBlocks = num_blocks;
   constexpr int64_t kBlockSize = 128;
   constexpr int64_t kNumHeads = 8;
   constexpr int64_t kHeadDim = 128;
@@ -315,17 +324,18 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
             << " MB" << std::endl;
 
   // 1. Allocate Host Staging Buffers (Page Aligned, Zero-initialized)
-  auto allocator_or = tpu_raiden::HostMemoryAllocator::Create(manager->client());
-  ASSERT_THAT(allocator_or.status(), IsOk());
+  auto allocator_or =
+      tpu_raiden::HostMemoryAllocator::Create(manager->client());
+  ASSERT_OK(allocator_or.status());
   auto host_allocator = std::move(allocator_or).value();
 
   auto src_alloc_or = host_allocator->AllocateDmaMapped(total_bytes);
-  ASSERT_THAT(src_alloc_or.status(), IsOk());
+  ASSERT_OK(src_alloc_or.status());
   auto host_src = std::move(src_alloc_or).value();
   std::memset(host_src.ptr, 0, total_bytes);
 
   auto dst_alloc_or = host_allocator->AllocateDmaMapped(total_bytes);
-  ASSERT_THAT(dst_alloc_or.status(), IsOk());
+  ASSERT_OK(dst_alloc_or.status());
   auto host_dst = std::move(dst_alloc_or).value();
   std::memset(host_dst.ptr, 0, total_bytes);
 
@@ -342,9 +352,9 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
   // 2. Allocate TPU Device Buffer (fully populated from host_src)
   auto device_buffer_or =
       manager->BufferFromHost(host_src.ptr, primitive_type, baked_shape);
-  ASSERT_THAT(device_buffer_or.status(), IsOk());
+  ASSERT_OK(device_buffer_or.status());
   auto device_buffer = std::move(device_buffer_or).value();
-  ASSERT_THAT(device_buffer->GetReadyFuture().Await(), IsOk());
+  ASSERT_OK(device_buffer->GetReadyFuture().Await());
 
   std::vector<xla::PjRtBuffer*> device_buffer_ptrs = {device_buffer.get()};
   std::vector<uint8_t*> host_dst_ptrs = {host_dst.ptr};
@@ -357,14 +367,14 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
     auto d2h_future_or =
         transfer_d2h_core(device_buffer_ptrs, host_dst_ptrs, host_sizes,
                           src_offsets, dst_offsets, copy_sizes);
-    ASSERT_THAT(d2h_future_or.status(), IsOk());
-    ASSERT_THAT(d2h_future_or.value().Await().status(), IsOk());
+    ASSERT_OK(d2h_future_or.status());
+    ASSERT_OK(d2h_future_or.value().Await().status());
 
     auto h2d_future_or =
         transfer_h2d_core(device_buffer_ptrs, host_src_ptrs, host_sizes,
                           src_offsets, dst_offsets, copy_sizes);
-    ASSERT_THAT(h2d_future_or.status(), IsOk());
-    ASSERT_THAT(h2d_future_or.value().Await().status(), IsOk());
+    ASSERT_OK(h2d_future_or.status());
+    ASSERT_OK(h2d_future_or.value().Await().status());
   }
 
   // 4. Timed Benchmark Loop (D2H) - Measure each iteration
@@ -377,8 +387,8 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
     auto d2h_future_or =
         transfer_d2h_core(device_buffer_ptrs, host_dst_ptrs, host_sizes,
                           src_offsets, dst_offsets, copy_sizes);
-    ASSERT_THAT(d2h_future_or.status(), IsOk());
-    ASSERT_THAT(d2h_future_or.value().Await().status(), IsOk());
+    ASSERT_OK(d2h_future_or.status());
+    ASSERT_OK(d2h_future_or.value().Await().status());
     absl::Duration duration = absl::Now() - start;
     double seconds = absl::ToDoubleSeconds(duration);
     double bandwidth =
@@ -398,8 +408,8 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
     auto h2d_future_or =
         transfer_h2d_core(device_buffer_ptrs, host_src_ptrs, host_sizes,
                           src_offsets, dst_offsets, copy_sizes);
-    ASSERT_THAT(h2d_future_or.status(), IsOk());
-    ASSERT_THAT(h2d_future_or.value().Await().status(), IsOk());
+    ASSERT_OK(h2d_future_or.status());
+    ASSERT_OK(h2d_future_or.value().Await().status());
     absl::Duration duration = absl::Now() - start;
     double seconds = absl::ToDoubleSeconds(duration);
     double bandwidth =
@@ -473,35 +483,104 @@ class RawTransferPerfTest : public ::testing::Test {
   bool should_gate_performance_ = false;
 };
 
-// =============================================================================
-// Scenario A: Fragmented Batch (64 Independent Layer Buffers)
-// =============================================================================
-TEST_F(RawTransferPerfTest, BenchmarkScenarioA_FragmentedBatch_BF16) {
-  RunBenchmarkScenarioA<uint16_t>(
-      manager_, xla::BF16, "BF16", min_d2h_bandwidth_gb_s_,
-      min_h2d_bandwidth_gb_s_, should_gate_performance_);
+struct BenchmarkParams {
+  xla::PrimitiveType primitive_type;
+  std::string type_label;
+  int num_layers;
+  int64_t num_blocks;
+  bool should_gate_performance;
+};
+
+class ParameterizedRawTransferPerfTest
+    : public RawTransferPerfTest,
+      public ::testing::WithParamInterface<BenchmarkParams> {};
+
+// Scenario A: Fragmented Batch (Independent Layer Buffers)
+TEST_P(ParameterizedRawTransferPerfTest, ScenarioA_FragmentedBatch) {
+  const BenchmarkParams& params = GetParam();
+  bool should_gate =
+      params.should_gate_performance ? should_gate_performance_ : false;
+  switch (params.primitive_type) {
+    case xla::BF16:
+      RunBenchmarkScenarioA<uint16_t>(
+          manager_, params.primitive_type, params.type_label,
+          params.num_layers, params.num_blocks, min_d2h_bandwidth_gb_s_,
+          min_h2d_bandwidth_gb_s_, should_gate);
+      break;
+    case xla::F32:
+      RunBenchmarkScenarioA<float>(
+          manager_, params.primitive_type, params.type_label,
+          params.num_layers, params.num_blocks, min_d2h_bandwidth_gb_s_,
+          min_h2d_bandwidth_gb_s_, should_gate);
+      break;
+    case xla::S32:
+      RunBenchmarkScenarioA<int32_t>(
+          manager_, params.primitive_type, params.type_label,
+          params.num_layers, params.num_blocks, min_d2h_bandwidth_gb_s_,
+          min_h2d_bandwidth_gb_s_, should_gate);
+      break;
+    case xla::F8E4M3FN:
+      RunBenchmarkScenarioA<uint8_t>(
+          manager_, params.primitive_type, params.type_label,
+          params.num_layers, params.num_blocks, min_d2h_bandwidth_gb_s_,
+          min_h2d_bandwidth_gb_s_, should_gate);
+      break;
+    default:
+      FAIL() << "Unsupported primitive type: " << params.primitive_type;
+  }
 }
 
-TEST_F(RawTransferPerfTest, BenchmarkScenarioA_FragmentedBatch_F32) {
-  RunBenchmarkScenarioA<float>(manager_, xla::F32, "F32",
-                               min_d2h_bandwidth_gb_s_, min_h2d_bandwidth_gb_s_,
-                               should_gate_performance_);
-}
-
-// =============================================================================
 // Scenario B: Baked-in Layer Dimension (Single Massive Buffer)
-// =============================================================================
-TEST_F(RawTransferPerfTest, BenchmarkScenarioB_BakedInTensor_BF16) {
-  RunBenchmarkScenarioB<uint16_t>(
-      manager_, xla::BF16, "BF16", min_d2h_bandwidth_gb_s_,
-      min_h2d_bandwidth_gb_s_, should_gate_performance_);
+TEST_P(ParameterizedRawTransferPerfTest, ScenarioB_BakedInTensor) {
+  const BenchmarkParams& params = GetParam();
+  bool should_gate =
+      params.should_gate_performance ? should_gate_performance_ : false;
+  switch (params.primitive_type) {
+    case xla::BF16:
+      RunBenchmarkScenarioB<uint16_t>(
+          manager_, params.primitive_type, params.type_label,
+          params.num_layers, params.num_blocks, min_d2h_bandwidth_gb_s_,
+          min_h2d_bandwidth_gb_s_, should_gate);
+      break;
+    case xla::F32:
+      RunBenchmarkScenarioB<float>(
+          manager_, params.primitive_type, params.type_label,
+          params.num_layers, params.num_blocks, min_d2h_bandwidth_gb_s_,
+          min_h2d_bandwidth_gb_s_, should_gate);
+      break;
+    case xla::S32:
+      RunBenchmarkScenarioB<int32_t>(
+          manager_, params.primitive_type, params.type_label,
+          params.num_layers, params.num_blocks, min_d2h_bandwidth_gb_s_,
+          min_h2d_bandwidth_gb_s_, should_gate);
+      break;
+    case xla::F8E4M3FN:
+      RunBenchmarkScenarioB<uint8_t>(
+          manager_, params.primitive_type, params.type_label,
+          params.num_layers, params.num_blocks, min_d2h_bandwidth_gb_s_,
+          min_h2d_bandwidth_gb_s_, should_gate);
+      break;
+    default:
+      FAIL() << "Unsupported primitive type: " << params.primitive_type;
+  }
 }
 
-TEST_F(RawTransferPerfTest, BenchmarkScenarioB_BakedInTensor_F32) {
-  RunBenchmarkScenarioB<float>(manager_, xla::F32, "F32",
-                               min_d2h_bandwidth_gb_s_, min_h2d_bandwidth_gb_s_,
-                               should_gate_performance_);
-}
+INSTANTIATE_TEST_SUITE_P(
+    RawTransferPerfTestInstantiation, ParameterizedRawTransferPerfTest,
+    ::testing::Values(
+        BenchmarkParams{xla::BF16, "BF16_Base", 64, 16, true},
+        BenchmarkParams{xla::F32, "F32_Base", 64, 16, true},
+        BenchmarkParams{xla::BF16, "BF16_Medium", 128, 32, false},
+        BenchmarkParams{xla::BF16, "BF16_Large", 256, 32, false},
+        BenchmarkParams{xla::BF16, "BF16_Extreme", 1024, 8, false},
+        BenchmarkParams{xla::S32, "INT32_Medium", 128, 32, false},
+        BenchmarkParams{xla::S32, "INT32_Large", 256, 16, false},
+        BenchmarkParams{xla::F8E4M3FN, "FP8_Medium", 128, 32, false},
+        BenchmarkParams{xla::F8E4M3FN, "FP8_Large", 256, 32, false},
+        BenchmarkParams{xla::F8E4M3FN, "FP8_Extreme", 1024, 8, false}),
+    [](const ::testing::TestParamInfo<BenchmarkParams>& info) {
+      return info.param.type_label;
+    });
 
 }  // namespace
 }  // namespace raiden
