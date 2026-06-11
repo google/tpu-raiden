@@ -28,10 +28,16 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <thread>  // NOLINT
+#include <vector>
 
 #include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
+#include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
 #include "third_party/peregrine/src/api/types.h"
 
 namespace tpu_raiden {
@@ -210,7 +216,11 @@ void SocketTransport::CloseConnection(std::string_view peer, int fd) {
 }
 
 absl::StatusOr<peregrine::Handle> SocketTransport::Post(
-    std::string_view peer, const peregrine::Request& request) {
+    std::string_view peer, absl::Span<const peregrine::Request> requests) {
+  if (requests.size() != 1) {
+    return absl::InvalidArgumentError("Only single request is supported");
+  }
+  const peregrine::Request& request = requests[0];
   if (!request.IsValid()) {
     return absl::InvalidArgumentError(
         absl::StrCat("Invalid transport request: ", request.ToString()));
@@ -295,7 +305,8 @@ absl::Status SocketTransport::DispatchReadRequest(
   return ReadExact(fd, request.laddr, resp_header.length);
 }
 
-absl::StatusOr<peregrine::Status> SocketTransport::Poll(peregrine::Handle handle) {
+absl::StatusOr<peregrine::Status> SocketTransport::Poll(
+    peregrine::Handle handle) {
   absl::MutexLock _(&mu_);
   auto it = status_map_.find(handle);
   if (it == status_map_.end()) {
