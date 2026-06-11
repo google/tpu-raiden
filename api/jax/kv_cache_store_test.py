@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from api.jax import kv_cache_manager
+
 from api.jax import kv_cache_store
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
@@ -95,9 +95,7 @@ class KVCacheStoreTest(parameterized.TestCase):
 
     jax.block_until_ready(tpu_arrs)
 
-    manager = kv_cache_manager.KVCacheManager(
-        device_arrays=tpu_arrs, block_size=1, unsafe_skip_buffer_lock=True
-    )
+
     store = kv_cache_store.KVCacheStore(1, 4)
 
     # Store chunk 0 into hash 1 (local LRU insert)
@@ -163,12 +161,7 @@ class KVCacheStoreTest(parameterized.TestCase):
     jax.block_until_ready(local_tpu_arrs)
 
     # 2. Setup the "Remote Node" (listening on dynamic port)
-    remote_manager = kv_cache_manager.KVCacheManager(
-        device_arrays=remote_tpu_arrs,
-        block_size=1,
-        host_blocks_to_allocate=4,
-        unsafe_skip_buffer_lock=True,
-    )
+
     remote_store = kv_cache_store.KVCacheStore(
         block_size=1,
         capacity=4,
@@ -177,12 +170,7 @@ class KVCacheStoreTest(parameterized.TestCase):
     )
 
     # 3. Setup the "Local Node" (listening on separate dynamic port)
-    local_manager = kv_cache_manager.KVCacheManager(
-        device_arrays=local_tpu_arrs,
-        block_size=1,
-        host_blocks_to_allocate=4,
-        unsafe_skip_buffer_lock=True,
-    )
+
     local_store = kv_cache_store.KVCacheStore(
         block_size=1,
         capacity=4,

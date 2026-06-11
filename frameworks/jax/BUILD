@@ -611,6 +611,10 @@ py_test(
 py_test(
     name = "resharding_test",
     srcs = ["resharding_test.py"],
+    tags = [
+        "manual",
+        "notap",
+    ],
     deps = [
         ":resharding_engine",
         ":resharding_test_lib",

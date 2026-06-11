@@ -37,14 +37,13 @@ py_test(
     srcs = ["kv_cache_store_test.py"],
     data = ["//kv_cache/global_registry:global_registry_server"],
     deps = [
-        ":kv_cache_manager_jax_py",
         ":kv_cache_store",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
         "@jax//jax",
         "@pypi//numpy",
         # buildcleaner: keep
-        ":raw_transfer",
+        "//frameworks/jax:_raw_transfer",
     ],
 )
 
