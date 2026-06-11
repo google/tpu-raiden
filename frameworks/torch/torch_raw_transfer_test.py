@@ -20,7 +20,7 @@ import numpy as np
 import torch
 import torch_tpu
 
-from api.torch import torch_raw_transfer
+from frameworks.torch import _torch_raw_transfer as torch_raw_transfer
 
 os.environ["TORCH_TPU_TOPOLOGY"] = "1x1"
 

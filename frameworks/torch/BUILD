@@ -521,3 +521,55 @@ test_suite(
         ":torch_raw_transfer_perf_test_gl",
     ],
 )
+
+py_test(
+    name = "torch_raw_transfer_test_gl",
+    timeout = "long",
+    srcs = ["torch_raw_transfer_test.py"],
+    main = "torch_raw_transfer_test.py",
+    tags = [
+        "cpu:8",
+        "notap",
+        "requires-accel-hbm",
+        "requires-ghostlite:8",
+        "requires-net:external",
+    ],
+    deps = [
+        ":_torch_raw_transfer",
+        "@com_google_absl_py//absl/testing:absltest",
+        "@com_google_absl_py//absl/testing:parameterized",
+        "@pypi//numpy",
+        "@torch_tpu//shims/torch:pytorch",
+        "@torch_tpu//torch_tpu",
+    ],
+)
+
+py_test(
+    name = "torch_raw_transfer_test_gf",
+    timeout = "long",
+    srcs = ["torch_raw_transfer_test.py"],
+    main = "torch_raw_transfer_test.py",
+    tags = [
+        "cpu:8",
+        "notap",
+        "requires-accel-hbm",
+        "requires-ghostfish:4",
+        "requires-net:external",
+    ],
+    deps = [
+        ":_torch_raw_transfer",
+        "@com_google_absl_py//absl/testing:absltest",
+        "@com_google_absl_py//absl/testing:parameterized",
+        "@pypi//numpy",
+        "@torch_tpu//shims/torch:pytorch",
+        "@torch_tpu//torch_tpu",
+    ],
+)
+
+test_suite(
+    name = "torch_raw_transfer_test_py",
+    tests = [
+        ":torch_raw_transfer_test_gf",
+        ":torch_raw_transfer_test_gl",
+    ],
+)
