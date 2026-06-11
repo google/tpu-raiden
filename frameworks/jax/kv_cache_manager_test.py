@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from api.jax import kv_cache_manager
+from frameworks.jax import _kv_cache_manager
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 
@@ -109,7 +109,7 @@ class KVCacheManagerTest(parameterized.TestCase):
 
     # Initialize manager with tpu_arrs and host_blocks_to_allocate = 2 (half of
     # 4 blocks)
-    manager = kv_cache_manager.KVCacheManager(
+    manager = _kv_cache_manager.KVCacheManager(
         device_arrays=tpu_arrs,
         block_size=1,
         host_blocks_to_allocate=2,
@@ -165,7 +165,7 @@ class KVCacheManagerTest(parameterized.TestCase):
 
     jax.block_until_ready(tpu_arrs)
 
-    manager = kv_cache_manager.KVCacheManager(
+    manager = _kv_cache_manager.KVCacheManager(
         device_arrays=tpu_arrs,
         block_size=1,
         host_blocks_to_allocate=2,
@@ -219,7 +219,7 @@ class KVCacheManagerTest(parameterized.TestCase):
 
     # Host blocks allocated = 5 (enough for our copies, which need 5 slices
     # total)
-    manager = kv_cache_manager.KVCacheManager(
+    manager = _kv_cache_manager.KVCacheManager(
         device_arrays=tpu_arrs,
         block_size=1,
         host_blocks_to_allocate=5,
@@ -288,7 +288,7 @@ class KVCacheManagerTest(parameterized.TestCase):
     jax.block_until_ready(tpu_src_arrs)
 
     # We allocate 2 blocks in host (capacity 4 slices).
-    manager = kv_cache_manager.KVCacheManager(
+    manager = _kv_cache_manager.KVCacheManager(
         device_arrays=tpu_src_arrs,
         block_size=block_size,
         host_blocks_to_allocate=2,
@@ -357,7 +357,7 @@ class KVCacheManagerTest(parameterized.TestCase):
     jax.block_until_ready(tpu_dst_arrs)
 
     # Spin up destination peer server on kernel ephemeral port 0.
-    dst_manager = kv_cache_manager.KVCacheManager(
+    dst_manager = _kv_cache_manager.KVCacheManager(
         device_arrays=tpu_dst_arrs,
         block_size=block_size,
         local_port=0,
@@ -369,7 +369,7 @@ class KVCacheManagerTest(parameterized.TestCase):
     self.assertIsNotNone(port)
 
     # Client source manager
-    src_manager = kv_cache_manager.KVCacheManager(
+    src_manager = _kv_cache_manager.KVCacheManager(
         device_arrays=tpu_src_arrs,
         block_size=block_size,
         host_blocks_to_allocate=8,
@@ -436,7 +436,7 @@ class KVCacheManagerTest(parameterized.TestCase):
 
     # Remote server owns pre-populated source host buffers. Bound to dynamic
     # kernel port 0.
-    remote_manager = kv_cache_manager.KVCacheManager(
+    remote_manager = _kv_cache_manager.KVCacheManager(
         device_arrays=tpu_src_arrs,
         block_size=block_size,
         local_port=0,
@@ -449,7 +449,7 @@ class KVCacheManagerTest(parameterized.TestCase):
     port = remote_manager.local_port()
     self.assertIsNotNone(port)
 
-    local_manager = kv_cache_manager.KVCacheManager(
+    local_manager = _kv_cache_manager.KVCacheManager(
         device_arrays=tpu_dst_arrs,
         block_size=block_size,
         host_blocks_to_allocate=8,
@@ -492,7 +492,7 @@ class KVCacheManagerTest(parameterized.TestCase):
     ]
     jax.block_until_ready(tpu_arrs)
 
-    manager = kv_cache_manager.KVCacheManager(
+    manager = _kv_cache_manager.KVCacheManager(
         device_arrays=tpu_arrs,
         block_size=1,
         host_blocks_to_allocate=8,
@@ -579,7 +579,7 @@ class KVCacheManagerTest(parameterized.TestCase):
     ]
     jax.block_until_ready(tpu_dst_arrs)
 
-    remote_manager = kv_cache_manager.KVCacheManager(
+    remote_manager = _kv_cache_manager.KVCacheManager(
         device_arrays=tpu_src_arrs,
         block_size=block_size,
         local_port=0,
@@ -592,7 +592,7 @@ class KVCacheManagerTest(parameterized.TestCase):
     port = remote_manager.local_port()
     self.assertIsNotNone(port)
 
-    local_manager = kv_cache_manager.KVCacheManager(
+    local_manager = _kv_cache_manager.KVCacheManager(
         device_arrays=tpu_dst_arrs,
         block_size=block_size,
         host_blocks_to_allocate=8,

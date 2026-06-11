@@ -14,6 +14,7 @@
 
 load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_python//python:defs.bzl", "py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -529,5 +530,26 @@ nanobind_extension(
         "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
         "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
+    ],
+)
+
+py_test(
+    name = "kv_cache_manager_test_cpu",
+    timeout = "long",
+    srcs = ["kv_cache_manager_test.py"],
+    args = ["--device_type=cpu"],
+    main = "kv_cache_manager_test.py",
+    tags = [
+        "cpu:4",
+        "notap",
+    ],
+    deps = [
+        ":_kv_cache_manager",
+        ":_raw_transfer",
+        "@com_google_absl_py//absl/flags",
+        "@com_google_absl_py//absl/testing:absltest",
+        "@com_google_absl_py//absl/testing:parameterized",
+        "@jax//jax",
+        "@pypi//numpy",
     ],
 )
