@@ -19,8 +19,11 @@ package(default_visibility = ["//visibility:public"])
 py_library(
     name = "kv_cache_manager_jax_py",
     srcs = ["kv_cache_manager.py"],
+    data = [
+        "kv_cache_manager.pyi",
+    ],
     visibility = ["//visibility:public"],
-    deps = ["//frameworks/jax:_kv_cache_manager"],
+    deps = ["//frameworks/jax:_transfer_engine"],
 )
 
 py_library(
