@@ -26,347 +26,195 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""E2E unit tests for repurposed PyTorch KVCacheManager (Raw Transfer)."""
+"""E2E physical unit tests for KVCacheManager on XLA TPUs."""
 
-import os
+import threading
 import time
 
 from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
 import torch
-import torch_tpu
 
-from api.torch import kv_cache_manager as torch_raw_transfer
-
-os.environ["TORCH_TPU_TOPOLOGY"] = "1x1"
-
-SUPPORTED_DTYPES = {
-    torch.float8_e4m3fn: "fp8",
-    torch.bfloat16: "bf16",
-    torch.float32: "fp32",
-}
+from api.torch.kv_cache_manager import KVCacheManager
 
 
-class KVCacheManagerTorchTest(parameterized.TestCase):
+class KVCacheManagerTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.device = torch.device("tpu:0")
-    # Emulate realistic KV cache block dimensions as requested by user
-    num_blocks = 4
-    self.shape = (num_blocks, 128, 8, 2, 128)
+    # Initialize PyTorch XLA accelerator device E2E
+    self.device = torch.device("tpu")
+    self.num_layers = 1
+    self.block_size = 1
 
-  @parameterized.named_parameters(
-      ("fp8", torch.float8_e4m3fn),
-      ("bf16", torch.bfloat16),
-      ("fp32", torch.float32),
-  )
-  def test_single_transfers(self, dtype):
-    ref_arr = torch.randn(self.shape).to(dtype)
-    tpu_arr = ref_arr.to(self.device)
-    torch.tpu.synchronize()
+  def test_initialization(self):
+    device = torch.device("cpu")
+    shape = (4, 128, 8)
+    kv_caches = [torch.zeros(shape, device=device)]
 
-    dst_d2h = torch.zeros_like(ref_arr)
-    torch_raw_transfer.transfer_d2h(tpu_arr, dst_d2h)
-
-    dst_h2d = torch.zeros_like(tpu_arr, device="cpu").to(self.device)
-    torch_raw_transfer.transfer_h2d(dst_d2h, dst_h2d)
-    torch.tpu.synchronize()
-    torch.testing.assert_close(dst_h2d.cpu(), ref_arr)
-
-  @parameterized.named_parameters(
-      ("fp8", torch.float8_e4m3fn),
-      ("bf16", torch.bfloat16),
-      ("fp32", torch.float32),
-  )
-  def test_single_async_transfers(self, dtype):
-    ref_arr = torch.randn(self.shape).to(dtype)
-    tpu_arr = ref_arr.to(self.device)
-    torch.tpu.synchronize()
-
-    dst_d2h = torch.zeros_like(ref_arr)
-    torch_raw_transfer.transfer_d2h_async(tpu_arr, dst_d2h).Await()
-
-    dst_h2d = torch.zeros_like(tpu_arr, device="cpu").to(self.device)
-    torch_raw_transfer.transfer_h2d_async(dst_d2h, dst_h2d).Await()
-    torch.tpu.synchronize()
-    torch.testing.assert_close(dst_h2d.cpu(), ref_arr)
-
-  @parameterized.named_parameters(
-      ("sync_fp8", "sync", torch.float8_e4m3fn),
-      ("sync_bf16", "sync", torch.bfloat16),
-      ("sync_fp32", "sync", torch.float32),
-      ("async_fp8", "async", torch.float8_e4m3fn),
-      ("async_bf16", "async", torch.bfloat16),
-      ("async_fp32", "async", torch.float32),
-  )
-  def test_batch_transfers(self, mode, dtype):
-    n_layers = 2
-    ref_arrs = []
-    tpu_arrs = []
-
-    for i in range(n_layers):
-      base = torch.randn(self.shape).to(dtype)
-      ref_arrs.append(base)
-      tpu_arrs.append(base.to(self.device))
-
-    torch.tpu.synchronize()
-
-    host_arrs = [torch.zeros_like(ref) for ref in ref_arrs]
-    tpu_dst_arrs = [torch.zeros_like(tpu, device="cpu").to(self.device) for tpu in tpu_arrs]
-
-    if mode == "sync":
-      torch_raw_transfer.transfer_d2h_batch(tpu_arrs, host_arrs)
-
-      torch_raw_transfer.transfer_h2d_batch(host_arrs, tpu_dst_arrs)
-      torch.tpu.synchronize()
-      for i in range(n_layers):
-        torch.testing.assert_close(tpu_dst_arrs[i].cpu(), ref_arrs[i])
-
-    elif mode == "async":
-      torch_raw_transfer.transfer_d2h_batch_async(tpu_arrs, host_arrs).Await()
-
-      torch_raw_transfer.transfer_h2d_batch_async(
-          host_arrs, tpu_dst_arrs
-      ).Await()
-      torch.tpu.synchronize()
-      for i in range(n_layers):
-        torch.testing.assert_close(tpu_dst_arrs[i].cpu(), ref_arrs[i])
-
-  def test_single_async_transfers_is_ready(self):
-    dtype = torch.bfloat16
-    ref_arr = torch.randn(self.shape).to(dtype)
-    tpu_arr = ref_arr.to(self.device)
-    torch.tpu.synchronize()
-
-    dst_d2h = torch.zeros_like(ref_arr)
-    future_d2h = torch_raw_transfer.transfer_d2h_async(tpu_arr, dst_d2h)
-
-    self.assertIsInstance(future_d2h.IsReady(), bool)
-    self.assertTrue(torch_raw_transfer.is_ready(future_d2h) in [True, False])
-    self.assertTrue(torch_raw_transfer.is_ready([future_d2h]) in [True, False])
-
-    future_d2h.Await()
-
-    self.assertTrue(future_d2h.IsReady())
-    self.assertTrue(torch_raw_transfer.is_ready(future_d2h))
-    self.assertTrue(torch_raw_transfer.is_ready([future_d2h]))
-
-    dst_h2d = torch.zeros_like(tpu_arr, device="cpu").to(self.device)
-    future_h2d = torch_raw_transfer.transfer_h2d_async(dst_d2h, dst_h2d)
-
-    self.assertIsInstance(future_h2d.IsReady(), bool)
-    self.assertTrue(torch_raw_transfer.is_ready(future_h2d) in [True, False])
-    self.assertTrue(torch_raw_transfer.is_ready([future_h2d]) in [True, False])
-
-    future_h2d.Await()
-    torch.tpu.synchronize()
-
-    self.assertTrue(future_h2d.IsReady())
-    self.assertTrue(torch_raw_transfer.is_ready(future_h2d))
-    self.assertTrue(torch_raw_transfer.is_ready([future_h2d]))
-    torch.testing.assert_close(dst_h2d.cpu(), ref_arr)
-
-  def test_batch_transfers_is_ready(self):
-    dtype = torch.bfloat16
-    n_layers = 2
-    ref_arrs = []
-    tpu_arrs = []
-
-    for i in range(n_layers):
-      base = torch.randn(self.shape).to(dtype)
-      ref_arrs.append(base)
-      tpu_arrs.append(base.to(self.device))
-
-    torch.tpu.synchronize()
-
-    host_arrs = [torch.zeros_like(ref) for ref in ref_arrs]
-    tpu_dst_arrs = [torch.zeros_like(tpu, device="cpu").to(self.device) for tpu in tpu_arrs]
-
-    future_d2h = torch_raw_transfer.transfer_d2h_batch_async(
-        tpu_arrs, host_arrs
+    manager = KVCacheManager(
+        kv_caches=kv_caches,
+        tp_rank=0,
+        local_control_port=0,
+        max_blocks=4,
+        num_slots=2,
     )
-    self.assertIsInstance(future_d2h.IsReady(), bool)
-    self.assertTrue(torch_raw_transfer.is_ready(future_d2h) in [True, False])
-    self.assertTrue(torch_raw_transfer.is_ready([future_d2h]) in [True, False])
+    self.assertIsNotNone(manager)
 
-    future_d2h.Await()
+  def test_e2e_transfer_polling(self):
+    num_blocks = 2
+    shape = (num_blocks, 128, 8)
 
-    self.assertTrue(future_d2h.IsReady())
-    self.assertTrue(torch_raw_transfer.is_ready(future_d2h))
-    self.assertTrue(torch_raw_transfer.is_ready([future_d2h]))
-
-    future_h2d = torch_raw_transfer.transfer_h2d_batch_async(
-        host_arrs, tpu_dst_arrs
-    )
-    self.assertIsInstance(future_h2d.IsReady(), bool)
-    self.assertTrue(torch_raw_transfer.is_ready(future_h2d) in [True, False])
-    self.assertTrue(torch_raw_transfer.is_ready([future_h2d]) in [True, False])
-
-    future_h2d.Await()
-    torch.tpu.synchronize()
-
-    self.assertTrue(future_h2d.IsReady())
-    self.assertTrue(torch_raw_transfer.is_ready(future_h2d))
-    self.assertTrue(torch_raw_transfer.is_ready([future_h2d]))
-    for i in range(n_layers):
-      torch.testing.assert_close(tpu_dst_arrs[i].cpu(), ref_arrs[i])
-
-  def test_prepared_transfer(self):
-    dtype = torch.bfloat16
-    ref_arr = torch.randn(self.shape).to(dtype)
-    tpu_arr = ref_arr.to(self.device)
-    torch.tpu.synchronize()
-
-    # 2 bytes per bfloat16
-    size_bytes = ref_arr.numel() * 2
-    host_buffer = torch_raw_transfer.RawHostBuffer(size_bytes)
-    prepared = torch_raw_transfer.PreparedTorchRawTransfer(tpu_arr, host_buffer)
-
-    # Perform D2H
-    prepared.d2h()
-
-    # Perform H2D
-    dst_tpu_arr = torch.zeros_like(tpu_arr, device="cpu").to(self.device)
-    prepared_dst = torch_raw_transfer.PreparedTorchRawTransfer(
-        dst_tpu_arr, host_buffer
-    )
-    prepared_dst.h2d()
-    torch.tpu.synchronize()
-
-    torch.testing.assert_close(dst_tpu_arr.cpu(), ref_arr)
-
-  def test_perf_compare(self):
-    import gc
-
-    num_layers = 4
-    num_iterations = 10
-    dtype = torch.bfloat16
-
-    ref_arrs = []
-    tpu_arrs = []
-
-    for i in range(num_layers):
-      base = torch.randn(self.shape).to(dtype)
-      ref_arrs.append(base)
-      tpu_arrs.append(base.to(self.device))
-
-    torch.tpu.synchronize()
-
-    host_arrs = [torch.zeros_like(ref) for ref in ref_arrs]
-    tpu_dst_arrs = [torch.zeros_like(tpu, device="cpu").to(self.device) for tpu in tpu_arrs]
-
-    # Benchmark Stateless batch async
-    batched_d2h_times = []
-    batched_h2d_times = []
-
-    for _ in range(num_iterations):
-      gc.disable()
-      start = time.time()
-      futures = torch_raw_transfer.transfer_d2h_batch_async(tpu_arrs, host_arrs)
-      futures.Await()
-      batched_d2h_times.append(time.time() - start)
-
-      gc.enable()
-      gc.collect()
-      gc.disable()
-
-      start = time.time()
-      futures = torch_raw_transfer.transfer_h2d_batch_async(
-          host_arrs, tpu_dst_arrs
-      )
-      futures.Await()
-      torch.tpu.synchronize()
-      batched_h2d_times.append(time.time() - start)
-
-      gc.enable()
-      gc.collect()
-
-    # Benchmark Prepared (emulating batch using loop)
-    prepared_d2h_times = []
-    prepared_h2d_times = []
-
-    size_bytes = ref_arrs[0].numel() * 2
-    host_buffers = [
-        torch_raw_transfer.RawHostBuffer(size_bytes) for _ in range(num_layers)
-    ]
-    prepared_d2h = [
-        torch_raw_transfer.PreparedTorchRawTransfer(
-            tpu_arrs[i], host_buffers[i]
-        )
-        for i in range(num_layers)
-    ]
-    prepared_h2d = [
-        torch_raw_transfer.PreparedTorchRawTransfer(
-            tpu_dst_arrs[i], host_buffers[i]
-        )
-        for i in range(num_layers)
-    ]
-
-    for _ in range(num_iterations):
-      gc.disable()
-      start = time.time()
-      futures = [p.d2h_async() for p in prepared_d2h]
-      for f in futures:
-        f.Await()
-      prepared_d2h_times.append(time.time() - start)
-
-      gc.enable()
-      gc.collect()
-      gc.disable()
-
-      start = time.time()
-      futures = [p.h2d_async() for p in prepared_h2d]
-      for f in futures:
-        f.Await()
-      torch.tpu.synchronize()
-      prepared_h2d_times.append(time.time() - start)
-
-      gc.enable()
-      gc.collect()
-
-    # Benchmark Native Torch/XLA .cpu() and .to()
-    native_d2h_times = []
-    native_h2d_times = []
-
-    for _ in range(num_iterations):
-      gc.disable()
-      start = time.time()
-      cpu_tensors = [tpu.cpu() for tpu in tpu_arrs]
-      native_d2h_times.append(time.time() - start)
-
-      gc.enable()
-      gc.collect()
-      gc.disable()
-
-      start = time.time()
-      _ = [cpu.to(self.device) for cpu in cpu_tensors]
-      torch.tpu.synchronize()
-      native_h2d_times.append(time.time() - start)
-
-      gc.enable()
-      gc.collect()
-
-    element_size = 2
-    total_bytes = np.prod(self.shape) * element_size * num_layers
-
-    def report_perf(name, times):
-      med_time = np.median(times)
-      med_bw = total_bytes / med_time / (1024 * 1024 * 1024)
-      print(
-          f"PERF_REPORT | {name} BW: {med_bw:.3f} GB/s (median time:"
-          f" {med_time:.6f}s)"
+    src_caches = []
+    for _ in range(self.num_layers):
+      src_caches.append(
+          torch.full(
+              shape, fill_value=1.0, dtype=torch.float32, device=self.device
+          )
       )
 
-    print("\n--- Performance Comparison (Torch TPU vs Native) ---")
-    report_perf("Stateless Batch D2H", batched_d2h_times)
-    report_perf("Stateless Batch H2D", batched_h2d_times)
-    report_perf("Prepared Raw D2H", prepared_d2h_times)
-    report_perf("Prepared Raw H2D", prepared_h2d_times)
-    report_perf("Native torch.cpu() D2H", native_d2h_times)
-    report_perf("Native tensor.to(tpu) H2D", native_h2d_times)
-    print("----------------------------------------------------\n")
+    dst_caches = []
+    for _ in range(self.num_layers):
+      dst_caches.append(
+          torch.zeros(shape, dtype=torch.float32, device=self.device)
+      )
+
+    producer = KVCacheManager(
+        kv_caches=src_caches,
+        tp_rank=0,
+        local_control_port=0,
+        max_blocks=2,
+        num_slots=2,
+    )
+
+    consumer = KVCacheManager(
+        kv_caches=dst_caches,
+        tp_rank=0,
+        local_control_port=0,
+        max_blocks=2,
+        num_slots=2,
+    )
+
+    port = producer.local_control_port
+    self.assertGreater(port, 0)
+
+    req_id = "test_req_poll"
+    uuid = 12345
+    producer.notify_for_read(req_id, uuid, [0, 1])
+
+    remote_endpoint = f"127.0.0.1:{port}"
+    consumer.start_read(
+        req_id=req_id,
+        uuid=uuid,
+        remote_endpoint=remote_endpoint,
+        remote_block_ids=[0, 1],
+        local_block_ids=[0, 1],
+    )
+
+    # Poll until consumer is done receiving
+    done = False
+    for _ in range(50):
+      done_sending, done_recving, failed_recving = consumer.complete_read()
+      if req_id in failed_recving:
+        self.fail("Transfer failed")
+      if req_id in done_recving:
+        done = True
+        break
+      time.sleep(0.1)
+
+    self.assertTrue(done, "Consumer did not finish transfer in time")
+
+    # Check that consumer correctly loaded the values
+    for t in dst_caches:
+      np.testing.assert_allclose(t.cpu().numpy(), 1.0, atol=1e-5)
+
+    # Poll producer until it's done sending
+    done_prod = False
+    for _ in range(50):
+      done_sending, done_recving, failed_recving = producer.complete_read()
+      if req_id in done_sending:
+        done_prod = True
+        break
+      time.sleep(0.1)
+
+    self.assertTrue(done_prod, "Producer did not finish sending in time")
+
+  def test_parallel_pull(self):
+    num_blocks = 2
+    shape = (num_blocks, 128, 8)
+
+    src_caches = []
+    for _ in range(self.num_layers):
+      src_caches.append(
+          torch.full(
+              shape, fill_value=2.0, dtype=torch.float32, device=self.device
+          )
+      )
+
+    dst_caches = []
+    for _ in range(self.num_layers):
+      dst_caches.append(
+          torch.zeros(shape, dtype=torch.float32, device=self.device)
+      )
+
+    producer = KVCacheManager(
+        kv_caches=src_caches,
+        tp_rank=0,
+        local_control_port=0,
+        max_blocks=2,
+        num_slots=2,
+    )
+
+    consumer = KVCacheManager(
+        kv_caches=dst_caches,
+        tp_rank=0,
+        local_control_port=0,
+        max_blocks=2,
+        num_slots=2,
+    )
+
+    port = producer.local_control_port
+    self.assertGreater(port, 0)
+
+    req_id = "test_req_parallel"
+    uuid = 99999
+    producer.notify_for_read(req_id, uuid, [0, 1])
+
+    remote_endpoint = f"127.0.0.1:{port}"
+    consumer.start_read(
+        req_id=req_id,
+        uuid=uuid,
+        remote_endpoint=remote_endpoint,
+        remote_block_ids=[0, 1],
+        local_block_ids=[0, 1],
+        parallelism=2,
+    )
+
+    done = False
+    for _ in range(50):
+      done_sending, done_recving, failed_recving = consumer.complete_read()
+      if req_id in failed_recving:
+        self.fail("Transfer failed")
+      if req_id in done_recving:
+        done = True
+        break
+      time.sleep(0.1)
+
+    self.assertTrue(done, "Consumer did not finish transfer in time")
+
+    for t in dst_caches:
+      np.testing.assert_allclose(t.cpu().numpy(), 2.0, atol=1e-5)
+
+    done_prod = False
+    for _ in range(50):
+      done_sending, done_recving, failed_recving = producer.complete_read()
+      if req_id in done_sending:
+        done_prod = True
+        break
+      time.sleep(0.1)
+
+    self.assertTrue(done_prod, "Producer did not finish sending in time")
 
 
 if __name__ == "__main__":

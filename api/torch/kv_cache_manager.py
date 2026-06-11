@@ -26,24 +26,100 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""High-performance PyTorch KV Cache Manager (repurposed as Raw Transfer)."""
+"""High-performance PyTorch KV Cache Manager (repurposed as TransferEngine)."""
 
-from frameworks.torch import _torch_raw_transfer as _impl
+import ctypes
+import os
+from pathlib import Path
+from typing import Any, List, Tuple
 
-# Expose the core stateless raw transfer API classes and functions
-RawHostBuffer = _impl.RawHostBuffer
-PjRtCopyFuture = _impl.PjRtCopyFuture
-PreparedTorchRawTransfer = _impl.PreparedTorchRawTransfer
+import torch  # noqa: F401  # Load torch shared libraries before the extension.
+import torch_tpu
+from torch_tpu import _loader as _torch_tpu_loader
 
-await_all = _impl.await_all
-is_ready = _impl.is_ready
 
-transfer_d2h_async = _impl.transfer_d2h_async
-transfer_h2d_async = _impl.transfer_h2d_async
-transfer_d2h = _impl.transfer_d2h
-transfer_h2d = _impl.transfer_h2d
+def _load_torch_tpu_common() -> None:
+  _torch_tpu_loader.load()
+  common = Path(torch_tpu.__file__).resolve().parent / "common"
+  lib = common / "libpywrap_torch_tpu_common.so"
+  if lib.exists():
+    ctypes.CDLL(str(lib), mode=os.RTLD_GLOBAL | os.RTLD_NOW)
 
-transfer_d2h_batch_async = _impl.transfer_d2h_batch_async
-transfer_h2d_batch_async = _impl.transfer_h2d_batch_async
-transfer_d2h_batch = _impl.transfer_d2h_batch
-transfer_h2d_batch = _impl.transfer_h2d_batch
+
+_load_torch_tpu_common()
+
+from frameworks.torch import _transfer_engine as _impl
+
+
+class KVCacheManager:
+  """Wrapper around compiled C++ KV Cache Manager.
+
+  This class has been repurposed to expose the TransferEngine API interface
+  for distributed disaggregated KV-cache movement on PyTorch TPUs.
+  """
+
+  def __init__(
+      self,
+      kv_caches: List[Any],
+      tp_rank: int,
+      local_control_port: int,
+      max_blocks: int,
+      num_slots: int,
+      timeout_s: float = 120.0,
+      unsafe_skip_buffer_lock: bool = True,
+  ):
+    """Instantiates the TransferEngine-based KVCacheManager.
+
+    Args:
+      kv_caches: List of device-placed contiguous Tensors representing the
+        sharded KV caches.
+      tp_rank: Tensor Parallel rank.
+      local_control_port: TCP socket server port for control plane coordination.
+      max_blocks: Maximum number of blocks in the host pool.
+      num_slots: Number of transfer slots to allocate.
+      timeout_s: Timeout in seconds for transfer operations.
+      unsafe_skip_buffer_lock: Skip dynamic safety locking.
+    """
+    self._impl = _impl.TransferEngine(
+        kv_caches=kv_caches,
+        tp_rank=tp_rank,
+        local_control_port=local_control_port,
+        max_blocks=max_blocks,
+        num_slots=num_slots,
+        timeout_s=timeout_s,
+        unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
+    )
+
+  @property
+  def local_control_port(self) -> int:
+    """Returns the active control plane listener port."""
+    return self._impl.local_control_port
+
+  def notify_for_read(
+      self, req_id: str, uuid: int, block_ids: List[int]
+  ) -> int:
+    """Producer node notifies the registry/peer that blocks are ready for read."""
+    return self._impl.notify_for_read(req_id, uuid, block_ids)
+
+  def start_read(
+      self,
+      req_id: str,
+      uuid: int,
+      remote_endpoint: str,
+      remote_block_ids: List[int],
+      local_block_ids: List[int],
+      parallelism: int = 1,
+  ) -> int:
+    """Consumer node initiates an asynchronous pull of blocks from a remote peer."""
+    return self._impl.start_read(
+        req_id,
+        uuid,
+        remote_endpoint,
+        remote_block_ids,
+        local_block_ids,
+        parallelism,
+    )
+
+  def complete_read(self) -> Tuple[List[str], List[str], List[str]]:
+    """Waits for and completes all active asynchronous read operations."""
+    return self._impl.complete_read()

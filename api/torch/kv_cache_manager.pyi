@@ -12,111 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
-from typing import List, Any, Union
-
-class RawHostBuffer:
-  def __init__(self, size_bytes: int) -> None: ...
-  @property
-  def size_bytes(self) -> int: ...
-  @property
-  def data_ptr(self) -> int: ...
-  @property
-  def is_pjrt_backed(self) -> bool: ...
-
-class PjRtCopyFuture:
-  def Await(self) -> None: ...
-  def wait(self) -> None: ...
-  def IsReady(self) -> bool: ...
-  def is_ready(self) -> bool: ...
-
-class PreparedTorchRawTransfer:
+class KVCacheManager:
   def __init__(
       self,
-      tpu_tensor: torch.Tensor,
-      host_buffer: RawHostBuffer,
-      unsafe_skip_buffer_lock: bool = True,
+      kv_caches: list,
+      tp_rank: int,
+      local_control_port: int,
+      max_blocks: int,
+      num_slots: int,
+      timeout_s: float = ...,
+      unsafe_skip_buffer_lock: bool = ...,
   ) -> None: ...
   @property
-  def physical_size_bytes(self) -> int: ...
-  @property
-  def host_buffer(self) -> RawHostBuffer: ...
-  def d2h_async(self) -> PjRtCopyFuture: ...
-  def h2d_async(self) -> PjRtCopyFuture: ...
-  def d2h(self) -> None: ...
-  def h2d(self) -> None: ...
-
-def await_all(futures: Union[PjRtCopyFuture, List[PjRtCopyFuture]]) -> None: ...
-def is_ready(futures: Union[PjRtCopyFuture, List[PjRtCopyFuture]]) -> bool: ...
-
-def transfer_d2h_async(
-    src_arr: torch.Tensor,
-    dst_arr: torch.Tensor,
-    *,
-    src_offsets_major_dim: List[int] = ...,
-    dst_offsets_major_dim: List[int] = ...,
-    copy_sizes_major_dim: List[int] = ...,
-) -> PjRtCopyFuture: ...
-
-def transfer_h2d_async(
-    src_arr: torch.Tensor,
-    dst_arr: torch.Tensor,
-    *,
-    src_offsets_major_dim: List[int] = ...,
-    dst_offsets_major_dim: List[int] = ...,
-    copy_sizes_major_dim: List[int] = ...,
-) -> PjRtCopyFuture: ...
-
-def transfer_d2h(
-    src_arr: torch.Tensor,
-    dst_arr: torch.Tensor,
-    *,
-    src_offsets_major_dim: List[int] = ...,
-    dst_offsets_major_dim: List[int] = ...,
-    copy_sizes_major_dim: List[int] = ...,
-) -> None: ...
-
-def transfer_h2d(
-    src_arr: torch.Tensor,
-    dst_arr: torch.Tensor,
-    *,
-    src_offsets_major_dim: List[int] = ...,
-    dst_offsets_major_dim: List[int] = ...,
-    copy_sizes_major_dim: List[int] = ...,
-) -> None: ...
-
-def transfer_d2h_batch_async(
-    src_arrs: List[torch.Tensor],
-    dst_arrs: List[torch.Tensor],
-    *,
-    src_offsets_major_dim: List[int] = ...,
-    dst_offsets_major_dim: List[int] = ...,
-    copy_sizes_major_dim: List[int] = ...,
-) -> PjRtCopyFuture: ...
-
-def transfer_h2d_batch_async(
-    src_arrs: List[torch.Tensor],
-    dst_arrs: List[torch.Tensor],
-    *,
-    src_offsets_major_dim: List[int] = ...,
-    dst_offsets_major_dim: List[int] = ...,
-    copy_sizes_major_dim: List[int] = ...,
-) -> PjRtCopyFuture: ...
-
-def transfer_d2h_batch(
-    src_arrs: List[torch.Tensor],
-    dst_arrs: List[torch.Tensor],
-    *,
-    src_offsets_major_dim: List[int] = ...,
-    dst_offsets_major_dim: List[int] = ...,
-    copy_sizes_major_dim: List[int] = ...,
-) -> None: ...
-
-def transfer_h2d_batch(
-    src_arrs: List[torch.Tensor],
-    dst_arrs: List[torch.Tensor],
-    *,
-    src_offsets_major_dim: List[int] = ...,
-    dst_offsets_major_dim: List[int] = ...,
-    copy_sizes_major_dim: List[int] = ...,
-) -> None: ...
+  def local_control_port(self) -> int: ...
+  def notify_for_read(
+      self,
+      req_id: str,
+      uuid: int,
+      block_ids: list[int],
+  ) -> int: ...
+  def start_read(
+      self,
+      req_id: str,
+      uuid: int,
+      remote_endpoint: str,
+      remote_block_ids: list[int],
+      local_block_ids: list[int],
+      parallelism: int = 1,
+  ) -> int: ...
+  def complete_read(self) -> tuple[list[str], list[str], list[str]]: ...
