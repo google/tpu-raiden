@@ -44,6 +44,7 @@
 #include <cstring>
 #include <deque>
 #include <future>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -632,6 +633,24 @@ int64_t TransferEngineBase::StartRead(
             h2d_wait_ms = DurationMs(h2d_wait_start, h2d_done);
             h2d_total_ms =
                 h2d_started ? DurationMs(h2d_started_at, h2d_done) : 0.0;
+          }
+
+          // KV-transfer timing: consumer H2D fully done -- the KV for this
+          // request is now entirely on-device (both the host-reorder and the
+          // overlapped path converge here, before the ACK to the producer).
+          // Pairs with the Python connector's "KVXFER event=prod_start" by
+          // req_id; t is epoch wall-clock (time since epoch, comparable across
+          // hosts after NTP). Emitted once per request per tp rank.
+          {
+            const double cons_done_epoch =
+                std::chrono::duration<double>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+            std::ostringstream kvxfer;
+            kvxfer << "KVXFER event=cons_done req_id=" << req_id
+                   << " uuid=" << uuid << " rank=" << tp_rank_ << " t="
+                   << std::fixed << std::setprecision(6) << cons_done_epoch;
+            EmitTimingLog(kvxfer.str());
           }
 
           const auto ack_start = std::chrono::steady_clock::now();

@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
@@ -128,6 +129,14 @@ class BlockTransport {
  private:
   absl::StatusOr<int> ConnectToPeer(const std::string& peer);
 
+  // Persistent connection pool (consumer side). Reuse warm, congestion-window-
+  // ramped TCP connections across pulls instead of opening a fresh slow-start
+  // connection every transfer. (H2H bandwidth Exp-3 / RC1.) Gated by env
+  // RAIDEN_CONN_POOL (default on; "0" disables).
+  absl::StatusOr<int> AcquireConnection(const std::string& peer);
+  void ReleaseConnection(const std::string& peer, int fd);
+  void ClosePooledConnections();
+
   absl::Status ProcessSingleRequest(int client_fd);
   void ConnectionWorker(int client_fd);
   void ListenerLoop();
@@ -156,6 +165,11 @@ class BlockTransport {
 
   absl::Mutex mu_;
   std::vector<int> active_client_fds_ ABSL_GUARDED_BY(mu_);
+
+  absl::Mutex pool_mu_;
+  absl::flat_hash_map<std::string, std::vector<int>> conn_pool_
+      ABSL_GUARDED_BY(pool_mu_);
+  bool pooling_enabled_ = true;
 
   std::thread listener_thread_;
   std::vector<std::thread> worker_threads_;
