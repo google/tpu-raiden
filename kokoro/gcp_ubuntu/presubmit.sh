@@ -109,7 +109,7 @@ sys.modules['jax.core'] = MagicMock()
 sys.modules['jax.extend'] = MagicMock()
 sys.modules['jax.extend.ffi'] = MagicMock()
 
-import raw_transfer
+import kv_cache_manager
 import _kv_cache_manager
 import _kv_cache_manager_ffi
 import _weight_synchronizer
