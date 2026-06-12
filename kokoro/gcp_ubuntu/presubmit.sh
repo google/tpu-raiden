@@ -65,14 +65,32 @@ BAZEL_STARTUP_FLAGS=(
   "--output_base=${BAZEL_OUTPUT_BASE}"
 )
 
+# === Dynamic Resource Detection (75% Headroom Allocation) ===
+echo "Detecting VM resources..."
+NPROC=$(nproc)
+BAZEL_JOBS=$((NPROC > 1 ? NPROC - 1 : 1))
+MEM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+BAZEL_RAM=$((MEM_KB / 1024 * 75 / 100))
+echo "Allocating ${BAZEL_JOBS} jobs/CPUs and ${BAZEL_RAM}MB RAM to Bazel..."
+
+# === Dynamic Cache Write Access Toggle ===
+if [[ "${KOKORO_JOB_TYPE}" == "PRESUBMIT_GITHUB" || "${KOKORO_JOB_TYPE}" == "PRESUBMIT" ]]; then
+  echo "Presubmit build detected. Setting remote cache to READ-ONLY..."
+  UPLOAD_RESULTS="false"
+else
+  echo "Postsubmit/trusted build detected. Setting remote cache to READ-WRITE..."
+  UPLOAD_RESULTS="true"
+fi
+
 BAZEL_COMMAND_FLAGS=(
   "--remote_cache=https://storage.googleapis.com/${CACHE_BUCKET}"
   "--google_default_credentials"
   "--spawn_strategy=standalone"
   "--strategy=standalone"
-  "--jobs=4"
-  "--local_ram_resources=4096"
-  "--local_cpu_resources=4"
+  "--jobs=${BAZEL_JOBS}"
+  "--local_ram_resources=${BAZEL_RAM}"
+  "--local_cpu_resources=${BAZEL_JOBS}"
+  "--remote_upload_local_results=${UPLOAD_RESULTS}"
   "--remote_max_connections=25"
   "--remote_timeout=300s"
   "--remote_retries=3"
