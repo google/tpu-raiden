@@ -12,10 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("@rules_python//python:defs.bzl", "py_test")
 load("//core:header_only_cc_info.bzl", "header_only_cc_info")
+load("//tpu_raiden/frameworks/torch:torch_rules.bzl", "raiden_torch_cc_library", "raiden_torch_cc_test", "raiden_torch_nanobind_extension", "raiden_torch_py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -26,7 +24,7 @@ header_only_cc_info(
     ],
 )
 
-cc_library(
+raiden_torch_cc_library(
     name = "weight_synchronizer_torch",
     srcs = ["weight_synchronizer.cc"],
     hdrs = ["weight_synchronizer.h"],
@@ -41,20 +39,18 @@ cc_library(
     linkopts = ["-Wl,--allow-shlib-undefined"],
     visibility = ["//visibility:public"],
     deps = [
+        ":torch_utils",
         "//core:xla_raw_transfer_headers",
-        "//tpu_raiden/frameworks/torch:torch_utils",
         "//weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
-        "@torch_tpu//shims/torch/c10/core:base_headers",
-        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
     ],
 )
 
 # Removed _weight_synchronizer (consolidated into _tpu_raiden_torch)
 
-cc_library(
+raiden_torch_cc_library(
     name = "torch_tpu_utils",
     srcs = ["torch_tpu_utils.cc"],
     hdrs = ["torch_tpu_utils.h"],
@@ -69,14 +65,12 @@ cc_library(
     deps = [
         ":torch_tpu_tensor_to_buffer_headers",
         "//core:xla_raw_transfer_headers",
-        "@com_google_absl//absl/status",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
-        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
     ],
 )
 
-cc_library(
+raiden_torch_cc_library(
     name = "torch_utils",
     srcs = ["torch_utils.cc"],
     hdrs = ["torch_utils.h"],
@@ -95,7 +89,7 @@ cc_library(
     ],
 )
 
-cc_library(
+raiden_torch_cc_library(
     name = "torch_nanobind_utils",
     hdrs = ["torch_nanobind_utils.h"],
     copts = [
@@ -113,7 +107,7 @@ cc_library(
     ],
 )
 
-cc_library(
+raiden_torch_cc_library(
     name = "kv_cache_manager_torch",
     srcs = ["kv_cache_manager.cc"],
     hdrs = ["kv_cache_manager.h"],
@@ -138,13 +132,16 @@ cc_library(
     ],
 )
 
-nanobind_extension(
+raiden_torch_nanobind_extension(
     name = "_tpu_raiden_torch",
     srcs = ["tpu_raiden_torch_module.cc"],
     features = [
         "-use_header_modules",
     ],
-    linkopts = ["-Wl,--allow-shlib-undefined"],
+    linkopts = [
+        "-Wl,--allow-shlib-undefined",
+        "-Wl,-Bsymbolic",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         ":kv_cache_manager_torch",
@@ -159,7 +156,7 @@ nanobind_extension(
     ],
 )
 
-cc_library(
+raiden_torch_cc_library(
     name = "torch_raw_transfer_torch",
     srcs = ["torch_raw_transfer.cc"],
     hdrs = ["torch_raw_transfer.h"],
@@ -182,11 +179,14 @@ cc_library(
     alwayslink = 1,
 )
 
-nanobind_extension(
+raiden_torch_nanobind_extension(
     name = "_torch_raw_transfer",
     srcs = ["torch_raw_transfer_module.cc"],
     features = ["-use_header_modules"],
-    linkopts = ["-Wl,--allow-shlib-undefined"],
+    linkopts = [
+        "-Wl,--allow-shlib-undefined",
+        "-Wl,-Bsymbolic",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         ":torch_nanobind_utils",
@@ -201,7 +201,7 @@ nanobind_extension(
     ],
 )
 
-cc_library(
+raiden_torch_cc_library(
     name = "torch_raw_transfer_torch_mock",
     srcs = ["torch_raw_transfer.cc"],
     hdrs = ["torch_raw_transfer.h"],
@@ -223,7 +223,7 @@ cc_library(
     ],
 )
 
-cc_library(
+raiden_torch_cc_library(
     name = "torch_tpu_utils_mock",
     srcs = ["torch_tpu_utils_mock.cc"],
     hdrs = [
@@ -239,12 +239,11 @@ cc_library(
     deps = [
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
-        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
         "@xla//xla/pjrt:pjrt_client",
     ],
 )
 
-cc_library(
+raiden_torch_cc_library(
     name = "torch_utils_mock",
     srcs = ["torch_utils.cc"],
     hdrs = ["torch_utils.h"],
@@ -261,7 +260,7 @@ cc_library(
     ],
 )
 
-cc_library(
+raiden_torch_cc_library(
     name = "kv_cache_manager_torch_mock",
     srcs = ["kv_cache_manager.cc"],
     hdrs = ["kv_cache_manager.h"],
@@ -283,7 +282,7 @@ cc_library(
     ],
 )
 
-cc_library(
+raiden_torch_cc_library(
     name = "weight_synchronizer_torch_mock",
     srcs = ["weight_synchronizer.cc"],
     hdrs = ["weight_synchronizer.h"],
@@ -301,12 +300,10 @@ cc_library(
         "@com_google_absl//absl/status",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
-        "@torch_tpu//shims/torch/c10/core:base_headers",
-        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
     ],
 )
 
-cc_test(
+raiden_torch_cc_test(
     name = "kv_cache_manager_test",
     srcs = ["kv_cache_manager_test.cc"],
     copts = [
@@ -327,7 +324,7 @@ cc_test(
     ],
 )
 
-cc_test(
+raiden_torch_cc_test(
     name = "kv_cache_manager_transfer_test",
     srcs = ["kv_cache_manager_transfer_test.cc"],
     copts = [
@@ -350,7 +347,7 @@ cc_test(
     ],
 )
 
-cc_test(
+raiden_torch_cc_test(
     name = "torch_raw_transfer_test",
     srcs = ["torch_raw_transfer_test.cc"],
     copts = [
@@ -371,7 +368,7 @@ cc_test(
     ],
 )
 
-py_test(
+raiden_torch_py_test(
     name = "kv_cache_manager_test_py",
     srcs = ["kv_cache_manager_test.py"],
     main = "kv_cache_manager_test.py",
@@ -392,7 +389,7 @@ py_test(
     ],
 )
 
-py_test(
+raiden_torch_py_test(
     name = "torch_raw_transfer_perf_test_gl",
     timeout = "long",
     srcs = ["torch_raw_transfer_perf_test.py"],
@@ -415,7 +412,7 @@ py_test(
     ],
 )
 
-py_test(
+raiden_torch_py_test(
     name = "torch_raw_transfer_perf_test_gf",
     timeout = "long",
     srcs = ["torch_raw_transfer_perf_test.py"],
@@ -446,7 +443,7 @@ test_suite(
     ],
 )
 
-py_test(
+raiden_torch_py_test(
     name = "torch_raw_transfer_test_gl",
     timeout = "long",
     srcs = ["torch_raw_transfer_test.py"],
@@ -468,7 +465,7 @@ py_test(
     ],
 )
 
-py_test(
+raiden_torch_py_test(
     name = "torch_raw_transfer_test_gf",
     timeout = "long",
     srcs = ["torch_raw_transfer_test.py"],

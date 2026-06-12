@@ -12,13 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("//tpu_raiden/frameworks/jax:jax_rules.bzl", "raiden_jax_cc_library", "raiden_jax_cc_test", "raiden_jax_nanobind_extension", "raiden_jax_py_library", "raiden_jax_py_test")
 
 package(default_visibility = ["//visibility:public"])
 
-cc_library(
+raiden_jax_cc_library(
     name = "kv_cache_manager_jax",
     srcs = [
         "kv_cache_manager.cc",
@@ -43,7 +41,7 @@ cc_library(
     ],
 )
 
-cc_library(
+raiden_jax_cc_library(
     name = "jax_utils",
     hdrs = [
         "jax_utils.h",
@@ -58,7 +56,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":mock_nanobind",
-        "@jax//jaxlib:py_client",
+        "@local_py_packages//:jax_py_client",
         "@nanobind",
         "@rules_python//python/cc:current_py_cc_headers",
         "@xla//xla/pjrt:pjrt_client",
@@ -67,7 +65,7 @@ cc_library(
     ],
 )
 
-cc_library(
+raiden_jax_cc_library(
     name = "utils",
     hdrs = [
         "utils.h",
@@ -88,7 +86,7 @@ cc_library(
     ],
 )
 
-cc_library(
+raiden_jax_cc_library(
     name = "nb_statusor",
     hdrs = ["nb_statusor.h"],
     copts = ["-fexceptions"],
@@ -101,7 +99,7 @@ cc_library(
     ],
 )
 
-nanobind_extension(
+raiden_jax_nanobind_extension(
     name = "_tpu_raiden_jax",
     srcs = [
         "nb_statusor.h",
@@ -132,7 +130,7 @@ nanobind_extension(
     ],
 )
 
-nanobind_extension(
+raiden_jax_nanobind_extension(
     name = "kv_cache_store",
     srcs = [
         "kv_cache_store_module.cc",
@@ -151,7 +149,7 @@ nanobind_extension(
     ],
 )
 
-cc_library(
+raiden_jax_cc_library(
     name = "kv_cache_manager_ffi",
     srcs = [
         "kv_cache_manager_ffi.cc",
@@ -181,7 +179,7 @@ cc_library(
     alwayslink = 1,
 )
 
-nanobind_extension(
+raiden_jax_nanobind_extension(
     name = "_kv_cache_manager_ffi",
     srcs = [
         "kv_cache_manager_ffi_module.cc",
@@ -203,7 +201,7 @@ nanobind_extension(
     ],
 )
 
-cc_library(
+raiden_jax_cc_library(
     name = "weight_synchronizer_ffi",
     srcs = [
         "weight_synchronizer_ffi.cc",
@@ -235,7 +233,7 @@ cc_library(
     alwayslink = 1,
 )
 
-nanobind_extension(
+raiden_jax_nanobind_extension(
     name = "_weight_synchronizer_ffi",
     srcs = [
         "weight_synchronizer_ffi_module.cc",
@@ -257,7 +255,7 @@ nanobind_extension(
     ],
 )
 
-cc_library(
+raiden_jax_cc_library(
     name = "weight_synchronizer_jax",
     srcs = [
         "weight_synchronizer.cc",
@@ -287,7 +285,7 @@ cc_library(
 
 # Removed _weight_synchronizer (consolidated into _tpu_raiden_jax)
 
-cc_library(
+raiden_jax_cc_library(
     name = "mock_nanobind",
     hdrs = [
         "mock_nanobind.h",
@@ -297,7 +295,7 @@ cc_library(
     visibility = ["//visibility:private"],
 )
 
-nanobind_extension(
+raiden_jax_nanobind_extension(
     name = "_raw_transfer",
     srcs = [
         "mock_nanobind.h",
@@ -331,7 +329,7 @@ nanobind_extension(
     ],
 )
 
-cc_library(
+raiden_jax_cc_library(
     name = "kv_cache_manager_ffi_mock",
     srcs = ["kv_cache_manager_ffi.cc"],
     hdrs = [
@@ -352,7 +350,7 @@ cc_library(
     ],
 )
 
-cc_test(
+raiden_jax_cc_test(
     name = "kv_cache_manager_ffi_test",
     srcs = ["kv_cache_manager_ffi_test.cc"],
     copts = ["-fexceptions"],
@@ -369,7 +367,7 @@ cc_test(
     ],
 )
 
-cc_library(
+raiden_jax_cc_library(
     name = "weight_synchronizer_ffi_mock",
     srcs = ["weight_synchronizer_ffi.cc"],
     hdrs = [
@@ -396,7 +394,7 @@ cc_library(
     ],
 )
 
-cc_test(
+raiden_jax_cc_test(
     name = "weight_synchronizer_ffi_test",
     srcs = ["weight_synchronizer_ffi_test.cc"],
     copts = ["-fexceptions"],
@@ -414,7 +412,7 @@ cc_test(
     ],
 )
 
-cc_library(
+raiden_jax_cc_library(
     name = "raw_transfer_jax",
     srcs = ["raw_transfer.cc"],
     hdrs = [
@@ -435,7 +433,7 @@ cc_library(
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
-        "@jax//jaxlib:py_client",
+        "@local_py_packages//:jax_py_client",
         "@nanobind",
         "@rules_python//python/cc:current_py_cc_headers",
         "@xla//xla:future",
@@ -450,7 +448,7 @@ cc_library(
     ],
 )
 
-cc_library(
+raiden_jax_cc_library(
     name = "raw_transfer_jax_mock",
     srcs = ["raw_transfer.cc"],
     hdrs = [
@@ -471,6 +469,9 @@ cc_library(
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
+        "@local_py_packages//:jax_py_client",
+        "@nanobind",
+        "@rules_python//python/cc:current_py_cc_headers",
         "@xla//xla:future",
         "@xla//xla:shape_util",
         "@xla//xla/pjrt:pjrt_client",
@@ -483,7 +484,7 @@ cc_library(
     ],
 )
 
-cc_test(
+raiden_jax_cc_test(
     name = "raw_transfer_test",
     srcs = ["raw_transfer_test.cc"],
     copts = ["-fexceptions"],
@@ -500,7 +501,7 @@ cc_test(
     ],
 )
 
-py_test(
+raiden_jax_py_test(
     name = "kv_cache_manager_test_cpu",
     timeout = "long",
     srcs = ["kv_cache_manager_test.py"],
@@ -515,34 +516,33 @@ py_test(
         "@com_google_absl_py//absl/flags",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
-        "@jax//jax",
+        "@local_py_packages//:jax_py_client",
         "@pypi//numpy",
     ],
 )
 
-py_library(
+raiden_jax_py_library(
     name = "weight_synchronizer_ffi_py",
     srcs = ["weight_synchronizer_ffi.py"],
     visibility = ["//visibility:public"],
     deps = [
         ":_weight_synchronizer_ffi",
-        "@jax//jax",
-        "@jax//jax/experimental:compute_on",
+        "@local_py_packages//:jax_py_client",
         "@pypi//numpy",
     ],
 )
 
-py_library(
+raiden_jax_py_library(
     name = "resharding_planner",
     srcs = ["resharding_planner.py"],
     visibility = ["//visibility:public"],
     deps = [
         "//weight_sync:weight_synchronizer_service_py_pb2",
-        "@jax//jax",
+        "@local_py_packages//:jax_py_client",
     ],
 )
 
-py_library(
+raiden_jax_py_library(
     name = "resharding_engine",
     srcs = ["resharding_engine.py"],
     visibility = ["//visibility:public"],
@@ -550,34 +550,34 @@ py_library(
         ":resharding_planner",
         ":weight_synchronizer_ffi_py",
         "//rpc:coordination_helper",
-        "@jax//jax",
+        "@local_py_packages//:jax_py_client",
         "@pypi//numpy",
     ],
 )
 
-py_library(
+raiden_jax_py_library(
     name = "resharding_test_lib",
     srcs = ["resharding_test_lib.py"],
     visibility = ["//visibility:public"],
     deps = [
         ":resharding_planner",
-        "@jax//jax",
+        "@local_py_packages//:jax_py_client",
         "@pypi//numpy",
     ],
 )
 
-py_test(
+raiden_jax_py_test(
     name = "resharding_planner_test",
     srcs = ["resharding_planner_test.py"],
     deps = [
         ":resharding_planner",
         "@com_google_absl_py//absl/testing:absltest",
-        "@jax//jax",
+        "@local_py_packages//:jax_py_client",
         "@pypi//numpy",
     ],
 )
 
-py_test(
+raiden_jax_py_test(
     name = "resharding_test",
     srcs = ["resharding_test.py"],
     tags = [
@@ -588,23 +588,23 @@ py_test(
         ":resharding_engine",
         ":resharding_test_lib",
         "@com_google_absl_py//absl/testing:absltest",
-        "@jax//jax",
+        "@local_py_packages//:jax_py_client",
         "@pypi//numpy",
     ],
 )
 
-py_library(
+raiden_jax_py_library(
     name = "jax_test_utils",
     srcs = ["utils.py"],
     visibility = ["//visibility:public"],
     deps = [
         "@com_google_absl_py//absl/flags",
-        "@jax//jax",
+        "@local_py_packages//:jax_py_client",
         "@pypi//numpy",
     ],
 )
 
-py_test(
+raiden_jax_py_test(
     name = "raw_transfer_perf_gl",
     timeout = "long",
     srcs = ["raw_transfer_perf_test.py"],
@@ -622,12 +622,12 @@ py_test(
         "@com_google_absl_py//absl/flags",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
-        "@jax//jax",
+        "@local_py_packages//:jax_py_client",
         "@pypi//numpy",
     ],
 )
 
-py_test(
+raiden_jax_py_test(
     name = "raw_transfer_perf_gf",
     timeout = "long",
     srcs = ["raw_transfer_perf_test.py"],
@@ -645,12 +645,12 @@ py_test(
         "@com_google_absl_py//absl/flags",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
-        "@jax//jax",
+        "@local_py_packages//:jax_py_client",
         "@pypi//numpy",
     ],
 )
 
-py_test(
+raiden_jax_py_test(
     name = "raw_transfer_test_gl",
     timeout = "long",
     srcs = ["raw_transfer_test.py"],
@@ -666,12 +666,12 @@ py_test(
         ":_raw_transfer",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
-        "@jax//jax",
+        "@local_py_packages//:jax_py_client",
         "@pypi//numpy",
     ],
 )
 
-py_test(
+raiden_jax_py_test(
     name = "raw_transfer_test_gf",
     timeout = "long",
     srcs = ["raw_transfer_test.py"],
@@ -687,7 +687,7 @@ py_test(
         ":_raw_transfer",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
-        "@jax//jax",
+        "@local_py_packages//:jax_py_client",
         "@pypi//numpy",
     ],
 )

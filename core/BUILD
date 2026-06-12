@@ -195,6 +195,7 @@ cc_library(
         "-fexceptions",
         "-Wno-unused-variable",
     ],
+    defines = ["TPU_RAIDEN_OSS"],
     features = ["-use_header_modules"],
     deps = [
         ":xla_raw_transfer_headers",

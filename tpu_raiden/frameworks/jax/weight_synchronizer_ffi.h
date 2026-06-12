@@ -15,6 +15,9 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_JAX_WEIGHT_SYNCHRONIZER_FFI_H_
 #define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_JAX_WEIGHT_SYNCHRONIZER_FFI_H_
 
+#include <map>
+#include <string>
+
 namespace tpu_raiden {
 namespace weight_sync {
 
@@ -22,6 +25,8 @@ class WeightSynchronizerBase;
 
 // Global registry map for distributed JAX meshes multi-device support
 extern WeightSynchronizerBase* g_weight_synchronizers[32];
+
+std::map<std::string, void*> GetRegistrations();
 
 }  // namespace weight_sync
 }  // namespace tpu_raiden

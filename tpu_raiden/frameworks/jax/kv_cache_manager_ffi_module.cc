@@ -28,4 +28,12 @@ NB_MODULE(_kv_cache_manager_ffi, m) {
   });
 
   m.def("sync_copies", &tpu_raiden::kv_cache::SyncCopies);
+
+  m.def("registrations", []() {
+    nb::dict registrations;
+    for (const auto& [name, ptr] : tpu_raiden::kv_cache::GetRegistrations()) {
+      registrations[name.c_str()] = nb::capsule(ptr);
+    }
+    return registrations;
+  });
 }

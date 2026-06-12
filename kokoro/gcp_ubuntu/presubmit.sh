@@ -22,10 +22,15 @@ set -x
 # Resolve paths
 export WORK_DIR="${KOKORO_ARTIFACTS_DIR}/workspace"
 export BAZEL_OUTPUT_BASE="${KOKORO_ARTIFACTS_DIR}/bazel_cache"
-export HERMETIC_PYTHON_VERSION=3.12
+export HERMETIC_PYTHON_VERSION=3.13
+export DUMMY_TORCH_TPU_MODULE="${WORK_DIR}/dummy_torch_tpu_module"
 
 mkdir -p "${WORK_DIR}"
 mkdir -p "${BAZEL_OUTPUT_BASE}"
+
+BAZEL_STARTUP_FLAGS=(
+  "--output_base=${BAZEL_OUTPUT_BASE}"
+)
 
 echo "=== 0. Bootstrapping system packages ==="
 apt-get update && apt-get install -y python3-venv python3-pip curl git ca-certificates
@@ -48,22 +53,56 @@ chmod +x "${BAZEL_BIN}"
 
 "${BAZEL_BIN}" --version
 
-echo "=== 3. Setting up Python Virtual Environment ==="
-python3 -m venv "${WORK_DIR}/venv"
-source "${WORK_DIR}/venv/bin/activate"
-pip install --upgrade pip
+echo "=== 3. Fetching Pre-compiled Wheels ==="
+WHEELS_DIR="${WORK_DIR}/wheels"
+mkdir -p "${WHEELS_DIR}"
 
-echo "=== 4. E2E Validation Build with Bazel Remote Cache ==="
-CACHE_BUCKET="tpu-raiden-bazel-cache"
+if [[ -n "${KOKORO_GFILE_DIR}" ]]; then
+  echo "Kokoro environment detected. Copying wheels from GFile..."
+  # Handle both flat and nested GFile structures robustly
+  if [[ -d "${KOKORO_GFILE_DIR}/wheels" ]]; then
+    cp "${KOKORO_GFILE_DIR}/wheels/"*cp${HERMETIC_PYTHON_VERSION//./}*.whl "${WHEELS_DIR}/"
+  else
+    cp "${KOKORO_GFILE_DIR}/"*cp${HERMETIC_PYTHON_VERSION//./}*.whl "${WHEELS_DIR}/"
+  fi
+else
+  echo "Local environment detected (KOKORO_GFILE_DIR not set)."
+  if command -v gcloud >/dev/null 2>&1; then
+    echo "gcloud found, downloading wheels from GCS..."
+    gcloud storage cp "gs://tpu-raiden-bazel-cache/wheels/*cp${HERMETIC_PYTHON_VERSION//./}*.whl" "${WHEELS_DIR}/"
+  else
+    echo "Warning: gcloud not found. Skipping wheel download. Build may fail if wheels are missing."
+  fi
+fi
 
-# Set up a dummy torch_tpu module to satisfy Bazel module resolution for JAX-only CI
-DUMMY_TORCH_TPU_MODULE="${WORK_DIR}/dummy_torch_tpu_module"
+echo "=== 4. Bootstrapping Bazel & Setting up Hermetic Python Virtual Environment ==="
+# Set up a dummy torch_tpu module early to satisfy Bazel module resolution during bootstrap.
 mkdir -p "${DUMMY_TORCH_TPU_MODULE}"
 echo 'module(name = "torch_tpu", version = "0.1.1")' > "${DUMMY_TORCH_TPU_MODULE}/MODULE.bazel"
 
-BAZEL_STARTUP_FLAGS=(
-  "--output_base=${BAZEL_OUTPUT_BASE}"
-)
+HERMETIC_VENV="${WORK_DIR}/venv_hermetic"
+
+# Run our newly implemented setup_venv python tool via Bazel
+"${BAZEL_BIN}" "${BAZEL_STARTUP_FLAGS[@]}" run \
+  --override_module=torch_tpu=${DUMMY_TORCH_TPU_MODULE} \
+  //tools:setup_venv -- \
+  --venv_dir="${HERMETIC_VENV}" \
+  --wheels_dir="${WHEELS_DIR}"
+
+source "${HERMETIC_VENV}/bin/activate"
+
+# Export PYTHON_BIN_PATH for the custom repository rule
+export PYTHON_BIN_PATH="${HERMETIC_VENV}/bin/python"
+echo "Exported PYTHON_BIN_PATH=${PYTHON_BIN_PATH}"
+
+
+# Shutdown the Bazel server to discard the cached dummy repositories
+# from the bootstrap phase and force a fresh evaluation in the next step.
+echo "=== Shutting down Bazel server to reset repository cache ==="
+"${BAZEL_BIN}" "${BAZEL_STARTUP_FLAGS[@]}" shutdown
+
+echo "=== 7. E2E Validation Build with Bazel Remote Cache ==="
+CACHE_BUCKET="tpu-raiden-bazel-cache"
 
 # === Dynamic Resource Detection (75% Headroom Allocation) ===
 echo "Detecting VM resources..."
@@ -95,31 +134,24 @@ BAZEL_COMMAND_FLAGS=(
   "--remote_timeout=300s"
   "--remote_retries=3"
   "--override_module=torch_tpu=${DUMMY_TORCH_TPU_MODULE}"
-  "--experimental_repo_remote_exec"
 )
 
 echo "Running build.sh..."
 export BAZEL_BIN
 ./build.sh jax "${BAZEL_COMMAND_FLAGS[@]}"
 
-echo "=== 5. Running CPU-bound standard unit tests ==="
+echo "=== 8. Running CPU-bound standard unit tests ==="
 "${BAZEL_BIN}" "${BAZEL_STARTUP_FLAGS[@]}" test -c opt --check_visibility=false --verbose_failures \
   "${BAZEL_COMMAND_FLAGS[@]}" \
   //kv_cache:logical_block_manager_test
 
-# Find Bazel's hermetic Python 3.12 interpreter to avoid ABI mismatches with host Python 3.10
-HERMETIC_PYTHON_BIN=$(find "${BAZEL_OUTPUT_BASE}/external" -path "*python_3_12*/bin/python3" | head -n 1)
-if [[ -z "${HERMETIC_PYTHON_BIN}" ]]; then
-  echo "Error: Could not find hermetic Python 3.12 interpreter under ${BAZEL_OUTPUT_BASE}/external" >&2
-  exit 1
-fi
-echo "Using hermetic Python interpreter: ${HERMETIC_PYTHON_BIN}"
-
-echo "=== 6. Verifying dynamic module binding linkage ==="
+echo "=== 9. Verifying dynamic module binding linkage ==="
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/bazel-bin:${REPO_ROOT}/tpu_raiden/api/jax:${REPO_ROOT}/tpu_raiden/frameworks/jax:${PYTHONPATH}"
 
+
 echo "Verifying import of all modules in a single process (with JAX mocked)..."
-"${HERMETIC_PYTHON_BIN}" -c "
+# We use the activated hermetic virtualenv's python directly
+python -c "
 import sys
 from unittest.mock import MagicMock
 sys.modules['jax'] = MagicMock()

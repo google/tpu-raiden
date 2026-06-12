@@ -15,6 +15,9 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_JAX_KV_CACHE_MANAGER_FFI_H_
 #define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_JAX_KV_CACHE_MANAGER_FFI_H_
 
+#include <map>
+#include <string>
+
 namespace tpu_raiden {
 
 class KVCacheManagerWithTransfer;
@@ -25,6 +28,8 @@ namespace kv_cache {
 extern KVCacheManagerWithTransfer* g_kv_cache_managers[32];
 
 void SyncCopies();
+
+std::map<std::string, void*> GetRegistrations();
 
 }  // namespace kv_cache
 }  // namespace tpu_raiden

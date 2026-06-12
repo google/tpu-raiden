@@ -1,0 +1,56 @@
+diff --git a/third_party/clang_toolchain/cc_configure_clang.bzl b/third_party/clang_toolchain/cc_configure_clang.bzl
+index a6b87ab697..385bd3b0ad 100644
+--- a/third_party/clang_toolchain/cc_configure_clang.bzl
++++ b/third_party/clang_toolchain/cc_configure_clang.bzl
+@@ -3 +3 @@
+-load("@bazel_tools//tools/cpp:cc_configure.bzl", "cc_autoconf_impl")
++load("@rules_cc//cc/private/toolchain:cc_configure.bzl", "cc_autoconf_impl")
+diff --git a/third_party/py/BUILD.tpl b/third_party/py/BUILD.tpl
+index be0c6091d9..34148524cd 100644
+--- a/third_party/py/BUILD.tpl
++++ b/third_party/py/BUILD.tpl
+@@ -7 +7,2 @@ package(default_visibility = ["//visibility:public"])
+-load("@bazel_tools//tools/python:toolchain.bzl", "py_runtime_pair")
++load("@rules_python//python:py_runtime_pair.bzl", "py_runtime_pair")
++
+@@ -9,5 +9,0 @@ load("@bazel_tools//tools/python:toolchain.bzl", "py_runtime_pair")
+-py_runtime(
+-    name = "py2_runtime",
+-    interpreter = "%{PYTHON_INTERPRETER}",
+-    python_version = "PY2",
+-)
+@@ -23 +18,0 @@ py_runtime_pair(
+-    py2_runtime = ":py2_runtime",
+diff --git a/tools/def_file_filter/def_file_filter_configure.bzl b/tools/def_file_filter/def_file_filter_configure.bzl
+index a648d3d8d6..5e0dd18697 100644
+--- a/tools/def_file_filter/def_file_filter_configure.bzl
++++ b/tools/def_file_filter/def_file_filter_configure.bzl
+@@ -22,2 +22,2 @@ symbols through this python script.
+-load("@bazel_tools//tools/cpp:lib_cc_configure.bzl", "auto_configure_fail")
+-load("@bazel_tools//tools/cpp:windows_cc_configure.bzl", "find_msvc_tool", "find_vc_path")
++load("@rules_cc//cc/private/toolchain:lib_cc_configure.bzl", "auto_configure_fail")
++load("@rules_cc//cc/private/toolchain:windows_cc_configure.bzl", "find_msvc_tool", "find_vc_path")
+diff --git a/workspace1.bzl b/workspace1.bzl
+index cbd3d24aec..40684012ff 100644
+--- a/workspace1.bzl
++++ b/workspace1.bzl
+@@ -4 +4 @@ load("@com_github_grpc_grpc//bazel:grpc_deps.bzl", "grpc_deps")
+-load("@io_bazel_rules_closure//closure:defs.bzl", "closure_repositories")
++load("@io_bazel_rules_closure//closure:repositories.bzl", "closure_repositories")
+diff --git a/workspace2.bzl b/workspace2.bzl
+index 185640bfd3..b25c2e9c8e 100644
+--- a/workspace2.bzl
++++ b/workspace2.bzl
+@@ -7 +7 @@ load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
+-load("@io_bazel_rules_closure//closure:defs.bzl", "filegroup_external")
++load("@io_bazel_rules_closure//closure:filegroup_external.bzl", "filegroup_external")
+
+diff --git a/xla/backends/profiler/plugin/BUILD b/xla/backends/profiler/plugin/BUILD
+--- a/xla/backends/profiler/plugin/BUILD
++++ b/xla/backends/profiler/plugin/BUILD
+@@ -27,3 +27,3 @@ cc_library(
+     copts = tf_profiler_copts(),
+-    visibility = ["//xla:friends"],
++    visibility = ["//visibility:public"],
+     deps = [
+

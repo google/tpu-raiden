@@ -126,6 +126,8 @@ if [ "$BUILD_JAX" = true ]; then
   echo "Configuring build for JAX..."
   BAZEL_TARGETS+=(
     "//tpu_raiden/frameworks/jax:_tpu_raiden_jax"
+    "//tpu_raiden/frameworks/jax:_raw_transfer"
+    "//tpu_raiden/frameworks/jax:kv_cache_store"
   )
 else
   DEFINE_FLAGS+=" --define with_jax=false"
@@ -158,6 +160,7 @@ PY
   TORCH_REPO_ENV_FLAGS+=("--repo_env=TORCH_SOURCE=${TORCH_SOURCE}")
   BAZEL_TARGETS+=(
     "//tpu_raiden/frameworks/torch:_tpu_raiden_torch"
+    "//tpu_raiden/frameworks/torch:_torch_raw_transfer"
   )
 else
   DEFINE_FLAGS+=" --define with_torch=false"
@@ -179,6 +182,7 @@ mkdir -p "${BAZEL_DISK_CACHE}" "${BAZEL_REPO_CACHE}" "$(dirname "${BAZEL_OUTPUT_
 echo "=== Building targets with Bazel ==="
 "${BAZEL_BIN}" --install_base="${BAZEL_OUTPUT_BASE}/install_base" --output_base="${BAZEL_OUTPUT_BASE}" --host_jvm_args="-Xmx32g" --host_jvm_args="-Xms2g" build -c opt --check_visibility=false --verbose_failures --experimental_repo_remote_exec --incompatible_disallow_empty_glob=false \
   --repo_env=HERMETIC_PYTHON_VERSION=${HERMETIC_PYTHON_VERSION:-3.12} \
+  --repo_env=PYTHON_BIN_PATH=${PYTHON_BIN_PATH:-} \
   --repo_env=PIP_INDEX_URL="https://pypi.org/simple" \
   --repo_env=PIP_EXTRA_INDEX_URL="" \
   --repo_env=PYTHON_KEYRING_BACKEND="keyring.backends.null.Keyring" \
@@ -196,6 +200,8 @@ echo "=== Copying compiled shared libraries to source directory ==="
 if [ "$BUILD_JAX" = true ]; then
   echo "Copying JAX artifacts..."
   cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/frameworks/jax/_tpu_raiden_jax.so" "${WORKSPACE_DIR}/tpu_raiden/frameworks/jax/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/frameworks/jax/_raw_transfer.so" "${WORKSPACE_DIR}/tpu_raiden/frameworks/jax/"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/frameworks/jax/kv_cache_store.so" "${WORKSPACE_DIR}/tpu_raiden/frameworks/jax/"
 fi
 
 if [ "$BUILD_TORCH" = true ]; then
@@ -203,21 +209,25 @@ if [ "$BUILD_TORCH" = true ]; then
   TORCH_SO="${WORKSPACE_DIR}/tpu_raiden/frameworks/torch/_tpu_raiden_torch.so"
   cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/frameworks/torch/_tpu_raiden_torch.so" "${TORCH_SO}"
   chmod u+w "${TORCH_SO}"
-  # The torch extension statically links its own XLA and references a few
-  # torch_tpu symbols (MaterializeAndReturn, AwaitBuffer). Add a NEEDED
-  # dependency on libpywrap so those resolve in *local* scope at import time
-  # (the loader imports the extension RTLD_LOCAL, see api/torch/
-  # kv_cache_manager.py). This keeps raiden's XLA private and avoids the
-  # duplicate AllocatorFactory registration that a global libpywrap preload
-  # would trigger. torch_tpu must already be imported (libpywrap loaded) when
-  # the extension imports, so no RUNPATH is required.
+  
+  RAW_TRANSFER_SO="${WORKSPACE_DIR}/tpu_raiden/frameworks/torch/_torch_raw_transfer.so"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/frameworks/torch/_torch_raw_transfer.so" "${RAW_TRANSFER_SO}"
+  chmod u+w "${RAW_TRANSFER_SO}"
+
+  # Inject local dynamic link to libpywrap_torch_tpu_common.so
   if command -v patchelf > /dev/null; then
-    patchelf --add-needed libpywrap_torch_tpu_common.so "${TORCH_SO}"
-    echo "patchelf: added NEEDED libpywrap_torch_tpu_common.so to torch extension"
+    echo "Applying patchelf dynamic linking patches to Torch shared libraries..."
+    for SO_FILE in "${TORCH_SO}" "${RAW_TRANSFER_SO}"; do
+      echo "Patching ${SO_FILE}..."
+      # 1. Add DT_NEEDED entry
+      patchelf --add-needed libpywrap_torch_tpu_common.so "${SO_FILE}"
+      # 2. Set relative RPATH to look inside torch_tpu/common/ in site-packages
+      patchelf --set-rpath '$ORIGIN/../../../../torch_tpu/common' "${SO_FILE}"
+    done
+    echo "patchelf patches applied successfully!"
   else
-    echo "WARNING: patchelf not found; torch extension will NOT resolve" \
-         "torch_tpu symbols without a global libpywrap preload (which aborts" \
-         "on duplicate XLA allocator registration). Install patchelf." >&2
+    echo "Warning: patchelf utility not found in PATH. Skipping dynamic linking patch."
+    echo "If runtime loading crashes, please install patchelf via: sudo apt install patchelf"
   fi
 fi
 
@@ -234,3 +244,5 @@ echo "=== Install Python Dependencies! ==="
 pip install --index-url=https://pypi.org/simple -r requirements.txt || echo "Warning: pip installation returned a non-zero status. Proceeding anyway."
 
 echo "=== Installation Complete! ==="
+
+# Dummy comment to force-trigger presubmit pipeline.

@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("//tpu_raiden/frameworks/jax:jax_rules.bzl", "raiden_jax_py_library", "raiden_jax_py_test")
 
 package(default_visibility = ["//visibility:public"])
 
-py_library(
+raiden_jax_py_library(
     name = "kv_cache_manager_jax_py",
     srcs = ["kv_cache_manager.py"],
     data = [
@@ -26,7 +26,7 @@ py_library(
     deps = ["//tpu_raiden/frameworks/jax:_tpu_raiden_jax"],
 )
 
-py_library(
+raiden_jax_py_library(
     name = "kv_cache_store",
     srcs = ["kv_cache_store.py"],
     visibility = ["//visibility:public"],
@@ -35,7 +35,7 @@ py_library(
     ],
 )
 
-py_test(
+raiden_jax_py_test(
     name = "kv_cache_store_test",
     srcs = ["kv_cache_store_test.py"],
     data = ["//kv_cache/global_registry:global_registry_server"],
@@ -47,7 +47,7 @@ py_test(
     ],
 )
 
-py_library(
+raiden_jax_py_library(
     name = "weight_synchronizer_jax_py",
     srcs = ["weight_synchronizer.py"],
     visibility = ["//visibility:public"],
@@ -56,7 +56,7 @@ py_library(
     ],
 )
 
-py_test(
+raiden_jax_py_test(
     name = "weight_synchronizer_test",
     srcs = ["weight_synchronizer_test.py"],
     tags = ["notap"],
@@ -64,7 +64,7 @@ py_test(
         ":weight_synchronizer_jax_py",
         "//weight_sync:weight_synchronizer_service_py_pb2",
         "@com_google_absl_py//absl/testing:absltest",
-        "@jax//jax",
+        "@local_py_packages//:jax_py_client",
         "@pypi//numpy",
     ],
 )

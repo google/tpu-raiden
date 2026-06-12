@@ -267,6 +267,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   struct RecvEntry {
     std::string req_id;
     std::vector<int64_t> chip_block_ids;
+    CopySpec h2d_copy;
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
 

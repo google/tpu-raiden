@@ -24,7 +24,7 @@ export PYTHONPATH="${WORKSPACE_DIR}:${WORKSPACE_DIR}/bazel-bin:${PYTHONPATH}"
 
 
 # Change to the tests directory to avoid Python's local directory import shadowing
-cd "${WORKSPACE_DIR}/frameworks/jax"
+cd "${WORKSPACE_DIR}/tpu_raiden/frameworks/jax"
 
 echo "=== Running: raw_transfer_test.py ==="
 python raw_transfer_test.py 2>&1 | tee "${WORKSPACE_DIR}/test.log"

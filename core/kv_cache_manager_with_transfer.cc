@@ -533,7 +533,7 @@ void KVCacheManagerWithTransfer::StartRead(
   {
     std::lock_guard<std::mutex> lock(mu_);
     active_recv_entries_[uuid] =
-        RecvEntry{req_id, load_plan.h2d_local_block_ids};
+        RecvEntry{req_id, load_plan.h2d_local_block_ids, load_plan.h2d_copy};
   }
 
   if (load_plan.num_blocks == 0) {
@@ -1000,16 +1000,18 @@ void KVCacheManagerWithTransfer::StartPushInternal(
 
 absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
     const std::vector<int>& block_ids, uint64_t uuid) {
-  std::vector<int64_t> chip_dst_blocks;
+  CopySpec h2d_copy;
   std::string target_req_id;
+  size_t expected_block_count = 0;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = active_recv_entries_.find(uuid);
     if (it == active_recv_entries_.end()) {
       return absl::OkStatus();
     }
-    chip_dst_blocks = it->second.chip_block_ids;
+    h2d_copy = it->second.h2d_copy;
     target_req_id = it->second.req_id;
+    expected_block_count = it->second.chip_block_ids.size();
   }
 
   VLOG(1) << "OnBlocksReceived (Hybrid Bridge) triggered for UUID " << uuid
@@ -1020,7 +1022,7 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
   std::vector<int64_t> host_src_blocks(block_ids.begin(), block_ids.end());
   std::vector<int64_t> copy_sizes(host_src_blocks.size(), 1);
 
-  if (host_src_blocks.size() != chip_dst_blocks.size()) {
+  if (host_src_blocks.size() != expected_block_count) {
     std::lock_guard<std::mutex> lock(mu_);
     failed_recving_.insert(target_req_id);
     active_recv_entries_.erase(uuid);
@@ -1029,8 +1031,8 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
         "count");
   }
 
-  auto future_or = H2d(host_src_blocks, chip_dst_blocks, copy_sizes,
-                       /*slot_idx=*/std::nullopt);
+  auto future_or = H2d(h2d_copy.src_offsets, h2d_copy.dst_offsets,
+                       h2d_copy.sizes, /*slot_idx=*/std::nullopt);
   if (!future_or.ok()) {
     std::lock_guard<std::mutex> lock(mu_);
     failed_recving_.insert(target_req_id);

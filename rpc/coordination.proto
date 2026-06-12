@@ -19,18 +19,18 @@ package tpu_raiden.rpc;
 service CoordinationService {
   // Queries peer server and returns metadata (port, block_ids, host_ip).
   rpc GetTransferMetadata(MetadataRequest) returns (MetadataResponse) {
-    option deadline = 60.0;
+
   }
 
   // Signals peer CoordinationServer to shut down and exit.
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse) {
-    option deadline = 10.0;
+
   }
 
   // Collects the metadata info across all replicas.
   rpc CollectReplicaInfo(CollectReplicaInfoRequest)
       returns (CollectReplicaInfoResponse) {
-    option deadline = 300.0;
+
   }
 }
 

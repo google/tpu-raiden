@@ -53,4 +53,13 @@ NB_MODULE(_weight_synchronizer_ffi, m) {
   });
 
   m.def("prepare_extended_info", &prepare_extended_info);
+
+  m.def("registrations", []() {
+    nb::dict registrations;
+    for (const auto& [name, ptr] :
+         tpu_raiden::weight_sync::GetRegistrations()) {
+      registrations[name.c_str()] = nb::capsule(ptr);
+    }
+    return registrations;
+  });
 }

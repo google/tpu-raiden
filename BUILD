@@ -16,3 +16,8 @@ config_setting(
     values = {"define": "with_torch=false"},
     visibility = ["//visibility:public"],
 )
+
+py_binary(
+    name = "bootstrap_python",
+    srcs = ["bootstrap_python.py"],
+)

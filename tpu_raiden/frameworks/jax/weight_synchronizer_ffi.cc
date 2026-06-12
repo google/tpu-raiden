@@ -134,7 +134,8 @@ xla::ffi::Error TriggerWeightSynchronizerInitImpl(
       if (ifa->ifa_addr->sa_family == AF_INET6) {
         struct sockaddr_in6* ipv6_addr =
             reinterpret_cast<struct sockaddr_in6*>(ifa->ifa_addr);
-        if (std::strcmp(ifa->ifa_name, "lo") != 0) {
+        if (std::strcmp(ifa->ifa_name, "lo") != 0 &&
+            !IN6_IS_ADDR_LINKLOCAL(&ipv6_addr->sin6_addr)) {
           std::memcpy(ipv6, &ipv6_addr->sin6_addr, 16);
           found = true;
           break;
@@ -253,7 +254,8 @@ xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
       if (ifa->ifa_addr->sa_family == AF_INET6) {
         struct sockaddr_in6* ipv6_addr =
             reinterpret_cast<struct sockaddr_in6*>(ifa->ifa_addr);
-        if (std::strcmp(ifa->ifa_name, "lo") != 0) {
+        if (std::strcmp(ifa->ifa_name, "lo") != 0 &&
+            !IN6_IS_ADDR_LINKLOCAL(&ipv6_addr->sin6_addr)) {
           std::memcpy(ipv6, &ipv6_addr->sin6_addr, 16);
           found = true;
           break;
@@ -481,10 +483,25 @@ XLA_FFI_DEFINE_HANDLER(
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "init_weight_synchronizer",
                          "Host", kWSInit);
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "init_weight_synchronizer",
+                         "host", kWSInit);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "init_weight_synchronizer",
+                         "CPU", kWSInit);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "init_weight_synchronizer",
+                         "cpu", kWSInit);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "init_weight_synchronizer",
                          "TPU", kWSInit);
 
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(),
                          "init_weight_synchronizer_and_d2h", "Host",
+                         kWSInitWeightSynchronizerAndD2h);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(),
+                         "init_weight_synchronizer_and_d2h", "host",
+                         kWSInitWeightSynchronizerAndD2h);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(),
+                         "init_weight_synchronizer_and_d2h", "CPU",
+                         kWSInitWeightSynchronizerAndD2h);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(),
+                         "init_weight_synchronizer_and_d2h", "cpu",
                          kWSInitWeightSynchronizerAndD2h);
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(),
                          "init_weight_synchronizer_and_d2h", "TPU",
@@ -492,8 +509,24 @@ XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(),
 
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "execute_resharding", "Host",
                          kExecuteResharding);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "execute_resharding", "host",
+                         kExecuteResharding);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "execute_resharding", "CPU",
+                         kExecuteResharding);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "execute_resharding", "cpu",
+                         kExecuteResharding);
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "execute_resharding", "TPU",
                          kExecuteResharding);
+
+std::map<std::string, void*> GetRegistrations() {
+  std::map<std::string, void*> registrations;
+  registrations["init_weight_synchronizer"] = reinterpret_cast<void*>(kWSInit);
+  registrations["init_weight_synchronizer_and_d2h"] =
+      reinterpret_cast<void*>(kWSInitWeightSynchronizerAndD2h);
+  registrations["execute_resharding"] =
+      reinterpret_cast<void*>(kExecuteResharding);
+  return registrations;
+}
 
 }  // namespace weight_sync
 }  // namespace tpu_raiden

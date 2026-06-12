@@ -25,8 +25,8 @@ option java_outer_classname = "GlobalRegistry";
 service GlobalRegistryService {
   // Registers a batch of KV cache entries.
   rpc Register(RegisterRequest) returns (RegisterResponse) {
-    option deadline = 10.0;
-    option security_level = NONE;
+
+
   }
 
   // Looks up KV cache entries for a batch of prefix hashes.
@@ -34,14 +34,14 @@ service GlobalRegistryService {
   // (a hash with no active registrations). All subsequent prefix hashes in the
   // request are treated as misses and will be absent from the response map.
   rpc Lookup(LookupRequest) returns (LookupResponse) {
-    option deadline = 10.0;
-    option security_level = NONE;
+
+
   }
 
   // Unregisters a KV cache entry (e.g. on eviction).
   rpc Unregister(UnregisterRequest) returns (UnregisterResponse) {
-    option deadline = 10.0;
-    option security_level = NONE;
+
+
   }
 }
 

@@ -358,17 +358,43 @@ XLA_FFI_DEFINE_HANDLER(
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "init_kv_cache_manager",
                          "Host", kRaidenInit);
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "init_kv_cache_manager",
+                         "host", kRaidenInit);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "init_kv_cache_manager",
+                         "CPU", kRaidenInit);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "init_kv_cache_manager",
+                         "cpu", kRaidenInit);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "init_kv_cache_manager",
                          "TPU", kRaidenInit);
 
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "h2d", "Host",
+                         kTriggerRaidenH2d);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "h2d", "host",
+                         kTriggerRaidenH2d);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "h2d", "CPU",
+                         kTriggerRaidenH2d);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "h2d", "cpu",
                          kTriggerRaidenH2d);
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "h2d", "TPU",
                          kTriggerRaidenH2d);
 
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "d2h", "Host",
                          kTriggerRaidenD2h);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "d2h", "host",
+                         kTriggerRaidenD2h);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "d2h", "CPU",
+                         kTriggerRaidenD2h);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "d2h", "cpu",
+                         kTriggerRaidenD2h);
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "d2h", "TPU",
                          kTriggerRaidenD2h);
+
+std::map<std::string, void*> GetRegistrations() {
+  std::map<std::string, void*> registrations;
+  registrations["init_kv_cache_manager"] = reinterpret_cast<void*>(kRaidenInit);
+  registrations["h2d"] = reinterpret_cast<void*>(kTriggerRaidenH2d);
+  registrations["d2h"] = reinterpret_cast<void*>(kTriggerRaidenD2h);
+  return registrations;
+}
 
 void SyncCopies() {
   LOG(WARNING) << "[C++ FFI] Eager physical TPU PCIe DMA copies "

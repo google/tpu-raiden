@@ -181,16 +181,24 @@ PjRtCopyFuture IssueD2HCopy(xla::PjRtBuffer* src_buffer, uint8_t* dst_data,
   BufferHoldAndAlias hold =
       ValueOrThrow("Failed to acquire source raw buffer",
                    BufferHoldAndAlias::Acquire(src_buffer));
-  std::vector<xla::Future<>> futures;
-  futures.reserve(chunks.size());
+
+  std::vector<D2hCopy> copies;
+  copies.reserve(chunks.size());
   for (const auto& chunk : chunks) {
-    futures.push_back(hold.CopyRawDeviceToHost(
-        dst_data + chunk.dst_offset, chunk.src_offset, chunk.size_bytes));
+    copies.push_back({
+        .dst = dst_data + chunk.dst_offset,
+        .src_off = chunk.src_offset,
+        .size = chunk.size_bytes,
+    });
   }
-  return PjRtCopyFuture(
-      xla::JoinFutures(absl::MakeSpan(futures)),
-      {BufferHolder{hold.c_hold, hold.common_hold, /*ext_hold=*/nullptr,
-                    std::move(user_hold)}});
+
+  auto future_or = IssueD2hShard(hold, copies);
+  if (!future_or.ok()) {
+    ThrowStatus("Failed to issue D2H shard copy", future_or.status());
+  }
+  auto future = std::move(future_or).value();
+  future.keep_alive = std::move(user_hold);
+  return future;
 }
 
 PjRtCopyFuture IssueH2DCopy(const uint8_t* src_data, size_t src_size,
@@ -221,16 +229,24 @@ PjRtCopyFuture IssueH2DCopy(const uint8_t* src_data, size_t src_size,
   BufferHoldAndAlias hold =
       ValueOrThrow("Failed to acquire destination raw buffer",
                    BufferHoldAndAlias::Acquire(dst_buffer));
-  std::vector<xla::Future<>> futures;
-  futures.reserve(chunks.size());
+
+  std::vector<H2dCopy> copies;
+  copies.reserve(chunks.size());
   for (const auto& chunk : chunks) {
-    futures.push_back(hold.CopyRawHostToDevice(
-        src_data + chunk.src_offset, chunk.dst_offset, chunk.size_bytes));
+    copies.push_back({
+        .src = src_data + chunk.src_offset,
+        .dst_off = chunk.dst_offset,
+        .size = chunk.size_bytes,
+    });
   }
-  return PjRtCopyFuture(
-      xla::JoinFutures(absl::MakeSpan(futures)),
-      {BufferHolder{hold.c_hold, hold.common_hold, /*ext_hold=*/nullptr,
-                    std::move(user_hold)}});
+
+  auto future_or = IssueH2dShard(hold, copies);
+  if (!future_or.ok()) {
+    ThrowStatus("Failed to issue H2D shard copy", future_or.status());
+  }
+  auto future = std::move(future_or).value();
+  future.keep_alive = std::move(user_hold);
+  return future;
 }
 }  // namespace
 
@@ -343,21 +359,37 @@ std::shared_ptr<RawHostBuffer> PreparedTorchRawTransfer::HostBuffer() const {
 }
 
 PjRtCopyFuture PreparedTorchRawTransfer::D2HAsync() {
-  xla::Future<> copy_future =
-      hold_.CopyRawDeviceToHost(host_buffer_->MutableData(), 0, physical_size_);
-  return PjRtCopyFuture(
-      std::move(copy_future),
-      {BufferHolder{hold_.c_hold, hold_.common_hold, /*ext_hold=*/nullptr,
-                    shared_from_this()}});
+  D2hCopy copy{
+      .dst = host_buffer_->MutableData(),
+      .src_off = 0,
+      .size = static_cast<int64_t>(physical_size_),
+  };
+  auto future_or = IssueD2hShard(hold_, {copy});
+  if (!future_or.ok()) {
+    ThrowStatus("Failed to issue D2H prepared copy", future_or.status());
+  }
+  auto future = std::move(future_or).value();
+  for (auto& h : future.holds) {
+    h.user_hold = shared_from_this();
+  }
+  return future;
 }
 
 PjRtCopyFuture PreparedTorchRawTransfer::H2DAsync() {
-  xla::Future<> copy_future =
-      hold_.CopyRawHostToDevice(host_buffer_->Data(), 0, physical_size_);
-  return PjRtCopyFuture(
-      std::move(copy_future),
-      {BufferHolder{hold_.c_hold, hold_.common_hold, /*ext_hold=*/nullptr,
-                    shared_from_this()}});
+  H2dCopy copy{
+      .src = host_buffer_->Data(),
+      .dst_off = 0,
+      .size = static_cast<int64_t>(physical_size_),
+  };
+  auto future_or = IssueH2dShard(hold_, {copy});
+  if (!future_or.ok()) {
+    ThrowStatus("Failed to issue H2D prepared copy", future_or.status());
+  }
+  auto future = std::move(future_or).value();
+  for (auto& h : future.holds) {
+    h.user_hold = shared_from_this();
+  }
+  return future;
 }
 
 void PreparedTorchRawTransfer::D2H() {

@@ -43,6 +43,12 @@
 
 namespace raiden {
 
+#ifdef TPU_RAIDEN_OSS
+using RaidenPjRtRawBufferRef = tsl::RCReference<xla::CommonPjRtRawBuffer>;
+#else
+using RaidenPjRtRawBufferRef = xla::PjRtRawBufferRef;
+#endif
+
 struct RawBufferHolder {
   const PJRT_Api* c_api;
   const PJRT_RawBuffer_Extension* extension;
@@ -148,7 +154,7 @@ struct BufferHoldAndAlias {
   bool is_common_buffer = false;
 
   // For CommonPjRtBuffer:
-  xla::PjRtRawBufferRef common_raw_buffer;
+  RaidenPjRtRawBufferRef common_raw_buffer;
   std::shared_ptr<xla::CommonPjRtBuffer::ScopedHold> common_hold;
 
   // For PjRtCApiBuffer:

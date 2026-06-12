@@ -17,6 +17,7 @@
 from typing import List, Optional
 
 import torch
+import torch_tpu
 
 # Import Pybind11 dynamic binary extension E2E!
 from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _weight_synchronizer

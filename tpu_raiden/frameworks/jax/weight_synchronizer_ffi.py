@@ -21,6 +21,13 @@ import numpy as np
 
 from tpu_raiden.frameworks.jax import _weight_synchronizer_ffi
 
+for name, target in _weight_synchronizer_ffi.registrations().items():
+  jax.ffi.register_ffi_target(name, target, platform="cpu")
+  try:
+    jax.ffi.register_ffi_target(name, target, platform="tpu")
+  except Exception:  # pylint: disable=broad-except
+    pass
+
 
 def init_weight_synchronizer(
     device_array,

@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("//tpu_raiden/frameworks/torch:torch_rules.bzl", "raiden_torch_py_library", "raiden_torch_py_test")
 
 package(default_visibility = ["//visibility:public"])
 
-py_library(
+raiden_torch_py_library(
     name = "kv_cache_manager_torch_py",
     srcs = ["kv_cache_manager.py"],
     data = [
@@ -31,7 +31,7 @@ py_library(
     ],
 )
 
-py_library(
+raiden_torch_py_library(
     name = "weight_synchronizer_torch_py",
     srcs = ["weight_synchronizer.py"],
     visibility = ["//visibility:public"],
@@ -39,10 +39,11 @@ py_library(
         "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",
         "@torch_tpu//shims/torch:pytorch",
         "@torch_tpu//torch_tpu",
+        "@torch_tpu//torch_tpu:_loader",
     ],
 )
 
-py_test(
+raiden_torch_py_test(
     name = "weight_synchronizer_test",
     srcs = ["weight_synchronizer_test.py"],
     tags = [
@@ -62,7 +63,7 @@ py_test(
     ],
 )
 
-py_test(
+raiden_torch_py_test(
     name = "kv_cache_manager_transfer_test",
     srcs = ["kv_cache_manager_transfer_test.py"],
     tags = [

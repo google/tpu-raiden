@@ -26,7 +26,10 @@ from torch import distributed as dist
 import torch.multiprocessing as mp
 import torch_tpu
 
-from google3.pyglib.contrib.g3_multiprocessing import g3_multiprocessing
+try:
+  from google3.pyglib.contrib.g3_multiprocessing import g3_multiprocessing
+except ImportError:
+  g3_multiprocessing = None
 from tpu_raiden.frameworks.torch import _torch_raw_transfer as torch_raw_transfer
 
 _GOOGLE_PCI_VENDOR_ID = "0x1ae0"
@@ -91,13 +94,12 @@ def pick_unused_ports(count: int) -> list[int]:
 def prepare_tpu_environment(world_size: int) -> None:
   if "TORCH_TPU_XPROF_SESSION_ID" not in os.environ:
     os.environ["TORCH_TPU_XPROF_SESSION_ID"] = str(time.time_ns())
-  if "TORCH_TPU_SLICEBUILDER_ADDRESSES" not in os.environ:
-    ports = pick_unused_ports(world_size)
-    os.environ["TORCH_TPU_SLICEBUILDER_ADDRESSES"] = ",".join(
-        [f"localhost:{p}" for p in ports]
-    )
-  if "TORCH_TPU_TOPOLOGY" not in os.environ:
-    os.environ["TORCH_TPU_TOPOLOGY"] = get_tpu_topology(world_size)
+  # Always force overwrite to prevent test pollution and port conflicts
+  ports = pick_unused_ports(world_size)
+  os.environ["TORCH_TPU_SLICEBUILDER_ADDRESSES"] = ",".join(
+      [f"localhost:{p}" for p in ports]
+  )
+  os.environ["TORCH_TPU_TOPOLOGY"] = get_tpu_topology(world_size)
 
 
 def _worker_fn(rank: int, world_size: int, master_port: int, fn, args, kwargs):
@@ -120,6 +122,9 @@ def dist_run(world_size: int, fn, *args, **kwargs):
       nprocs=world_size,
       join=True,
   )
+  import time
+
+  time.sleep(5)
 
 
 SUPPORTED_DTYPES = {
@@ -527,4 +532,7 @@ class TorchRawTransferPerfTest(parameterized.TestCase):
 
 if __name__ == "__main__":
   mp.set_start_method("spawn")
-  g3_multiprocessing.handle_test_main(absltest.main)
+  if g3_multiprocessing:
+    g3_multiprocessing.handle_test_main(absltest.main)
+  else:
+    absltest.main()

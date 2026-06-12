@@ -299,7 +299,7 @@ class KVCacheManagerTest(parameterized.TestCase):
         copy_sizes_major_dim=sizes,
     )
     self.assertLen(block_ids, 2)
-    self.assertEqual(block_ids, [0, 1])
+    self.assertEqual(list(block_ids), [0, 1])
 
     future.Await()
 
@@ -609,3 +609,5 @@ class KVCacheManagerTest(parameterized.TestCase):
 
 if __name__ == "__main__":
   absltest.main()
+
+# Dummy comment to force-trigger presubmit pipeline.

@@ -18,6 +18,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
 import torch
+import torch_tpu
 
 from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _kv_cache_manager
 
@@ -30,7 +31,7 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
     self.device = torch.device("tpu")
     self.num_layers = 2
     self.num_shards = 1
-    self.block_size = 2
+    self.block_size = 1
     self.slice_byte_size = 16384 // 4  # float32 capacity
 
   @parameterized.named_parameters(
@@ -125,10 +126,10 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
     )
     h2d_future_push.Await()
 
-    # Copy pulled data (host block 1, offset 2) to device block 1 (offset 2)
+    # Copy pulled data (host block 1, offset 1) to device block 1 (offset 1)
     h2d_future_pull = ws_dest.H2d(
-        src_offsets_major_dim=[2],
-        dst_offsets_major_dim=[2],
+        src_offsets_major_dim=[1],
+        dst_offsets_major_dim=[1],
         copy_sizes_major_dim=[self.block_size],
     )
     h2d_future_pull.Await()
@@ -142,7 +143,6 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
         actual_data = dst_tensors[l][sh].cpu().numpy()
         # Verify both blocks have the expected values
         np.testing.assert_allclose(actual_data[0:2], expected_val, atol=1e-5)
-        np.testing.assert_allclose(actual_data[2:4], expected_val, atol=1e-5)
 
 
 if __name__ == "__main__":

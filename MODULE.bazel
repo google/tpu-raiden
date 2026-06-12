@@ -19,32 +19,24 @@ archive_override(
     urls = ["https://github.com/google-ml-infra/rules_ml_toolchain/archive/84ac62e4db38215a2a7d3ad8cd4d7452134e3ec6.tar.gz"],
 )
 
-bazel_dep(name = "jax")
-git_override(
-    module_name = "jax",
-    commit = "a33ed614c58ee8a10d0b7536c50c2609c38500c1",
-    patch_strip = 1,
-    patches = [
-        "//:third_party/py/remove_rules_ml_toolchain.patch",
-    ],
-    remote = "https://github.com/jax-ml/jax.git",
-)
+bazel_dep(name = "rules_python", version = "1.8.5")
+
+bazel_dep(name = "torch_tpu", version = "0.1.1", dev_dependency = True)
 
 bazel_dep(name = "xla")
-git_override(
+archive_override(
     module_name = "xla",
-    commit = "a98e42b8b195e578a97025654f4e7b9b3fb5001a",
+    integrity = "sha256-6103a9hGp02vVtT6Xavw7r/Ix0uAvK1U+/Iic2croiM=",
     patch_strip = 1,
     patches = [
+        "//:third_party/xla/xla_bazel8.patch",
         "//:third_party/xla/future_sfinae.patch",
         "//:third_party/xla/attribute_map_static_assert.patch",
         "//:third_party/xla/attribute_map_cc_static_assert.patch",
     ],
-    remote = "https://github.com/openxla/xla.git",
+    strip_prefix = "xla-1e42a8527caa67e59827034e2d6371d965e9a1e8",
+    urls = ["https://github.com/openxla/xla/archive/1e42a8527caa67e59827034e2d6371d965e9a1e8.tar.gz"],
 )
-
-bazel_dep(name = "rules_python", version = "1.8.5")
-bazel_dep(name = "torch_tpu", version = "0.1.1", dev_dependency = True)
 
 single_version_override(
     module_name = "rules_python",
@@ -65,23 +57,7 @@ single_version_override(
     version = "1.78.0",
 )
 
-third_party = use_extension("@xla//third_party/extensions:third_party.bzl", "third_party_ext")
-use_repo(
-    third_party,
-    "nanobind",
-    "stablehlo",
-)
-
 bazel_dep(name = "abseil-cpp", version = "20260107.1", repo_name = "com_google_absl")
-
-llvm = use_extension("@xla//third_party/extensions:llvm.bzl", "llvm_extension")
-use_repo(llvm, "llvm-project")
-
-jax_python_wheel_repository = use_repo_rule(
-    "@jax//jaxlib:jax_python_wheel.bzl",
-    "jax_python_wheel_repository",
-)
-
 bazel_dep(name = "pybind11_bazel", version = "2.13.6")
 bazel_dep(name = "nanobind_bazel", version = "2.12.0")
 bazel_dep(name = "nanobind_abseil")
@@ -94,12 +70,6 @@ pybind11_internal_configure = use_extension(
 )
 use_repo(pybind11_internal_configure, "pybind11")
 
-jax_python_wheel_repository(
-    name = "jax_wheel",
-    version_key = "_version",
-    version_source = "@jax//jax:version.py",
-)
-
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.defaults(
     python_version = "3.12",
@@ -111,12 +81,7 @@ python.toolchain(python_version = "3.13")
 python.toolchain(python_version = "3.14")
 
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
-use_repo(pip, pypi = "jax_pypi")
-
-override_repo(
-    pip,
-    xla_pypi = "pypi",
-)
+use_repo(pip, pypi = "xla_pypi")
 
 git_override(
     module_name = "nanobind_abseil",
@@ -137,3 +102,23 @@ raiden_version_repo(
     name = "raiden_version",
     pyproject_toml = "//:pyproject.toml",
 )
+
+# XLA Third-party dependencies
+xla_third_party = use_extension("@xla//third_party/extensions:third_party.bzl", "third_party_ext")
+use_repo(
+    xla_third_party,
+    "eigen_archive",
+    "farmhash_archive",
+    "highwayhash",
+    "ml_dtypes_py",
+    "nanobind",
+    "stablehlo",
+)
+
+# LLVM Extension for MLIR
+llvm = use_extension("@xla//third_party/extensions:llvm.bzl", "llvm_extension")
+use_repo(llvm, "llvm-project")
+
+# Dynamic Python Packages & XLA Headers Extension
+local_py_packages = use_extension("//:third_party/py_packages.bzl", "local_py_packages_extension")
+use_repo(local_py_packages, "jax_headers", "local_py_packages", "xla_headers")
