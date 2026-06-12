@@ -383,12 +383,13 @@ cc_test(
     ],
     tags = [
         "no_oss",
-        "requires-ghostlite",  # Runs on GF TPU slices
+        "requires-ghostfish:4",
     ],
     deps = [
         ":host_memory_allocator",
         ":raw_transfer_impl",
         ":tpu_pjrt_manager",
+        "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/time",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/tsl/platform:statusor",

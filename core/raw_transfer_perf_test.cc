@@ -12,8 +12,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/* Copyright 2026 The TPU Raiden Authors. All Rights Reserved.
-==============================================================================*/
+// This file contains performance benchmarks for raw transfers (H2D and D2H).
+//
+// By default, the test suite runs a lightweight configuration (4 data types,
+// 64 layers, 16 blocks) to keep presubmit runs fast (~1 minute).
+//
+// To manually reproduce the deeper benchmark scenarios previously defined in
+// this file (e.g., to test PCIe roofline saturation), you can run the test with
+// the following absl flags:
+//
+// 1. Base (Default):
+//    blaze test ... --test_arg=--num_layers=64 --test_arg=--num_blocks=16
+//
+// 2. Medium:
+//    blaze test ... --test_arg=--num_layers=128 --test_arg=--num_blocks=32
+//
+// 3. Large:
+//    blaze test ... --test_arg=--num_layers=256 --test_arg=--num_blocks=32
+//    (Note: INT32_Large historically used --num_blocks=16)
+//
+// 4. Extreme:
+//    blaze test ... --test_arg=--num_layers=1024 --test_arg=--num_blocks=8
+//
+// You can also control the number of TPUs to use with --test_arg=--num_tpus=N.
+// For example, to run the Extreme benchmark on all 8 TPUs of a Ghostfish host:
+//   blaze test --nocheck_visibility -c opt \
+//     --test_arg=--num_tpus=8 \
+//     --test_arg=--num_layers=1024 \
+//     --test_arg=--num_blocks=8 \
+//     //core:raw_transfer_perf_test
 
 #include <dlfcn.h>
 
@@ -25,11 +52,11 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "absl/flags/flag.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -38,6 +65,11 @@
 #include "core/host_memory_allocator.h"
 #include "core/raw_transfer_impl.h"
 #include "core/tpu_pjrt_manager.h"
+
+ABSL_FLAG(int, num_tpus, 1, "Number of TPUs to use");
+ABSL_FLAG(int, num_layers, 64, "Number of layers to use for the benchmark.");
+ABSL_FLAG(int64_t, num_blocks, 16,
+          "Number of blocks to use for the benchmark.");
 
 namespace raiden {
 namespace {
@@ -124,11 +156,10 @@ void PrintDistribution(const std::string& label,
 // Templated benchmark executor for Scenario A (Fragmented Batch)
 template <typename T>
 void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
+                           const std::vector<xla::PjRtDevice*>& devices,
                            xla::PrimitiveType primitive_type,
-                           const std::string& type_label,
-                           int num_layers,
-                           int64_t num_blocks,
-                           double min_d2h_bandwidth_gb_s,
+                           const std::string& type_label, int num_layers,
+                           int64_t num_blocks, double min_d2h_bandwidth_gb_s,
                            double min_h2d_bandwidth_gb_s,
                            bool should_gate_performance) {
   const int kNumLayers = num_layers;
@@ -214,8 +245,9 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
   device_buffer_ptrs.reserve(kNumLayers);
 
   for (int i = 0; i < kNumLayers; ++i) {
-    auto buf_or =
-        manager->BufferFromHost(host_src_ptrs[i], primitive_type, layer_shape);
+    xla::PjRtDevice* device = devices[i % devices.size()];
+    auto buf_or = manager->BufferFromHost(host_src_ptrs[i], primitive_type,
+                                          layer_shape, device);
     ASSERT_OK(buf_or.status());
     device_buffers.push_back(std::move(buf_or).value());
     device_buffer_ptrs.push_back(device_buffers.back().get());
@@ -325,14 +357,14 @@ void RunBenchmarkScenarioA(tpu_raiden::TpuPjrtManager* manager,
 // Templated benchmark executor for Scenario B (Baked-in Tensor)
 template <typename T>
 void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
+                           const std::vector<xla::PjRtDevice*>& devices,
                            xla::PrimitiveType primitive_type,
-                           const std::string& type_label,
-                           int num_layers,
-                           int64_t num_blocks,
-                           double min_d2h_bandwidth_gb_s,
+                           const std::string& type_label, int num_layers,
+                           int64_t num_blocks, double min_d2h_bandwidth_gb_s,
                            double min_h2d_bandwidth_gb_s,
                            bool should_gate_performance) {
-  const int kNumLayers = num_layers;
+  int num_devices = devices.size();
+  const int kNumLayers = std::max(1, num_layers / num_devices);
   const int64_t kNumBlocks = num_blocks;
   constexpr int64_t kBlockSize = 128;
   constexpr int64_t kNumHeads = 8;
@@ -353,15 +385,17 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
     dst_offsets.push_back(b);
     copy_sizes.push_back(1);
   }
-  size_t bytes_transferred = total_bytes / 2;
+
+  size_t bytes_transferred = (total_bytes / 2) * num_devices;
 
   std::cout << "[INFO] Scenario B: Baked-in Tensor (ODD BLOCKS ONLY) ["
             << type_label << "]. Shape: [" << kNumBlocks << ", " << kNumLayers
             << ", " << kBlockSize << ", " << kNumHeads << ", 2, " << kHeadDim
             << "]"
-            << ", Total size: " << total_bytes / (1024.0 * 1024.0) << " MB"
+            << ", Total size: "
+            << (total_bytes * num_devices) / (1024.0 * 1024.0) << " MB"
             << ", Transferred size: " << bytes_transferred / (1024.0 * 1024.0)
-            << " MB" << std::endl;
+            << " MB" << ", Devices: " << num_devices << std::endl;
 
   // 1. Allocate Host Staging Buffers (Page Aligned, Zero-initialized)
   auto allocator_or =
@@ -369,15 +403,11 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
   ASSERT_OK(allocator_or.status());
   auto host_allocator = std::move(allocator_or).value();
 
+  // Optimize: Allocate only ONE host src buffer and reuse it for all devices
   auto src_alloc_or = host_allocator->AllocateDmaMapped(total_bytes);
   ASSERT_OK(src_alloc_or.status());
   auto host_src = std::move(src_alloc_or).value();
   std::memset(host_src.ptr, 0, total_bytes);
-
-  auto dst_alloc_or = host_allocator->AllocateDmaMapped(total_bytes);
-  ASSERT_OK(dst_alloc_or.status());
-  auto host_dst = std::move(dst_alloc_or).value();
-  std::memset(host_dst.ptr, 0, total_bytes);
 
   // Initialize source host memory with dummy values
   T* src_ptr = reinterpret_cast<T*>(host_src.ptr);
@@ -389,17 +419,44 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
     }
   }
 
-  // 2. Allocate TPU Device Buffer (fully populated from host_src)
-  auto device_buffer_or =
-      manager->BufferFromHost(host_src.ptr, primitive_type, baked_shape);
-  ASSERT_OK(device_buffer_or.status());
-  auto device_buffer = std::move(device_buffer_or).value();
-  ASSERT_OK(device_buffer->GetReadyFuture().Await());
+  std::vector<tpu_raiden::HostBufferAllocation> host_dst_buffers;
+  std::vector<const uint8_t*> host_src_ptrs;
+  std::vector<uint8_t*> host_dst_ptrs;
+  std::vector<size_t> host_sizes;
 
-  std::vector<xla::PjRtBuffer*> device_buffer_ptrs = {device_buffer.get()};
-  std::vector<uint8_t*> host_dst_ptrs = {host_dst.ptr};
-  std::vector<const uint8_t*> host_src_ptrs = {host_src.ptr};
-  std::vector<size_t> host_sizes = {total_bytes};
+  host_dst_buffers.reserve(num_devices);
+  host_src_ptrs.reserve(num_devices);
+  host_dst_ptrs.reserve(num_devices);
+  host_sizes.reserve(num_devices);
+
+  for (int i = 0; i < num_devices; ++i) {
+    auto dst_alloc_or = host_allocator->AllocateDmaMapped(total_bytes);
+    ASSERT_OK(dst_alloc_or.status());
+    host_dst_buffers.push_back(std::move(dst_alloc_or).value());
+    std::memset(host_dst_buffers.back().ptr, 0, total_bytes);
+
+    host_src_ptrs.push_back(host_src.ptr);  // Reuse the same src pointer
+    host_dst_ptrs.push_back(host_dst_buffers.back().ptr);
+    host_sizes.push_back(total_bytes);
+  }
+
+  // 2. Allocate TPU Device Buffers (fully populated from host_src)
+  std::vector<std::unique_ptr<xla::PjRtBuffer>> device_buffers;
+  std::vector<xla::PjRtBuffer*> device_buffer_ptrs;
+  device_buffers.reserve(num_devices);
+  device_buffer_ptrs.reserve(num_devices);
+
+  for (int i = 0; i < num_devices; ++i) {
+    auto device_buffer_or = manager->BufferFromHost(
+        host_src_ptrs[i], primitive_type, baked_shape, devices[i]);
+    ASSERT_OK(device_buffer_or.status());
+    device_buffers.push_back(std::move(device_buffer_or).value());
+    device_buffer_ptrs.push_back(device_buffers.back().get());
+  }
+
+  for (auto* buf : device_buffer_ptrs) {
+    ASSERT_OK(buf->GetReadyFuture().Await());
+  }
 
   // 3. Warmup Phase
   constexpr int kWarmupIterations = 3;
@@ -462,17 +519,21 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
 
   // 6. Verify Correctness
   size_t bytes_per_block = total_bytes / kNumBlocks;
-  uint8_t* src_bytes = host_src.ptr;
-  uint8_t* dst_bytes = host_dst.ptr;
-  for (int64_t b = 0; b < kNumBlocks; ++b) {
-    if (b % 2 == 1) {
-      int cmp = std::memcmp(src_bytes + b * bytes_per_block,
-                            dst_bytes + b * bytes_per_block, bytes_per_block);
-      EXPECT_EQ(cmp, 0) << "Data mismatch in Scenario B, odd block " << b;
-    } else {
-      for (size_t k = 0; k < bytes_per_block; ++k) {
-        EXPECT_EQ(dst_bytes[b * bytes_per_block + k], 0)
-            << "Even block " << b << " in Scenario B was touched at byte " << k;
+  uint8_t* src_bytes = host_src.ptr;  // Use the single src buffer
+  for (int i = 0; i < num_devices; ++i) {
+    uint8_t* dst_bytes = host_dst_ptrs[i];
+    for (int64_t b = 0; b < kNumBlocks; ++b) {
+      if (b % 2 == 1) {
+        int cmp = std::memcmp(src_bytes + b * bytes_per_block,
+                              dst_bytes + b * bytes_per_block, bytes_per_block);
+        EXPECT_EQ(cmp, 0) << "Data mismatch in Scenario B, device " << i
+                          << ", odd block " << b;
+      } else {
+        for (size_t k = 0; k < bytes_per_block; ++k) {
+          EXPECT_EQ(dst_bytes[b * bytes_per_block + k], 0)
+              << "Even block " << b << " in Scenario B, device " << i
+              << " was touched at byte " << k;
+        }
       }
     }
   }
@@ -497,7 +558,31 @@ class RawTransferPerfTest : public ::testing::Test {
  protected:
   void SetUp() override {
     TF_ASSERT_OK_AND_ASSIGN(manager_, tpu_raiden::TpuPjrtManager::GetDefault());
-    device_ = manager_->GetDefaultDevice();
+
+    int num_tpus = absl::GetFlag(FLAGS_num_tpus);
+    auto all_devices = manager_->client()->addressable_devices();
+    int available_tpus = all_devices.size();
+    std::cout << "[INFO] Available TPUs: " << available_tpus << std::endl;
+
+    if (num_tpus > available_tpus) {
+      std::cout << "[WARNING] Requested " << num_tpus << " TPUs, but only "
+                << available_tpus << " are available. Using " << available_tpus
+                << " TPUs." << std::endl;
+      num_tpus = available_tpus;
+    }
+
+    for (int i = 0; i < num_tpus; ++i) {
+      devices_.push_back(all_devices[i]);
+    }
+
+    std::cout << "[INFO] Using " << devices_.size() << " TPUs:" << std::endl;
+    for (auto* dev : devices_) {
+      std::cout << "  Device " << dev->id() << ": " << dev->device_kind()
+                << std::endl;
+    }
+
+    // Use the first device for platform detection and default device pointer
+    device_ = devices_[0];
 
     // Detect platform (GhostFish vs GhostFishLite)
     std::string device_kind(device_->device_kind());
@@ -517,6 +602,7 @@ class RawTransferPerfTest : public ::testing::Test {
   }
 
   tpu_raiden::TpuPjrtManager* manager_ = nullptr;
+  std::vector<xla::PjRtDevice*> devices_;
   xla::PjRtDevice* device_ = nullptr;
   double min_d2h_bandwidth_gb_s_ = 12.0;
   double min_h2d_bandwidth_gb_s_ = 12.0;
@@ -526,8 +612,6 @@ class RawTransferPerfTest : public ::testing::Test {
 struct BenchmarkParams {
   xla::PrimitiveType primitive_type;
   std::string type_label;
-  int num_layers;
-  int64_t num_blocks;
   bool should_gate_performance;
 };
 
@@ -538,32 +622,34 @@ class ParameterizedRawTransferPerfTest
 // Scenario A: Fragmented Batch (Independent Layer Buffers)
 TEST_P(ParameterizedRawTransferPerfTest, ScenarioA_FragmentedBatch) {
   const BenchmarkParams& params = GetParam();
+  int num_layers = absl::GetFlag(FLAGS_num_layers);
+  int64_t num_blocks = absl::GetFlag(FLAGS_num_blocks);
   bool should_gate =
       params.should_gate_performance ? should_gate_performance_ : false;
   switch (params.primitive_type) {
     case xla::BF16:
-      RunBenchmarkScenarioA<uint16_t>(
-          manager_, params.primitive_type, params.type_label,
-          params.num_layers, params.num_blocks, min_d2h_bandwidth_gb_s_,
-          min_h2d_bandwidth_gb_s_, should_gate);
+      RunBenchmarkScenarioA<uint16_t>(manager_, devices_, params.primitive_type,
+                                      params.type_label, num_layers, num_blocks,
+                                      min_d2h_bandwidth_gb_s_,
+                                      min_h2d_bandwidth_gb_s_, should_gate);
       break;
     case xla::F32:
-      RunBenchmarkScenarioA<float>(
-          manager_, params.primitive_type, params.type_label,
-          params.num_layers, params.num_blocks, min_d2h_bandwidth_gb_s_,
-          min_h2d_bandwidth_gb_s_, should_gate);
+      RunBenchmarkScenarioA<float>(manager_, devices_, params.primitive_type,
+                                   params.type_label, num_layers, num_blocks,
+                                   min_d2h_bandwidth_gb_s_,
+                                   min_h2d_bandwidth_gb_s_, should_gate);
       break;
     case xla::S32:
-      RunBenchmarkScenarioA<int32_t>(
-          manager_, params.primitive_type, params.type_label,
-          params.num_layers, params.num_blocks, min_d2h_bandwidth_gb_s_,
-          min_h2d_bandwidth_gb_s_, should_gate);
+      RunBenchmarkScenarioA<int32_t>(manager_, devices_, params.primitive_type,
+                                     params.type_label, num_layers, num_blocks,
+                                     min_d2h_bandwidth_gb_s_,
+                                     min_h2d_bandwidth_gb_s_, should_gate);
       break;
     case xla::F8E4M3FN:
-      RunBenchmarkScenarioA<uint8_t>(
-          manager_, params.primitive_type, params.type_label,
-          params.num_layers, params.num_blocks, min_d2h_bandwidth_gb_s_,
-          min_h2d_bandwidth_gb_s_, should_gate);
+      RunBenchmarkScenarioA<uint8_t>(manager_, devices_, params.primitive_type,
+                                     params.type_label, num_layers, num_blocks,
+                                     min_d2h_bandwidth_gb_s_,
+                                     min_h2d_bandwidth_gb_s_, should_gate);
       break;
     default:
       FAIL() << "Unsupported primitive type: " << params.primitive_type;
@@ -573,32 +659,34 @@ TEST_P(ParameterizedRawTransferPerfTest, ScenarioA_FragmentedBatch) {
 // Scenario B: Baked-in Layer Dimension (Single Massive Buffer)
 TEST_P(ParameterizedRawTransferPerfTest, ScenarioB_BakedInTensor) {
   const BenchmarkParams& params = GetParam();
+  int num_layers = absl::GetFlag(FLAGS_num_layers);
+  int64_t num_blocks = absl::GetFlag(FLAGS_num_blocks);
   bool should_gate =
       params.should_gate_performance ? should_gate_performance_ : false;
   switch (params.primitive_type) {
     case xla::BF16:
-      RunBenchmarkScenarioB<uint16_t>(
-          manager_, params.primitive_type, params.type_label,
-          params.num_layers, params.num_blocks, min_d2h_bandwidth_gb_s_,
-          min_h2d_bandwidth_gb_s_, should_gate);
+      RunBenchmarkScenarioB<uint16_t>(manager_, devices_, params.primitive_type,
+                                      params.type_label, num_layers, num_blocks,
+                                      min_d2h_bandwidth_gb_s_,
+                                      min_h2d_bandwidth_gb_s_, should_gate);
       break;
     case xla::F32:
-      RunBenchmarkScenarioB<float>(
-          manager_, params.primitive_type, params.type_label,
-          params.num_layers, params.num_blocks, min_d2h_bandwidth_gb_s_,
-          min_h2d_bandwidth_gb_s_, should_gate);
+      RunBenchmarkScenarioB<float>(manager_, devices_, params.primitive_type,
+                                   params.type_label, num_layers, num_blocks,
+                                   min_d2h_bandwidth_gb_s_,
+                                   min_h2d_bandwidth_gb_s_, should_gate);
       break;
     case xla::S32:
-      RunBenchmarkScenarioB<int32_t>(
-          manager_, params.primitive_type, params.type_label,
-          params.num_layers, params.num_blocks, min_d2h_bandwidth_gb_s_,
-          min_h2d_bandwidth_gb_s_, should_gate);
+      RunBenchmarkScenarioB<int32_t>(manager_, devices_, params.primitive_type,
+                                     params.type_label, num_layers, num_blocks,
+                                     min_d2h_bandwidth_gb_s_,
+                                     min_h2d_bandwidth_gb_s_, should_gate);
       break;
     case xla::F8E4M3FN:
-      RunBenchmarkScenarioB<uint8_t>(
-          manager_, params.primitive_type, params.type_label,
-          params.num_layers, params.num_blocks, min_d2h_bandwidth_gb_s_,
-          min_h2d_bandwidth_gb_s_, should_gate);
+      RunBenchmarkScenarioB<uint8_t>(manager_, devices_, params.primitive_type,
+                                     params.type_label, num_layers, num_blocks,
+                                     min_d2h_bandwidth_gb_s_,
+                                     min_h2d_bandwidth_gb_s_, should_gate);
       break;
     default:
       FAIL() << "Unsupported primitive type: " << params.primitive_type;
@@ -607,17 +695,10 @@ TEST_P(ParameterizedRawTransferPerfTest, ScenarioB_BakedInTensor) {
 
 INSTANTIATE_TEST_SUITE_P(
     RawTransferPerfTestInstantiation, ParameterizedRawTransferPerfTest,
-    ::testing::Values(
-        BenchmarkParams{xla::BF16, "BF16_Base", 64, 16, true},
-        BenchmarkParams{xla::F32, "F32_Base", 64, 16, true},
-        BenchmarkParams{xla::BF16, "BF16_Medium", 128, 32, false},
-        BenchmarkParams{xla::BF16, "BF16_Large", 256, 32, false},
-        BenchmarkParams{xla::BF16, "BF16_Extreme", 1024, 8, false},
-        BenchmarkParams{xla::S32, "INT32_Medium", 128, 32, false},
-        BenchmarkParams{xla::S32, "INT32_Large", 256, 16, false},
-        BenchmarkParams{xla::F8E4M3FN, "FP8_Medium", 128, 32, false},
-        BenchmarkParams{xla::F8E4M3FN, "FP8_Large", 256, 32, false},
-        BenchmarkParams{xla::F8E4M3FN, "FP8_Extreme", 1024, 8, false}),
+    ::testing::Values(BenchmarkParams{xla::BF16, "BF16", true},
+                      BenchmarkParams{xla::F32, "F32", true},
+                      BenchmarkParams{xla::S32, "INT32", false},
+                      BenchmarkParams{xla::F8E4M3FN, "FP8", false}),
     [](const ::testing::TestParamInfo<BenchmarkParams>& info) {
       return info.param.type_label;
     });

@@ -83,7 +83,16 @@ absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> TpuPjrtManager::AllocateBuffer(
 
 absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> TpuPjrtManager::BufferFromHost(
     const void* data, xla::PrimitiveType type, absl::Span<const int64_t> dims) {
-  auto memory_space_or = default_device_->default_memory_space();
+  return BufferFromHost(data, type, dims, default_device_);
+}
+
+absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> TpuPjrtManager::BufferFromHost(
+    const void* data, xla::PrimitiveType type, absl::Span<const int64_t> dims,
+    xla::PjRtDevice* device) {
+  if (device == nullptr) {
+    device = default_device_;
+  }
+  auto memory_space_or = device->default_memory_space();
   if (!memory_space_or.ok()) {
     return memory_space_or.status();
   }

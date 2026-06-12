@@ -56,6 +56,12 @@ class TpuPjrtManager {
       const void* data, xla::PrimitiveType type,
       absl::Span<const int64_t> dims);
 
+  // Creates an on-device buffer initialized with host data on a specific
+  // device.
+  absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> BufferFromHost(
+      const void* data, xla::PrimitiveType type, absl::Span<const int64_t> dims,
+      xla::PjRtDevice* device);
+
   // Creates an on-device buffer from an XLA Literal.
   absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> BufferFromLiteral(
       const xla::LiteralSlice& literal);
