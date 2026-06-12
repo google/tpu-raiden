@@ -15,6 +15,8 @@
 /* Copyright 2026 The TPU Raiden Authors. All Rights Reserved.
 ==============================================================================*/
 
+#include <dlfcn.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -23,6 +25,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -36,6 +39,43 @@
 #include "core/raw_transfer_impl.h"
 #include "core/tpu_pjrt_manager.h"
 
+namespace raiden {
+namespace {
+
+// Static initializer to load and initialize libtpu.so in OSS environment.
+bool InitializeLibtpuOnce() {
+  const char* libtpu_path = std::getenv("TPU_LIBRARY_PATH");
+  if (!libtpu_path || std::string(libtpu_path).empty()) {
+    libtpu_path = "libtpu.so";
+  }
+  std::cout << "[INFO] Dynamically loading libtpu from: " << libtpu_path
+            << std::endl;
+  void* library = dlopen(libtpu_path, RTLD_NOW | RTLD_GLOBAL);
+  if (!library) {
+    std::cerr << "[WARNING] Failed to dlopen libtpu.so: " << dlerror()
+              << ". This might be expected if not running on TPU hardware."
+              << std::endl;
+    return false;
+  }
+  auto initialize_fn = reinterpret_cast<void (*)(bool, int, const char**)>(
+      dlsym(library, "TfTpu_Initialize"));
+  if (!initialize_fn) {
+    std::cerr << "[WARNING] TfTpu_Initialize symbol not found in libtpu.so"
+              << std::endl;
+    dlclose(library);
+    return false;
+  }
+  std::cout << "[INFO] Calling TfTpu_Initialize(true, 0, nullptr)."
+            << std::endl;
+  initialize_fn(/*init_library=*/true, 0, nullptr);
+  std::cout << "[INFO] libtpu.so initialized successfully." << std::endl;
+  return true;
+}
+
+static bool libtpu_dummy = InitializeLibtpuOnce();
+
+}  // namespace
+}  // namespace raiden
 
 #ifndef ASSERT_OK
 #define ASSERT_OK(status) ASSERT_TRUE((status).ok())
