@@ -15,11 +15,14 @@
 #include "core/tpu_utils.h"
 
 #include <dirent.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -34,13 +37,21 @@ int64_t SetThreadMempolicy(int mode, int node) {
   constexpr int kMpolDefault = 0;
   constexpr int kMpolBind = 2;
 #ifdef __NR_set_mempolicy
+  int64_t res;
   if (mode == kMpolDefault || node < 0) {
-    return static_cast<int64_t>(
+    res = static_cast<int64_t>(
         syscall(__NR_set_mempolicy, kMpolDefault, nullptr, 0));
+  } else {
+    uint64_t mask = 1ULL << node;
+    res = static_cast<int64_t>(
+        syscall(__NR_set_mempolicy, kMpolBind, &mask, sizeof(mask) * 8));
   }
-  uint64_t mask = 1ULL << node;
-  return static_cast<int64_t>(
-      syscall(__NR_set_mempolicy, kMpolBind, &mask, sizeof(mask) * 8));
+  if (res < 0) {
+    std::cerr << "[ERROR] SetThreadMempolicy(mode=" << mode << ", node=" << node
+              << ") failed: " << std::strerror(errno) << " (errno=" << errno
+              << ")" << std::endl;
+  }
+  return res;
 #else
   return -1;  // Syscall not available
 #endif

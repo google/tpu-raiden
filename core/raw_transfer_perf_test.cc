@@ -44,6 +44,7 @@
 
 #include <dlfcn.h>
 #include <malloc.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <algorithm>
