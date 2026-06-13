@@ -38,7 +38,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//frameworks/torch:_transfer_engine",
+        "//frameworks/torch:_kv_cache_manager",
         "@torch_tpu//shims/torch:pytorch",
         "@torch_tpu//torch_tpu",
         "@torch_tpu//torch_tpu:_loader",
@@ -76,24 +76,9 @@ py_test(
     ],
 )
 
-py_library(
-    name = "transfer_engine",
-    srcs = ["transfer_engine.py"],
-    data = [
-        "transfer_engine.pyi",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//frameworks/torch:_transfer_engine",
-        "@torch_tpu//shims/torch:pytorch",
-        "@torch_tpu//torch_tpu",
-        "@torch_tpu//torch_tpu:_loader",
-    ],
-)
-
 py_test(
-    name = "transfer_engine_test",
-    srcs = ["transfer_engine_test.py"],
+    name = "kv_cache_manager_transfer_test",
+    srcs = ["kv_cache_manager_transfer_test.py"],
     tags = [
         "cpu:8",
         "notap",
@@ -102,7 +87,7 @@ py_test(
         "requires-net:external",
     ],
     deps = [
-        ":transfer_engine",
+        ":kv_cache_manager_torch_py",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
         "@pypi//numpy",

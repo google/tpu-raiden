@@ -118,6 +118,7 @@ cc_library(
         ":tpu_utils",
         ":xla_raw_transfer_headers",
         "@com_google_absl//absl/base:nullability",
+        "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
@@ -206,12 +207,12 @@ cc_library(
 )
 
 cc_library(
-    name = "transfer_engine_base",
+    name = "kv_cache_manager_with_transfer",
     srcs = [
-        "transfer_engine_base.cc",
+        "kv_cache_manager_with_transfer.cc",
     ],
     hdrs = [
-        "transfer_engine_base.h",
+        "kv_cache_manager_with_transfer.h",
     ],
     copts = [
         "-fno-strict-aliasing",
@@ -220,12 +221,14 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":host_memory_allocator",
         ":raw_transfer_core",
         "//kv_cache:kv_cache_manager_base",
         "//transport:block_transport",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@xla//xla/pjrt:pjrt_client",
     ],
 )
 
@@ -445,8 +448,8 @@ cc_test(
 )
 
 cc_test(
-    name = "transfer_engine_base_test",
-    srcs = ["transfer_engine_base_test.cc"],
+    name = "kv_cache_manager_with_transfer_test",
+    srcs = ["kv_cache_manager_with_transfer_test.cc"],
     copts = [
         "-fno-strict-aliasing",
         "-fexceptions",
@@ -460,8 +463,8 @@ cc_test(
         "requires-jellyfish",
     ],
     deps = [
+        ":kv_cache_manager_with_transfer",
         ":tpu_pjrt_manager",
-        ":transfer_engine_base",
         "//kv_cache:kv_cache_manager_base",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/tsl/platform:statusor",

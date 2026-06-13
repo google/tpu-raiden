@@ -56,6 +56,12 @@ NB_MODULE(_kv_cache_manager, m) {
            nb::arg("external_host_ptrs") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
            nb::arg("parallelism") = 1)
+      .def(nb::init<const std::vector<at::Tensor>&, int64_t, int64_t, int64_t,
+                    int64_t, double, bool>(),
+           nb::arg("kv_caches"), nb::arg("tp_rank"),
+           nb::arg("local_control_port"), nb::arg("max_blocks"),
+           nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
+           nb::arg("unsafe_skip_buffer_lock") = true)
       .def(
           "H2d",
           [](KVCacheManager& self,
@@ -146,5 +152,17 @@ NB_MODULE(_kv_cache_manager, m) {
       .def_prop_ro("num_layers", &KVCacheManager::num_layers)
       .def_prop_ro("num_shards", &KVCacheManager::num_shards)
       .def_prop_ro("block_size", &KVCacheManager::block_size)
-      .def_prop_ro("slice_byte_size", &KVCacheManager::slice_byte_size);
+      .def_prop_ro("slice_byte_size", &KVCacheManager::slice_byte_size)
+      .def_prop_ro("local_control_port", &KVCacheManager::local_control_port)
+      .def("notify_for_read", &KVCacheManager::NotifyForRead, nb::arg("req_id"),
+           nb::arg("uuid"), nb::arg("block_ids"))
+      .def("start_read", &KVCacheManager::StartRead, nb::arg("req_id"),
+           nb::arg("uuid"), nb::arg("remote_endpoint"),
+           nb::arg("remote_block_ids"), nb::arg("local_block_ids"),
+           nb::arg("parallelism") = 1)
+      .def("complete_read", [](KVCacheManager& self) {
+        auto [done_sending, done_recving, failed_recving] =
+            self.CompleteReadRaw();
+        return nb::make_tuple(done_sending, done_recving, failed_recving);
+      });
 }

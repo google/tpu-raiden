@@ -23,7 +23,7 @@ py_library(
         "kv_cache_manager.pyi",
     ],
     visibility = ["//visibility:public"],
-    deps = ["//frameworks/jax:_transfer_engine"],
+    deps = ["//frameworks/jax:_kv_cache_manager"],
 )
 
 py_library(
@@ -69,18 +69,6 @@ py_test(
         "@com_google_absl_py//absl/testing:absltest",
         "@jax//jax",
         "@pypi//numpy",
-    ],
-)
-
-py_library(
-    name = "transfer_engine_jax_py",
-    srcs = ["transfer_engine.py"],
-    data = [
-        "transfer_engine.pyi",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//frameworks/jax:_transfer_engine",
     ],
 )
 

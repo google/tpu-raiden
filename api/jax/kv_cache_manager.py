@@ -29,7 +29,7 @@
 """High-performance JAX KV Cache Manager (repurposed as TransferEngine)."""
 
 from typing import Any, List, Tuple
-from frameworks.jax import _transfer_engine as _impl
+from frameworks.jax import _kv_cache_manager as _impl
 
 
 class KVCacheManager:
@@ -59,7 +59,7 @@ class KVCacheManager:
       timeout_s: Timeout in seconds for transfer operations.
       unsafe_skip_buffer_lock: Skip dynamic safety locking.
     """
-    self._impl = _impl.TransferEngine(
+    self._impl = _impl.KVCacheManager(
         kv_caches=kv_caches,
         local_control_port=local_control_port,
         max_blocks=max_blocks,
@@ -69,27 +69,9 @@ class KVCacheManager:
     )
 
   @property
-  def uses_prepared_tpu_buffers(self) -> bool:
-    """Returns whether the engine uses pre-allocated TPU buffers."""
-    return self._impl.uses_prepared_tpu_buffers
-
-  @property
   def local_control_port(self) -> int:
     """Returns the active control plane listener port."""
     return self._impl.local_control_port
-
-  @property
-  def local_data_port(self) -> int:
-    """Returns the active data plane listener port."""
-    return self._impl.local_data_port
-
-  def register_kv_cache(self, kv_caches: List[Any]) -> None:
-    """Registers a new set of JAX TPU KV-cache device arrays."""
-    self._impl.register_kv_cache(kv_caches)
-
-  def register_host_buffers(self, host_pool: Any, tp_rank: int) -> None:
-    """Registers a shared CPU host memory pool for staging transfers."""
-    self._impl.register_host_buffers(host_pool, tp_rank)
 
   def register_read(self, req_id: str, uuid: int, block_ids: List[int]) -> bool:
     """Producer node notifies the registry/peer that blocks are ready for read.
@@ -124,68 +106,6 @@ class KVCacheManager:
         parallelism,
     )
 
-  def stage_d2h(
-      self, slot_idx: int, num_blocks: int, block_ids: List[int]
-  ) -> Tuple[Any, Any, Any, int]:
-    """Stages an asynchronous Device-to-Host (D2H) copy of cache slices."""
-    return self._impl.stage_d2h(
-        slot_idx=slot_idx, num_blocks=num_blocks, block_ids=block_ids
-    )
-
-  def stage_d2h_sync(
-      self, slot_idx: int, num_blocks: int, block_ids: List[int]
-  ) -> None:
-    """Stages a synchronous Device-to-Host (D2H) copy of cache slices."""
-    self._impl.stage_d2h_sync(
-        slot_idx=slot_idx, num_blocks=num_blocks, block_ids=block_ids
-    )
-
-  def stage_h2d(
-      self, slot_idx: int, num_blocks: int, block_ids: List[int]
-  ) -> Tuple[Any, Any, Any, int]:
-    """Stages an asynchronous Host-to-Device (H2D) copy of cache slices."""
-    return self._impl.stage_h2d(
-        slot_idx=slot_idx, num_blocks=num_blocks, block_ids=block_ids
-    )
-
-  def commit_h2d(
-      self, slot_idx: int, num_blocks: int, local_block_ids: List[int]
-  ) -> Tuple[float, float, float, int]:
-    """Commits and waits for completion of Host-to-Device (H2D) copies."""
-    return self._impl.commit_h2d(
-        slot_idx=slot_idx,
-        num_blocks=num_blocks,
-        local_block_ids=local_block_ids,
-    )
-
-  def rank_layer_views(self, slot_idx: int, rank: int, num_blocks: int) -> Any:
-    """Returns memory views of the host staging buffers for a specific rank."""
-    return self._impl.rank_layer_views(slot_idx, rank, num_blocks)
-
-  def unpack_rank_layers(
-      self, slot_idx: int, rank: int, num_blocks: int, layer_buffers: Any
-  ) -> None:
-    """Copies external numpy/host buffers directly into the staging spans."""
-    self._impl.unpack_rank_layers(slot_idx, rank, num_blocks, layer_buffers)
-
-  def submit_d2h(
-      self, slot_idx: int, num_blocks: int, block_ids: List[int]
-  ) -> None:
-    """Submits a previously staged D2H copy to the TPU hardware queue."""
-    self._impl.submit_d2h(
-        slot_idx=slot_idx, num_blocks=num_blocks, block_ids=block_ids
-    )
-
-  def submit_h2d(
-      self, slot_idx: int, num_blocks: int, local_block_ids: List[int]
-  ) -> None:
-    """Submits a previously staged H2D copy to the TPU hardware queue."""
-    self._impl.submit_h2d(
-        slot_idx=slot_idx,
-        num_blocks=num_blocks,
-        local_block_ids=local_block_ids,
-    )
-
   def poll_stats(self) -> Tuple[List[str], List[str], List[str]]:
     """Polls the status of all active background transfer operations.
 
@@ -194,24 +114,3 @@ class KVCacheManager:
       IDs.
     """
     return self._impl.complete_read()
-
-  def poll_transfer_ops(self) -> List[Any]:
-    """Polls the status of active background transfer operations."""
-    return self._impl.poll_transfer_ops()
-
-  def wait_transfer(self, op_id: Any) -> None:
-    """Waits for a specific background transfer operation to complete."""
-    self._impl.wait_transfer(op_id)
-
-  def _count_copy_segments_for_testing(self, block_ids: List[int]) -> int:
-    return self._impl._count_copy_segments_for_testing(block_ids)  # pytype: disable=protected-access
-
-  def _send_copy_plan_for_testing(self, block_ids: List[int]) -> Any:
-    return self._impl._send_copy_plan_for_testing(block_ids)  # pytype: disable=protected-access
-
-  def _load_copy_plan_for_testing(
-      self, remote_block_ids: List[int], local_block_ids: List[int]
-  ) -> Any:
-    return self._impl._load_copy_plan_for_testing(  # pytype: disable=protected-access
-        remote_block_ids, local_block_ids
-    )

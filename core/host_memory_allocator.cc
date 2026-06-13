@@ -19,10 +19,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <iostream>
 #include <memory>
 
 #include "absl/base/nullability.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
@@ -58,9 +58,9 @@ absl::StatusOr<HostBufferAllocation>
 XlaHostMemoryAllocator::AllocateDmaMappedForDevice(
     size_t size_bytes, const xla::PjRtDevice* device) {
   int numa_node = GetPjRtDeviceNumaNode(device);
-  std::cout << "[ALLOCATOR] Device: "
-            << (device ? device->DebugString() : "nullptr")
-            << ", resolved NUMA node: " << numa_node << std::endl;
+  VLOG(1) << "[ALLOCATOR] Device: "
+          << (device ? device->DebugString() : "nullptr")
+          << ", resolved NUMA node: " << numa_node;
   if (numa_node >= 0) {
     // Bind this thread's allocations to the TPU's local NUMA node
     SetThreadMempolicy(2, numa_node);  // MPOL_BIND

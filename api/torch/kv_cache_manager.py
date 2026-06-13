@@ -52,7 +52,7 @@ def _load_torch_tpu_common() -> None:
 
 _load_torch_tpu_common()
 
-from frameworks.torch import _transfer_engine as _impl
+from frameworks.torch import _kv_cache_manager as _impl
 
 
 class KVCacheManager:
@@ -84,7 +84,7 @@ class KVCacheManager:
       timeout_s: Timeout in seconds for transfer operations.
       unsafe_skip_buffer_lock: Skip dynamic safety locking.
     """
-    self._impl = _impl.TransferEngine(
+    self._impl = _impl.KVCacheManager(
         kv_caches=kv_caches,
         tp_rank=tp_rank,
         local_control_port=local_control_port,

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""E2E physical unit tests for TransferEngine on XLA TPUs."""
+"""E2E physical unit tests for KVCacheManager transfer on XLA TPUs."""
 
 import threading
 import time
@@ -22,10 +22,10 @@ from absl.testing import parameterized
 import numpy as np
 import torch
 
-from api.torch.transfer_engine import TransferEngine
+from api.torch.kv_cache_manager import KVCacheManager
 
 
-class TransferEngineTest(parameterized.TestCase):
+class KVCacheManagerTransferTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -35,11 +35,10 @@ class TransferEngineTest(parameterized.TestCase):
     self.block_size = 1
 
   def test_initialization(self):
-    device = torch.device("cpu")
     shape = (4, 128, 8)
-    kv_caches = [torch.zeros(shape, device=device)]
+    kv_caches = [torch.zeros(shape, device=self.device)]
 
-    engine = TransferEngine(
+    engine = KVCacheManager(
         kv_caches=kv_caches,
         tp_rank=0,
         local_control_port=0,
@@ -66,7 +65,7 @@ class TransferEngineTest(parameterized.TestCase):
           torch.zeros(shape, dtype=torch.float32, device=self.device)
       )
 
-    producer = TransferEngine(
+    producer = KVCacheManager(
         kv_caches=src_caches,
         tp_rank=0,
         local_control_port=0,
@@ -74,7 +73,7 @@ class TransferEngineTest(parameterized.TestCase):
         num_slots=2,
     )
 
-    consumer = TransferEngine(
+    consumer = KVCacheManager(
         kv_caches=dst_caches,
         tp_rank=0,
         local_control_port=0,
@@ -88,7 +87,7 @@ class TransferEngineTest(parameterized.TestCase):
 
     req_id = "test_req_poll"
     uuid = 12345
-    producer.notify_for_read(req_id, uuid, [0, 1])
+    producer.register_read(req_id, uuid, [0, 1])
 
     remote_endpoint = f"127.0.0.1:{port}"
     consumer.start_read(
@@ -102,7 +101,7 @@ class TransferEngineTest(parameterized.TestCase):
     # Poll until consumer is done receiving
     done = False
     for _ in range(50):
-      done_sending, done_recving, failed_recving = consumer.complete_read()
+      done_sending, done_recving, failed_recving = consumer.poll_stats()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
@@ -119,7 +118,7 @@ class TransferEngineTest(parameterized.TestCase):
     # Poll producer until it's done sending
     done_prod = False
     for _ in range(50):
-      done_sending, done_recving, failed_recving = producer.complete_read()
+      done_sending, done_recving, failed_recving = producer.poll_stats()
       if req_id in done_sending:
         done_prod = True
         break
@@ -145,7 +144,7 @@ class TransferEngineTest(parameterized.TestCase):
           torch.zeros(shape, dtype=torch.float32, device=self.device)
       )
 
-    producer = TransferEngine(
+    producer = KVCacheManager(
         kv_caches=src_caches,
         tp_rank=0,
         local_control_port=0,
@@ -153,7 +152,7 @@ class TransferEngineTest(parameterized.TestCase):
         num_slots=2,
     )
 
-    consumer = TransferEngine(
+    consumer = KVCacheManager(
         kv_caches=dst_caches,
         tp_rank=0,
         local_control_port=0,
@@ -166,7 +165,7 @@ class TransferEngineTest(parameterized.TestCase):
 
     req_id = "test_req_parallel"
     uuid = 99999
-    producer.notify_for_read(req_id, uuid, [0, 1])
+    producer.register_read(req_id, uuid, [0, 1])
 
     remote_endpoint = f"127.0.0.1:{port}"
     consumer.start_read(
@@ -180,7 +179,7 @@ class TransferEngineTest(parameterized.TestCase):
 
     done = False
     for _ in range(50):
-      done_sending, done_recving, failed_recving = consumer.complete_read()
+      done_sending, done_recving, failed_recving = consumer.poll_stats()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
@@ -195,7 +194,7 @@ class TransferEngineTest(parameterized.TestCase):
 
     done_prod = False
     for _ in range(50):
-      done_sending, done_recving, failed_recving = producer.complete_read()
+      done_sending, done_recving, failed_recving = producer.poll_stats()
       if req_id in done_sending:
         done_prod = True
         break

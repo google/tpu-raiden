@@ -18,21 +18,37 @@
 #include <optional>
 #include <vector>
 
+#include "ATen/core/TensorBody.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "core/kv_cache_manager_with_transfer.h"
 #include "core/utils.h"
 #include "frameworks/torch/torch_tpu_utils.h"
 #include "frameworks/torch/torch_utils.h"
-#include "kv_cache/kv_cache_manager_base.h"
 
 namespace tpu_raiden {
 namespace torch {
+namespace {
+
+using TensorList = std::vector<at::Tensor>;
+
+std::vector<std::vector<at::Tensor>> SingleShardLayers(
+    const TensorList& kv_caches) {
+  std::vector<std::vector<at::Tensor>> layers;
+  layers.reserve(kv_caches.size());
+  for (const auto& kv_cache : kv_caches) {
+    layers.push_back({kv_cache});
+  }
+  return layers;
+}
+
+}  // namespace
 
 KVCacheManager::KVCacheManager(
     const std::vector<std::vector<at::Tensor>>& device_tensors, int block_size,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     std::optional<std::vector<uintptr_t>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism)
-    : kv_cache::KVCacheManagerBase(
+    : KVCacheManagerWithTransfer(
           UnpackTorchTensors(device_tensors), block_size, local_port,
           host_blocks_to_allocate,
           tpu_raiden::CastExternalPointers(external_host_ptrs),
@@ -42,7 +58,30 @@ KVCacheManager::KVCacheManager(
                   ? nullptr
                   : UnpackTorchTensor(device_tensors[0][0])
                         ->device()
-                        ->client())) {}
+                        ->client()),
+          /*tp_rank=*/0,
+          /*local_control_port=*/-1,
+          /*max_blocks=*/0,
+          /*num_slots=*/0,
+          /*timeout_s=*/120.0) {}
+
+KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
+                               int64_t tp_rank, int64_t local_control_port,
+                               int64_t max_blocks, int64_t num_slots,
+                               double timeout_s, bool unsafe_skip_buffer_lock)
+    : KVCacheManagerWithTransfer(
+          UnpackTorchTensors(SingleShardLayers(kv_caches)),
+          /*block_size=*/1,
+          /*local_port=*/std::nullopt,
+          /*host_blocks_to_allocate=*/std::nullopt,
+          /*external_host_ptrs=*/std::nullopt, unsafe_skip_buffer_lock,
+          /*parallelism=*/1,
+          tpu_raiden::CreateHostMemoryAllocator(
+              kv_caches.empty()
+                  ? nullptr
+                  : UnpackTorchTensor(kv_caches[0])->device()->client()),
+          tp_rank, local_control_port, max_blocks, num_slots, timeout_s),
+      kv_caches_(kv_caches) {}
 
 KVCacheManager::~KVCacheManager() = default;
 

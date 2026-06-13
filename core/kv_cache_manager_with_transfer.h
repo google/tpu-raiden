@@ -26,8 +26,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_TPU_RAIDEN_CORE_TRANSFER_ENGINE_BASE_H_
-#define THIRD_PARTY_TPU_RAIDEN_CORE_TRANSFER_ENGINE_BASE_H_
+#ifndef THIRD_PARTY_TPU_RAIDEN_CORE_KV_CACHE_MANAGER_WITH_TRANSFER_H_
+#define THIRD_PARTY_TPU_RAIDEN_CORE_KV_CACHE_MANAGER_WITH_TRANSFER_H_
 
 #include <atomic>
 #include <chrono>
@@ -38,7 +38,6 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -127,22 +126,29 @@ struct CommitResult {
   int64_t total_bytes;
 };
 
-class TransferEngineBase {
+class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
  public:
-  TransferEngineBase(std::unique_ptr<kv_cache::KVCacheManagerBase> kv_transfer,
-                     int64_t tp_rank, int64_t local_control_port,
-                     int64_t max_blocks, int64_t num_slots, double timeout_s,
-                     bool unsafe_skip_buffer_lock);
+  KVCacheManagerWithTransfer(
+      const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
+      int block_size, std::optional<int> local_port,
+      std::optional<int> host_blocks_to_allocate,
+      std::optional<std::vector<const uint8_t*>> external_host_ptrs,
+      bool unsafe_skip_buffer_lock, int parallelism,
+      HostBufferAllocator host_allocator, int64_t tp_rank = 0,
+      int64_t local_control_port = -1, int64_t max_blocks = 0,
+      int64_t num_slots = 0, double timeout_s = 120.0);
 
-  virtual ~TransferEngineBase();
+  // Metadata-based constructor for FFI / CPU-only testing
+  KVCacheManagerWithTransfer(size_t num_layers, size_t num_shards,
+                             size_t slice_byte_size, int block_size,
+                             std::optional<int> local_port,
+                             std::optional<int> host_blocks_to_allocate,
+                             int parallelism = 1, int64_t tp_rank = 0,
+                             int64_t local_control_port = -1,
+                             int64_t max_blocks = 0, int64_t num_slots = 0,
+                             double timeout_s = 120.0);
 
-  bool UsesPreparedTpuBuffers() const { return kv_transfer_ != nullptr; }
-
-  int64_t SubmitD2H(int64_t slot_idx, int64_t num_blocks,
-                    const std::vector<int64_t>& block_ids);
-
-  int64_t SubmitH2D(int64_t slot_idx, int64_t num_blocks,
-                    const std::vector<int64_t>& local_block_ids);
+  virtual ~KVCacheManagerWithTransfer();
 
   int64_t NotifyForRead(const std::string& req_id, uint64_t uuid,
                         const std::vector<int64_t>& block_ids);
@@ -161,32 +167,8 @@ class TransferEngineBase {
              std::vector<std::string>>
   CompleteReadRaw();
 
-  // Helpers for subclasses / nanobindings
-  virtual StageResult IssueD2H(int64_t slot_idx, int64_t num_blocks,
-                               const std::vector<int64_t>& block_ids);
-
-  virtual StageResult IssueH2D(int64_t slot_idx, int64_t num_blocks,
-                               const std::vector<int64_t>& local_block_ids);
-
-  virtual CommitResult CommitH2DRaw(
-      int64_t slot_idx, int64_t num_blocks,
-      const std::vector<int64_t>& local_block_ids);
-
-  virtual std::vector<kv_cache::KVCacheHostSpan> LayerSpans(int64_t slot_idx,
-                                                            int64_t num_blocks);
-
   int local_control_port() const { return local_control_port_; }
-  int local_data_port() const { return local_data_port_; }
   int64_t tp_rank() const { return tp_rank_; }
-
-  // Testing helpers
-  int64_t CountCopySegmentsForTesting(
-      const std::vector<int64_t>& block_ids) const;
-  CopyPlan BuildProducerCopyPlanForTesting(
-      const std::vector<int64_t>& block_ids) const;
-  CopyPlan BuildLoadCopyPlanForTesting(
-      const std::vector<int64_t>& remote_block_ids,
-      const std::vector<int64_t>& local_block_ids) const;
 
  protected:
   struct PendingOperation {
@@ -295,7 +277,6 @@ class TransferEngineBase {
                           bool source_is_compact);
   static kv_cache::KVCacheCopySpec ToKVCacheCopySpec(const CopySpec& spec);
 
-  std::unique_ptr<kv_cache::KVCacheManagerBase> kv_transfer_;
   int64_t tp_rank_ = 0;
   int local_control_port_ = 0;
   int local_data_port_ = 0;
@@ -320,8 +301,7 @@ class TransferEngineBase {
   // to ensure the state stays alive even if the entry is removed from this
   // map (e.g. on timeout, cancellation, or slot release) before the async
   // callback runs.
-  std::map<int64_t, std::shared_ptr<StagingReadinessState>>
-      staging_readiness_;
+  std::map<int64_t, std::shared_ptr<StagingReadinessState>> staging_readiness_;
 
   std::mutex mu_;
   std::condition_variable cv_;
@@ -332,8 +312,15 @@ class TransferEngineBase {
   std::vector<std::thread> control_workers_;
   std::mutex worker_threads_mu_;
   std::vector<std::thread> worker_threads_;
+
+ private:
+  StageResult IssueH2D(int64_t slot_idx, int64_t num_blocks,
+                       const std::vector<int64_t>& local_block_ids);
+
+  std::vector<kv_cache::KVCacheHostSpan> LayerSpans(int64_t slot_idx,
+                                                    int64_t num_blocks);
 };
 
 }  // namespace tpu_raiden
 
-#endif  // THIRD_PARTY_TPU_RAIDEN_CORE_TRANSFER_ENGINE_BASE_H_
+#endif  // THIRD_PARTY_TPU_RAIDEN_CORE_KV_CACHE_MANAGER_WITH_TRANSFER_H_

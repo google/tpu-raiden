@@ -147,9 +147,9 @@ cc_library(
         ":torch_tpu_utils",
         ":torch_utils",
         "//core:host_memory_allocator",
+        "//core:kv_cache_manager_with_transfer",
         "//core:utils",
         "//core:xla_raw_transfer_headers",
-        "//kv_cache:kv_cache_manager_base",
         "@com_google_absl//absl/status:statusor",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
@@ -170,66 +170,6 @@ nanobind_extension(
         "//core:raw_transfer_core",
         "//kv_cache:kv_cache_manager_base",
         "@com_google_absl//absl/status:statusor",
-    ],
-)
-
-cc_library(
-    name = "transfer_engine_torch",
-    srcs = ["transfer_engine.cc"],
-    hdrs = ["transfer_engine.h"],
-    copts = [
-        "-std=c++20",
-        "-fexceptions",
-        "-march=x86-64-v2",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":kv_cache_manager_torch",
-        "//core:transfer_engine_base",
-        "//kv_cache:kv_cache_manager_base",
-        "@torch_tpu//shims/torch:aten_headers",
-    ],
-    alwayslink = 1,
-)
-
-nanobind_extension(
-    name = "_transfer_engine",
-    srcs = ["transfer_engine_module.cc"],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":torch_nanobind_utils",
-        ":transfer_engine_torch",
-        "//core:transfer_engine_base",
-        "//kv_cache:kv_cache_manager_base",
-        "@torch_tpu//shims/torch:aten_headers",
-    ],
-)
-
-cc_library(
-    name = "transfer_engine_torch_mock",
-    srcs = ["transfer_engine.cc"],
-    hdrs = ["transfer_engine.h"],
-    copts = [
-        "-std=c++20",
-        "-fexceptions",
-        "-march=x86-64-v2",
-    ],
-    defines = ["RAIDEN_TORCH_USE_MOCKS"],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":kv_cache_manager_torch_mock",
-        "//core:transfer_engine_base",
-        "//kv_cache:kv_cache_manager_base",
-        "@torch_tpu//shims/torch:aten_headers",
     ],
 )
 
@@ -352,9 +292,9 @@ cc_library(
         ":torch_tpu_utils_mock",
         ":torch_utils_mock",
         "//core:host_memory_allocator",
+        "//core:kv_cache_manager_with_transfer",
         "//core:utils",
         "//core:xla_raw_transfer_headers",
-        "//kv_cache:kv_cache_manager_base",
         "@com_google_absl//absl/status:statusor",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
@@ -406,18 +346,20 @@ cc_test(
 )
 
 cc_test(
-    name = "transfer_engine_test",
-    srcs = ["transfer_engine_test.cc"],
+    name = "kv_cache_manager_transfer_test",
+    srcs = ["kv_cache_manager_transfer_test.cc"],
     copts = [
         "-std=c++20",
         "-fexceptions",
     ],
     features = ["-use_header_modules"],
     deps = [
+        ":kv_cache_manager_torch_mock",
         ":torch_tpu_utils_mock",
-        ":transfer_engine_torch_mock",
         "@torch_tpu//shims/torch",
+        "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
+        "@torch_tpu//shims/torch/c10/core:base_headers",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt/plugin/xla_cpu:xla_cpu_pjrt_client",
         "@xla//xla/tsl/platform:statusor",

@@ -12,22 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "frameworks/torch/transfer_engine.h"
-
 #include <memory>
+#include <optional>
 #include <vector>
 
+#include "ATen/core/TensorBody.h"
+#include "ATen/ops/zeros.h"
+#include "c10/core/ScalarType.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/plugin/xla_cpu/xla_cpu_pjrt_client.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
+#include "frameworks/torch/kv_cache_manager.h"
 #include "frameworks/torch/torch_tpu_utils_mock.h"
-#include "torch/torch.h"
 
 namespace tpu_raiden::torch {
 namespace {
 
-class TransferEngineTest : public ::testing::Test {
+class KVCacheManagerTransferTest : public ::testing::Test {
  protected:
   void SetUp() override {
     TF_ASSERT_OK_AND_ASSIGN(client_,
@@ -37,7 +39,7 @@ class TransferEngineTest : public ::testing::Test {
   std::unique_ptr<xla::PjRtClient> client_;
 };
 
-TEST_F(TransferEngineTest, ConstructorAndRegisterSucceeds) {
+TEST_F(KVCacheManagerTransferTest, Basic) {
   // Create a real CPU PJRT buffer
   TF_ASSERT_OK_AND_ASSIGN(
       xla::PjRtMemorySpace * memory_space,
@@ -53,25 +55,20 @@ TEST_F(TransferEngineTest, ConstructorAndRegisterSucceeds) {
                             /*device_layout=*/nullptr));
 
   // Create a CPU PyTorch tensor.
-  at::Tensor tensor = ::torch::zeros({8, 1024}, ::torch::kFloat32);
+  at::Tensor tensor = at::zeros({8, 1024}, at::kFloat);
 
   // Register the mapping
   RegisterMockTensor(tensor, pjrt_buffer.get());
 
   std::vector<at::Tensor> kv_caches = {tensor};
 
-  // Construct TransferEngine
-  TransferEngine engine(kv_caches, /*tp_rank=*/0,
+  // Construct KVCacheManager with transfer enabled
+  KVCacheManager engine(kv_caches, /*tp_rank=*/0,
                         /*local_control_port=*/0, /*max_blocks=*/2,
                         /*num_slots=*/2, /*timeout_s=*/10.0,
                         /*unsafe_skip_buffer_lock=*/true);
 
-  EXPECT_TRUE(engine.UsesPreparedTpuBuffers());
-
-  // Test RegisterKvCache
-  std::vector<int64_t> region_ids = engine.RegisterKvCache(kv_caches);
-  EXPECT_EQ(region_ids.size(), 1);
-  EXPECT_EQ(region_ids[0], 0);
+  EXPECT_EQ(engine.kv_caches().size(), 1);
 }
 
 }  // namespace

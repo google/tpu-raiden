@@ -26,7 +26,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "core/transfer_engine_base.h"
+#include "core/kv_cache_manager_with_transfer.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -52,11 +52,16 @@
 #include <optional>
 #include <set>
 #include <sstream>
+#include <exception>
+#include <ratio>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <tuple>
 #include <utility>
+
+#include "xla/pjrt/pjrt_client.h"
+#include "core/host_memory_allocator.h"
 #include <vector>
 
 #include "absl/log/log.h"
@@ -216,22 +221,7 @@ static kv_cache::KVCacheCopySpec ToKVCacheCopySpecImpl(const CopySpec& spec) {
           .sizes = spec.sizes};
 }
 
-static std::vector<int64_t> CanonicalSendBlockIds(
-    const std::vector<int64_t>& block_ids) {
-  std::vector<int64_t> ordered = block_ids;
-  std::stable_sort(ordered.begin(), ordered.end());
-  return ordered;
-}
 
-static CopyPlan BuildProducerCopyPlan(const std::vector<int64_t>& block_ids) {
-  CopyPlan plan;
-  plan.num_blocks = static_cast<int64_t>(block_ids.size());
-  plan.requested_remote_block_ids = block_ids;
-  plan.producer_remote_block_ids = CanonicalSendBlockIds(block_ids);
-  plan.d2h_copy =
-      OffsetsImpl(plan.producer_remote_block_ids, /*source_is_compact=*/false);
-  return plan;
-}
 
 static CopyPlan BuildLoadCopyPlan(const std::vector<int64_t>& remote_block_ids,
                                   const std::vector<int64_t>& local_block_ids) {
@@ -317,17 +307,17 @@ static double DurationMs(std::chrono::steady_clock::time_point start,
 
 }  // namespace
 
-CopySpec TransferEngineBase::Offsets(const std::vector<int64_t>& block_ids,
-                                     bool source_is_compact) {
+CopySpec KVCacheManagerWithTransfer::Offsets(
+    const std::vector<int64_t>& block_ids, bool source_is_compact) {
   return OffsetsImpl(block_ids, source_is_compact);
 }
 
-kv_cache::KVCacheCopySpec TransferEngineBase::ToKVCacheCopySpec(
+kv_cache::KVCacheCopySpec KVCacheManagerWithTransfer::ToKVCacheCopySpec(
     const CopySpec& spec) {
   return ToKVCacheCopySpecImpl(spec);
 }
 
-void TransferEngineBase::ValidateRequestedBlocks(
+void KVCacheManagerWithTransfer::ValidateRequestedBlocks(
     const SendEntry& entry, const std::vector<int64_t>& requested_block_ids) {
   if (requested_block_ids.empty()) {
     throw std::invalid_argument(
@@ -347,11 +337,21 @@ void TransferEngineBase::ValidateRequestedBlocks(
   }
 }
 
-TransferEngineBase::TransferEngineBase(
-    std::unique_ptr<kv_cache::KVCacheManagerBase> kv_transfer, int64_t tp_rank,
+KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
+    const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
+    int block_size, std::optional<int> local_port,
+    std::optional<int> host_blocks_to_allocate,
+    std::optional<std::vector<const uint8_t*>> external_host_ptrs,
+    bool unsafe_skip_buffer_lock, int parallelism,
+    HostBufferAllocator host_allocator, int64_t tp_rank,
     int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
-    double timeout_s, bool unsafe_skip_buffer_lock)
-    : kv_transfer_(std::move(kv_transfer)),
+    double timeout_s)
+    : KVCacheManagerBase(layer_buffers, block_size, local_port,
+                         host_blocks_to_allocate.has_value()
+                             ? *host_blocks_to_allocate
+                             : num_slots * max_blocks,
+                         external_host_ptrs, unsafe_skip_buffer_lock,
+                         parallelism, host_allocator),
       tp_rank_(tp_rank),
       local_control_port_(static_cast<int>(local_control_port)),
       local_data_port_(0),
@@ -359,42 +359,72 @@ TransferEngineBase::TransferEngineBase(
       num_slots_(num_slots),
       timeout_s_(timeout_s),
       unsafe_skip_buffer_lock_(unsafe_skip_buffer_lock) {
-  if (max_blocks_ <= 0) {
-    throw std::invalid_argument("max_blocks must be positive");
+  if (local_control_port_ >= 0) {
+    if (max_blocks_ <= 0) {
+      throw std::invalid_argument("max_blocks must be positive");
+    }
+    if (num_slots_ <= 0) {
+      throw std::invalid_argument("num_slots must be positive");
+    }
+    auto status = ConfigureHostStagingSlots(num_slots_, max_blocks_);
+    if (!status.ok()) {
+      throw std::runtime_error("Failed to configure host staging slots: " +
+                               std::string(status.message()));
+    }
+    if (num_layers() > 0) {
+      ConfigureDataPortFromKvTransfer();
+    }
+    InitializeSlotPool(num_slots_);
+    StartControlServer();
   }
-  if (num_slots <= 0) {
-    throw std::invalid_argument("num_slots must be positive");
-  }
-  if (kv_transfer_) {
-    ConfigureDataPortFromKvTransfer();
-  }
-  InitializeSlotPool(num_slots_);
-  StartControlServer();
 }
 
-TransferEngineBase::~TransferEngineBase() {
+KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
+    size_t num_layers, size_t num_shards, size_t slice_byte_size,
+    int block_size, std::optional<int> local_port,
+    std::optional<int> host_blocks_to_allocate, int parallelism,
+    int64_t tp_rank, int64_t local_control_port, int64_t max_blocks,
+    int64_t num_slots, double timeout_s)
+    : KVCacheManagerBase(
+          num_layers, num_shards, slice_byte_size, block_size, local_port,
+          host_blocks_to_allocate.has_value() ? *host_blocks_to_allocate
+                                              : num_slots * max_blocks,
+          parallelism),
+      tp_rank_(tp_rank),
+      local_control_port_(static_cast<int>(local_control_port)),
+      local_data_port_(0),
+      max_blocks_(max_blocks),
+      num_slots_(num_slots),
+      timeout_s_(timeout_s),
+      unsafe_skip_buffer_lock_(false) {
+  if (local_control_port_ >= 0) {
+    if (max_blocks_ <= 0) {
+      throw std::invalid_argument("max_blocks must be positive");
+    }
+    if (num_slots_ <= 0) {
+      throw std::invalid_argument("num_slots must be positive");
+    }
+    auto status = ConfigureHostStagingSlots(num_slots_, max_blocks_);
+    if (!status.ok()) {
+      throw std::runtime_error("Failed to configure host staging slots: " +
+                               std::string(status.message()));
+    }
+    if (num_layers > 0) {
+      ConfigureDataPortFromKvTransfer();
+    }
+    InitializeSlotPool(num_slots_);
+    StartControlServer();
+  }
+}
+
+KVCacheManagerWithTransfer::~KVCacheManagerWithTransfer() {
   StopControlServer();
-  if (kv_transfer_) {
-    kv_transfer_->SetBlockReadinessCallback(nullptr);
+  if (num_layers() > 0) {
+    SetBlockReadinessCallback(nullptr);
   }
 }
 
-int64_t TransferEngineBase::SubmitD2H(int64_t slot_idx, int64_t num_blocks,
-                                      const std::vector<int64_t>& block_ids) {
-  PendingOperation op;
-  op.future = IssueD2H(slot_idx, num_blocks, block_ids).future;
-  return StorePending(std::move(op));
-}
-
-int64_t TransferEngineBase::SubmitH2D(
-    int64_t slot_idx, int64_t num_blocks,
-    const std::vector<int64_t>& local_block_ids) {
-  PendingOperation op;
-  op.future = IssueH2D(slot_idx, num_blocks, local_block_ids).future;
-  return StorePending(std::move(op));
-}
-
-int64_t TransferEngineBase::NotifyForRead(
+int64_t KVCacheManagerWithTransfer::NotifyForRead(
     const std::string& req_id, uint64_t uuid,
     const std::vector<int64_t>& block_ids) {
   const auto register_start = std::chrono::steady_clock::now();
@@ -437,7 +467,7 @@ int64_t TransferEngineBase::NotifyForRead(
   return static_cast<int64_t>(uuid);
 }
 
-int64_t TransferEngineBase::StartRead(
+int64_t KVCacheManagerWithTransfer::StartRead(
     const std::string& req_id, uint64_t uuid,
     const std::string& remote_endpoint,
     const std::vector<int64_t>& remote_block_ids,
@@ -544,11 +574,10 @@ int64_t TransferEngineBase::StartRead(
           if (overlap_h2d) {
             h2d_segments =
                 static_cast<int64_t>(load_plan.h2d_copy.sizes.size());
-            on_block_received =
-                [&](size_t layer_idx, size_t shard_idx, int /*block_id*/,
-                    size_t /*size_bytes*/) -> absl::Status {
-              const size_t span_idx = layer_idx * kv_transfer_->num_shards() +
-                                      shard_idx;
+            on_block_received = [&](size_t layer_idx, size_t shard_idx,
+                                    int /*block_id*/,
+                                    size_t /*size_bytes*/) -> absl::Status {
+              const size_t span_idx = layer_idx * num_shards() + shard_idx;
               if (span_idx >= local_spans.size()) {
                 return absl::OutOfRangeError(
                     "received block layer or shard out of range");
@@ -571,9 +600,8 @@ int64_t TransferEngineBase::StartRead(
                 h2d_started_at = issue_one_start;
               }
               absl::StatusOr<raiden::PjRtCopyFuture> future_or =
-                  kv_transfer_->H2dFromHostSlot(
-                      layer_idx, slot_idx, load_plan.num_blocks,
-                      h2d_transfer_spec, shard_idx);
+                  H2dFromHostSlot(layer_idx, slot_idx, load_plan.num_blocks,
+                                  h2d_transfer_spec, shard_idx);
               if (!future_or.ok()) {
                 return future_or.status();
               }
@@ -586,7 +614,7 @@ int64_t TransferEngineBase::StartRead(
             };
           }
           const auto h2h_start = std::chrono::steady_clock::now();
-          auto h2h_future_or = kv_transfer_->H2hReadExplicit(
+          auto h2h_future_or = H2hReadExplicit(
               EndpointWithPort(remote_endpoint, response.data_port),
               remote_staging_block_ids, local_compact_block_ids,
               explicit_dst_ptrs, parallelism,
@@ -698,7 +726,7 @@ int64_t TransferEngineBase::StartRead(
   return StorePending(std::move(op));
 }
 
-std::vector<int64_t> TransferEngineBase::PollTransferOps() {
+std::vector<int64_t> KVCacheManagerWithTransfer::PollTransferOps() {
   std::vector<int64_t> done;
   for (auto it = pending_.begin(); it != pending_.end();) {
     if (!it->second.future || it->second.future->IsReady()) {
@@ -714,7 +742,7 @@ std::vector<int64_t> TransferEngineBase::PollTransferOps() {
   return done;
 }
 
-void TransferEngineBase::WaitTransfer(int64_t op_id) {
+void KVCacheManagerWithTransfer::WaitTransfer(int64_t op_id) {
   auto it = pending_.find(op_id);
   if (it == pending_.end()) {
     throw std::invalid_argument("unknown Raiden transfer op id");
@@ -730,7 +758,7 @@ void TransferEngineBase::WaitTransfer(int64_t op_id) {
 
 std::tuple<std::vector<std::string>, std::vector<std::string>,
            std::vector<std::string>>
-TransferEngineBase::CompleteReadRaw() {
+KVCacheManagerWithTransfer::CompleteReadRaw() {
   std::vector<std::string> done_sending;
   std::vector<std::string> done_recving;
   std::vector<std::string> failed_recving;
@@ -757,31 +785,7 @@ TransferEngineBase::CompleteReadRaw() {
   return {done_sending, done_recving, failed_recving};
 }
 
-StageResult TransferEngineBase::IssueD2H(
-    int64_t slot_idx, int64_t num_blocks,
-    const std::vector<int64_t>& block_ids) {
-  if (num_blocks != static_cast<int64_t>(block_ids.size())) {
-    throw std::invalid_argument("num_blocks must match len(block_ids)");
-  }
-  CopySpec copy_spec = Offsets(block_ids, /*source_is_compact=*/false);
-  kv_cache::KVCacheCopySpec transfer_spec = ToKVCacheCopySpec(copy_spec);
-  std::vector<kv_cache::KVCacheHostSpan> host_spans =
-      LayerSpans(slot_idx, num_blocks);
-  auto future = std::make_shared<TransferFuture>();
-  int64_t total_bytes = 0;
-  for (size_t i = 0; i < kv_transfer_->num_layers(); ++i) {
-    total_bytes += static_cast<int64_t>(host_spans[i].nbytes);
-    future->Add(ValueOrThrow(
-        "Failed to issue D2H transfer",
-        kv_transfer_->D2hToHostSlot(i, slot_idx, num_blocks, transfer_spec)));
-  }
-  return {.future = std::move(future),
-          .host_spans = std::move(host_spans),
-          .total_bytes = total_bytes,
-          .copy_segments = static_cast<int64_t>(copy_spec.sizes.size())};
-}
-
-StageResult TransferEngineBase::IssueH2D(
+StageResult KVCacheManagerWithTransfer::IssueH2D(
     int64_t slot_idx, int64_t num_blocks,
     const std::vector<int64_t>& local_block_ids) {
   if (num_blocks != static_cast<int64_t>(local_block_ids.size())) {
@@ -793,11 +797,12 @@ StageResult TransferEngineBase::IssueH2D(
       LayerSpans(slot_idx, num_blocks);
   auto future = std::make_shared<TransferFuture>();
   int64_t total_bytes = 0;
-  for (size_t i = 0; i < kv_transfer_->num_layers(); ++i) {
-    total_bytes += static_cast<int64_t>(host_spans[i].nbytes);
-    future->Add(ValueOrThrow(
-        "Failed to issue H2D transfer",
-        kv_transfer_->H2dFromHostSlot(i, slot_idx, num_blocks, transfer_spec)));
+  for (const kv_cache::KVCacheHostSpan& span : host_spans) {
+    total_bytes += static_cast<int64_t>(span.nbytes);
+    future->Add(
+        ValueOrThrow("Failed to issue H2D transfer",
+                     H2dFromHostSlot(span.layer_idx, slot_idx, num_blocks,
+                                     transfer_spec, span.shard_idx)));
   }
   return {.future = std::move(future),
           .host_spans = std::move(host_spans),
@@ -805,56 +810,39 @@ StageResult TransferEngineBase::IssueH2D(
           .copy_segments = static_cast<int64_t>(copy_spec.sizes.size())};
 }
 
-CommitResult TransferEngineBase::CommitH2DRaw(
-    int64_t slot_idx, int64_t num_blocks,
-    const std::vector<int64_t>& local_block_ids) {
-  if (num_blocks != static_cast<int64_t>(local_block_ids.size())) {
-    throw std::invalid_argument("num_blocks must match len(local_block_ids)");
-  }
-  auto t0 = std::chrono::steady_clock::now();
-  StageResult result = IssueH2D(slot_idx, num_blocks, local_block_ids);
-  auto t_issued = std::chrono::steady_clock::now();
-  result.future->Await();
-  auto t_done = std::chrono::steady_clock::now();
-  return {.duration_issue_ms = DurationMs(t0, t_issued),
-          .duration_wait_ms = DurationMs(t_issued, t_done),
-          .duration_total_ms = DurationMs(t0, t_done),
-          .total_bytes = result.total_bytes};
-}
-
-std::vector<kv_cache::KVCacheHostSpan> TransferEngineBase::LayerSpans(
+std::vector<kv_cache::KVCacheHostSpan> KVCacheManagerWithTransfer::LayerSpans(
     int64_t slot_idx, int64_t num_blocks) {
-  if (!kv_transfer_) {
+  if (num_layers() == 0) {
     throw std::runtime_error("KV cache manager is not registered");
   }
   if (num_blocks < 0 || num_blocks > max_blocks_) {
     throw std::out_of_range("num_blocks out of range");
   }
   std::vector<kv_cache::KVCacheHostSpan> spans;
-  spans.reserve(kv_transfer_->num_layers());
-  for (size_t layer_idx = 0; layer_idx < kv_transfer_->num_layers();
-       ++layer_idx) {
-    spans.push_back(
-        ValueOrThrow("Failed to get KVCacheManager host staging span",
-                     kv_transfer_->HostSpan(layer_idx, /*shard_idx=*/0,
-                                            slot_idx, num_blocks)));
+  spans.reserve(num_layers() * num_shards());
+  for (size_t layer_idx = 0; layer_idx < num_layers(); ++layer_idx) {
+    for (size_t shard_idx = 0; shard_idx < num_shards(); ++shard_idx) {
+      spans.push_back(
+          ValueOrThrow("Failed to get KVCacheManager host staging span",
+                       HostSpan(layer_idx, shard_idx, slot_idx, num_blocks)));
+    }
   }
   return spans;
 }
 
-void TransferEngineBase::InitializeSlotPool(int64_t num_slots) {
+void KVCacheManagerWithTransfer::InitializeSlotPool(int64_t num_slots) {
   free_slots_.clear();
   for (int64_t slot = 0; slot < num_slots; ++slot) {
     free_slots_.push_back(slot);
   }
 }
 
-int64_t TransferEngineBase::AcquireSlot() {
+int64_t KVCacheManagerWithTransfer::AcquireSlot() {
   std::lock_guard<std::mutex> lock(mu_);
   return AcquireSlotLocked();
 }
 
-int64_t TransferEngineBase::AcquireSlotLocked() {
+int64_t KVCacheManagerWithTransfer::AcquireSlotLocked() {
   if (free_slots_.empty()) {
     throw std::runtime_error("Raiden host slot pool exhausted");
   }
@@ -863,12 +851,12 @@ int64_t TransferEngineBase::AcquireSlotLocked() {
   return slot;
 }
 
-void TransferEngineBase::ReleaseSlotLocked(int64_t slot_idx) {
+void KVCacheManagerWithTransfer::ReleaseSlotLocked(int64_t slot_idx) {
   if (slot_idx < 0) return;
   free_slots_.push_back(slot_idx);
 }
 
-void TransferEngineBase::ReleaseEntrySlotLocked(
+void KVCacheManagerWithTransfer::ReleaseEntrySlotLocked(
     const std::shared_ptr<SendEntry>& entry) {
   if (!entry || entry->slot_idx < 0 || entry->slot_released) return;
   RemoveStagingReadinessLocked(entry->slot_idx);
@@ -876,14 +864,14 @@ void TransferEngineBase::ReleaseEntrySlotLocked(
   entry->slot_released = true;
 }
 
-std::shared_ptr<TransferEngineBase::StagingReadinessState>
-TransferEngineBase::CreateStagingReadiness(int64_t slot_idx,
-                                           int64_t num_blocks) {
+std::shared_ptr<KVCacheManagerWithTransfer::StagingReadinessState>
+KVCacheManagerWithTransfer::CreateStagingReadiness(int64_t slot_idx,
+                                                   int64_t num_blocks) {
   auto state = std::make_shared<StagingReadinessState>();
   state->slot_idx = slot_idx;
   state->num_blocks = num_blocks;
-  state->num_layers = kv_transfer_->num_layers();
-  state->num_shards = kv_transfer_->num_shards();
+  state->num_layers = num_layers();
+  state->num_shards = num_shards();
   state->layers.resize(state->num_layers * state->num_shards);
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -892,7 +880,7 @@ TransferEngineBase::CreateStagingReadiness(int64_t slot_idx,
   return state;
 }
 
-void TransferEngineBase::MarkStagingLayerReady(
+void KVCacheManagerWithTransfer::MarkStagingLayerReady(
     const std::shared_ptr<StagingReadinessState>& state, size_t layer_idx,
     size_t shard_idx, absl::Status status) {
   if (!state) return;
@@ -906,7 +894,8 @@ void TransferEngineBase::MarkStagingLayerReady(
   state->cv.notify_all();
 }
 
-void TransferEngineBase::RemoveStagingReadinessLocked(int64_t slot_idx) {
+void KVCacheManagerWithTransfer::RemoveStagingReadinessLocked(
+    int64_t slot_idx) {
   auto it = staging_readiness_.find(slot_idx);
   if (it == staging_readiness_.end()) return;
   std::shared_ptr<StagingReadinessState> state = it->second;
@@ -923,9 +912,8 @@ void TransferEngineBase::RemoveStagingReadinessLocked(int64_t slot_idx) {
   state->cv.notify_all();
 }
 
-absl::Status TransferEngineBase::WaitForStagingBlockRead(size_t layer_idx,
-                                                         size_t shard_idx,
-                                                         int block_id) {
+absl::Status KVCacheManagerWithTransfer::WaitForStagingBlockRead(
+    size_t layer_idx, size_t shard_idx, int block_id) {
   if (block_id < 0 || max_blocks_ <= 0) {
     return absl::OkStatus();
   }
@@ -957,7 +945,7 @@ absl::Status TransferEngineBase::WaitForStagingBlockRead(size_t layer_idx,
   return state->layers[layer_state_idx].status;
 }
 
-void TransferEngineBase::StartControlServer() {
+void KVCacheManagerWithTransfer::StartControlServer() {
   control_fd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (control_fd_ < 0) {
     throw std::runtime_error("control socket() failed: " +
@@ -999,7 +987,7 @@ void TransferEngineBase::StartControlServer() {
   control_thread_ = std::thread([this]() { ControlServerLoop(); });
 }
 
-void TransferEngineBase::StopControlServer() {
+void KVCacheManagerWithTransfer::StopControlServer() {
   stopping_ = true;
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -1030,7 +1018,7 @@ void TransferEngineBase::StopControlServer() {
   }
 }
 
-void TransferEngineBase::ControlServerLoop() {
+void KVCacheManagerWithTransfer::ControlServerLoop() {
   while (!stopping_) {
     pollfd pfd;
     pfd.fd = control_fd_;
@@ -1054,7 +1042,7 @@ void TransferEngineBase::ControlServerLoop() {
   }
 }
 
-void TransferEngineBase::HandleControlConnection(int fd) {
+void KVCacheManagerWithTransfer::HandleControlConnection(int fd) {
   try {
     ControlRequestHeader req;
     CheckStatus("control request header read",
@@ -1083,8 +1071,8 @@ void TransferEngineBase::HandleControlConnection(int fd) {
   }
 }
 
-void TransferEngineBase::ProcessPullStream(int fd,
-                                           const ControlRequestHeader& req) {
+void KVCacheManagerWithTransfer::ProcessPullStream(
+    int fd, const ControlRequestHeader& req) {
   const auto pull_start = std::chrono::steady_clock::now();
   std::shared_ptr<SendEntry> entry;
   const auto wait_producer_start = std::chrono::steady_clock::now();
@@ -1104,7 +1092,7 @@ void TransferEngineBase::ProcessPullStream(int fd,
   if (stopping_) return;
   if (!entry) {
     throw std::runtime_error(
-        "TransferEngineBase is stopping during wait for send entry");
+        "KVCacheManagerWithTransfer is stopping during wait for send entry");
   }
 
   const auto parse_start = std::chrono::steady_clock::now();
@@ -1134,9 +1122,8 @@ void TransferEngineBase::ProcessPullStream(int fd,
   for (const kv_cache::KVCacheHostSpan& span : host_spans) {
     d2h_total_bytes += static_cast<int64_t>(span.nbytes);
     absl::StatusOr<raiden::PjRtCopyFuture> future_or =
-        kv_transfer_->D2hToHostSlot(span.layer_idx, slot_idx,
-                                    entry->num_blocks, d2h_transfer_spec,
-                                    span.shard_idx);
+        D2hToHostSlot(span.layer_idx, slot_idx, entry->num_blocks,
+                      d2h_transfer_spec, span.shard_idx);
     if (!future_or.ok()) {
       MarkStagingLayerReady(readiness, span.layer_idx, span.shard_idx,
                             future_or.status());
@@ -1210,15 +1197,15 @@ void TransferEngineBase::ProcessPullStream(int fd,
   EmitTimingLog(timing.str());
 }
 
-std::string TransferEngineBase::EndpointWithPort(const std::string& endpoint,
-                                                 int port) const {
+std::string KVCacheManagerWithTransfer::EndpointWithPort(
+    const std::string& endpoint, int port) const {
   auto [host, ignored_port] = SplitEndpoint(endpoint);
   (void)ignored_port;
   return host + ":" + std::to_string(port);
 }
 
-void TransferEngineBase::AckRemote(const std::string& remote_endpoint,
-                                   uint64_t uuid) {
+void KVCacheManagerWithTransfer::AckRemote(const std::string& remote_endpoint,
+                                           uint64_t uuid) {
   int control_fd = ConnectTcp(remote_endpoint);
   auto control_cleanup =
       std::unique_ptr<int, void (*)(int*)>(&control_fd, [](int* p) {
@@ -1234,8 +1221,8 @@ void TransferEngineBase::AckRemote(const std::string& remote_endpoint,
   (void)ReadControlResponseHeader(control_fd);
 }
 
-TransferEngineBase::ControlResponseHeader
-TransferEngineBase::ReadControlResponseHeader(int fd) {
+KVCacheManagerWithTransfer::ControlResponseHeader
+KVCacheManagerWithTransfer::ReadControlResponseHeader(int fd) {
   ControlResponseHeader response;
   CheckStatus("control response read",
               ReadExact(fd, &response, sizeof(response)));
@@ -1253,7 +1240,7 @@ TransferEngineBase::ReadControlResponseHeader(int fd) {
   return response;
 }
 
-void TransferEngineBase::AckSend(uint64_t uuid) {
+void KVCacheManagerWithTransfer::AckSend(uint64_t uuid) {
   std::shared_ptr<SendEntry> entry;
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -1280,52 +1267,35 @@ void TransferEngineBase::AckSend(uint64_t uuid) {
   EmitTimingLog(timing.str());
 }
 
-int64_t TransferEngineBase::StorePending(PendingOperation op) {
+int64_t KVCacheManagerWithTransfer::StorePending(PendingOperation op) {
   const int64_t op_id = next_op_id_++;
   pending_[op_id] = std::move(op);
   return op_id;
 }
 
-std::chrono::steady_clock::time_point TransferEngineBase::DeadlineFromNow()
-    const {
+std::chrono::steady_clock::time_point
+KVCacheManagerWithTransfer::DeadlineFromNow() const {
   return std::chrono::steady_clock::now() +
          std::chrono::milliseconds(static_cast<int64_t>(timeout_s_ * 1000.0));
 }
 
-int64_t TransferEngineBase::CountCopySegmentsForTesting(
-    const std::vector<int64_t>& block_ids) const {
-  return static_cast<int64_t>(
-      Offsets(block_ids, /*source_is_compact=*/false).sizes.size());
-}
-
-CopyPlan TransferEngineBase::BuildProducerCopyPlanForTesting(
-    const std::vector<int64_t>& block_ids) const {
-  return BuildProducerCopyPlan(block_ids);
-}
-
-CopyPlan TransferEngineBase::BuildLoadCopyPlanForTesting(
-    const std::vector<int64_t>& remote_block_ids,
-    const std::vector<int64_t>& local_block_ids) const {
-  return BuildLoadCopyPlan(remote_block_ids, local_block_ids);
-}
-
-void TransferEngineBase::ConfigureDataPortFromKvTransfer() {
-  if (!kv_transfer_) {
+void KVCacheManagerWithTransfer::ConfigureDataPortFromKvTransfer() {
+  if (num_layers() == 0) {
     local_data_port_ = 0;
     return;
   }
-  std::optional<int> data_port = kv_transfer_->local_port();
+  std::optional<int> data_port = local_port();
   if (!data_port.has_value()) {
     throw std::runtime_error("KVCacheManager BlockTransport is not running");
   }
   local_data_port_ = *data_port;
-  kv_transfer_->SetBlockReadinessCallback(
+  SetBlockReadinessCallback(
       [this](size_t layer_idx, size_t shard_idx, int block_id) {
         return WaitForStagingBlockRead(layer_idx, shard_idx, block_id);
       });
 }
 
-uint64_t TransferEngineBase::StagingBlockBase(int64_t slot_idx) const {
+uint64_t KVCacheManagerWithTransfer::StagingBlockBase(int64_t slot_idx) const {
   if (slot_idx < 0) {
     throw std::out_of_range("slot_idx out of range");
   }
@@ -1341,8 +1311,8 @@ uint64_t TransferEngineBase::StagingBlockBase(int64_t slot_idx) const {
   return static_cast<uint64_t>(base);
 }
 
-std::vector<int> TransferEngineBase::ContiguousBlockIds(uint64_t base,
-                                                        uint64_t count) const {
+std::vector<int> KVCacheManagerWithTransfer::ContiguousBlockIds(
+    uint64_t base, uint64_t count) const {
   if (count > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
     throw std::out_of_range("block count exceeds int range");
   }

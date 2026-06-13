@@ -344,7 +344,7 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
 
     done = False
     for _ in range(50):
-      _, done_recving, failed_recving = consumer.complete_read()
+      _, done_recving, failed_recving = consumer.poll_stats()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
@@ -362,7 +362,7 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
 
     done_prod = False
     for _ in range(50):
-      done_sending, _, _ = producer.complete_read()
+      done_sending, _, _ = producer.poll_stats()
       if req_id in done_sending:
         done_prod = True
         break
@@ -422,7 +422,7 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     requested_remote = list(reversed(remote_blocks))
     local_blocks = list(range(len(remote_blocks)))
 
-    producer.notify_for_read(req_id, uuid, remote_blocks)
+    producer.register_read(req_id, uuid, remote_blocks)
 
     remote_endpoint = f"127.0.0.1:{port}"
     consumer.start_read(
@@ -435,7 +435,7 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
 
     done = False
     for _ in range(100):
-      _, done_recving, failed_recving = consumer.complete_read()
+      _, done_recving, failed_recving = consumer.poll_stats()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
@@ -455,7 +455,7 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
 
     done_prod = False
     for _ in range(50):
-      done_sending, _, _ = producer.complete_read()
+      done_sending, _, _ = producer.poll_stats()
       if req_id in done_sending:
         done_prod = True
         break
@@ -510,7 +510,7 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
 
     req_id = "test_req_parallel"
     uuid = 77777
-    producer.notify_for_read(req_id, uuid, [0, 1])
+    producer.register_read(req_id, uuid, [0, 1])
 
     remote_endpoint = f"127.0.0.1:{port}"
     consumer.start_read(
@@ -524,7 +524,7 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
 
     done = False
     for _ in range(50):
-      _, done_recving, failed_recving = consumer.complete_read()
+      _, done_recving, failed_recving = consumer.poll_stats()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
@@ -539,7 +539,7 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
 
     done_prod = False
     for _ in range(50):
-      done_sending, _, _ = producer.complete_read()
+      done_sending, _, _ = producer.poll_stats()
       if req_id in done_sending:
         done_prod = True
         break

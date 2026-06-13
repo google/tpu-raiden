@@ -37,12 +37,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from api.jax.transfer_engine import TransferEngine
+from api.jax.kv_cache_manager import KVCacheManager
 
 os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 
 
-class TransferEngineJaxTest(parameterized.TestCase):
+class KVCacheManagerJaxTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -100,7 +100,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
     shape = (4, 128, 8, 8, 128)
     kv_caches = [jax.device_put(jnp.zeros(shape), tpu_sharding)]
 
-    engine = TransferEngine(
+    engine = KVCacheManager(
         kv_caches=kv_caches,
         local_control_port=0,
         max_blocks=4,
@@ -135,7 +135,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = TransferEngine(
+    producer = KVCacheManager(
         kv_caches=src_caches,
         local_control_port=0,
         max_blocks=2,
@@ -143,7 +143,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
         unsafe_skip_buffer_lock=self.skip_lock,
     )
 
-    consumer = TransferEngine(
+    consumer = KVCacheManager(
         kv_caches=dst_caches,
         local_control_port=0,
         max_blocks=2,
@@ -156,7 +156,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
 
     req_id = "test_req_poll_jax"
     uuid = 12345
-    producer.notify_for_read(req_id, uuid, [0, 1])
+    producer.register_read(req_id, uuid, [0, 1])
 
     remote_endpoint = f"127.0.0.1:{port}"
     consumer.start_read(
@@ -170,7 +170,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
     # Poll until consumer is done receiving
     done = False
     for _ in range(50):
-      _, done_recving, failed_recving = consumer.complete_read()
+      _, done_recving, failed_recving = consumer.poll_stats()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
@@ -187,7 +187,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
     # Poll producer until it's done sending
     done_prod = False
     for _ in range(50):
-      done_sending, _, _ = producer.complete_read()
+      done_sending, _, _ = producer.poll_stats()
       if req_id in done_sending:
         done_prod = True
         break
@@ -221,7 +221,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = TransferEngine(
+    producer = KVCacheManager(
         kv_caches=src_caches,
         local_control_port=0,
         max_blocks=3,
@@ -229,7 +229,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
         unsafe_skip_buffer_lock=self.skip_lock,
     )
 
-    consumer = TransferEngine(
+    consumer = KVCacheManager(
         kv_caches=dst_caches,
         local_control_port=0,
         max_blocks=3,
@@ -242,7 +242,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
 
     req_id = "test_req_non_contig"
     uuid = 54321
-    producer.notify_for_read(req_id, uuid, [0, 2])
+    producer.register_read(req_id, uuid, [0, 2])
 
     remote_endpoint = f"127.0.0.1:{port}"
     consumer.start_read(
@@ -255,7 +255,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
 
     done = False
     for _ in range(50):
-      _, done_recving, failed_recving = consumer.complete_read()
+      _, done_recving, failed_recving = consumer.poll_stats()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
@@ -275,7 +275,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
 
     done_prod = False
     for _ in range(50):
-      done_sending, _, _ = producer.complete_read()
+      done_sending, _, _ = producer.poll_stats()
       if req_id in done_sending:
         done_prod = True
         break
@@ -309,7 +309,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = TransferEngine(
+    producer = KVCacheManager(
         kv_caches=src_caches,
         local_control_port=0,
         max_blocks=2,
@@ -317,7 +317,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
         unsafe_skip_buffer_lock=self.skip_lock,
     )
 
-    consumer = TransferEngine(
+    consumer = KVCacheManager(
         kv_caches=dst_caches,
         local_control_port=0,
         max_blocks=2,
@@ -330,7 +330,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
 
     req_id = "test_req_reorder"
     uuid = 98765
-    producer.notify_for_read(req_id, uuid, [0, 1])
+    producer.register_read(req_id, uuid, [0, 1])
 
     remote_endpoint = f"127.0.0.1:{port}"
     consumer.start_read(
@@ -343,7 +343,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
 
     done = False
     for _ in range(50):
-      _, done_recving, failed_recving = consumer.complete_read()
+      _, done_recving, failed_recving = consumer.poll_stats()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
@@ -361,7 +361,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
 
     done_prod = False
     for _ in range(50):
-      done_sending, _, _ = producer.complete_read()
+      done_sending, _, _ = producer.poll_stats()
       if req_id in done_sending:
         done_prod = True
         break
@@ -395,7 +395,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = TransferEngine(
+    producer = KVCacheManager(
         kv_caches=src_caches,
         local_control_port=0,
         max_blocks=16,
@@ -403,7 +403,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
         unsafe_skip_buffer_lock=self.skip_lock,
     )
 
-    consumer = TransferEngine(
+    consumer = KVCacheManager(
         kv_caches=dst_caches,
         local_control_port=0,
         max_blocks=16,
@@ -421,7 +421,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
     requested_remote = list(reversed(remote_blocks))
     local_blocks = list(range(len(remote_blocks)))
 
-    producer.notify_for_read(req_id, uuid, remote_blocks)
+    producer.register_read(req_id, uuid, remote_blocks)
 
     remote_endpoint = f"127.0.0.1:{port}"
     consumer.start_read(
@@ -434,7 +434,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
 
     done = False
     for _ in range(100):
-      _, done_recving, failed_recving = consumer.complete_read()
+      _, done_recving, failed_recving = consumer.poll_stats()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
@@ -454,7 +454,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
 
     done_prod = False
     for _ in range(50):
-      done_sending, _, _ = producer.complete_read()
+      done_sending, _, _ = producer.poll_stats()
       if req_id in done_sending:
         done_prod = True
         break
@@ -488,7 +488,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = TransferEngine(
+    producer = KVCacheManager(
         kv_caches=src_caches,
         local_control_port=0,
         max_blocks=2,
@@ -496,7 +496,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
         unsafe_skip_buffer_lock=self.skip_lock,
     )
 
-    consumer = TransferEngine(
+    consumer = KVCacheManager(
         kv_caches=dst_caches,
         local_control_port=0,
         max_blocks=2,
@@ -509,7 +509,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
 
     req_id = "test_req_parallel"
     uuid = 77777
-    producer.notify_for_read(req_id, uuid, [0, 1])
+    producer.register_read(req_id, uuid, [0, 1])
 
     remote_endpoint = f"127.0.0.1:{port}"
     consumer.start_read(
@@ -523,7 +523,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
 
     done = False
     for _ in range(50):
-      _, done_recving, failed_recving = consumer.complete_read()
+      _, done_recving, failed_recving = consumer.poll_stats()
       if req_id in failed_recving:
         self.fail("Transfer failed")
       if req_id in done_recving:
@@ -538,7 +538,7 @@ class TransferEngineJaxTest(parameterized.TestCase):
 
     done_prod = False
     for _ in range(50):
-      done_sending, _, _ = producer.complete_read()
+      done_sending, _, _ = producer.poll_stats()
       if req_id in done_sending:
         done_prod = True
         break

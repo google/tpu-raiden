@@ -15,6 +15,7 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_JAX_KV_CACHE_MANAGER_H_
 #define THIRD_PARTY_TPU_RAIDEN_FRAMEWORKS_JAX_KV_CACHE_MANAGER_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <vector>
@@ -24,7 +25,6 @@
 #else
 namespace nanobind {
 struct list {
-  // Minimal dummy implementation to allow compilation and trivial destruction
   list() = default;
   ~list() = default;
   list(const list&) = default;
@@ -32,7 +32,7 @@ struct list {
 };
 }  // namespace nanobind
 #endif
-#include "kv_cache/kv_cache_manager_base.h"
+#include "core/kv_cache_manager_with_transfer.h"
 
 namespace xla {
 class PjRtBuffer;
@@ -47,11 +47,9 @@ struct UnpackedCache {
   nanobind::list device_arrays;
 };
 
-class KVCacheManager : public KVCacheManagerBase {
+class KVCacheManager : public KVCacheManagerWithTransfer {
  public:
-  using KVCacheManagerBase::KVCacheManagerBase;
-
-  // Standard Python list arrays unpack constructor E2E
+  // JAX sharded constructor E2E (cache-only by default)
   KVCacheManager(
       nanobind::list device_arrays, int block_size = 1,
       std::optional<int> local_port = std::nullopt,
@@ -59,14 +57,38 @@ class KVCacheManager : public KVCacheManagerBase {
       std::optional<std::vector<uintptr_t>> external_host_ptrs = std::nullopt,
       bool unsafe_skip_buffer_lock = false, int parallelism = 1);
 
+  // New transfer-enabled constructor (flat list of arrays, single shard per
+  // layer)
+  KVCacheManager(nanobind::list kv_caches, int64_t tp_rank,
+                 int64_t local_control_port, int64_t max_blocks,
+                 int64_t num_slots, double timeout_s,
+                 bool unsafe_skip_buffer_lock);
+
+  // FFI metadata constructor (cache-only by default)
+  KVCacheManager(size_t num_layers, size_t num_shards, size_t slice_byte_size,
+                 int block_size, std::optional<int> local_port,
+                 std::optional<int> host_blocks_to_allocate,
+                 int parallelism = 1);
+
   ~KVCacheManager() override;
 
+  nanobind::list kv_caches() const {
+    return device_arrays_.value_or(nanobind::list());
+  }
+
  private:
+  // Private constructor for sharded (cache-only)
   KVCacheManager(UnpackedCache&& cache, int block_size,
                  std::optional<int> local_port,
                  std::optional<int> host_blocks_to_allocate,
                  std::optional<std::vector<uintptr_t>> external_host_ptrs,
                  bool unsafe_skip_buffer_lock, int parallelism);
+
+  // Private constructor for flat (transfer-enabled)
+  KVCacheManager(UnpackedCache&& cache, int64_t tp_rank,
+                 int64_t local_control_port, int64_t max_blocks,
+                 int64_t num_slots, double timeout_s,
+                 bool unsafe_skip_buffer_lock);
 
   std::optional<nanobind::list> device_arrays_;
 };

@@ -36,8 +36,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":utils",
+        "//core:kv_cache_manager_with_transfer",
         "//core:utils",
-        "//kv_cache:kv_cache_manager_base",
         "@nanobind",
     ],
 )
@@ -116,8 +116,8 @@ nanobind_extension(
     deps = [
         ":kv_cache_manager_jax",
         ":nb_statusor",
+        "//core:kv_cache_manager_with_transfer",
         "//core:raw_transfer_core",
-        "//kv_cache:kv_cache_manager_base",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@nanobind",
@@ -354,7 +354,7 @@ cc_library(
     defines = ["WITHOUT_PYTHON"],
     features = ["-use_header_modules"],
     deps = [
-        "//kv_cache:kv_cache_manager_base",
+        "//core:kv_cache_manager_with_transfer",
         "@xla//xla/pjrt:pjrt_client",
     ],
 )
@@ -507,33 +507,6 @@ cc_test(
         "@xla//xla/tsl/platform:statusor",
         "@xla//xla/tsl/platform:test",
         "@xla//xla/tsl/platform:test_main",
-    ],
-)
-
-nanobind_extension(
-    name = "_transfer_engine",
-    srcs = [
-        "transfer_engine.cc",
-    ],
-    copts = [
-        "-fexceptions",
-        "-march=x86-64-v2",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":kv_cache_manager_jax",
-        "//core:transfer_engine_base",
-        "//kv_cache:kv_cache_manager_base",
-        "@nanobind",
-        "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt:raw_buffer",
-        "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
-        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_extension_hdrs",
-        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",
-        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
     ],
 )
 

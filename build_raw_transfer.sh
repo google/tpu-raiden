@@ -125,11 +125,9 @@ TORCH_REPO_ENV_FLAGS=()
 if [ "$BUILD_JAX" = true ]; then
   echo "Configuring build for JAX..."
   BAZEL_TARGETS+=(
-    "//frameworks/jax:_raw_transfer"
     "//frameworks/jax:_kv_cache_manager"
     "//frameworks/jax:_kv_cache_manager_ffi"
     "//frameworks/jax:_weight_synchronizer"
-    "//frameworks/jax:_transfer_engine"
   )
 else
   DEFINE_FLAGS+=" --define with_jax=false"
@@ -161,10 +159,8 @@ PY
   DEFINE_FLAGS+=" --define=TORCH_SOURCE=local"
   TORCH_REPO_ENV_FLAGS+=("--repo_env=TORCH_SOURCE=${TORCH_SOURCE}")
   BAZEL_TARGETS+=(
-    "//frameworks/torch:_torch_raw_transfer"
     "//frameworks/torch:_kv_cache_manager"
     "//frameworks/torch:_weight_synchronizer"
-    "//frameworks/torch:_transfer_engine"
   )
 else
   DEFINE_FLAGS+=" --define with_torch=false"
@@ -202,21 +198,15 @@ echo "=== Building targets with Bazel ==="
 echo "=== Copying compiled shared libraries to source directory ==="
 if [ "$BUILD_JAX" = true ]; then
   echo "Copying JAX artifacts..."
-  # Copy compiled nanobind .so extensions to frameworks/jax/ to match Python imports
-  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_raw_transfer.so" "${WORKSPACE_DIR}/frameworks/jax/"
   cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_kv_cache_manager.so" "${WORKSPACE_DIR}/frameworks/jax/"
   cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_kv_cache_manager_ffi.so" "${WORKSPACE_DIR}/frameworks/jax/"
   cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_weight_synchronizer.so" "${WORKSPACE_DIR}/frameworks/jax/"
-  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/jax/_transfer_engine.so" "${WORKSPACE_DIR}/frameworks/jax/"
 fi
 
 if [ "$BUILD_TORCH" = true ]; then
   echo "Copying Torch artifacts..."
-  # Copy compiled nanobind .so extensions to frameworks/torch/ to match Python imports
-  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/torch/_torch_raw_transfer.so" "${WORKSPACE_DIR}/frameworks/torch/"
   cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/torch/_kv_cache_manager.so" "${WORKSPACE_DIR}/frameworks/torch/"
   cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/torch/_weight_synchronizer.so" "${WORKSPACE_DIR}/frameworks/torch/"
-  cp -f "${WORKSPACE_DIR}/bazel-bin/frameworks/torch/_transfer_engine.so" "${WORKSPACE_DIR}/frameworks/torch/"
 fi
 
 
