@@ -71,12 +71,12 @@ cc_library(
 )
 
 cc_library(
-    name = "kv_cache_store",
+    name = "kv_cache_store_internal",
     srcs = [
-        "kv_cache_store.cc",
+        "kv_cache_store_internal.cc",
     ],
     hdrs = [
-        "kv_cache_store.h",
+        "kv_cache_store_internal.h",
     ],
     copts = [
         "-fno-strict-aliasing",
@@ -105,8 +105,8 @@ cc_library(
 # JAX test targets successfully relocated to api/jax/BUILD.
 
 cc_test(
-    name = "kv_cache_store_test",
-    srcs = ["kv_cache_store_test.cc"],
+    name = "kv_cache_store_internal_test",
+    srcs = ["kv_cache_store_internal_test.cc"],
     copts = [
         "-fno-strict-aliasing",
         "-fexceptions",
@@ -121,7 +121,7 @@ cc_test(
     ],
     deps = [
         ":kv_cache_manager_base",
-        ":kv_cache_store",
+        ":kv_cache_store_internal",
         "//core:raw_transfer_core",
         "//core:tpu_pjrt_manager",
         "@xla//xla/pjrt:pjrt_client",
@@ -146,6 +146,45 @@ cc_test(
     srcs = ["lru_cache_test.cc"],
     deps = [
         ":lru_cache",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "kv_cache_store",
+    srcs = ["kv_cache_store.cc"],
+    hdrs = ["kv_cache_store.h"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":lru_cache",
+        "//core:raw_transfer_core",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "kv_cache_store_test",
+    srcs = ["kv_cache_store_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":kv_cache_store",
+        "//core:raw_transfer_core",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],

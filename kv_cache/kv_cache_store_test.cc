@@ -14,172 +14,106 @@
 
 #include "kv_cache/kv_cache_store.h"
 
-#include "xla/tsl/platform/test.h"
-
 #include <cstdint>
-#include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
-#include "xla/pjrt/pjrt_client.h"
-#include "xla/tsl/platform/statusor.h"
+#include <gtest/gtest.h>
+#include "absl/status/statusor.h"
 #include "core/raw_transfer_core.h"
-#include "core/tpu_pjrt_manager.h"
-#include "kv_cache/kv_cache_manager_base.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
 namespace {
 
-using ::absl_testing::IsOk;
+TEST(KVCacheStoreTest, BasicTests) {
+  KVCacheStore controller(50);
+  EXPECT_EQ(controller.capacity(), 50);
 
-TEST(KVCacheStoreTest, LocalInsertAndLookup) {
-  TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
-                          TpuPjrtManager::GetDefault());
+  std::vector<uint64_t> hashes = {4001, 4002};
+  std::vector<std::vector<RaidenId>> slices = {
+      {RaidenId{"inference_server", "0", "kv_cache", 0}},
+      {RaidenId{"inference_server", "1", "kv_cache", 0}}};
 
-  // Rank 3 shape: {2, 32, 32} of float.
-  std::vector<int64_t> shape_dims = {2, 32, 32};
-  int64_t elements_per_slice = 32 * 32;
-  int64_t total_elements = 2 * elements_per_slice;
+  // 1. Insert
+  EXPECT_TRUE(controller.Insert(hashes, slices, true));
+  EXPECT_FALSE(controller.Insert(hashes, slices, true));  // Already exists
 
-  // Initialize buffer: slice 0 has 0, 1, 2... slice 1 has -1.0f
-  std::vector<float> host_data(total_elements, -1.0f);
-  for (int i = 0; i < elements_per_slice; ++i) {
-    host_data[i] = static_cast<float>(i);
-  }
+  // 2. Lookup with a partial miss at the end
+  std::vector<uint64_t> hashes_with_miss = {4001, 4002, 4003};
+  auto lookup_res = controller.Lookup(hashes_with_miss);
+  ASSERT_TRUE(lookup_res.ok());
+  EXPECT_EQ(lookup_res->size(), 2);
+  EXPECT_EQ((*lookup_res)[0].first, 4001);
+  EXPECT_EQ((*lookup_res)[0].second.size(), 1);
 
-  TF_ASSERT_OK_AND_ASSIGN(
-      std::unique_ptr<xla::PjRtBuffer> buffer,
-      pjrt_manager->BufferFromHost(host_data.data(), xla::F32, shape_dims));
+  // Lookup with an early miss
+  std::vector<uint64_t> hashes_early_miss = {4001, 4003, 4002};
+  auto lookup_res_early = controller.Lookup(hashes_early_miss);
+  ASSERT_TRUE(lookup_res_early.ok());
+  EXPECT_EQ(lookup_res_early->size(), 1);
+  EXPECT_EQ((*lookup_res_early)[0].first, 4001);
 
-  ASSERT_THAT(buffer->GetReadyFuture().Await(), IsOk());
-
-  auto make_manager = [&](xla::PjRtBuffer* buf) {
-    std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers = {{buf}};
-    return std::make_unique<kv_cache::KVCacheManagerBase>(
-        layer_buffers, /*block_size=*/1, /*local_port=*/std::nullopt,
-        /*host_blocks_to_allocate=*/4,
-        /*external_host_ptrs=*/std::nullopt,
-        /*unsafe_skip_buffer_lock=*/true);
-  };
-
-  // Create KVCacheStore (local only, capacity = 2)
-  auto store = std::make_unique<KVCacheStore>(/*block_size=*/1, /*capacity=*/2);
-
-  // 1. Insert slice 0 (hash 100) into store using a fresh manager
-  auto kv_manager1 = make_manager(buffer.get());
-  ASSERT_THAT(store->Insert(/*block_hashes=*/{100}, *kv_manager1,
-                            /*src_offsets_major_dim=*/{0},
-                            /*copy_sizes_major_dim=*/{1}),
-              IsOk());
-
-  // 2. Lookup hash 100 and fetch it into slice 1 using a fresh manager
-  auto kv_manager2 = make_manager(buffer.get());
-  TF_ASSERT_OK_AND_ASSIGN(
-      auto lookup_result,
-      store->LookupAndFetch(/*block_hashes=*/{100}, *kv_manager2,
-                            /*dst_offsets_major_dim=*/{1},
-                            /*copy_sizes_major_dim=*/{1}));
-
-  std::vector<bool> hits = lookup_result.first;
-  raiden::PjRtCopyFuture future = std::move(lookup_result.second);
-
-  ASSERT_EQ(hits.size(), 1);
-  EXPECT_TRUE(hits[0]);
-
-  // Await the fetch to complete
-  ASSERT_OK(future.Await().status());
-
-  // 3. Verify buffer content: slice 1 should now match slice 0 (0, 1, 2...)
-  TF_ASSERT_OK_AND_ASSIGN(auto literal, buffer->ToLiteral().Await());
-  auto read_back = literal->data<float>();
-  ASSERT_EQ(read_back.size(), total_elements);
-
-  for (int i = 0; i < elements_per_slice; ++i) {
-    EXPECT_EQ(read_back[i], static_cast<float>(i));
-  }
-  for (int i = elements_per_slice; i < total_elements; ++i) {
-    EXPECT_EQ(read_back[i], static_cast<float>(i - elements_per_slice));
-  }
+  // 3. Delete
+  controller.Delete(hashes, slices);
+  EXPECT_TRUE(controller.Insert(hashes, slices, true));  // Succesful again
 }
 
-TEST(KVCacheStoreTest, LruEviction) {
-  TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
-                          TpuPjrtManager::GetDefault());
+TEST(KVCacheStoreTest, PinAndRelease) {
+  KVCacheStore controller(2);
 
-  std::vector<int64_t> shape_dims = {2, 32, 32};
-  int64_t elements_per_slice = 32 * 32;
-  int64_t total_elements = 2 * elements_per_slice;
+  std::vector<uint64_t> hashes = {101, 102};
+  std::vector<std::vector<RaidenId>> slices = {
+      {RaidenId{"inference_server", "0", "kv_cache", 0}},
+      {RaidenId{"inference_server", "1", "kv_cache", 0}}};
 
-  std::vector<float> host_data(total_elements, 1.0f);
-  TF_ASSERT_OK_AND_ASSIGN(
-      std::unique_ptr<xla::PjRtBuffer> buffer,
-      pjrt_manager->BufferFromHost(host_data.data(), xla::F32, shape_dims));
+  EXPECT_TRUE(controller.Insert(hashes, slices, true));
 
-  ASSERT_THAT(buffer->GetReadyFuture().Await(), IsOk());
+  // Pin both
+  EXPECT_TRUE(controller.Pin(hashes));
+  EXPECT_EQ(controller.GetPinCount(101), 1);
+  EXPECT_EQ(controller.GetPinCount(102), 1);
 
-  auto make_manager = [&](xla::PjRtBuffer* buf) {
-    std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers = {{buf}};
-    return std::make_unique<kv_cache::KVCacheManagerBase>(
-        layer_buffers, /*block_size=*/1, /*local_port=*/std::nullopt,
-        /*host_blocks_to_allocate=*/4,
-        /*external_host_ptrs=*/std::nullopt,
-        /*unsafe_skip_buffer_lock=*/true);
-  };
+  // Inserting a third element should fail to evict because both existing items
+  // are pinned
+  std::vector<uint64_t> hash_3 = {103};
+  std::vector<std::vector<RaidenId>> slice_3 = {
+      {RaidenId{"inference_server", "2", "kv_cache", 0}}};
+  controller.Insert(hash_3, slice_3, true);
 
-  // Capacity = 2
-  auto store = std::make_unique<KVCacheStore>(/*block_size=*/1, /*capacity=*/2);
+  // Release 101
+  controller.Release({101});
+  EXPECT_EQ(controller.GetPinCount(101), 0);
 
-  // Insert hash 101 (slice 0)
-  auto kv_manager1 = make_manager(buffer.get());
-  ASSERT_THAT(store->Insert({101}, *kv_manager1, {0}, {1}), IsOk());
+  // Now inserting a fourth element (104) should successfully evict 101
+  std::vector<uint64_t> hash_4 = {104};
+  std::vector<std::vector<RaidenId>> slice_4 = {
+      {RaidenId{"inference_server", "3", "kv_cache", 0}}};
+  controller.Insert(hash_4, slice_4, true);
 
-  // Insert hash 102 (slice 1)
-  auto kv_manager2 = make_manager(buffer.get());
-  ASSERT_THAT(store->Insert({102}, *kv_manager2, {1}, {1}), IsOk());
+  // Lookup 101 should result in an immediate miss (return size 0 before 102)
+  EXPECT_EQ(controller.Lookup({101, 102})->size(), 0);
+  EXPECT_EQ(controller.Lookup({102})->size(), 1);
+}
 
-  // Both should be in cache
-  {
-    auto kv_manager3 = make_manager(buffer.get());
-    TF_ASSERT_OK_AND_ASSIGN(
-        auto res, store->LookupAndFetch({101}, *kv_manager3, {0}, {1}));
-    EXPECT_TRUE(res.first[0]);
-    ASSERT_OK(res.second.Await().status());
-  }
-  {
-    auto kv_manager4 = make_manager(buffer.get());
-    TF_ASSERT_OK_AND_ASSIGN(
-        auto res, store->LookupAndFetch({102}, *kv_manager4, {1}, {1}));
-    EXPECT_TRUE(res.first[0]);
-    ASSERT_OK(res.second.Await().status());
-  }
+TEST(KVCacheStoreTest, PartialPinRollback) {
+  KVCacheStore controller(2);
 
-  // Insert hash 103 (slice 0) -> should evict the least recently used (101)
-  auto kv_manager5 = make_manager(buffer.get());
-  ASSERT_THAT(store->Insert({103}, *kv_manager5, {0}, {1}), IsOk());
+  std::vector<uint64_t> hashes = {201, 202};
+  std::vector<std::vector<RaidenId>> slices = {
+      {RaidenId{"inference_server", "0", "kv_cache", 0}},
+      {RaidenId{"inference_server", "1", "kv_cache", 0}}};
 
-  // 101 should be miss, 102 and 103 should be hit
-  {
-    auto kv_manager6 = make_manager(buffer.get());
-    TF_ASSERT_OK_AND_ASSIGN(
-        auto res, store->LookupAndFetch({101}, *kv_manager6, {0}, {1}));
-    EXPECT_FALSE(res.first[0]);
-  }
-  {
-    auto kv_manager7 = make_manager(buffer.get());
-    TF_ASSERT_OK_AND_ASSIGN(
-        auto res, store->LookupAndFetch({102}, *kv_manager7, {1}, {1}));
-    EXPECT_TRUE(res.first[0]);
-    ASSERT_OK(res.second.Await().status());
-  }
-  {
-    auto kv_manager8 = make_manager(buffer.get());
-    TF_ASSERT_OK_AND_ASSIGN(
-        auto res, store->LookupAndFetch({103}, *kv_manager8, {0}, {1}));
-    EXPECT_TRUE(res.first[0]);
-    ASSERT_OK(res.second.Await().status());
-  }
+  EXPECT_TRUE(controller.Insert(hashes, slices, true));
+
+  // Attempt to pin a sequence with a missing hash (203)
+  EXPECT_FALSE(controller.Pin({201, 202, 203}));
+
+  // Confirm that 201 and 202 were completely reverted (pin count 0)
+  EXPECT_EQ(controller.GetPinCount(201), 0);
+  EXPECT_EQ(controller.GetPinCount(202), 0);
 }
 
 }  // namespace

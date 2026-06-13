@@ -83,6 +83,7 @@ class LRUCache {
     std::optional<std::pair<Key, Value>> evicted = std::nullopt;
     if (map_.size() >= capacity_) {
       evicted = Evict();
+      if (!evicted.has_value()) return std::nullopt;
     }
 
     // Insert new item at the front of the list (MRU)

@@ -97,6 +97,21 @@ TEST(LRUCacheTest, PinningProtectsAgainstEviction) {
   EXPECT_EQ(evicted_unpinned->first, 2);  // 3 was inserted after 2, so 2 is LRU
 }
 
+TEST(LRUCacheTest, InsertionRejectedWhenAllPinned) {
+  LRUCache<int, std::string> cache(2);
+
+  cache.Put(101, "one");
+  cache.Put(102, "two");
+
+  EXPECT_TRUE(cache.Pin(101));
+  EXPECT_TRUE(cache.Pin(102));
+
+  auto evicted = cache.Put(103, "three");
+  EXPECT_EQ(evicted, std::nullopt);
+  EXPECT_FALSE(cache.Contains(103));
+  EXPECT_EQ(cache.size(), 2);
+}
+
 TEST(LRUCacheTest, PeekDoesNotPromote) {
   LRUCache<int, std::string> cache(2);
 

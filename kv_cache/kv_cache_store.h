@@ -15,9 +15,7 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_KV_CACHE_KV_CACHE_STORE_H_
 #define THIRD_PARTY_TPU_RAIDEN_KV_CACHE_KV_CACHE_STORE_H_
 
-#include <atomic>
 #include <cstdint>
-#include <list>
 #include <memory>
 #include <string>
 #include <utility>
@@ -28,102 +26,77 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
 #include "core/raw_transfer_core.h"
-#include "kv_cache/global_registry/global_registry_client.h"
-#include "kv_cache/kv_cache_manager_base.h"
-#include "kv_cache/logical_block_manager.h"
-#include "transport/block_transport.h"
+#include "kv_cache/lru_cache.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
 
-class KVCacheStore : public tpu_raiden::transport::BlockTransportDelegate {
+// Represents a microservice slice identifier / entity address hosting a replica
+// of a Key-Value cache block.
+struct RaidenId {
+  std::string job_name;
+  std::string job_replica_id;
+  std::string data_name;
+  int data_replica_idx = 0;
+
+  bool operator==(const RaidenId& other) const {
+    return job_name == other.job_name &&
+           job_replica_id == other.job_replica_id &&
+           data_name == other.data_name &&
+           data_replica_idx == other.data_replica_idx;
+  }
+};
+
+using RaidenSlice = RaidenId;
+
+// KV Store that manages the indices and routing of prefix cache across serving
+// nodes and microservice slices.
+class KVCacheStore {
  public:
-  KVCacheStore(int block_size, int capacity,
-               std::string global_registry_address = "",
-               std::string local_address = "");
-  virtual ~KVCacheStore();
-  void Clear();
+  explicit KVCacheStore(size_t capacity);
 
-  int capacity() const { return capacity_; }
+  ~KVCacheStore();
 
-  absl::StatusOr<std::pair<std::vector<bool>, raiden::PjRtCopyFuture>>
-  LookupAndFetch(const std::vector<uint64_t>& block_hashes,
-                 KVCacheManagerBase& manager,
-                 const std::vector<int>& dst_offsets_major_dim,
-                 const std::vector<int>& copy_sizes_major_dim);
+  KVCacheStore(const KVCacheStore&) = delete;
+  KVCacheStore& operator=(const KVCacheStore&) = delete;
 
-  absl::Status Insert(const std::vector<uint64_t>& block_hashes,
-                      KVCacheManagerBase& manager,
-                      const std::vector<int>& src_offsets_major_dim,
-                      const std::vector<int>& copy_sizes_major_dim);
+  // Authoritative KVCacheStore API implementations
 
-  // BlockTransportDelegate overrides
-  uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) override {
-    return nullptr;
-  }
-  size_t GetHostSize(size_t layer_idx, size_t shard_idx) override { return 0; }
-  uint8_t* GetBlockHostPointer(size_t layer_idx, size_t shard_idx,
-                               int block_id) override;
+  // Checks the LRU directory for cached block hashes. Returns a list of all
+  // matched replica pairs (block hash and vector of RaidenIds) encountered
+  // in sequence prior to the first miss.
+  absl::StatusOr<std::vector<std::pair<int64_t, std::vector<RaidenId>>>> Lookup(
+      const std::vector<uint64_t>& block_hashes);
 
-  absl::StatusOr<std::vector<int>> AllocateBlocks(size_t num_blocks,
-                                                  int64_t entity_id) override;
-  int GetRemoteReadBlockId(int base_remote_id, int chunk_k) override {
-    return base_remote_id + chunk_k;
-  }
-  absl::Status OnDataReceived() override { return absl::OkStatus(); }
-  absl::Status OnSingleBlockReceived(int block_id, size_t size_bytes) override;
+  // Caches sharded buffers into host-RAM/HBM backing store.
+  // Returns true if insertion is successful, false if the cache entry already
+  // exists.
+  bool Insert(const std::vector<uint64_t>& block_hashes,
+              const std::vector<std::vector<RaidenId>>& slices, bool on_host);
 
-  size_t num_layers() const override { return num_layers_; }
-  size_t num_shards() const override { return num_shards_; }
-  size_t slice_byte_size() const override { return slice_byte_size_; }
-  int block_size() const override { return block_size_; }
-  size_t shard_factor() const override { return shard_factor_; }
+  // Deletes cached sharded buffers from host-RAM/HBM backing store entirely.
+  void Delete(const std::vector<uint64_t>& block_hashes,
+              const std::vector<std::vector<RaidenId>>& slices);
+
+  // Pins cached block hashes in memory, protecting them against LRU eviction
+  // while in active use. Returns true if all keys exist and were successfully
+  // pinned.
+  bool Pin(const std::vector<uint64_t>& block_hashes);
+
+  // Releases previously pinned block hashes, making them eligible for LRU
+  // eviction when capacity is exceeded.
+  void Release(const std::vector<uint64_t>& block_hashes);
+
+  int GetPinCount(uint64_t hash) const;
+
+  size_t capacity() const;
 
  private:
-  struct CacheEntry {
-    uint64_t block_hash;
-    std::vector<int> internal_block_ids;
-    std::shared_ptr<std::vector<std::vector<uint8_t>>> host_buffers;
-    raiden::PjRtCopyFuture insert_future;
-  };
-
-  class BlockUnlocker;
-
-  absl::Status LookupAndFetchRemote(
-      const std::vector<uint64_t>& block_hashes, KVCacheManagerBase& manager,
-      const std::vector<int>& dst_offsets_major_dim,
-      const std::vector<int>& copy_sizes_major_dim, std::vector<bool>& hits,
-      std::vector<raiden::PjRtCopyFuture>& futures_to_join);
-
-  absl::Status RegisterBlocksInGlobalRegistry(
-      const std::vector<uint64_t>& block_hashes,
-      const std::vector<int>& copy_sizes_major_dim,
-      const std::vector<int>& allocated_block_ids);
-
-  void CleanupCompletedFuturesLocked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
-  absl::Mutex mutex_;
-
-  int block_size_;
-  int capacity_;
-
-  std::list<CacheEntry> lru_list_;
-  absl::flat_hash_map<uint64_t, std::list<CacheEntry>::iterator> cache_map_;
-
-  std::unique_ptr<global_registry::GlobalRegistryClient> registry_client_;
-
-  std::string local_address_;
-  std::atomic<int64_t> next_entity_id_{2000000};
-
-  std::unique_ptr<LogicalBlockManager> block_manager_;
-  absl::flat_hash_map<int, std::vector<uint8_t*>> block_to_ptrs_
+  mutable absl::Mutex mutex_;
+  mutable LRUCache<uint64_t, std::vector<RaidenId>> lru_cache_
       ABSL_GUARDED_BY(mutex_);
-  std::unique_ptr<tpu_raiden::transport::BlockTransport> server_;
-
-  size_t num_layers_ = 0;
-  size_t num_shards_ = 0;
-  size_t slice_byte_size_ = 0;
-  size_t shard_factor_ = 1;
 };
 
 }  // namespace kv_cache
