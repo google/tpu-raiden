@@ -26,7 +26,7 @@ namespace tpu_raiden {
 namespace {
 
 TEST(TpuUtilsTest, GetTpuPciDevicesTest) {
-  auto pci_devices = GetTpuPciDevices();
+  const auto& pci_devices = GetTpuPciDevices();
   std::cout << "[TEST] Detected " << pci_devices.size()
             << " TPU PCI devices:" << std::endl;
   for (const auto& dev : pci_devices) {

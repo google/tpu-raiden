@@ -15,7 +15,8 @@
 #include "core/tpu_utils.h"
 
 #include <dirent.h>
-#include <sys/syscall.h>
+#include <pthread.h>
+#include <sched.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -25,6 +26,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -57,90 +59,170 @@ int64_t SetThreadMempolicy(int mode, int node) {
 #endif
 }
 
-std::vector<TpuPciDevice> GetTpuPciDevices() {
-  std::vector<TpuPciDevice> tpu_devices;
-  std::string pci_dir = "/sys/bus/pci/devices";
-  DIR* dir = opendir(pci_dir.c_str());
-  if (dir == nullptr) {
-    return tpu_devices;
+std::vector<int> GetNumaNodeCpuCores(int numa_node) {
+  std::vector<int> cores;
+  std::string path =
+      "/sys/devices/system/node/node" + std::to_string(numa_node) + "/cpulist";
+  std::ifstream file(path);
+  if (!file.is_open()) {
+    std::cerr << "[ERROR] Failed to open " << path << std::endl;
+    return cores;
   }
-
-  // Known Google TPU Device IDs (from util/platforminfo/pci_ids.h)
-  const std::vector<std::string> kTpuDeviceIds = {
-      // TPU v4 (Pufferfish)
-      "0x0056",  // PUFFYLITE_CHIP
-      "0x005e",  // PUFFERFISH_CHIP
-
-      // TPU v5e (Viperfish/Viperlite)
-      "0x0062",  // VIPERFISH_CHIP
-      "0x0063",  // VIPERLITE_CHIP
-
-      // TPU v6e (Ghostlite)
-      "0x006e",  // GHOSTLITE_CHIP_PF (Application)
-      "0x006f",  // GHOSTLITE_CHIP_VF (Application)
-      "0x0070",  // GHOSTLITE_CHIP_MANAGEMENT_PF
-      "0x0071",  // GHOSTLITE_CHIP_MANAGEMENT_VF
-
-      // TPU v7/v7x (Ghostfish)
-      "0x0075",  // GHOSTFISH_CHIP_APPLICATION_PF
-      "0x0076",  // GHOSTFISH_CHIP_APPLICATION_VF
-      "0x0077",  // GHOSTFISH_CHIP_MANAGEMENT_PF
-      "0x0078",  // GHOSTFISH_CHIP_MANAGEMENT_VF
-  };
-
-  struct dirent* entry;
-  while ((entry = readdir(dir)) != nullptr) {
-    std::string dev_name = entry->d_name;
-    if (dev_name == "." || dev_name == "..") continue;
-
-    std::string dev_path = pci_dir + "/" + dev_name;
-    std::string vendor_path = dev_path + "/vendor";
-    std::string device_path = dev_path + "/device";
-    std::string numa_path = dev_path + "/numa_node";
-
-    // Read vendor
-    std::ifstream vendor_file(vendor_path);
-    std::string vendor_id;
-    if (!(vendor_file >> vendor_id)) continue;
-
-    // Google Vendor ID is 0x1ae0
-    if (vendor_id != "0x1ae0") continue;
-
-    // Read device ID
-    std::ifstream device_file(device_path);
-    std::string device_id;
-    if (!(device_file >> device_id)) continue;
-
-    // Check if it is a known TPU device
-    bool is_tpu = false;
-    for (const auto& id : kTpuDeviceIds) {
-      if (device_id == id) {
-        is_tpu = true;
-        break;
+  std::string line;
+  if (std::getline(file, line)) {
+    std::stringstream ss(line);
+    std::string part;
+    while (std::getline(ss, part, ',')) {
+      size_t dash = part.find('-');
+      if (dash == std::string::npos) {
+        try {
+          cores.push_back(std::stoi(part));
+        } catch (...) {
+        }
+      } else {
+        try {
+          int start = std::stoi(part.substr(0, dash));
+          int end = std::stoi(part.substr(dash + 1));
+          for (int c = start; c <= end; ++c) {
+            cores.push_back(c);
+          }
+        } catch (...) {
+        }
       }
     }
-    if (!is_tpu) continue;
+  }
+  return cores;
+}
 
-    // Read NUMA node
-    std::ifstream numa_file(numa_path);
-    int node = -1;
-    if (numa_file >> node) {
-      TpuPciDevice dev;
-      dev.bdf = dev_name;
-      dev.device_id = device_id;
-      dev.numa_node = node;
-      tpu_devices.push_back(dev);
+int PinCurrentThreadToCores(const std::vector<int>& cores) {
+  if (cores.empty()) return -1;
+#ifdef __linux__
+  cpu_set_t allowed_set;
+  CPU_ZERO(&allowed_set);
+  if (sched_getaffinity(0, sizeof(cpu_set_t), &allowed_set) != 0) {
+    std::cerr << "[ERROR] sched_getaffinity failed: " << std::strerror(errno)
+              << std::endl;
+    // Fallback: assume all cores are allowed if we can't query
+    for (int i = 0; i < CPU_SETSIZE; ++i) {
+      CPU_SET(i, &allowed_set);
     }
   }
-  closedir(dir);
 
-  // Sort by BDF to ensure consistent ordering
-  std::sort(tpu_devices.begin(), tpu_devices.end(),
-            [](const TpuPciDevice& a, const TpuPciDevice& b) {
-              return a.bdf < b.bdf;
-            });
+  cpu_set_t cpuset;
+  CPU_ZERO(&cpuset);
+  bool has_cores = false;
+  for (int core : cores) {
+    if (core >= 0 && core < CPU_SETSIZE && CPU_ISSET(core, &allowed_set)) {
+      CPU_SET(core, &cpuset);
+      has_cores = true;
+    }
+  }
+  if (!has_cores) {
+    std::cerr
+        << "[WARNING] No allowed cores found for pinning on this NUMA node"
+        << std::endl;
+    return -1;
+  }
+  int res = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+  if (res != 0) {
+    std::cerr << "[ERROR] pthread_setaffinity_np failed: " << std::strerror(res)
+              << " (rc=" << res << ")" << std::endl;
+    return -res;
+  }
+  return 0;
+#else
+  return -1;
+#endif
+}
 
-  return tpu_devices;
+const std::vector<TpuPciDevice>& GetTpuPciDevices() {
+  static const std::vector<TpuPciDevice>* cached_devices = []() {
+    auto* devices = new std::vector<TpuPciDevice>();
+    std::string pci_dir = "/sys/bus/pci/devices";
+    DIR* dir = opendir(pci_dir.c_str());
+    if (dir == nullptr) {
+      return devices;
+    }
+
+    // Known Google TPU Device IDs (from util/platforminfo/pci_ids.h)
+    const std::vector<std::string> kTpuDeviceIds = {
+        // TPU v4 (Pufferfish)
+        "0x0056",  // PUFFYLITE_CHIP
+        "0x005e",  // PUFFERFISH_CHIP
+
+        // TPU v5e (Viperfish/Viperlite)
+        "0x0062",  // VIPERFISH_CHIP
+        "0x0063",  // VIPERLITE_CHIP
+
+        // TPU v6e (Ghostlite)
+        "0x006e",  // GHOSTLITE_CHIP_PF (Application)
+        "0x006f",  // GHOSTLITE_CHIP_VF (Application)
+        "0x0070",  // GHOSTLITE_CHIP_MANAGEMENT_PF
+        "0x0071",  // GHOSTLITE_CHIP_MANAGEMENT_VF
+
+        // TPU v7/v7x (Ghostfish)
+        "0x0075",  // GHOSTFISH_CHIP_APPLICATION_PF
+        "0x0076",  // GHOSTFISH_CHIP_APPLICATION_VF
+        "0x0077",  // GHOSTFISH_CHIP_MANAGEMENT_PF
+        "0x0078",  // GHOSTFISH_CHIP_MANAGEMENT_VF
+    };
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+      std::string dev_name = entry->d_name;
+      if (dev_name == "." || dev_name == "..") continue;
+
+      std::string dev_path = pci_dir + "/" + dev_name;
+      std::string vendor_path = dev_path + "/vendor";
+      std::string device_path = dev_path + "/device";
+      std::string numa_path = dev_path + "/numa_node";
+
+      // Read vendor
+      std::ifstream vendor_file(vendor_path);
+      std::string vendor_id;
+      if (!(vendor_file >> vendor_id)) continue;
+
+      // Google Vendor ID is 0x1ae0
+      if (vendor_id != "0x1ae0") continue;
+
+      // Read device ID
+      std::ifstream device_file(device_path);
+      std::string device_id;
+      if (!(device_file >> device_id)) continue;
+
+      // Check if it is a known TPU device
+      bool is_tpu = false;
+      for (const auto& id : kTpuDeviceIds) {
+        if (device_id == id) {
+          is_tpu = true;
+          break;
+        }
+      }
+      if (!is_tpu) continue;
+
+      // Read NUMA node
+      std::ifstream numa_file(numa_path);
+      int node = -1;
+      if (numa_file >> node) {
+        TpuPciDevice dev;
+        dev.bdf = dev_name;
+        dev.device_id = device_id;
+        dev.numa_node = node;
+        devices->push_back(dev);
+      }
+    }
+    closedir(dir);
+
+    // Sort by BDF to ensure consistent ordering
+    std::sort(devices->begin(), devices->end(),
+              [](const TpuPciDevice& a, const TpuPciDevice& b) {
+                return a.bdf < b.bdf;
+              });
+
+    return devices;
+  }();
+
+  return *cached_devices;
 }
 
 int GetPjRtDeviceNumaNode(const xla::PjRtDevice* device) {
@@ -148,7 +230,7 @@ int GetPjRtDeviceNumaNode(const xla::PjRtDevice* device) {
 
   int chip_idx = device->local_hardware_id().value();
 
-  auto pci_devices = GetTpuPciDevices();
+  const auto& pci_devices = GetTpuPciDevices();
   if (pci_devices.empty()) {
     return -1;
   }
@@ -198,7 +280,7 @@ int GetPjRtDeviceNumaNode(const xla::PjRtDevice* device) {
 
 void PrintTpuHardwareTopology() {
   std::cout << "[INFO] Querying TPU NUMA topology via PCI sysfs:" << std::endl;
-  auto devices = GetTpuPciDevices();
+  const auto& devices = GetTpuPciDevices();
   for (const auto& dev : devices) {
     std::cout << "  TPU Device " << dev.bdf << " (Device ID: " << dev.device_id
               << ") is attached to NUMA Node " << dev.numa_node << std::endl;

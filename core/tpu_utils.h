@@ -33,8 +33,16 @@ struct TpuPciDevice {
 // Returns 0 on success, or a negative error code on failure.
 int64_t SetThreadMempolicy(int mode, int node = -1);
 
+// Returns the CPU core IDs belonging to a given NUMA node.
+// Parses /sys/devices/system/node/node<N>/cpulist.
+std::vector<int> GetNumaNodeCpuCores(int numa_node);
+
+// Pins the current thread to the given CPU cores.
+// Returns 0 on success, or a negative error code on failure.
+int PinCurrentThreadToCores(const std::vector<int>& cores);
+
 // Scans the PCI bus and returns all detected TPU PCI devices, sorted by BDF.
-std::vector<TpuPciDevice> GetTpuPciDevices();
+const std::vector<TpuPciDevice>& GetTpuPciDevices();
 
 // Returns the NUMA node for a given PjRtDevice.
 // Maps the device's local_hardware_id to the sorted PCI devices.

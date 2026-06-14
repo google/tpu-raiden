@@ -17,7 +17,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -31,6 +30,7 @@
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/stream_executor/stream.h"
 #include "core/host_memory_allocator.h"
+#include "core/numa_thread_pool.h"
 #include "core/raiden_manager_base.h"
 #include "core/raw_transfer_core.h"
 #include "kv_cache/logical_block_manager.h"
@@ -193,6 +193,8 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   // Separate PJRT active holds matrix to protect subclass scoping E2E!
   std::vector<std::vector<raiden::BufferHoldAndAlias>> buffer_holds_;
+
+  std::unique_ptr<NumaThreadPool> numa_pool_;
 
   // Override parent AllocateBlocks using our dynamic block manager!
   absl::StatusOr<std::vector<int>> AllocateBlocks(size_t num_blocks,

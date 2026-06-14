@@ -19,7 +19,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <future>  // NOLINT(build/c++11)
+#include <iterator>
+#include <map>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -27,14 +31,22 @@
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "core/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/types/span.h"
 #include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/shape.h"
+#include "xla/stream_executor/device_address.h"
+#include "xla/stream_executor/stream.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
+#include "core/numa_thread_pool.h"
+#include "core/raiden_manager_base.h"
 #include "core/raw_transfer_core.h"
+#include "core/status_macros.h"
+#include "core/tpu_utils.h"
+#include "kv_cache/logical_block_manager.h"
 #include "transport/block_transport.h"
 
 namespace tpu_raiden {
@@ -155,7 +167,8 @@ KVCacheManagerBase::KVCacheManagerBase(
               "Host allocator failed for size: ", alloc_size,
               ", error: ", status_or_allocation.status().ToString()));
         }
-        HostBufferAllocation allocation = std::move(status_or_allocation).value();
+        HostBufferAllocation allocation =
+            std::move(status_or_allocation).value();
         if (alloc_size > 0 && allocation.ptr == nullptr) {
           throw std::runtime_error(absl::StrCat(
               "Host allocator returned null buffer for size: ", alloc_size));
@@ -197,6 +210,35 @@ KVCacheManagerBase::KVCacheManagerBase(
     layers_.push_back(std::move(layer_info));
     buffer_holds_.push_back(std::move(hold_info));
   }
+
+  // Initialize NUMA thread pool
+  std::vector<int> unique_numa_nodes;
+  for (const auto& layer : layer_buffers) {
+    for (xla::PjRtBuffer* buf : layer) {
+      if (buf && buf->device()) {
+        int node = GetPjRtDeviceNumaNode(buf->device());
+        if (node >= 0) {
+          bool found = false;
+          for (int n : unique_numa_nodes) {
+            if (n == node) {
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            unique_numa_nodes.push_back(node);
+          }
+        }
+      }
+    }
+  }
+  auto pool_or = NumaThreadPool::Create(unique_numa_nodes);
+  if (pool_or.ok()) {
+    numa_pool_ = std::move(pool_or).value();
+  } else {
+    LOG(ERROR) << "Failed to create NumaThreadPool: "
+               << pool_or.status().message();
+  }
 }
 
 KVCacheManagerBase::KVCacheManagerBase(
@@ -226,7 +268,8 @@ KVCacheManagerBase::KVCacheManagerBase(
               "Host allocator failed for size: ", alloc_size,
               ", error: ", status_or_allocation.status().ToString()));
         }
-        HostBufferAllocation allocation = std::move(status_or_allocation).value();
+        HostBufferAllocation allocation =
+            std::move(status_or_allocation).value();
         if (alloc_size > 0 && allocation.ptr == nullptr) {
           throw std::runtime_error(absl::StrCat(
               "Host allocator returned null buffer for size: ", alloc_size));
@@ -280,49 +323,143 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
     }
   }
 
-  std::vector<xla::Future<raiden::BufferHolder>> shard_futures_to_join;
-  for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
-    const auto& layer_info = layers_[layer_idx];
-    const auto& layer_holds = buffer_holds_[layer_idx];
-    for (size_t i = 0; i < num_shards_; ++i) {
-      const auto& shard_info = layer_info.shards[i];
-      const auto& shard_hold = layer_holds[i];
+  if (!numa_pool_) {
+    // Fallback to sequential execution if NUMA pool is not initialized
+    std::vector<xla::Future<raiden::BufferHolder>> shard_futures_to_join;
+    for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
+      const auto& layer_info = layers_[layer_idx];
+      const auto& layer_holds = buffer_holds_[layer_idx];
+      for (size_t i = 0; i < num_shards_; ++i) {
+        const auto& shard_info = layer_info.shards[i];
+        const auto& shard_hold = layer_holds[i];
 
-      std::vector<xla::Future<>> shard_futures;
-      if (!is_partial) {
-        xla::Future<> future = shard_hold.CopyRawHostToDevice(
-            shard_info.host_ptr, 0, physical_size_);
-        shard_futures.push_back(std::move(future));
-      } else {
-        for (size_t j = 0; j < src_offsets_major_dim.size(); ++j) {
-          int64_t src_major_dim_offset = src_offsets_major_dim[j];
-          int64_t dst_major_dim_offset = dst_offsets_major_dim[j];
-          int64_t major_dim_size = copy_sizes_major_dim[j];
-
-          int64_t src_offset = src_major_dim_offset * slice_byte_size_;
-          int64_t dst_offset = dst_major_dim_offset * slice_byte_size_;
-          int64_t size_to_copy = major_dim_size * slice_byte_size_;
-
-          if (src_offset + size_to_copy > shard_info.host_size) {
-            return absl::InvalidArgumentError(
-                "Copy range exceeds source host buffer size");
-          }
-          if (dst_offset + size_to_copy > shard_info.device_size) {
-            return absl::InvalidArgumentError(
-                "Copy range exceeds destination device buffer size");
-          }
-
-          const uint8_t* src_ptr = shard_info.host_ptr + src_offset;
-          xla::Future<> future =
-              shard_hold.CopyRawHostToDevice(src_ptr, dst_offset, size_to_copy);
+        std::vector<xla::Future<>> shard_futures;
+        if (!is_partial) {
+          xla::Future<> future = shard_hold.CopyRawHostToDevice(
+              shard_info.host_ptr, 0, physical_size_);
           shard_futures.push_back(std::move(future));
+        } else {
+          for (size_t j = 0; j < src_offsets_major_dim.size(); ++j) {
+            int64_t src_major_dim_offset = src_offsets_major_dim[j];
+            int64_t dst_major_dim_offset = dst_offsets_major_dim[j];
+            int64_t major_dim_size = copy_sizes_major_dim[j];
+
+            int64_t src_offset = src_major_dim_offset * slice_byte_size_;
+            int64_t dst_offset = dst_major_dim_offset * slice_byte_size_;
+            int64_t size_to_copy = major_dim_size * slice_byte_size_;
+
+            if (src_offset + size_to_copy > shard_info.host_size) {
+              return absl::InvalidArgumentError(
+                  "Copy range exceeds source host buffer size");
+            }
+            if (dst_offset + size_to_copy > shard_info.device_size) {
+              return absl::InvalidArgumentError(
+                  "Copy range exceeds destination device buffer size");
+            }
+
+            const uint8_t* src_ptr = shard_info.host_ptr + src_offset;
+            xla::Future<> future = shard_hold.CopyRawHostToDevice(
+                src_ptr, dst_offset, size_to_copy);
+            shard_futures.push_back(std::move(future));
+          }
+        }
+        shard_futures_to_join.push_back(raiden::CreateBufferFuture(
+            std::move(shard_futures), shard_hold.c_hold,
+            shard_hold.common_hold));
+      }
+    }
+    return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
+  }
+
+  // Group work by NUMA node
+  struct CopyWork {
+    size_t layer_idx;
+    size_t shard_idx;
+  };
+  std::map<int, std::vector<CopyWork>> grouped_work;
+  for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
+    for (size_t shard_idx = 0; shard_idx < num_shards_; ++shard_idx) {
+      int node = -1;
+      if (layer_idx < buffer_holds_.size() &&
+          shard_idx < buffer_holds_[layer_idx].size()) {
+        auto* buf = buffer_holds_[layer_idx][shard_idx].buffer;
+        if (buf && buf->device()) {
+          node = GetPjRtDeviceNumaNode(buf->device());
         }
       }
-      shard_futures_to_join.push_back(raiden::CreateBufferFuture(
-          std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
+      grouped_work[node].push_back({layer_idx, shard_idx});
     }
   }
-  return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
+
+  std::vector<std::future<
+      absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>>>
+      pool_futures;
+
+  for (const auto& [node, works] : grouped_work) {
+    auto future = numa_pool_->Schedule(
+        node,
+        [this, works, is_partial, src_offsets_major_dim, dst_offsets_major_dim,
+         copy_sizes_major_dim]()
+            -> absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>> {
+          std::vector<xla::Future<raiden::BufferHolder>> local_futures;
+          for (const auto& work : works) {
+            const auto& layer_info = layers_[work.layer_idx];
+            const auto& shard_hold =
+                buffer_holds_[work.layer_idx][work.shard_idx];
+            const auto& shard_info = layer_info.shards[work.shard_idx];
+
+            std::vector<xla::Future<>> shard_futures;
+            if (!is_partial) {
+              xla::Future<> future = shard_hold.CopyRawHostToDevice(
+                  shard_info.host_ptr, 0, physical_size_);
+              shard_futures.push_back(std::move(future));
+            } else {
+              for (size_t j = 0; j < src_offsets_major_dim.size(); ++j) {
+                int64_t src_major_dim_offset = src_offsets_major_dim[j];
+                int64_t dst_major_dim_offset = dst_offsets_major_dim[j];
+                int64_t major_dim_size = copy_sizes_major_dim[j];
+
+                int64_t src_offset = src_major_dim_offset * slice_byte_size_;
+                int64_t dst_offset = dst_major_dim_offset * slice_byte_size_;
+                int64_t size_to_copy = major_dim_size * slice_byte_size_;
+
+                if (src_offset + size_to_copy > shard_info.host_size) {
+                  return absl::InvalidArgumentError(
+                      "Copy range exceeds source host buffer size");
+                }
+                if (dst_offset + size_to_copy > shard_info.device_size) {
+                  return absl::InvalidArgumentError(
+                      "Copy range exceeds destination device buffer size");
+                }
+
+                const uint8_t* src_ptr = shard_info.host_ptr + src_offset;
+                xla::Future<> future = shard_hold.CopyRawHostToDevice(
+                    src_ptr, dst_offset, size_to_copy);
+                shard_futures.push_back(std::move(future));
+              }
+            }
+            local_futures.push_back(raiden::CreateBufferFuture(
+                std::move(shard_futures), shard_hold.c_hold,
+                shard_hold.common_hold));
+          }
+          return local_futures;
+        });
+    pool_futures.push_back(std::move(future));
+  }
+
+  std::vector<xla::Future<raiden::BufferHolder>> all_shard_futures;
+  for (auto& pf : pool_futures) {
+    auto status_or_local_futures = pf.get();
+    if (!status_or_local_futures.ok()) {
+      return status_or_local_futures.status();
+    }
+    auto local_futures = std::move(status_or_local_futures).value();
+    all_shard_futures.insert(all_shard_futures.end(),
+                             std::make_move_iterator(local_futures.begin()),
+                             std::make_move_iterator(local_futures.end()));
+  }
+
+  return xla::JoinFutures(absl::MakeSpan(all_shard_futures));
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::DispatchD2hChunks(
@@ -330,59 +467,161 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::DispatchD2hChunks(
     const std::vector<int64_t>& dst_offsets,
     const std::vector<int64_t>& copy_sizes, int64_t device_id) {
   bool is_partial = !src_offsets.empty();
-  std::vector<xla::Future<raiden::BufferHolder>> shard_futures_to_join;
 
-  for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
-    const auto& layer_info = layers_[layer_idx];
-    const auto& layer_holds = buffer_holds_[layer_idx];
-    for (size_t i = 0; i < num_shards_; ++i) {
-      if (device_id >= 0 && static_cast<int64_t>(i) != device_id) {
-        continue;
-      }
-      const auto& shard_info = layer_info.shards[i];
-      const auto& shard_hold = layer_holds[i];
-      uint8_t* dst_host_ptr = const_cast<uint8_t*>(shard_info.host_ptr);
-
-      std::vector<xla::Future<>> shard_futures;
-      if (!is_partial) {
-        if (dst_host_ptr == nullptr) {
-          return absl::FailedPreconditionError(
-              "Destination host pointer is null");
+  if (!numa_pool_) {
+    // Fallback
+    std::vector<xla::Future<raiden::BufferHolder>> shard_futures_to_join;
+    for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
+      const auto& layer_info = layers_[layer_idx];
+      const auto& layer_holds = buffer_holds_[layer_idx];
+      for (size_t i = 0; i < num_shards_; ++i) {
+        if (device_id >= 0 && static_cast<int64_t>(i) != device_id) {
+          continue;
         }
-        if (physical_size_ > shard_info.host_size) {
-          return absl::OutOfRangeError(
-              "Copy range exceeds destination host buffer size");
-        }
-        xla::Future<> future =
-            shard_hold.CopyRawDeviceToHost(dst_host_ptr, 0, physical_size_);
-        shard_futures.push_back(std::move(future));
-      } else {
-        shard_futures.reserve(src_offsets.size());
-        for (size_t j = 0; j < src_offsets.size(); ++j) {
-          int64_t src_offset = src_offsets[j] * slice_byte_size_;
-          int64_t dst_offset = dst_offsets[j] * slice_byte_size_;
-          int64_t size_to_copy = copy_sizes[j] * slice_byte_size_;
+        const auto& shard_info = layer_info.shards[i];
+        const auto& shard_hold = layer_holds[i];
+        uint8_t* dst_host_ptr = const_cast<uint8_t*>(shard_info.host_ptr);
 
-          if (src_offset + size_to_copy > shard_info.device_size) {
-            return absl::InvalidArgumentError(
-                "Copy range exceeds source device buffer size");
+        std::vector<xla::Future<>> shard_futures;
+        if (!is_partial) {
+          if (dst_host_ptr == nullptr) {
+            return absl::FailedPreconditionError(
+                "Destination host pointer is null");
           }
-          if (dst_offset + size_to_copy > shard_info.host_size) {
-            return absl::InvalidArgumentError(
+          if (physical_size_ > shard_info.host_size) {
+            return absl::OutOfRangeError(
                 "Copy range exceeds destination host buffer size");
           }
-
-          uint8_t* dst_ptr = dst_host_ptr + dst_offset;
           xla::Future<> future =
-              shard_hold.CopyRawDeviceToHost(dst_ptr, src_offset, size_to_copy);
+              shard_hold.CopyRawDeviceToHost(dst_host_ptr, 0, physical_size_);
           shard_futures.push_back(std::move(future));
+        } else {
+          shard_futures.reserve(src_offsets.size());
+          for (size_t j = 0; j < src_offsets.size(); ++j) {
+            int64_t src_offset = src_offsets[j] * slice_byte_size_;
+            int64_t dst_offset = dst_offsets[j] * slice_byte_size_;
+            int64_t size_to_copy = copy_sizes[j] * slice_byte_size_;
+
+            if (src_offset + size_to_copy > shard_info.device_size) {
+              return absl::InvalidArgumentError(
+                  "Copy range exceeds source device buffer size");
+            }
+            if (dst_offset + size_to_copy > shard_info.host_size) {
+              return absl::InvalidArgumentError(
+                  "Copy range exceeds destination host buffer size");
+            }
+
+            uint8_t* dst_ptr = dst_host_ptr + dst_offset;
+            xla::Future<> future = shard_hold.CopyRawDeviceToHost(
+                dst_ptr, src_offset, size_to_copy);
+            shard_futures.push_back(std::move(future));
+          }
+        }
+        shard_futures_to_join.push_back(raiden::CreateBufferFuture(
+            std::move(shard_futures), shard_hold.c_hold,
+            shard_hold.common_hold));
+      }
+    }
+    return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
+  }
+
+  // Group work by NUMA node
+  struct CopyWork {
+    size_t layer_idx;
+    size_t shard_idx;
+  };
+  std::map<int, std::vector<CopyWork>> grouped_work;
+  for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
+    for (size_t shard_idx = 0; shard_idx < num_shards_; ++shard_idx) {
+      if (device_id >= 0 && static_cast<int64_t>(shard_idx) != device_id) {
+        continue;
+      }
+      int node = -1;
+      if (layer_idx < buffer_holds_.size() &&
+          shard_idx < buffer_holds_[layer_idx].size()) {
+        auto* buf = buffer_holds_[layer_idx][shard_idx].buffer;
+        if (buf && buf->device()) {
+          node = GetPjRtDeviceNumaNode(buf->device());
         }
       }
-      shard_futures_to_join.push_back(raiden::CreateBufferFuture(
-          std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
+      grouped_work[node].push_back({layer_idx, shard_idx});
     }
   }
-  return xla::JoinFutures(absl::MakeSpan(shard_futures_to_join));
+
+  std::vector<std::future<
+      absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>>>
+      pool_futures;
+
+  for (const auto& [node, works] : grouped_work) {
+    auto future = numa_pool_->Schedule(
+        node,
+        [this, works, is_partial, src_offsets, dst_offsets, copy_sizes]()
+            -> absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>> {
+          std::vector<xla::Future<raiden::BufferHolder>> local_futures;
+          for (const auto& work : works) {
+            const auto& layer_info = layers_[work.layer_idx];
+            const auto& shard_hold =
+                buffer_holds_[work.layer_idx][work.shard_idx];
+            const auto& shard_info = layer_info.shards[work.shard_idx];
+            uint8_t* dst_host_ptr = const_cast<uint8_t*>(shard_info.host_ptr);
+
+            std::vector<xla::Future<>> shard_futures;
+            if (!is_partial) {
+              if (dst_host_ptr == nullptr) {
+                return absl::FailedPreconditionError(
+                    "Destination host pointer is null");
+              }
+              if (physical_size_ > shard_info.host_size) {
+                return absl::OutOfRangeError(
+                    "Copy range exceeds destination host buffer size");
+              }
+              xla::Future<> future = shard_hold.CopyRawDeviceToHost(
+                  dst_host_ptr, 0, physical_size_);
+              shard_futures.push_back(std::move(future));
+            } else {
+              shard_futures.reserve(src_offsets.size());
+              for (size_t j = 0; j < src_offsets.size(); ++j) {
+                int64_t src_offset = src_offsets[j] * slice_byte_size_;
+                int64_t dst_offset = dst_offsets[j] * slice_byte_size_;
+                int64_t size_to_copy = copy_sizes[j] * slice_byte_size_;
+
+                if (src_offset + size_to_copy > shard_info.device_size) {
+                  return absl::InvalidArgumentError(
+                      "Copy range exceeds source device buffer size");
+                }
+                if (dst_offset + size_to_copy > shard_info.host_size) {
+                  return absl::InvalidArgumentError(
+                      "Copy range exceeds destination host buffer size");
+                }
+
+                uint8_t* dst_ptr = dst_host_ptr + dst_offset;
+                xla::Future<> future = shard_hold.CopyRawDeviceToHost(
+                    dst_ptr, src_offset, size_to_copy);
+                shard_futures.push_back(std::move(future));
+              }
+            }
+            local_futures.push_back(raiden::CreateBufferFuture(
+                std::move(shard_futures), shard_hold.c_hold,
+                shard_hold.common_hold));
+          }
+          return local_futures;
+        });
+    pool_futures.push_back(std::move(future));
+  }
+
+  std::vector<xla::Future<raiden::BufferHolder>> all_shard_futures;
+  for (auto& pf : pool_futures) {
+    auto status_or_local_futures = pf.get();
+    if (!status_or_local_futures.ok()) {
+      return status_or_local_futures.status();
+    }
+    auto local_futures = std::move(status_or_local_futures).value();
+    all_shard_futures.insert(all_shard_futures.end(),
+                             std::make_move_iterator(local_futures.begin()),
+                             std::make_move_iterator(local_futures.end()));
+  }
+
+  return xla::JoinFutures(absl::MakeSpan(all_shard_futures));
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2h(

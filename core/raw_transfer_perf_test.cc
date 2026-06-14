@@ -44,7 +44,6 @@
 
 #include <dlfcn.h>
 #include <malloc.h>
-#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -80,6 +79,9 @@ namespace {
 
 // Static initializer to load and initialize libtpu.so in OSS environment.
 bool InitializeLibtpuOnce() {
+  static bool initialized = false;
+  if (initialized) return true;
+
   const char* libtpu_path = std::getenv("TPU_LIBRARY_PATH");
   if (!libtpu_path || std::string(libtpu_path).empty()) {
     libtpu_path = "libtpu.so";
@@ -105,10 +107,9 @@ bool InitializeLibtpuOnce() {
             << std::endl;
   initialize_fn(/*init_library=*/true, 0, nullptr);
   std::cout << "[INFO] libtpu.so initialized successfully." << std::endl;
+  initialized = true;
   return true;
 }
-
-static bool libtpu_dummy = InitializeLibtpuOnce();
 
 // Helper to get NUMA node of a pointer using get_mempolicy syscall
 int GetPointerNumaNode(const void* ptr) {
@@ -601,6 +602,8 @@ void RunBenchmarkScenarioB(tpu_raiden::TpuPjrtManager* manager,
 
 class RawTransferPerfTest : public ::testing::Test {
  protected:
+  static void SetUpTestSuite() { InitializeLibtpuOnce(); }
+
   void SetUp() override {
     TF_ASSERT_OK_AND_ASSIGN(manager_, tpu_raiden::TpuPjrtManager::GetDefault());
 

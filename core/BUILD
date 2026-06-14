@@ -145,6 +145,31 @@ cc_library(
 )
 
 cc_library(
+    name = "numa_thread_pool",
+    srcs = [
+        "numa_thread_pool.cc",
+    ],
+    hdrs = [
+        "numa_thread_pool.h",
+    ],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":tpu_utils",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/synchronization",
+    ],
+)
+
+cc_library(
     name = "utils",
     hdrs = [
         "utils.h",
@@ -222,7 +247,9 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":host_memory_allocator",
+        ":numa_thread_pool",
         ":raw_transfer_core",
+        ":tpu_utils",
         "//kv_cache:kv_cache_manager_base",
         "//transport:block_transport",
         "@com_google_absl//absl/log",
@@ -466,6 +493,35 @@ cc_test(
         ":kv_cache_manager_with_transfer",
         ":tpu_pjrt_manager",
         "//kv_cache:kv_cache_manager_base",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/tsl/platform:statusor",
+        "@xla//xla/tsl/platform:test",
+        "@xla//xla/tsl/platform:test_main",
+    ],
+)
+
+cc_test(
+    name = "kv_cache_manager_perf_test",
+    srcs = ["kv_cache_manager_perf_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = [
+        "-use_header_modules",
+        "-layering_check",
+    ],
+    tags = [
+        "no_oss",
+        "requires-ghostfish:4",
+    ],
+    deps = [
+        ":host_memory_allocator",
+        ":tpu_pjrt_manager",
+        ":tpu_utils",
+        "//kv_cache:kv_cache_manager_base",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/time",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/tsl/platform:statusor",
         "@xla//xla/tsl/platform:test",
