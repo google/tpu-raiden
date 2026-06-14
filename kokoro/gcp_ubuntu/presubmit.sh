@@ -116,7 +116,7 @@ fi
 echo "Using hermetic Python interpreter: ${HERMETIC_PYTHON_BIN}"
 
 echo "=== 6. Verifying dynamic module binding linkage ==="
-export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/bazel-bin:${REPO_ROOT}/api/jax:${REPO_ROOT}/frameworks/jax:${PYTHONPATH}"
+export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/bazel-bin:${REPO_ROOT}/tpu_raiden/api/jax:${REPO_ROOT}/tpu_raiden/frameworks/jax:${PYTHONPATH}"
 
 echo "Verifying import of all modules in a single process (with JAX mocked)..."
 "${HERMETIC_PYTHON_BIN}" -c "

@@ -1,6 +1,9 @@
 package(default_visibility = ["//visibility:public"])
 
-exports_files(["LICENSE"])
+exports_files([
+    "LICENSE",
+    "README.md",
+])
 
 config_setting(
     name = "jax_disabled",

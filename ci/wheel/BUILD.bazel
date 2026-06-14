@@ -1,0 +1,146 @@
+# Copyright 2026 Google LLC.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Builds the tpu_raiden Python wheel. Bundles all JAX + Torch native
+# extensions and their thin Python wrappers under the single tpu_raiden import
+# root (tpu_raiden.frameworks.*, tpu_raiden.api.*). Build with:
+#
+#   bazel build -c opt //ci/wheel:raiden_wheel \
+#     --repo_env=WHEEL_VERSION_EXTRAS=.dev$(date +%Y%m%d%H%M%S)
+#
+# The torch extensions additionally need the torch_tpu module
+# (--override_module=torch_tpu=../torch_tpu) and a local torch
+# (--define=TORCH_SOURCE=local). See //ci/build_wheel.sh.
+
+load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
+load("@raiden_version//:version.bzl", "WHEEL_VERSION")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
+
+package(default_visibility = ["//visibility:public"])
+
+# When building against a locally-provided torch (TORCH_SOURCE=local, as the
+# torch extensions require), do not pin a torch version in the wheel so it can
+# be installed alongside whatever torch_tpu/torch the environment provides.
+config_setting(
+    name = "use_local_torch",
+    define_values = {
+        "TORCH_SOURCE": "local",
+    },
+)
+
+TORCH_REQ = select({
+    ":use_local_torch": [],
+    "//conditions:default": ["torch"],
+})
+
+# Runtime deps that live on a public index. torch_tpu is intentionally omitted
+# (private Artifact Registry) — see pyproject.toml.
+BASE_REQUIRES = [
+    "jax==0.10.0",
+    "jaxlib==0.10.0",
+    "libtpu==0.0.40",
+    "tpu-info==0.7.1",
+    "numpy",
+    "absl-py",
+]
+
+# Framework-agnostic python deps for the py_library aggregator.
+#
+# NOTE: //rpc and //tpu_raiden/frameworks/jax:resharding_engine (which imports
+# rpc) are intentionally excluded — rpc/BUILD loads Google-internal grpc rules
+# (//net/grpc, //third_party/grpc) and is not OSS-loadable. Re-add once rpc has
+# an OSS-compatible BUILD.
+COMMON_DEPS = []
+
+# JAX native extensions + wrappers + public API. (TransferEngine was merged into
+# KVCacheManager upstream, so there is no _transfer_engine target.)
+JAX_DEPS = [
+    "//tpu_raiden/frameworks/jax:_raw_transfer",
+    "//tpu_raiden/frameworks/jax:_kv_cache_manager",
+    "//tpu_raiden/frameworks/jax:_kv_cache_manager_ffi",
+    "//tpu_raiden/frameworks/jax:_weight_synchronizer",
+    "//tpu_raiden/frameworks/jax:_weight_synchronizer_ffi",
+    "//tpu_raiden/frameworks/jax:weight_synchronizer_ffi_py",
+    "//tpu_raiden/frameworks/jax:resharding_planner",
+    "//tpu_raiden/frameworks/jax:jax_test_utils",
+    "//tpu_raiden/api/jax:kv_cache_manager_jax_py",
+    "//tpu_raiden/api/jax:weight_synchronizer_jax_py",
+]
+# Excluded (non-OSS internal grpc / global registry):
+# //tpu_raiden/frameworks/jax:kv_cache_store and //tpu_raiden/api/jax:kv_cache_store
+# depend on //kv_cache:kv_cache_store -> //kv_cache/global_registry.
+
+# Torch native extensions + public API (require the torch_tpu module at build).
+TORCH_DEPS = [
+    "//tpu_raiden/frameworks/torch:_torch_raw_transfer",
+    "//tpu_raiden/frameworks/torch:_kv_cache_manager",
+    "//tpu_raiden/frameworks/torch:_weight_synchronizer",
+    "//tpu_raiden/api/torch:kv_cache_manager_torch_py",
+    "//tpu_raiden/api/torch:weight_synchronizer_torch_py",
+]
+
+# All native extensions (built to frameworks/{jax,torch}/_*.so at the correct
+# package-relative path — no pywrap remapping needed) plus the thin Python
+# wrappers and generated protos that make up the importable surface. The jax /
+# torch halves are gated on the same --define with_jax/with_torch=false flags
+# the rest of the repo uses, so JAX-only or torch-only wheels are possible.
+py_library(
+    name = "all_raiden_files",
+    visibility = ["//visibility:private"],
+    deps = COMMON_DEPS + select({
+        "//:jax_disabled": [],
+        "//conditions:default": JAX_DEPS,
+    }) + select({
+        "//:torch_disabled": [],
+        "//conditions:default": TORCH_DEPS,
+    }),
+)
+
+# Restrict the wheel to the single tpu_raiden import root so transitive deps
+# (torch_tpu, jax, xla, absl, grpc, ...) are NOT vendored into the wheel.
+py_package(
+    name = "raiden_package",
+    packages = ["tpu_raiden"],
+    visibility = ["//visibility:public"],
+    deps = [":all_raiden_files"],
+)
+
+py_wheel(
+    name = "raiden_wheel",
+    abi = "cp312",
+    author = "TPU Raiden team",
+    classifiers = [
+        "Development Status :: 3 - Alpha",
+        "License :: OSI Approved :: Apache Software License",
+        "Programming Language :: Python :: 3.12",
+        "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    ],
+    description_file = "//:README.md",
+    distribution = "tpu_raiden",
+    homepage = "https://github.com/google/tpu-raiden",
+    license = "Apache 2.0",
+    platform = "manylinux_2_31_x86_64",
+    python_requires = ">=3.12",
+    python_tag = "cp312",
+    requires = BASE_REQUIRES + TORCH_REQ,
+    summary = "High-bandwidth PJRT raw-transfer / KV-cache DMA engine for TPU.",
+    tags = ["manual"],
+    # Base version comes from pyproject.toml; .dev<timestamp> appended via
+    # WHEEL_VERSION_EXTRAS at build time.
+    version = WHEEL_VERSION,
+    visibility = ["//visibility:public"],
+    deps = [":raiden_package"],
+)

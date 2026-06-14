@@ -128,3 +128,12 @@ git_override(
     remote = "https://github.com/google/nanobind_abseil.git",
 )
 
+# Single-sources the wheel version from pyproject.toml [project].version and
+# appends WHEEL_VERSION_EXTRAS (e.g. ".dev<timestamp>"). Consumed by
+# //ci/wheel:raiden_wheel via @raiden_version//:version.bzl.
+raiden_version_repo = use_repo_rule("//bazel:wheel_version.bzl", "raiden_version_repo")
+
+raiden_version_repo(
+    name = "raiden_version",
+    pyproject_toml = "//:pyproject.toml",
+)
