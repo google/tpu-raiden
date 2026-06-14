@@ -17,7 +17,7 @@
 from typing import List, Optional
 
 # Import Nanobind binary library directly E2E!
-from tpu_raiden.frameworks.jax import _weight_synchronizer
+from tpu_raiden.frameworks.jax import _tpu_raiden_jax as _weight_synchronizer
 
 
 class WeightSynchronizer:

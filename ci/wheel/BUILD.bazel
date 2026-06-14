@@ -69,9 +69,8 @@ COMMON_DEPS = []
 # KVCacheManager upstream, so there is no _transfer_engine target.)
 JAX_DEPS = [
     "//tpu_raiden/frameworks/jax:_raw_transfer",
-    "//tpu_raiden/frameworks/jax:_kv_cache_manager",
+    "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
     "//tpu_raiden/frameworks/jax:_kv_cache_manager_ffi",
-    "//tpu_raiden/frameworks/jax:_weight_synchronizer",
     "//tpu_raiden/frameworks/jax:_weight_synchronizer_ffi",
     "//tpu_raiden/frameworks/jax:weight_synchronizer_ffi_py",
     "//tpu_raiden/frameworks/jax:resharding_planner",
@@ -86,8 +85,7 @@ JAX_DEPS = [
 # Torch native extensions + public API (require the torch_tpu module at build).
 TORCH_DEPS = [
     "//tpu_raiden/frameworks/torch:_torch_raw_transfer",
-    "//tpu_raiden/frameworks/torch:_kv_cache_manager",
-    "//tpu_raiden/frameworks/torch:_weight_synchronizer",
+    "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",
     "//tpu_raiden/api/torch:kv_cache_manager_torch_py",
     "//tpu_raiden/api/torch:weight_synchronizer_torch_py",
 ]

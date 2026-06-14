@@ -38,7 +38,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//tpu_raiden/frameworks/torch:_kv_cache_manager",
+        "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",
         "@torch_tpu//shims/torch:pytorch",
         "@torch_tpu//torch_tpu",
         "@torch_tpu//torch_tpu:_loader",
@@ -50,7 +50,7 @@ py_library(
     srcs = ["weight_synchronizer.py"],
     visibility = ["//visibility:public"],
     deps = [
-        "//tpu_raiden/frameworks/torch:_weight_synchronizer",
+        "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",
         "@torch_tpu//shims/torch:pytorch",
         "@torch_tpu//torch_tpu",
     ],

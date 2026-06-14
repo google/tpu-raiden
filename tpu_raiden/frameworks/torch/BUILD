@@ -52,23 +52,7 @@ cc_library(
     ],
 )
 
-nanobind_extension(
-    name = "_weight_synchronizer",
-    srcs = ["weight_synchronizer_module.cc"],
-    features = [
-        "-use_header_modules",
-    ],
-    linkopts = ["-Wl,--allow-shlib-undefined"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":torch_nanobind_utils",
-        ":weight_synchronizer_torch",
-        "//core:raw_transfer_core",
-        "//weight_sync:weight_synchronizer_base",
-        "@com_google_absl//absl/status",
-        "@torch_tpu//shims/torch:aten_headers",
-    ],
-)
+# Removed _weight_synchronizer (consolidated into _tpu_raiden_torch)
 
 cc_library(
     name = "torch_tpu_utils",
@@ -157,8 +141,8 @@ cc_library(
 )
 
 nanobind_extension(
-    name = "_kv_cache_manager",
-    srcs = ["kv_cache_manager_module.cc"],
+    name = "_tpu_raiden_torch",
+    srcs = ["tpu_raiden_torch_module.cc"],
     features = [
         "-use_header_modules",
     ],
@@ -167,9 +151,13 @@ nanobind_extension(
     deps = [
         ":kv_cache_manager_torch",
         ":torch_nanobind_utils",
+        ":weight_synchronizer_torch",
         "//core:raw_transfer_core",
         "//kv_cache:kv_cache_manager_base",
+        "//weight_sync:weight_synchronizer_base",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@torch_tpu//shims/torch:aten_headers",
     ],
 )
 
@@ -401,7 +389,7 @@ py_test(
         "requires-net:external",
     ],
     deps = [
-        ":_kv_cache_manager",
+        ":_tpu_raiden_torch",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
         "@pypi//numpy",

@@ -52,7 +52,7 @@ def _load_torch_tpu_common() -> None:
 
 _load_torch_tpu_common()
 
-from tpu_raiden.frameworks.torch import _kv_cache_manager as _impl
+from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _impl
 
 
 class KVCacheManager:

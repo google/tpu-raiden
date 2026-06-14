@@ -12,8 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
 #include "absl/status/statusor.h"
 #include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
 #include <nanobind/stl/optional.h>  // IWYU pragma: keep
 #include <nanobind/stl/pair.h>  // IWYU pragma: keep
 #include <nanobind/stl/string.h>  // IWYU pragma: keep
@@ -21,8 +27,11 @@
 #include "core/raw_transfer_core.h"
 #include "tpu_raiden/frameworks/jax/kv_cache_manager.h"
 #include "tpu_raiden/frameworks/jax/nb_statusor.h"  // IWYU pragma: keep
+#include "tpu_raiden/frameworks/jax/weight_synchronizer.h"
 
 namespace nb = nanobind;
+
+using ::tpu_raiden::jax::WeightSynchronizer;
 
 // Define a wrapper struct to avoid exposing PjRtCopyFuture directly,
 // which would force a dependency on the _raw_transfer module.
@@ -41,10 +50,11 @@ struct KVCacheManagerFuture {
   bool IsReady() const { return future.IsReady(); }
 };
 
-NB_MODULE(_kv_cache_manager, m) {
-  // Removed the import of _raw_transfer to sever the dependency.
-  // nb::module_::import_("frameworks.jax._raw_transfer");
-
+NB_MODULE(_tpu_raiden_jax, m) {
+  // =========================================================================
+  // 1. Bind KVCacheManager
+  // =========================================================================
+  
   // Bind the new Future class as RaidenFuture to maintain duck-typing
   // compatibility.
   nb::class_<KVCacheManagerFuture>(m, "RaidenFuture")
@@ -77,7 +87,7 @@ NB_MODULE(_kv_cache_manager, m) {
              const std::vector<int64_t>& src_offsets,
              const std::vector<int64_t>& dst_offsets,
              const std::vector<int64_t>& copy_sizes)
-              -> absl::StatusOr<KVCacheManagerFuture> {
+               -> absl::StatusOr<KVCacheManagerFuture> {
             auto res = self.H2d(src_offsets, dst_offsets, copy_sizes);
             if (!res.ok()) return res.status();
             return KVCacheManagerFuture{std::move(res.value())};
@@ -92,7 +102,7 @@ NB_MODULE(_kv_cache_manager, m) {
              const std::vector<int64_t>& src_offsets,
              const std::vector<int64_t>& dst_offsets,
              const std::vector<int64_t>& copy_sizes)
-              -> absl::StatusOr<KVCacheManagerFuture> {
+               -> absl::StatusOr<KVCacheManagerFuture> {
             auto res = self.D2h(src_offsets, dst_offsets, copy_sizes);
             if (!res.ok()) return res.status();
             return KVCacheManagerFuture{std::move(res.value())};
@@ -106,8 +116,8 @@ NB_MODULE(_kv_cache_manager, m) {
           [](tpu_raiden::kv_cache::jax::KVCacheManager& self,
              const std::vector<int64_t>& src_offsets,
              const std::vector<int64_t>& copy_sizes, int64_t entity_id)
-              -> absl::StatusOr<
-                  std::pair<std::vector<int>, KVCacheManagerFuture>> {
+               -> absl::StatusOr<
+                   std::pair<std::vector<int>, KVCacheManagerFuture>> {
             auto res = self.D2hAutoAllocate(src_offsets, copy_sizes, entity_id);
             if (!res.ok()) return res.status();
             return std::make_pair(
@@ -122,8 +132,8 @@ NB_MODULE(_kv_cache_manager, m) {
           "h2h_write",
           [](tpu_raiden::kv_cache::jax::KVCacheManager& self, std::string peer,
              const std::vector<int>& src_block_ids, int64_t entity_id)
-              -> absl::StatusOr<
-                  std::pair<std::vector<int>, KVCacheManagerFuture>> {
+               -> absl::StatusOr<
+                   std::pair<std::vector<int>, KVCacheManagerFuture>> {
             auto res = self.H2hWrite(peer, src_block_ids, entity_id);
             if (!res.ok()) return res.status();
             return std::make_pair(
@@ -136,8 +146,8 @@ NB_MODULE(_kv_cache_manager, m) {
           "h2h_read",
           [](tpu_raiden::kv_cache::jax::KVCacheManager& self, std::string peer,
              const std::vector<int>& src_block_ids, int64_t entity_id)
-              -> absl::StatusOr<
-                  std::pair<std::vector<int>, KVCacheManagerFuture>> {
+               -> absl::StatusOr<
+                   std::pair<std::vector<int>, KVCacheManagerFuture>> {
             auto res = self.H2hRead(peer, src_block_ids, entity_id);
             if (!res.ok()) return res.status();
             return std::make_pair(
@@ -175,4 +185,122 @@ NB_MODULE(_kv_cache_manager, m) {
                  self.CompleteReadRaw();
              return nb::make_tuple(done_sending, done_recving, failed_recving);
            });
+
+  // =========================================================================
+  // 2. Bind WeightSynchronizer
+  // =========================================================================
+  nb::class_<WeightSynchronizer>(m, "WeightSynchronizer")
+      .def(nb::init<const nb::list&, std::optional<int>, int, bool,
+                    std::optional<int>>(),
+           nb::arg("jax_arrays"), nb::arg("local_port") = nb::none(),
+           nb::arg("parallelism") = 1,
+           nb::arg("unsafe_skip_buffer_lock") = false,
+           nb::arg("control_port") = nb::none())
+      .def(
+          "PullWeights",
+          [](WeightSynchronizer& self, const std::string& source) {
+            absl::Status s = self.PullWeights(source);
+            if (!s.ok()) {
+              throw std::runtime_error("Weight sync PullWeights failed: " +
+                                       std::string(s.message()));
+            }
+          },
+          nb::arg("source"), nb::call_guard<nb::gil_scoped_release>())
+      .def(
+          "D2h",
+          [](WeightSynchronizer& self) {
+            auto status_or_future = self.D2h();
+            if (!status_or_future.ok()) {
+              throw std::runtime_error(
+                  "Weight sync D2H failed: " +
+                  std::string(status_or_future.status().message()));
+            }
+            absl::Status status = status_or_future.value().Await().status();
+            if (!status.ok()) {
+              throw std::runtime_error("Weight sync D2H copy failed: " +
+                                       std::string(status.message()));
+            }
+          },
+          nb::call_guard<nb::gil_scoped_release>())
+      .def(
+          "H2d",
+          [](WeightSynchronizer& self) {
+            auto status_or_future = self.H2d();
+            if (!status_or_future.ok()) {
+              throw std::runtime_error(
+                  "Weight sync H2D failed: " +
+                  std::string(status_or_future.status().message()));
+            }
+            absl::Status status = status_or_future.value().Await().status();
+            if (!status.ok()) {
+              throw std::runtime_error("Weight sync H2D copy failed: " +
+                                       std::string(status.message()));
+            }
+          },
+          nb::call_guard<nb::gil_scoped_release>())
+
+      .def(
+          "H2dChunk",
+          [](WeightSynchronizer& self, size_t shard_idx,
+             size_t host_offset_bytes, size_t device_offset_bytes,
+             size_t size_bytes) {
+            auto status_or_future = self.H2dChunk(
+                shard_idx, host_offset_bytes, device_offset_bytes, size_bytes
+            );
+            if (!status_or_future.ok()) {
+              throw std::runtime_error(
+                  "Weight sync H2DChunk failed: " +
+                  std::string(status_or_future.status().message()));
+            }
+            absl::Status status = status_or_future.value().Await().status();
+            if (!status.ok()) {
+              throw std::runtime_error("Weight sync H2DChunk copy failed: " +
+                                       std::string(status.message()));
+            }
+          },
+          nb::arg("shard_idx"), nb::arg("host_offset_bytes"),
+          nb::arg("device_offset_bytes"), nb::arg("size_bytes"),
+          nb::call_guard<nb::gil_scoped_release>())
+      .def(
+          "PullWeightsChunk",
+          [](WeightSynchronizer& self, const std::string& source,
+             size_t src_shard_idx, size_t src_offset_bytes,
+             size_t dst_shard_idx, size_t dst_offset_bytes, size_t size_bytes) {
+            absl::Status s = self.PullWeightsChunk(
+                source, src_shard_idx, src_offset_bytes, dst_shard_idx,
+                dst_offset_bytes, size_bytes
+            );
+            if (!s.ok()) {
+              throw std::runtime_error(
+                  "Weight sync PullWeightsChunk failed: " +
+                  std::string(s.message())
+              );
+            }
+          },
+          nb::arg("source"), nb::arg("src_shard_idx"),
+          nb::arg("src_offset_bytes"), nb::arg("dst_shard_idx"),
+          nb::arg("dst_offset_bytes"), nb::arg("size_bytes"),
+          nb::call_guard<nb::gil_scoped_release>())
+      .def(
+          "get_host_buffer",
+          [](WeightSynchronizer& self, size_t layer_idx, size_t shard_idx) {
+            const uint8_t* ptr = self.GetHostBufferPtr(layer_idx, shard_idx);
+            if (!ptr) {
+              throw std::runtime_error("Invalid layer or shard index");
+            }
+            size_t size = self.slice_byte_size() + 256 * 1024;
+            size_t shape[1] = {size};
+            return nb::ndarray<uint8_t, nb::numpy, nb::c_contig>(
+                const_cast<uint8_t*>(ptr), 1, shape,
+                nb::handle() /* view only, no ownership copy */
+            );
+          },
+          nb::arg("layer_idx") = 0, nb::arg("shard_idx") = 0)
+      .def_prop_ro("local_port", &WeightSynchronizer::local_port)
+      .def_prop_ro("control_port", &WeightSynchronizer::control_port)
+      .def_prop_ro("is_control_service_active",
+                   &WeightSynchronizer::is_control_service_active)
+      .def_prop_ro("num_layers", &WeightSynchronizer::num_layers)
+      .def_prop_ro("num_shards", &WeightSynchronizer::num_shards)
+      .def_prop_ro("slice_byte_size", &WeightSynchronizer::slice_byte_size);
 }

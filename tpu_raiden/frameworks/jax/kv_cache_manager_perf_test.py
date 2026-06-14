@@ -24,7 +24,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tpu_raiden.frameworks.jax import _kv_cache_manager
+from tpu_raiden.frameworks.jax import _tpu_raiden_jax as _kv_cache_manager
 
 # os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=8"
 

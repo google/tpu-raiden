@@ -19,7 +19,7 @@ from absl.testing import parameterized
 import numpy as np
 import torch
 
-from tpu_raiden.frameworks.torch import _kv_cache_manager
+from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _kv_cache_manager
 
 
 class KVCacheManagerTorchTest(parameterized.TestCase):

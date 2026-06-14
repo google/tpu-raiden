@@ -23,7 +23,7 @@ py_library(
         "kv_cache_manager.pyi",
     ],
     visibility = ["//visibility:public"],
-    deps = ["//tpu_raiden/frameworks/jax:_kv_cache_manager"],
+    deps = ["//tpu_raiden/frameworks/jax:_tpu_raiden_jax"],
 )
 
 py_library(
@@ -55,7 +55,7 @@ py_library(
     srcs = ["weight_synchronizer.py"],
     visibility = ["//visibility:public"],
     deps = [
-        "//tpu_raiden/frameworks/jax:_weight_synchronizer",
+        "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
     ],
 )
 

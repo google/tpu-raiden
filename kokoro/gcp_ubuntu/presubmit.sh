@@ -128,9 +128,6 @@ sys.modules['jax.extend'] = MagicMock()
 sys.modules['jax.extend.ffi'] = MagicMock()
 
 import kv_cache_manager
-import _kv_cache_manager
-import _kv_cache_manager_ffi
-import _weight_synchronizer
 print('All modules imported successfully!')
 "
 

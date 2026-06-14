@@ -98,10 +98,10 @@ cc_library(
 )
 
 nanobind_extension(
-    name = "_kv_cache_manager",
+    name = "_tpu_raiden_jax",
     srcs = [
-        "kv_cache_manager_module.cc",
         "nb_statusor.h",
+        "tpu_raiden_jax_module.cc",
     ],
     copts = [
         "-fexceptions",
@@ -116,8 +116,10 @@ nanobind_extension(
     deps = [
         ":kv_cache_manager_jax",
         ":nb_statusor",
+        ":weight_synchronizer_jax",
         "//core:kv_cache_manager_with_transfer",
         "//core:raw_transfer_core",
+        "//weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@nanobind",
@@ -276,29 +278,7 @@ cc_library(
     alwayslink = 1,
 )
 
-nanobind_extension(
-    name = "_weight_synchronizer",
-    srcs = [
-        "weight_synchronizer_module.cc",
-    ],
-    copts = [
-        "-fexceptions",
-        "-fvisibility=hidden",
-    ],
-    features = [
-        "-use_header_modules",
-    ],
-    linkopts = ["-Wl,--exclude-libs,ALL"],
-    tags = ["manual"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":weight_synchronizer_jax",
-        "//core:raw_transfer_core",
-        "//weight_sync:weight_synchronizer_base",
-        "@com_google_absl//absl/status:statusor",
-        "@nanobind",
-    ],
-)
+# Removed _weight_synchronizer (consolidated into _tpu_raiden_jax)
 
 cc_library(
     name = "mock_nanobind",
@@ -521,8 +501,8 @@ py_test(
         "notap",
     ],
     deps = [
-        ":_kv_cache_manager",
         ":_raw_transfer",
+        ":_tpu_raiden_jax",
         "@com_google_absl_py//absl/flags",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
