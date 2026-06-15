@@ -19,19 +19,12 @@
 
 #ifndef WITHOUT_PYTHON
 #include <nanobind/nanobind.h>
-#else
-namespace nanobind {
-struct list {
-  list() = default;
-  ~list() = default;
-  list(const list&) = default;
-  list& operator=(const list&) = default;
-};
-}  // namespace nanobind
 #endif
 #include "weight_sync/weight_synchronizer_base.h"
 
+#ifndef WITHOUT_PYTHON
 namespace nb = nanobind;
+#endif
 
 namespace tpu_raiden {
 namespace jax {
@@ -40,10 +33,12 @@ class WeightSynchronizer : public weight_sync::WeightSynchronizerBase {
  public:
   using WeightSynchronizerBase::WeightSynchronizerBase;
 
+#ifndef WITHOUT_PYTHON
   WeightSynchronizer(const nb::list& jax_arrays,
                      std::optional<int> local_port = std::nullopt,
                      int parallelism = 1, bool unsafe_skip_buffer_lock = false,
                      std::optional<int> control_port = std::nullopt);
+#endif
 
   ~WeightSynchronizer() override;
 };

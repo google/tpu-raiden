@@ -47,7 +47,9 @@ KVCacheManager::KVCacheManager(
     const std::vector<std::vector<at::Tensor>>& device_tensors, int block_size,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     std::optional<std::vector<uintptr_t>> external_host_ptrs,
-    bool unsafe_skip_buffer_lock, int parallelism)
+    bool unsafe_skip_buffer_lock, int parallelism,
+    std::optional<std::vector<std::string>> local_ips,
+    std::optional<std::vector<std::string>> peer_ips)
     : KVCacheManagerWithTransfer(
           UnpackTorchTensors(device_tensors), block_size, local_port,
           host_blocks_to_allocate,
@@ -63,12 +65,14 @@ KVCacheManager::KVCacheManager(
           /*local_control_port=*/-1,
           /*max_blocks=*/0,
           /*num_slots=*/0,
-          /*timeout_s=*/120.0) {}
+          /*timeout_s=*/120.0, std::move(local_ips), std::move(peer_ips)) {}
 
-KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
-                               int64_t tp_rank, int64_t local_control_port,
-                               int64_t max_blocks, int64_t num_slots,
-                               double timeout_s, bool unsafe_skip_buffer_lock)
+KVCacheManager::KVCacheManager(
+    const std::vector<at::Tensor>& kv_caches, int64_t tp_rank,
+    int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
+    double timeout_s, bool unsafe_skip_buffer_lock,
+    std::optional<std::vector<std::string>> local_ips,
+    std::optional<std::vector<std::string>> peer_ips)
     : KVCacheManagerWithTransfer(
           UnpackTorchTensors(SingleShardLayers(kv_caches)),
           /*block_size=*/1,
@@ -80,7 +84,8 @@ KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
               kv_caches.empty()
                   ? nullptr
                   : UnpackTorchTensor(kv_caches[0])->device()->client()),
-          tp_rank, local_control_port, max_blocks, num_slots, timeout_s),
+          tp_rank, local_control_port, max_blocks, num_slots, timeout_s,
+          std::move(local_ips), std::move(peer_ips)),
       kv_caches_(kv_caches) {}
 
 KVCacheManager::~KVCacheManager() = default;

@@ -50,7 +50,7 @@ class KVCacheManagerTest(parameterized.TestCase):
     self.block_size = 1
 
   def test_initialization(self):
-    device = torch.device("cpu")
+    device = self.device
     shape = (4, 128, 8)
     kv_caches = [torch.zeros(shape, device=device)]
 

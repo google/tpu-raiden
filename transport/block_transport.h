@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <thread>  // NOLINT
 #include <vector>
@@ -28,6 +29,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
+#include "core/numa_thread_pool.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -37,9 +39,10 @@ enum class MajorOrder : uint8_t {
   kBlockMajor = 1,
 };
 
-using BlockReceivedCallback =
-    std::function<absl::Status(size_t layer_idx, size_t shard_idx,
-                               int block_id, size_t size_bytes)>;
+constexpr uint16_t kBlockTransportFlagPartitionByNuma = 1 << 0;
+
+using BlockReceivedCallback = std::function<absl::Status(
+    size_t layer_idx, size_t shard_idx, int block_id, size_t size_bytes)>;
 
 // Delegate interface for BlockTransport to access layers/shards host memory
 // and allocate blocks on the receiver dynamically.
@@ -81,6 +84,7 @@ class BlockTransportDelegate {
   virtual size_t slice_byte_size() const = 0;
   virtual int block_size() const = 0;
   virtual size_t shard_factor() const = 0;
+  virtual int GetShardNumaNode(size_t shard_idx) const { return 0; }
 };
 
 // Standalone block-based POSIX TCP socket transport engine for TPU Raiden.
@@ -92,22 +96,24 @@ class BlockTransport {
     // Resharding Slice Push
     uint8_t op;
     uint8_t major_order;  // See MajorOrder. Ignored by legacy ops.
-    uint16_t reserved = 0;
+    uint16_t flags = 0;
     uint32_t remote_block_id;
     uint32_t local_block_id;
     uint32_t num_blocks;
   };
 
-  BlockTransport(BlockTransportDelegate* delegate, int local_port,
-                 bool enable_conn_pool = true);
+  BlockTransport(
+      BlockTransportDelegate* delegate, int local_port,
+      bool enable_conn_pool = true,
+      std::optional<std::vector<std::string>> local_ips = std::nullopt,
+      std::optional<std::vector<std::string>> peer_ips = std::nullopt);
   ~BlockTransport();
 
   // Push block data to remote peer (H2H Write)
-  absl::StatusOr<std::vector<int>> Push(const std::string& peer,
-                                        const std::vector<int>& src_block_ids,
-                                        int parallelism = 1,
-                                        MajorOrder major_order =
-                                            MajorOrder::kLayerMajor);
+  absl::StatusOr<std::vector<int>> Push(
+      const std::string& peer, const std::vector<int>& src_block_ids,
+      int parallelism = 1, MajorOrder major_order = MajorOrder::kLayerMajor,
+      std::optional<int> target_numa_node = std::nullopt);
 
   // Pull block data from remote peer (H2H Read)
   absl::StatusOr<std::vector<int>> Pull(
@@ -115,7 +121,8 @@ class BlockTransport {
       const std::vector<int>& local_block_ids = {},
       const std::vector<uint8_t*>& explicit_dst_ptrs = {}, int parallelism = 1,
       MajorOrder major_order = MajorOrder::kLayerMajor,
-      BlockReceivedCallback on_block_received = {});
+      BlockReceivedCallback on_block_received = {},
+      std::optional<int> target_numa_node = std::nullopt);
 
   // Pull byte-range weights chunk directly (Resharding Pull)
   absl::Status PullWeightsChunk(const std::string& source, size_t src_shard_idx,
@@ -154,6 +161,11 @@ class BlockTransport {
 
   int local_port() const { return local_port_; }
 
+  void SetWorkerPool(NumaThreadPool* pool) {
+    absl::MutexLock lock(&mu_);
+    worker_pool_ = pool;
+  }
+
  private:
   absl::StatusOr<int> ConnectToPeer(const std::string& peer);
 
@@ -165,7 +177,7 @@ class BlockTransport {
   void ClosePooledConnections();
 
   absl::Status ProcessSingleRequest(int client_fd);
-  void ConnectionWorker(int client_fd);
+  void ConnectionWorker(int client_fd, std::optional<int> numa_node);
   void ListenerLoop();
 
   void H2hWriteWorker(int stream_idx, const std::string& peer,
@@ -173,7 +185,8 @@ class BlockTransport {
                       const std::vector<int>& src_block_ids,
                       std::vector<int>& allocated_ids,
                       std::vector<absl::Status>& statuses,
-                      MajorOrder major_order);
+                      MajorOrder major_order,
+                      std::optional<int> target_numa_node);
 
   void H2hReadWorker(int stream_idx, const std::string& peer,
                      size_t local_block_offset, size_t local_block_count,
@@ -183,23 +196,30 @@ class BlockTransport {
                      const std::vector<uint8_t*>& explicit_dst_ptrs,
                      std::vector<absl::Status>& statuses,
                      MajorOrder major_order,
-                     BlockReceivedCallback on_block_received);
+                     BlockReceivedCallback on_block_received,
+                     std::optional<int> target_numa_node);
 
   BlockTransportDelegate* delegate_;
   int local_port_;
-  int server_fd_ = -1;
+  std::optional<std::vector<std::string>> local_ips_;
+  std::optional<std::vector<std::string>> peer_ips_;
+  std::vector<int> server_fds_;
+  absl::flat_hash_map<int, int> server_fd_to_numa_;
   std::atomic<bool> stopping_{false};
 
   absl::Mutex mu_;
   std::vector<int> active_client_fds_ ABSL_GUARDED_BY(mu_);
+
+  int active_threads_ ABSL_GUARDED_BY(mu_) = 0;
+  NumaThreadPool* worker_pool_ ABSL_GUARDED_BY(mu_) = nullptr;
 
   absl::Mutex pool_mu_;
   absl::flat_hash_map<std::string, std::vector<int>> conn_pool_
       ABSL_GUARDED_BY(pool_mu_);
   bool pooling_enabled_ = true;
 
+  absl::flat_hash_map<int, std::string> numa_to_ip_;
   std::thread listener_thread_;
-  std::vector<std::thread> worker_threads_;
 };
 
 }  // namespace transport

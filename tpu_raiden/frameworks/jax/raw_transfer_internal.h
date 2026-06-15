@@ -72,6 +72,29 @@ PjRtCopyFuture transfer_h2d_batch_async_naive(
     const nb::list& copy_sizes_major_dim = nb::list(),
     bool unsafe_skip_buffer_lock = false);
 
+void transfer_d2h(const nb::object& src_arr, const nb::object& dst_arr,
+                  const nb::list& src_offsets_major_dim = nb::list(),
+                  const nb::list& dst_offsets_major_dim = nb::list(),
+                  const nb::list& copy_sizes_major_dim = nb::list(),
+                  bool unsafe_skip_buffer_lock = false);
+void transfer_h2d(const nb::object& src_arr, const nb::object& dst_arr,
+                  const nb::list& src_offsets_major_dim = nb::list(),
+                  const nb::list& dst_offsets_major_dim = nb::list(),
+                  const nb::list& copy_sizes_major_dim = nb::list(),
+                  bool unsafe_skip_buffer_lock = false);
+void transfer_d2h_batch(const nb::list& src_arrs, const nb::list& dst_arrs,
+                        const nb::list& src_offsets_major_dim = nb::list(),
+                        const nb::list& dst_offsets_major_dim = nb::list(),
+                        const nb::list& copy_sizes_major_dim = nb::list(),
+                        bool unsafe_skip_buffer_lock = false);
+void transfer_h2d_batch(const nb::list& src_arrs, const nb::list& dst_arrs,
+                        const nb::list& src_offsets_major_dim = nb::list(),
+                        const nb::list& dst_offsets_major_dim = nb::list(),
+                        const nb::list& copy_sizes_major_dim = nb::list(),
+                        bool unsafe_skip_buffer_lock = false);
+void await_all(const nb::object& future_obj);
+bool is_ready(const nb::object& future_obj);
+
 }  // namespace raiden
 
 #endif  // THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_JAX_RAW_TRANSFER_INTERNAL_H_

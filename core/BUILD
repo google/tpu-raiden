@@ -61,6 +61,7 @@ cc_library(
         ":raw_transfer_core",
         ":raw_transfer_impl",
         ":status_macros",
+        ":tpu_utils",
         ":xla_raw_transfer_headers",
         "//transport:block_transport",
         "@com_google_absl//absl/base:core_headers",
@@ -249,6 +250,7 @@ cc_library(
         ":tpu_utils",
         "//kv_cache:kv_cache_manager_base",
         "//transport:block_transport",
+        "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -565,5 +567,22 @@ cc_test(
         "@xla//xla/tsl/platform:statusor",
         "@xla//xla/tsl/platform:test",
         "@xla//xla/tsl/platform:test_main",
+    ],
+)
+
+cc_test(
+    name = "numa_thread_pool_test",
+    srcs = ["numa_thread_pool_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":numa_thread_pool",
+        ":tpu_utils",
+        "@com_google_absl//absl/status",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
     ],
 )

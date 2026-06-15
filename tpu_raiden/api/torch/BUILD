@@ -12,23 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
-
-cc_library(
-    name = "torch_tpu_stablehlo_headers",
-    deps = [
-        "@stablehlo//:attr_type_builder_util",
-        "@stablehlo//:chlo_builder",
-        "@stablehlo//:chlo_ops",
-        "@stablehlo//:func_builder",
-        "@stablehlo//:mlir_builder",
-        "@stablehlo//:stablehlo_builder",
-        "@stablehlo//:stablehlo_ops",
-    ],
-)
 
 py_library(
     name = "kv_cache_manager_torch_py",

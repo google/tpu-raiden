@@ -81,13 +81,17 @@ KVCacheManagerBase::KVCacheManagerBase(
     std::optional<int> host_blocks_to_allocate,
     std::optional<std::vector<const uint8_t*>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism,
+    std::optional<std::vector<std::string>> local_ips,
+    std::optional<std::vector<std::string>> peer_ips,
     HostBufferAllocator host_allocator)
-    : RaidenManagerBase(layer_buffers.size(),
-                        layer_buffers.empty() ? 0 : layer_buffers[0].size(),
-                        layer_buffers.empty() ? 0
-                                              : raiden::GetMajorSliceByteSize(
-                                                    layer_buffers[0][0]),
-                        block_size, local_port, parallelism) {
+    : RaidenManagerBase(
+          layer_buffers.size(),
+          layer_buffers.empty() ? 0 : layer_buffers[0].size(),
+          layer_buffers.empty()
+              ? 0
+              : raiden::GetMajorSliceByteSize(layer_buffers[0][0]),
+          block_size, local_port, parallelism,
+          /*max_staging_blocks=*/4, std::move(local_ips), std::move(peer_ips)) {
   if (num_layers_ == 0 || num_shards_ == 0) {
     return;
   }
@@ -205,28 +209,7 @@ KVCacheManagerBase::KVCacheManagerBase(
   }
 
   // Initialize NUMA thread pool
-  std::vector<int> unique_numa_nodes;
-  for (const auto& layer : layer_buffers) {
-    for (xla::PjRtBuffer* buf : layer) {
-      if (buf && buf->device()) {
-        int node = GetPjRtDeviceNumaNode(buf->device());
-        if (node >= 0) {
-          bool found = false;
-          for (int n : unique_numa_nodes) {
-            if (n == node) {
-              found = true;
-              break;
-            }
-          }
-          if (!found) {
-            unique_numa_nodes.push_back(node);
-          }
-        }
-      }
-    }
-  }
-  size_t pool_size = std::max<size_t>(
-      {1, static_cast<size_t>(parallelism), unique_numa_nodes.size()});
+  size_t pool_size = std::max<size_t>(1, parallelism);
   dma_pool_ = std::make_unique<NumaThreadPool>(pool_size);
   push_pool_ = std::make_unique<NumaThreadPool>(pool_size);
   pull_pool_ = std::make_unique<NumaThreadPool>(pool_size);
@@ -236,9 +219,12 @@ KVCacheManagerBase::KVCacheManagerBase(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
     int block_size, std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate, int parallelism,
+    std::optional<std::vector<std::string>> local_ips,
+    std::optional<std::vector<std::string>> peer_ips,
     HostBufferAllocator host_allocator)
     : RaidenManagerBase(num_layers, num_shards, slice_byte_size, block_size,
-                        local_port, parallelism) {
+                        local_port, parallelism, /*max_staging_blocks=*/4,
+                        std::move(local_ips), std::move(peer_ips)) {
   int total_blocks = host_blocks_to_allocate.value_or(0);
   block_manager_ = std::make_unique<LogicalBlockManager>(total_blocks);
 
@@ -362,7 +348,8 @@ KVCacheManagerBase::H2d(const std::vector<int64_t>& src_offsets_major_dim,
   }
 
   size_t total_works = 0;
-  for (const auto& [node, works] : grouped_work) {
+  for (const auto& pair : grouped_work) {
+    auto works = pair.second;
     total_works += works.size();
   }
 
@@ -380,7 +367,9 @@ KVCacheManagerBase::H2d(const std::vector<int64_t>& src_offsets_major_dim,
     // OPTIMIZATION: Single work item. Execute inline to avoid pool overhead.
     VLOG(1) << "H2d: Executing inline (single work). Thread: "
             << std::this_thread::get_id();
-    for (const auto& [node, works] : grouped_work) {
+    for (const auto& pair : grouped_work) {
+      int node = pair.first;
+      auto works = pair.second;
       VLOG(1) << "H2d: Executing inline dispatch for NUMA node " << node
               << ", works count: " << works.size();
       auto status_or_local_futures =
@@ -402,7 +391,9 @@ KVCacheManagerBase::H2d(const std::vector<int64_t>& src_offsets_major_dim,
     // Safe to parallelize via the dedicated dma_pool_.
     VLOG(1) << "H2d: Parallelizing dispatches on dma_pool_. Thread: "
             << std::this_thread::get_id();
-    for (const auto& [node, works] : grouped_work) {
+    for (const auto& pair : grouped_work) {
+      int node = pair.first;
+      auto works = pair.second;
       VLOG(1) << "H2d: Scheduling dispatch for NUMA node " << node
               << ", works count: " << works.size();
       auto future = dma_pool_->Schedule(
@@ -499,7 +490,8 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
   }
 
   size_t total_works = 0;
-  for (const auto& [node, works] : grouped_work) {
+  for (const auto& pair : grouped_work) {
+    auto works = pair.second;
     total_works += works.size();
   }
 
@@ -517,7 +509,9 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
     // OPTIMIZATION: Single work item. Execute inline to avoid pool overhead.
     VLOG(1) << "DispatchD2hChunks: Executing inline (single work). Thread: "
             << std::this_thread::get_id();
-    for (const auto& [node, works] : grouped_work) {
+    for (const auto& pair : grouped_work) {
+      int node = pair.first;
+      auto works = pair.second;
       VLOG(1) << "DispatchD2hChunks: Executing inline dispatch for NUMA node "
               << node << ", works count: " << works.size();
       auto status_or_local_futures = DispatchD2hWork(
@@ -539,7 +533,9 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
     VLOG(1)
         << "DispatchD2hChunks: Parallelizing dispatches on dma_pool_. Thread: "
         << std::this_thread::get_id();
-    for (const auto& [node, works] : grouped_work) {
+    for (const auto& pair : grouped_work) {
+      int node = pair.first;
+      auto works = pair.second;
       VLOG(1) << "DispatchD2hChunks: Scheduling dispatch for NUMA node " << node
               << ", works count: " << works.size();
       auto future = dma_pool_->Schedule(
@@ -670,14 +666,34 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2hReadExplicit(
     const std::vector<int>& local_block_ids,
     const std::vector<uint8_t*>& explicit_dst_ptrs, int parallelism,
     tpu_raiden::transport::MajorOrder major_order,
-    tpu_raiden::transport::BlockReceivedCallback on_block_received) {
+    tpu_raiden::transport::BlockReceivedCallback on_block_received,
+    std::optional<int> target_numa_node) {
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
-  ASSIGN_OR_RETURN(
-      std::vector<int> allocated_ids,
-      server_->Pull(peer, src_block_ids, local_block_ids, explicit_dst_ptrs,
-                    parallelism, major_order, on_block_received));
+  std::optional<int> numa_node_to_use = std::nullopt;
+  if (target_numa_node.has_value()) {
+    if (*target_numa_node >= 0) {
+      numa_node_to_use = target_numa_node;
+    } else {
+      numa_node_to_use = std::nullopt;
+    }
+  } else {
+    if (!buffer_holds_.empty() && !buffer_holds_[0].empty() &&
+        buffer_holds_[0][0].buffer) {
+      if (auto* device = buffer_holds_[0][0].buffer->device()) {
+        int node = GetPjRtDeviceNumaNode(device);
+        if (node >= 0) {
+          numa_node_to_use = node;
+        }
+      }
+    }
+  }
+
+  ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
+                   server_->Pull(peer, src_block_ids, local_block_ids,
+                                 explicit_dst_ptrs, parallelism, major_order,
+                                 on_block_received, numa_node_to_use));
   return raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{});
 }
 
@@ -1091,6 +1107,18 @@ KVCacheManagerBase::DispatchD2hWork(const std::vector<CopyWork>& works,
           << local_futures.size()
           << " buffer futures. Thread: " << std::this_thread::get_id();
   return local_futures;
+}
+
+int KVCacheManagerBase::GetShardNumaNode(size_t shard_idx) const {
+  if (buffer_holds_.empty() || buffer_holds_[0].size() <= shard_idx) {
+    return 0;  // Fallback
+  }
+  auto* buf = buffer_holds_[0][shard_idx].buffer;
+  if (buf && buf->device()) {
+    int node = GetPjRtDeviceNumaNode(buf->device());
+    if (node >= 0) return node;
+  }
+  return 0;
 }
 
 }  // namespace kv_cache

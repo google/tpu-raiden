@@ -16,13 +16,13 @@
 #define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_JAX_KV_CACHE_MANAGER_FFI_H_
 
 namespace tpu_raiden {
+
+class KVCacheManagerWithTransfer;
+
 namespace kv_cache {
-namespace jax {
-class KVCacheManager;
-}  // namespace jax
 
 // Global registry map for distributed JAX meshes multi-device support
-extern jax::KVCacheManager* g_kv_cache_managers[32];
+extern KVCacheManagerWithTransfer* g_kv_cache_managers[32];
 
 void SyncCopies();
 

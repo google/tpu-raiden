@@ -38,12 +38,12 @@
 #include "xla/stream_executor/platform_manager.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
-#include "tpu_raiden/frameworks/jax/weight_synchronizer.h"
+#include "weight_sync/weight_synchronizer_base.h"
 
 namespace tpu_raiden {
 namespace weight_sync {
 
-jax::WeightSynchronizer* g_weight_synchronizers[32] = {nullptr};
+WeightSynchronizerBase* g_weight_synchronizers[32] = {nullptr};
 std::unique_ptr<stream_executor::Stream> g_streams[32] = {nullptr};
 
 // FFI Init custom call implementation for WeightSynchronizer (Host CPU
@@ -70,11 +70,13 @@ xla::ffi::Error TriggerWeightSynchronizerInitImpl(
         << "[TPU Worker FFI] >>> WS LAZY INITIALIZATION TRIGGERED <<< Shard: "
         << shard_idx;
 
-    g_weight_synchronizers[shard_idx] = new tpu_raiden::jax::WeightSynchronizer(
-        static_cast<size_t>(num_layers), static_cast<size_t>(parallelism),
-        static_cast<size_t>(slice_byte_size), std::make_optional(local_port),
-        std::nullopt,  // host_blocks_to_allocate
-        parallelism);
+    g_weight_synchronizers[shard_idx] =
+        new tpu_raiden::weight_sync::WeightSynchronizerBase(
+            static_cast<size_t>(num_layers), static_cast<size_t>(parallelism),
+            static_cast<size_t>(slice_byte_size),
+            std::make_optional(local_port),
+            std::nullopt,  // host_blocks_to_allocate
+            parallelism);
 
     // Allocate the StreamExecutor Stream once per shard, and cache E2E!
     int64_t dev_id = static_cast<int64_t>(shard_idx);
@@ -192,11 +194,13 @@ xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
         << "[TPU Worker FFI] >>> WS LAZY INITIALIZATION TRIGGERED <<< Shard: "
         << shard_idx;
 
-    g_weight_synchronizers[shard_idx] = new tpu_raiden::jax::WeightSynchronizer(
-        static_cast<size_t>(num_layers), static_cast<size_t>(parallelism),
-        static_cast<size_t>(slice_byte_size), std::make_optional(local_port),
-        std::nullopt,  // host_blocks_to_allocate
-        parallelism);
+    g_weight_synchronizers[shard_idx] =
+        new tpu_raiden::weight_sync::WeightSynchronizerBase(
+            static_cast<size_t>(num_layers), static_cast<size_t>(parallelism),
+            static_cast<size_t>(slice_byte_size),
+            std::make_optional(local_port),
+            std::nullopt,  // host_blocks_to_allocate
+            parallelism);
 
     int64_t dev_id = static_cast<int64_t>(shard_idx);
     auto platform_or =
@@ -473,8 +477,6 @@ XLA_FFI_DEFINE_HANDLER(
         .Arg<xla::ffi::AnyBuffer>()  // dst_shard_indices
         .Ret<xla::ffi::AnyBuffer>()  // result (aliased to anchor)
 );
-
-
 
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "init_weight_synchronizer",
                          "Host", kWSInit);

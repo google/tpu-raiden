@@ -56,6 +56,8 @@
 
 namespace tpu_raiden {
 
+class NumaThreadPool;
+
 class TransferFuture {
  public:
   TransferFuture() = default;
@@ -142,17 +144,19 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
       bool unsafe_skip_buffer_lock, int parallelism,
       HostBufferAllocator host_allocator, int64_t tp_rank = 0,
       int64_t local_control_port = -1, int64_t max_blocks = 0,
-      int64_t num_slots = 0, double timeout_s = 120.0);
+      int64_t num_slots = 0, double timeout_s = 120.0,
+      std::optional<std::vector<std::string>> local_ips = std::nullopt,
+      std::optional<std::vector<std::string>> peer_ips = std::nullopt);
 
   // Metadata-based constructor for FFI / CPU-only testing
-  KVCacheManagerWithTransfer(size_t num_layers, size_t num_shards,
-                             size_t slice_byte_size, int block_size,
-                             std::optional<int> local_port,
-                             std::optional<int> host_blocks_to_allocate,
-                             int parallelism = 1, int64_t tp_rank = 0,
-                             int64_t local_control_port = -1,
-                             int64_t max_blocks = 0, int64_t num_slots = 0,
-                             double timeout_s = 120.0);
+  KVCacheManagerWithTransfer(
+      size_t num_layers, size_t num_shards, size_t slice_byte_size,
+      int block_size, std::optional<int> local_port,
+      std::optional<int> host_blocks_to_allocate, int parallelism = 1,
+      int64_t tp_rank = 0, int64_t local_control_port = -1,
+      int64_t max_blocks = 0, int64_t num_slots = 0, double timeout_s = 120.0,
+      std::optional<std::vector<std::string>> local_ips = std::nullopt,
+      std::optional<std::vector<std::string>> peer_ips = std::nullopt);
 
   virtual ~KVCacheManagerWithTransfer();
 
@@ -301,6 +305,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   int control_fd_ = -1;
   std::atomic<bool> stopping_{false};
   std::thread control_thread_;
+  std::unique_ptr<NumaThreadPool> control_pool_;
 
  private:
   std::optional<int> GetLocalTpuNumaNode(xla::PjRtBuffer* buf) const;

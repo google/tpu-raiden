@@ -28,6 +28,7 @@
 #include "core/raw_transfer_core.h"
 #include "tpu_raiden/frameworks/jax/kv_cache_manager.h"
 #include "tpu_raiden/frameworks/jax/nb_statusor.h"  // IWYU pragma: keep
+#include "tpu_raiden/frameworks/jax/raw_transfer_internal.h"
 #include "tpu_raiden/frameworks/jax/weight_synchronizer.h"
 
 namespace nb = nanobind;
@@ -65,19 +66,24 @@ NB_MODULE(_tpu_raiden_jax, m) {
 
   nb::class_<tpu_raiden::kv_cache::jax::KVCacheManager>(m, "KVCacheManager")
       .def(nb::init<nb::list, int, std::optional<int>, std::optional<int>,
-                    std::optional<std::vector<uintptr_t>>, bool, int>(),
+                    std::optional<std::vector<uintptr_t>>, bool, int,
+                    std::optional<std::vector<std::string>>,
+                    std::optional<std::vector<std::string>>>(),
            nb::arg("device_arrays"), nb::arg("block_size") = 1,
            nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("external_host_ptrs") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
-           nb::arg("parallelism") = 1)
+           nb::arg("parallelism") = 1, nb::arg("local_ips") = nb::none(),
+           nb::arg("peer_ips") = nb::none())
       .def(nb::init<nanobind::list, int64_t, int64_t, int64_t, int64_t, double,
-                    bool>(),
+                    bool, std::optional<std::vector<std::string>>,
+                    std::optional<std::vector<std::string>>>(),
            nb::arg("kv_caches"), nb::arg("tp_rank") = 0,
            nb::arg("local_control_port"), nb::arg("max_blocks"),
            nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
-           nb::arg("unsafe_skip_buffer_lock") = true)
+           nb::arg("unsafe_skip_buffer_lock") = true,
+           nb::arg("local_ips") = nb::none(), nb::arg("peer_ips") = nb::none())
 
       // Use lambdas to wrap the returned raiden::PjRtCopyFuture into
       // KVCacheManagerFuture

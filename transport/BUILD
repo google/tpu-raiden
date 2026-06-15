@@ -29,7 +29,9 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        "//core:numa_thread_pool",
         "//core:status_macros",
+        "//core:tpu_utils",
         "//core:tsl_platform_headers",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/cleanup",

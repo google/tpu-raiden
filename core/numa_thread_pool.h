@@ -35,33 +35,37 @@ namespace tpu_raiden {
 
 class NumaThreadPool {
  public:
-  explicit NumaThreadPool(size_t threads);
+  // If target_numa_node is set, this pool is restricted to that node.
+  // If target_numa_node is nullopt and multi_numa is true, this pool
+  // will internally spawn sub-pools for each NUMA node in the system.
+  explicit NumaThreadPool(size_t threads,
+                          std::optional<int> target_numa_node = std::nullopt,
+                          bool multi_numa = true);
   ~NumaThreadPool();
 
   // Schedule a task, optionally targeting a specific NUMA node.
-  // The pool automatically handles pinning the worker thread to the target node
-  // before executing the task.
   template <class F, class... Args>
   auto Schedule(std::optional<int> numa_node, F&& f, Args&&... args)
       -> std::future<typename std::invoke_result<F, Args...>::type> {
     using return_type = typename std::invoke_result<F, Args...>::type;
 
-    VLOG(1) << "NumaThreadPool::Schedule: scheduling task. Target NUMA: "
-            << (numa_node.has_value() ? std::to_string(*numa_node) : "none")
-            << ", from thread: " << std::this_thread::get_id();
+    if (is_multi_numa_) {
+      int node = numa_node.value_or(0);
+      if (node < 0 || node >= static_cast<int>(sub_pools_.size())) {
+        node = 0;
+      }
+      return sub_pools_[node]->Schedule(std::nullopt, std::forward<F>(f),
+                                        std::forward<Args>(args)...);
+    }
 
-    // Wrap the user task to inject the pinning logic before execution.
-    auto task_wrapper =
-        [numa_node, f = std::forward<F>(f),
-         args_tuple = std::make_tuple(std::forward<Args>(args)...)]() mutable {
-          if (numa_node.has_value() && *numa_node >= 0) {
-            PinCurrentThreadToNumaNode(*numa_node);
-          }
-          return std::apply(f, std::move(args_tuple));
-        };
-
+    // Leaf pool (single NUMA node) implementation
+    // No dynamic pinning here! The worker threads are already pinned at
+    // startup.
     auto task = std::make_shared<std::packaged_task<return_type()>>(
-        std::move(task_wrapper));
+        [f = std::forward<F>(f),
+         args_tuple = std::make_tuple(std::forward<Args>(args)...)]() mutable {
+          return std::apply(f, std::move(args_tuple));
+        });
 
     std::future<return_type> res = task->get_future();
     {
@@ -90,6 +94,11 @@ class NumaThreadPool {
  private:
   void WorkerLoop();
 
+  std::optional<int> target_numa_node_;
+  bool is_multi_numa_ = false;
+  std::vector<std::unique_ptr<NumaThreadPool>> sub_pools_;
+
+  // Members for the single-node pool (only used if !is_multi_numa_)
   std::vector<std::thread> workers;
   std::queue<std::function<void()>> tasks;
   std::mutex queue_mutex;

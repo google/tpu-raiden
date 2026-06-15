@@ -28,12 +28,12 @@
 #include "xla/stream_executor/platform_manager.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
-#include "tpu_raiden/frameworks/jax/kv_cache_manager.h"
+#include "core/kv_cache_manager_with_transfer.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
 
-jax::KVCacheManager* g_kv_cache_managers[32] = {nullptr};
+KVCacheManagerWithTransfer* g_kv_cache_managers[32] = {nullptr};
 std::unique_ptr<stream_executor::Stream> g_streams[32] = {nullptr};
 
 int64_t g_block_byte_size = 0;
@@ -70,7 +70,7 @@ xla::ffi::Error TriggerRaidenInitImpl(
             << ", parallelism=" << parallelism << ", block_size=" << block_size
             << ", global_blocks=" << host_blocks_to_allocate;
 
-    g_kv_cache_managers[shard_idx] = new jax::KVCacheManager(
+    g_kv_cache_managers[shard_idx] = new KVCacheManagerWithTransfer(
         static_cast<size_t>(num_layers), static_cast<size_t>(parallelism),
         static_cast<size_t>(slice_byte_size), block_size,
         local_port > 0 ? std::make_optional(local_port) : std::nullopt,

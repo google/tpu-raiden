@@ -26,7 +26,6 @@
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "core/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
@@ -36,6 +35,8 @@
 #include "core/host_memory_allocator.h"
 #include "core/raw_transfer_core.h"
 #include "core/raw_transfer_impl.h"
+#include "core/status_macros.h"
+#include "core/tpu_utils.h"
 #include "transport/block_transport.h"
 
 namespace tpu_raiden {
@@ -44,10 +45,12 @@ xla::Future<> ReturnFuture(const absl::Status& status) {
   return xla::Future<>(status);
 }
 
-RaidenManagerBase::RaidenManagerBase(size_t num_layers, size_t num_shards,
-                                     size_t slice_byte_size, int block_size,
-                                     std::optional<int> local_port,
-                                     int parallelism, size_t max_staging_blocks)
+RaidenManagerBase::RaidenManagerBase(
+    size_t num_layers, size_t num_shards, size_t slice_byte_size,
+    int block_size, std::optional<int> local_port, int parallelism,
+    size_t max_staging_blocks,
+    std::optional<std::vector<std::string>> local_ips,
+    std::optional<std::vector<std::string>> peer_ips)
     : num_layers_(num_layers),
       num_shards_(num_shards),
       slice_byte_size_(slice_byte_size),
@@ -56,7 +59,9 @@ RaidenManagerBase::RaidenManagerBase(size_t num_layers, size_t num_shards,
   shard_factor_ = 1;
 
   int port = local_port.value_or(0);
-  server_ = std::make_unique<tpu_raiden::transport::BlockTransport>(this, port);
+  server_ = std::make_unique<tpu_raiden::transport::BlockTransport>(
+      this, port, /*enable_conn_pool=*/true, std::move(local_ips),
+      std::move(peer_ips));
 
   semaphore_ = std::make_unique<xla::Semaphore>(max_staging_blocks);
 }
@@ -244,7 +249,7 @@ xla::Future<> RaidenManagerBase::DoD2DTransfer(const BlockMetadata& src,
 
   // 3. Trigger H2H inside d2h_future ready callback
   d2h_future.OnReady(
-      [this, dst, host_allocation, shared_promise](
+      [this, dst, host_allocation, shared_promise, src_buffer](
           const absl::StatusOr<raiden::BufferHolders>& status_or) mutable {
         if (!status_or.ok()) {
           shared_promise->Set(absl::InternalError(
@@ -252,14 +257,35 @@ xla::Future<> RaidenManagerBase::DoD2DTransfer(const BlockMetadata& src,
           return;
         }
 
-        // 4. Start H2H Push in a separate thread to avoid blocking PJRT
-        // callback.
-        std::thread([this, dst, host_allocation, shared_promise]() mutable {
-          absl::Status s = server_->WriteBlockDirect(dst.address, dst.block_id,
-                                                     host_allocation.ptr,
-                                                     host_allocation.size);
-          shared_promise->Set(s);
-        }).detach();
+        int numa_node = 0;
+        if (src_buffer && src_buffer->device()) {
+          int device_node = GetPjRtDeviceNumaNode(src_buffer->device());
+          if (device_node >= 0) numa_node = device_node;
+        }
+
+        NumaThreadPool* pool = push_pool();
+        if (pool) {
+          pool->Schedule(numa_node, [this, dst, host_allocation,
+                                     shared_promise]() mutable {
+            absl::Status s = server_->WriteBlockDirect(
+                dst.address, dst.block_id, host_allocation.ptr,
+                host_allocation.size);
+            shared_promise->Set(s);
+          });
+        } else {
+          // Fallback to pinned raw thread if pool is null (e.g. in some
+          // tests/mocks)
+          std::thread([this, dst, host_allocation, shared_promise,
+                       numa_node]() mutable {
+            if (numa_node >= 0) {
+              PinCurrentThreadToNumaNode(numa_node);
+            }
+            absl::Status s = server_->WriteBlockDirect(
+                dst.address, dst.block_id, host_allocation.ptr,
+                host_allocation.size);
+            shared_promise->Set(s);
+          }).detach();
+        }
       });
 
   return future;

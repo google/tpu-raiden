@@ -130,11 +130,9 @@ cc_library(
     deps = [
         ":torch_tpu_utils",
         ":torch_utils",
-        "//core:host_memory_allocator",
         "//core:kv_cache_manager_with_transfer",
         "//core:utils",
         "//core:xla_raw_transfer_headers",
-        "@com_google_absl//absl/status:statusor",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
     ],
@@ -279,11 +277,9 @@ cc_library(
     deps = [
         ":torch_tpu_utils_mock",
         ":torch_utils_mock",
-        "//core:host_memory_allocator",
         "//core:kv_cache_manager_with_transfer",
         "//core:utils",
         "//core:xla_raw_transfer_headers",
-        "@com_google_absl//absl/status:statusor",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
     ],

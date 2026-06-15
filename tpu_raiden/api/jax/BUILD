@@ -42,9 +42,6 @@ py_test(
     deps = [
         ":kv_cache_store",
         "@com_google_absl_py//absl/testing:absltest",
-        "@com_google_absl_py//absl/testing:parameterized",
-        "@jax//jax",
-        "@pypi//numpy",
         # buildcleaner: keep
         "//tpu_raiden/frameworks/jax:_raw_transfer",
     ],
