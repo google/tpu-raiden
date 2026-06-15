@@ -14,15 +14,21 @@
 
 #include "core/tpu_utils.h"
 
+#include <arpa/inet.h>
 #include <dirent.h>
+#include <ifaddrs.h>
+#include <netdb.h>
 #include <pthread.h>
 #include <sched.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -241,6 +247,11 @@ int GetPjRtDeviceNumaNode(const xla::PjRtDevice* device) {
   if (device == nullptr) return -1;
 
   int chip_idx = device->local_hardware_id().value();
+  if (chip_idx < 0) {
+    VLOG(1) << "Negative local_hardware_id: " << chip_idx
+            << ", returning NUMA node -1";
+    return -1;
+  }
 
   const auto& pci_devices = GetTpuPciDevices();
   if (pci_devices.empty()) {
@@ -300,6 +311,112 @@ void PrintTpuHardwareTopology() {
   if (devices.empty()) {
     LOG(INFO) << "  No Google TPU PCI devices found in sysfs.";
   }
+}
+
+int GetNumaNodeCount() {
+  static int cached_count = []() {
+    int count = 0;
+    DIR* dir = opendir("/sys/devices/system/node");
+    if (dir == nullptr) {
+      return 1;  // Fallback to 1 if sysfs is not accessible
+    }
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+      std::string name = entry->d_name;
+      if (name.rfind("node", 0) == 0 && name.size() > 4) {
+        // Check if the rest of the name is a number
+        bool is_num = true;
+        for (size_t i = 4; i < name.size(); ++i) {
+          if (!std::isdigit(name[i])) {
+            is_num = false;
+            break;
+          }
+        }
+        if (is_num) {
+          count++;
+        }
+      }
+    }
+    closedir(dir);
+    return count > 0 ? count : 1;
+  }();
+  return cached_count;
+}
+
+int GetNumaNodeForIp(const std::string& ip) {
+  const char* env_override = std::getenv("RAIDEN_NUMA_IPS");
+  if (env_override != nullptr) {
+    std::string env_str(env_override);
+    std::stringstream ss(env_str);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+      size_t colon = item.find(':');
+      if (colon != std::string::npos) {
+        std::string node_str = item.substr(0, colon);
+        std::string ip_str = item.substr(colon + 1);
+        if (ip_str == ip) {
+          try {
+            int node = std::stoi(node_str);
+            VLOG(1) << "NUMA IP override match: IP " << ip << " -> NUMA Node "
+                    << node;
+            return node;
+          } catch (...) {
+            // ignore parse errors
+          }
+        }
+      }
+    }
+  }
+
+  std::string ifname;
+  struct ifaddrs* ifaddr;
+  if (getifaddrs(&ifaddr) != -1) {
+    for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+      if (ifa->ifa_addr == nullptr) continue;
+      if (ifa->ifa_addr->sa_family != AF_INET &&
+          ifa->ifa_addr->sa_family != AF_INET6) {
+        continue;
+      }
+      char host[NI_MAXHOST];
+      if (getnameinfo(ifa->ifa_addr,
+                      (ifa->ifa_addr->sa_family == AF_INET)
+                          ? sizeof(struct sockaddr_in)
+                          : sizeof(struct sockaddr_in6),
+                      host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
+        if (std::string(host) == ip) {
+          ifname = ifa->ifa_name;
+          break;
+        }
+      }
+    }
+    freeifaddrs(ifaddr);
+  }
+
+  int numa_node = 0;  // default fallback
+  if (!ifname.empty()) {
+    std::string numa_path = "/sys/class/net/" + ifname + "/device/numa_node";
+    std::ifstream file(numa_path);
+    if (file.is_open()) {
+      int val;
+      if (file >> val) {
+        if (val >= 0) {
+          numa_node = val;
+          VLOG(1) << "Auto-detected NUMA node " << numa_node << " for IP " << ip
+                  << " on interface " << ifname;
+        } else {
+          VLOG(1) << "NUMA node file for interface " << ifname << " returned "
+                  << val << ", falling back to 0";
+        }
+      }
+    } else {
+      VLOG(1) << "Could not open NUMA node file for interface " << ifname
+              << ", falling back to 0";
+    }
+  } else {
+    VLOG(1) << "Could not find interface for IP " << ip
+            << ", falling back to 0";
+  }
+  return numa_node;
 }
 
 }  // namespace tpu_raiden

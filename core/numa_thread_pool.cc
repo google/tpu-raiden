@@ -30,19 +30,46 @@ namespace {
 thread_local bool is_worker_thread = false;
 }  // namespace
 
-NumaThreadPool::NumaThreadPool(size_t threads) : stop(false) {
-  VLOG(1) << "NumaThreadPool created with " << threads
-          << " threads. Pool instance: " << this;
-  for (size_t i = 0; i < threads; ++i) {
-    workers.emplace_back([this, i] {
-      is_worker_thread = true;  // Mark this thread as a worker
-      VLOG(1) << "NumaThreadPool worker thread " << i
-              << " started. Thread ID: " << std::this_thread::get_id()
-              << ", Pool: " << this;
-      this->WorkerLoop();
-      VLOG(1) << "NumaThreadPool worker thread " << i
-              << " exiting. Thread ID: " << std::this_thread::get_id();
-    });
+NumaThreadPool::NumaThreadPool(size_t threads,
+                               std::optional<int> target_numa_node,
+                               bool multi_numa)
+    : target_numa_node_(target_numa_node), stop(false) {
+  if (multi_numa && !target_numa_node.has_value()) {
+    is_multi_numa_ = true;
+    int num_nodes = tpu_raiden::GetNumaNodeCount();
+    VLOG(1) << "NumaThreadPool (Composite) created with " << threads
+            << " threads. Spawning " << num_nodes << " sub-pools.";
+    size_t threads_per_node =
+        threads > 0 ? std::max<size_t>(1, threads / num_nodes) : 0;
+    for (int i = 0; i < num_nodes; ++i) {
+      sub_pools_.push_back(std::make_unique<NumaThreadPool>(
+          threads_per_node, /*target_numa_node=*/i, /*multi_numa=*/false));
+    }
+  } else {
+    is_multi_numa_ = false;
+    VLOG(1) << "NumaThreadPool (Leaf) created with " << threads
+            << " threads on NUMA node "
+            << (target_numa_node.has_value() ? std::to_string(*target_numa_node)
+                                             : "none")
+            << ". Pool instance: " << this;
+    for (size_t i = 0; i < threads; ++i) {
+      workers.emplace_back([this, i, target_numa_node] {
+        is_worker_thread = true;  // Mark this thread as a worker
+        if (target_numa_node.has_value() && *target_numa_node >= 0) {
+          PinCurrentThreadToNumaNode(*target_numa_node);
+        }
+        VLOG(1) << "NumaThreadPool worker thread " << i
+                << " started on NUMA node "
+                << (target_numa_node.has_value()
+                        ? std::to_string(*target_numa_node)
+                        : "none")
+                << ". Thread ID: " << std::this_thread::get_id()
+                << ", Pool: " << this;
+        this->WorkerLoop();
+        VLOG(1) << "NumaThreadPool worker thread " << i
+                << " exiting. Thread ID: " << std::this_thread::get_id();
+      });
+    }
   }
 }
 

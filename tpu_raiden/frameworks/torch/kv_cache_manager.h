@@ -33,14 +33,18 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
       int block_size = 1, std::optional<int> local_port = std::nullopt,
       std::optional<int> host_blocks_to_allocate = std::nullopt,
       std::optional<std::vector<uintptr_t>> external_host_ptrs = std::nullopt,
-      bool unsafe_skip_buffer_lock = false, int parallelism = 1);
+      bool unsafe_skip_buffer_lock = false, int parallelism = 1,
+      std::optional<std::vector<std::string>> local_ips = std::nullopt,
+      std::optional<std::vector<std::string>> peer_ips = std::nullopt);
 
   // New transfer-enabled constructor (flat list of tensors, single shard per
   // layer)
-  KVCacheManager(const std::vector<at::Tensor>& kv_caches, int64_t tp_rank,
-                 int64_t local_control_port, int64_t max_blocks,
-                 int64_t num_slots, double timeout_s,
-                 bool unsafe_skip_buffer_lock);
+  KVCacheManager(
+      const std::vector<at::Tensor>& kv_caches, int64_t tp_rank,
+      int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
+      double timeout_s, bool unsafe_skip_buffer_lock,
+      std::optional<std::vector<std::string>> local_ips = std::nullopt,
+      std::optional<std::vector<std::string>> peer_ips = std::nullopt);
 
   ~KVCacheManager() override;
 

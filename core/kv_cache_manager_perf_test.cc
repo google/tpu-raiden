@@ -250,7 +250,7 @@ void RunBenchmarkScenarioA(TpuPjrtManager* manager,
       /*host_blocks_to_allocate=*/host_blocks_to_allocate,
       /*external_host_ptrs=*/std::nullopt,
       /*unsafe_skip_buffer_lock=*/true,
-      /*parallelism=*/1,
+      /*parallelism=*/1, std::nullopt, std::nullopt,
       /*host_allocator=*/allocator_fn);
 
   // 4. Warmup Phase
@@ -312,7 +312,7 @@ void RunBenchmarkScenarioA(TpuPjrtManager* manager,
   for (int i = 0; i < kNumLayers; ++i) {
     TF_ASSERT_OK_AND_ASSIGN(auto literal,
                             device_buffers[i]->ToLiteral().Await());
-    auto read_back = literal->data<T>();
+    auto read_back = static_cast<const T*>(literal->untyped_data());
 
     for (int64_t b = 1; b < kNumBlocks; b += 2) {
       // Even block (b - 1) should now match odd block (b)
@@ -431,7 +431,7 @@ void RunBenchmarkScenarioB(TpuPjrtManager* manager,
       /*host_blocks_to_allocate=*/host_blocks_to_allocate,
       /*external_host_ptrs=*/std::nullopt,
       /*unsafe_skip_buffer_lock=*/true,
-      /*parallelism=*/1,
+      /*parallelism=*/1, std::nullopt, std::nullopt,
       /*host_allocator=*/allocator_fn);
 
   // 4. Warmup Phase
@@ -493,7 +493,7 @@ void RunBenchmarkScenarioB(TpuPjrtManager* manager,
   for (int i = 0; i < num_devices; ++i) {
     TF_ASSERT_OK_AND_ASSIGN(auto literal,
                             device_buffers[i]->ToLiteral().Await());
-    auto read_back = literal->data<T>();
+    auto read_back = static_cast<const T*>(literal->untyped_data());
 
     for (int64_t b = 1; b < kNumBlocks; b += 2) {
       // Even block (b - 1) should now match odd block (b)

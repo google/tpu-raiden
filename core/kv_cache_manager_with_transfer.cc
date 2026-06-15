@@ -63,6 +63,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -70,6 +71,7 @@
 #include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "core/host_memory_allocator.h"
+#include "core/numa_thread_pool.h"
 #include "core/raw_transfer_core.h"
 #include "core/tpu_utils.h"
 #include "kv_cache/kv_cache_manager_base.h"
@@ -384,13 +386,14 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     bool unsafe_skip_buffer_lock, int parallelism,
     HostBufferAllocator host_allocator, int64_t tp_rank,
     int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
-    double timeout_s)
-    : KVCacheManagerBase(layer_buffers, block_size, local_port,
-                         host_blocks_to_allocate.has_value()
-                             ? *host_blocks_to_allocate
-                             : num_slots * max_blocks,
-                         external_host_ptrs, unsafe_skip_buffer_lock,
-                         parallelism, host_allocator),
+    double timeout_s, std::optional<std::vector<std::string>> local_ips,
+    std::optional<std::vector<std::string>> peer_ips)
+    : KVCacheManagerBase(
+          layer_buffers, block_size, local_port,
+          host_blocks_to_allocate.has_value() ? *host_blocks_to_allocate
+                                              : num_slots * max_blocks,
+          external_host_ptrs, unsafe_skip_buffer_lock, parallelism,
+          std::move(local_ips), std::move(peer_ips), host_allocator),
       tp_rank_(tp_rank),
       local_control_port_(static_cast<int>(local_control_port)),
       local_data_port_(0),
@@ -414,6 +417,7 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
       ConfigureDataPortFromKvTransfer();
     }
     InitializeSlotPool(num_slots_);
+    control_pool_ = std::make_unique<NumaThreadPool>(num_slots_ + 4);
     StartControlServer();
   }
 }
@@ -423,12 +427,14 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     int block_size, std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate, int parallelism,
     int64_t tp_rank, int64_t local_control_port, int64_t max_blocks,
-    int64_t num_slots, double timeout_s)
+    int64_t num_slots, double timeout_s,
+    std::optional<std::vector<std::string>> local_ips,
+    std::optional<std::vector<std::string>> peer_ips)
     : KVCacheManagerBase(
           num_layers, num_shards, slice_byte_size, block_size, local_port,
           host_blocks_to_allocate.has_value() ? *host_blocks_to_allocate
                                               : num_slots * max_blocks,
-          parallelism),
+          parallelism, std::move(local_ips), std::move(peer_ips), nullptr),
       tp_rank_(tp_rank),
       local_control_port_(static_cast<int>(local_control_port)),
       local_data_port_(0),
@@ -452,12 +458,14 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
       ConfigureDataPortFromKvTransfer();
     }
     InitializeSlotPool(num_slots_);
+    control_pool_ = std::make_unique<NumaThreadPool>(num_slots_ + 4);
     StartControlServer();
   }
 }
 
 KVCacheManagerWithTransfer::~KVCacheManagerWithTransfer() {
   StopControlServer();
+  control_pool_.reset();
   push_pool_.reset();
   pull_pool_.reset();
   if (num_layers() > 0) {
@@ -693,18 +701,94 @@ void KVCacheManagerWithTransfer::StartRead(
         std::vector<int> local_host_block_ids_int(
             load_plan.transport_host_block_ids.begin(),
             load_plan.transport_host_block_ids.end());
-        auto h2h_future_or = H2hReadExplicit(
-            EndpointWithPort(remote_endpoint, response.data_port),
-            remote_block_ids_int, local_host_block_ids_int,
-            /*explicit_dst_ptrs=*/{}, parallelism,
-            transport::MajorOrder::kLayerMajor, on_block_received);
-        if (!h2h_future_or.ok()) {
-          ThrowStatus("BlockTransport pull failed", h2h_future_or.status());
+
+        std::map<int, std::vector<size_t>> numa_to_shards;
+        for (size_t sh = 0; sh < num_shards(); ++sh) {
+          int node = GetShardNumaNode(sh);
+          numa_to_shards[node].push_back(sh);
         }
-        absl::Status h2h_status = h2h_future_or.value().Await().status();
-        if (!h2h_status.ok()) {
-          ThrowStatus("BlockTransport pull failed", h2h_status);
+
+        bool is_loopback =
+            (remote_endpoint.find("127.0.0.1") != std::string::npos ||
+             remote_endpoint.find("::1") != std::string::npos ||
+             remote_endpoint.find("localhost") != std::string::npos);
+
+        if (numa_to_shards.size() == 1 || is_loopback) {
+          // Single NUMA node (or loopback/fallback). Disable transport-level
+          // NUMA filtering to avoid hangs due to unpinned server threads.
+          auto h2h_future_or = H2hReadExplicit(
+              EndpointWithPort(remote_endpoint, response.data_port),
+              remote_block_ids_int, local_host_block_ids_int, explicit_dst_ptrs,
+              parallelism, transport::MajorOrder::kLayerMajor,
+              on_block_received,
+              /*target_numa_node=*/-1);  // -1 explicitly disables filtering
+          if (!h2h_future_or.ok()) {
+            ThrowStatus("BlockTransport pull failed", h2h_future_or.status());
+          }
+          absl::Status s = h2h_future_or.value().Await().status();
+          if (!s.ok()) {
+            ThrowStatus("BlockTransport pull failed", s);
+          }
+        } else {
+          // Multi-NUMA node. Split and pull in parallel.
+          std::vector<std::future<absl::Status>> pull_futures;
+          pull_futures.reserve(numa_to_shards.size());
+
+          for (const auto& [numa_node_val, shards_in_node] : numa_to_shards) {
+            const int node = numa_node_val;  // Standard local variable to
+                                             // bypass C++17 capture limits
+            std::vector<uint8_t*> sub_explicit_dst_ptrs(
+                num_layers() * num_shards(), nullptr);
+            for (size_t l = 0; l < num_layers(); ++l) {
+              for (size_t sh : shards_in_node) {
+                size_t index = l * num_shards() + sh;
+                sub_explicit_dst_ptrs[index] = local_spans[index].ptr;
+              }
+            }
+            int sub_parallelism = std::max(
+                1, parallelism / static_cast<int>(numa_to_shards.size()));
+
+            auto fut = pull_pool_->Schedule(
+                node,
+                [this, remote_endpoint, response, remote_block_ids_int,
+                 local_host_block_ids_int,
+                 sub_explicit_dst_ptrs = std::move(sub_explicit_dst_ptrs),
+                 sub_parallelism, on_block_received, node]() -> absl::Status {
+                  auto h2h_future_or = H2hReadExplicit(
+                      EndpointWithPort(remote_endpoint, response.data_port),
+                      remote_block_ids_int, local_host_block_ids_int,
+                      sub_explicit_dst_ptrs, sub_parallelism,
+                      transport::MajorOrder::kLayerMajor, on_block_received,
+                      node);
+                  if (!h2h_future_or.ok()) {
+                    return h2h_future_or.status();
+                  }
+                  return h2h_future_or.value().Await().status();
+                });
+            pull_futures.push_back(std::move(fut));
+          }
+
+          // Wait for all parallel pulls to finish, collecting their statuses
+          std::vector<absl::Status> pull_statuses;
+          pull_statuses.reserve(pull_futures.size());
+          for (auto& fut : pull_futures) {
+            try {
+              pull_statuses.push_back(fut.get());
+            } catch (const std::exception& e) {
+              pull_statuses.push_back(absl::InternalError(e.what()));
+            } catch (...) {
+              pull_statuses.push_back(
+                  absl::InternalError("Unknown exception in pull thread"));
+            }
+          }
+          // Only throw after ensuring ALL background threads have finished
+          for (const auto& s : pull_statuses) {
+            if (!s.ok()) {
+              ThrowStatus("BlockTransport parallel pull failed", s);
+            }
+          }
         }
+
         h2h_ms += DurationMs(h2h_start, std::chrono::steady_clock::now());
 
         if (load_plan.RequiresHostReorder()) {
@@ -1069,6 +1153,7 @@ void KVCacheManagerWithTransfer::StopControlServer() {
       RemoveStagingReadinessLocked(staging_readiness_.begin()->first);
     }
   }
+  cv_.notify_all();  // Wake up blocked control threads!
   if (control_fd_ >= 0) {
     shutdown(control_fd_, SHUT_RDWR);
     close(control_fd_);
@@ -1095,16 +1180,16 @@ void KVCacheManagerWithTransfer::ControlServerLoop() {
       if (errno == EINTR) continue;
       break;
     }
-    xla::PjRtBuffer* representative_buf = nullptr;
-    if (!buffer_holds_.empty() && !buffer_holds_[0].empty()) {
-      representative_buf = buffer_holds_[0][0].buffer;
-    }
-    std::optional<int> source_node = GetLocalTpuNumaNode(representative_buf);
 
-    pull_pool_->Schedule(source_node, [this, client_fd]() {
-      HandleControlConnection(client_fd);
+    try {
+      control_pool_->Schedule(std::nullopt, [this, client_fd]() {
+        auto fd_cleanup = absl::MakeCleanup([client_fd] { close(client_fd); });
+        HandleControlConnection(client_fd);
+      });
+    } catch (...) {
       close(client_fd);
-    });
+      LOG(ERROR) << "Failed to schedule control connection handler";
+    }
   }
 }
 

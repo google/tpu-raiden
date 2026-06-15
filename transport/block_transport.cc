@@ -14,14 +14,18 @@
 
 #include "transport/block_transport.h"
 
+#include <arpa/inet.h>
 #include <asm-generic/socket.h>
+#include <ifaddrs.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <sched.h>
 #include <stdio.h>
 #include <sys/poll.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -30,6 +34,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <string>
@@ -40,12 +45,13 @@
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "core/status_macros.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
 #include "absl/synchronization/mutex.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
+#include "core/status_macros.h"
+#include "core/tpu_utils.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -114,14 +120,15 @@ absl::Status ValidateBlockRange(BlockTransportDelegate* delegate,
     const size_t byte_count = num_blocks * bytes_per_block;
     if (byte_offset > host_size || byte_count > host_size - byte_offset) {
       return absl::OutOfRangeError(absl::StrCat(
-          "Block range out of bounds. Block: ", block_id, ", Count: ", num_blocks,
-          ", Bytes per block: ", bytes_per_block, ", Host size: ", host_size));
+          "Block range out of bounds. Block: ", block_id,
+          ", Count: ", num_blocks, ", Bytes per block: ", bytes_per_block,
+          ", Host size: ", host_size));
     }
   } else {
     for (size_t i = 0; i < num_blocks; ++i) {
       int target_id = block_id + static_cast<int>(i);
-      if (delegate->GetBlockHostPointer(layer_idx, shard_idx,
-                                        target_id) == nullptr) {
+      if (delegate->GetBlockHostPointer(layer_idx, shard_idx, target_id) ==
+          nullptr) {
         return absl::FailedPreconditionError("Block host pointer is null");
       }
     }
@@ -169,64 +176,139 @@ absl::Status ForEachPayload(MajorOrder major_order, size_t num_layers,
 
 }  // namespace
 
-BlockTransport::BlockTransport(BlockTransportDelegate* delegate, int local_port,
-                               bool enable_conn_pool)
+BlockTransport::BlockTransport(
+    BlockTransportDelegate* delegate, int local_port, bool enable_conn_pool,
+    std::optional<std::vector<std::string>> local_ips,
+    std::optional<std::vector<std::string>> peer_ips)
     : delegate_(delegate),
       local_port_(local_port),
+      local_ips_(std::move(local_ips)),
+      peer_ips_(std::move(peer_ips)),
       pooling_enabled_(enable_conn_pool) {
-  server_fd_ = socket(AF_INET6, SOCK_STREAM, 0);
-  if (server_fd_ < 0) {
-    LOG(FATAL) << "Failed to create server socket: " << std::strerror(errno);
-  }
-  int opt = 1;
-  setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-  struct sockaddr_in6 serv_addr;
-  std::memset(&serv_addr, 0, sizeof(serv_addr));
-  serv_addr.sin6_family = AF_INET6;
-  serv_addr.sin6_addr = in6addr_any;
-  serv_addr.sin6_port = htons(local_port_);
-
-  if (bind(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
-           sizeof(serv_addr)) < 0) {
-    LOG(FATAL) << "Failed to bind server socket to port " << local_port_ << ": "
-               << std::strerror(errno);
+  std::vector<std::string> bind_ips;
+  if (local_ips_.has_value() && !local_ips_->empty()) {
+    bind_ips = *local_ips_;
+    std::sort(bind_ips.begin(), bind_ips.end());
+    bind_ips.erase(std::unique(bind_ips.begin(), bind_ips.end()),
+                   bind_ips.end());
+  } else {
+    bind_ips.push_back("::");
   }
 
-  socklen_t addr_len = sizeof(serv_addr);
-  if (getsockname(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
-                  &addr_len) == 0) {
-    local_port_ = ntohs(serv_addr.sin6_port);
+  struct ifaddrs* ifaddr;
+  if (getifaddrs(&ifaddr) != -1) {
+    absl::flat_hash_map<std::string, std::string> ip_to_ifname;
+    for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+      if (ifa->ifa_addr == nullptr) continue;
+      if (ifa->ifa_addr->sa_family != AF_INET &&
+          ifa->ifa_addr->sa_family != AF_INET6) {
+        continue;
+      }
+      char host[NI_MAXHOST];
+      if (getnameinfo(ifa->ifa_addr,
+                      (ifa->ifa_addr->sa_family == AF_INET)
+                          ? sizeof(struct sockaddr_in)
+                          : sizeof(struct sockaddr_in6),
+                      host, NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
+        ip_to_ifname[host] = ifa->ifa_name;
+      }
+    }
+    for (const std::string& ip : bind_ips) {
+      auto it = ip_to_ifname.find(ip);
+      if (it != ip_to_ifname.end()) {
+        std::string numa_path =
+            absl::StrCat("/sys/class/net/", it->second, "/device/numa_node");
+        std::ifstream file(numa_path);
+        if (file.is_open()) {
+          int numa_node;
+          if (file >> numa_node && numa_node >= 0) {
+            numa_to_ip_[numa_node] = ip;
+          }
+        }
+      }
+    }
+    freeifaddrs(ifaddr);
   }
 
-  if (listen(server_fd_, 128) < 0) {
-    LOG(FATAL) << "Failed to listen on server socket: " << std::strerror(errno);
+  for (const std::string& ip : bind_ips) {
+    int fd = socket(AF_INET6, SOCK_STREAM, 0);
+    if (fd < 0) {
+      LOG(FATAL) << "Failed to create server socket: " << std::strerror(errno);
+    }
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in6 serv_addr;
+    std::memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin6_family = AF_INET6;
+    serv_addr.sin6_port = htons(local_port_);
+    if (ip == "::") {
+      serv_addr.sin6_addr = in6addr_any;
+    } else {
+      if (inet_pton(AF_INET6, ip.c_str(), &serv_addr.sin6_addr) != 1) {
+        // Fallback: try parsing as an IPv4 address
+        struct in_addr v4_addr;
+        if (inet_pton(AF_INET, ip.c_str(), &v4_addr) == 1) {
+          // Map the IPv4 address to an IPv4-mapped IPv6 address
+          // (::ffff:w.x.y.z)
+          serv_addr.sin6_addr.s6_addr[10] = 0xff;
+          serv_addr.sin6_addr.s6_addr[11] = 0xff;
+          std::memcpy(&serv_addr.sin6_addr.s6_addr[12], &v4_addr.s_addr, 4);
+        } else {
+          LOG(FATAL) << "Invalid IP address format: " << ip;
+        }
+      }
+    }
+
+    if (bind(fd, reinterpret_cast<struct sockaddr*>(&serv_addr),
+             sizeof(serv_addr)) < 0) {
+      LOG(FATAL) << "Failed to bind server socket to port " << local_port_
+                 << " on IP " << ip << ": " << std::strerror(errno);
+    }
+
+    socklen_t addr_len = sizeof(serv_addr);
+    if (getsockname(fd, reinterpret_cast<struct sockaddr*>(&serv_addr),
+                    &addr_len) == 0) {
+      local_port_ = ntohs(serv_addr.sin6_port);
+    }
+
+    if (listen(fd, 128) < 0) {
+      LOG(FATAL) << "Failed to listen on server socket: "
+                 << std::strerror(errno);
+    }
+    server_fds_.push_back(fd);
+    int numa_node = -1;
+    for (const auto& [node, n_ip] : numa_to_ip_) {
+      if (n_ip == ip) {
+        numa_node = node;
+        break;
+      }
+    }
+    if (numa_node >= 0) {
+      server_fd_to_numa_[fd] = numa_node;
+    }
   }
   listener_thread_ = std::thread(&BlockTransport::ListenerLoop, this);
 }
 
 BlockTransport::~BlockTransport() {
   stopping_ = true;
+  if (listener_thread_.joinable()) {
+    listener_thread_.join();
+  }
   ClosePooledConnections();
-  if (server_fd_ >= 0) {
-    shutdown(server_fd_, SHUT_RDWR);
-    close(server_fd_);
+  for (int fd : server_fds_) {
+    shutdown(fd, SHUT_RDWR);
+    close(fd);
   }
   {
     absl::MutexLock _(mu_);
     for (int fd : active_client_fds_) {
       shutdown(fd, SHUT_RDWR);
-      close(fd);
     }
     active_client_fds_.clear();
-  }
-  if (listener_thread_.joinable()) {
-    listener_thread_.join();
-  }
-  for (auto& t : worker_threads_) {
-    if (t.joinable()) {
-      t.join();
-    }
+    mu_.Await(absl::Condition(
+        +[](int* count) { return *count == 0; }, &active_threads_));
   }
 }
 
@@ -253,6 +335,29 @@ absl::StatusOr<int> BlockTransport::ConnectToPeer(const std::string& peer) {
     port_str = parts[1];
   }
 
+  std::string bind_ip;
+  if (local_ips_.has_value() && !local_ips_->empty()) {
+    unsigned cpu, current_node;
+    if (syscall(SYS_getcpu, &cpu, &current_node, nullptr) == 0) {
+      auto it = numa_to_ip_.find(current_node);
+      if (it != numa_to_ip_.end()) {
+        bind_ip = it->second;
+      }
+    }
+    if (bind_ip.empty()) {
+      bind_ip = local_ips_->front();
+    }
+
+    // Map the selected local_ip to the corresponding peer_ip
+    if (peer_ips_.has_value() && peer_ips_->size() == local_ips_->size()) {
+      auto it = std::find(local_ips_->begin(), local_ips_->end(), bind_ip);
+      if (it != local_ips_->end()) {
+        size_t index = std::distance(local_ips_->begin(), it);
+        host = peer_ips_->at(index);
+      }
+    }
+  }
+
   struct addrinfo hints;
   struct addrinfo* result = nullptr;
   std::memset(&hints, 0, sizeof(hints));
@@ -268,6 +373,7 @@ absl::StatusOr<int> BlockTransport::ConnectToPeer(const std::string& peer) {
   int sock_fd = -1;
   struct addrinfo* rp;
   int last_errno = 0;
+
   for (rp = result; rp != nullptr; rp = rp->ai_next) {
     sock_fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
     if (sock_fd < 0) {
@@ -280,6 +386,46 @@ absl::StatusOr<int> BlockTransport::ConnectToPeer(const std::string& peer) {
     int buf_opt = 16 * 1024 * 1024;  // 16MB
     setsockopt(sock_fd, SOL_SOCKET, SO_SNDBUF, &buf_opt, sizeof(buf_opt));
     setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, &buf_opt, sizeof(buf_opt));
+
+    if (!bind_ip.empty()) {
+      if (rp->ai_family == AF_INET) {
+        struct sockaddr_in bind_addr;
+        std::memset(&bind_addr, 0, sizeof(bind_addr));
+        bind_addr.sin_family = AF_INET;
+        bind_addr.sin_port = 0;
+        if (inet_pton(AF_INET, bind_ip.c_str(), &bind_addr.sin_addr) == 1) {
+          if (bind(sock_fd, reinterpret_cast<struct sockaddr*>(&bind_addr),
+                   sizeof(bind_addr)) < 0) {
+            LOG(WARNING) << "Failed to bind IPv4 socket to " << bind_ip << ": "
+                         << std::strerror(errno);
+          }
+        }
+      } else if (rp->ai_family == AF_INET6) {
+        struct sockaddr_in6 bind_addr;
+        std::memset(&bind_addr, 0, sizeof(bind_addr));
+        bind_addr.sin6_family = AF_INET6;
+        bind_addr.sin6_port = 0;
+        if (inet_pton(AF_INET6, bind_ip.c_str(), &bind_addr.sin6_addr) == 1) {
+          if (bind(sock_fd, reinterpret_cast<struct sockaddr*>(&bind_addr),
+                   sizeof(bind_addr)) < 0) {
+            LOG(WARNING) << "Failed to bind IPv6 socket to " << bind_ip << ": "
+                         << std::strerror(errno);
+          }
+        } else {
+          struct in_addr v4_addr;
+          if (inet_pton(AF_INET, bind_ip.c_str(), &v4_addr) == 1) {
+            bind_addr.sin6_addr.s6_addr[10] = 0xff;
+            bind_addr.sin6_addr.s6_addr[11] = 0xff;
+            std::memcpy(&bind_addr.sin6_addr.s6_addr[12], &v4_addr.s_addr, 4);
+            if (bind(sock_fd, reinterpret_cast<struct sockaddr*>(&bind_addr),
+                     sizeof(bind_addr)) < 0) {
+              LOG(WARNING) << "Failed to bind IPv4-mapped IPv6 socket to "
+                           << bind_ip << ": " << std::strerror(errno);
+            }
+          }
+        }
+      }
+    }
 
     if (connect(sock_fd, rp->ai_addr, rp->ai_addrlen) >= 0) {
       break; /* Success */
@@ -301,9 +447,15 @@ absl::StatusOr<int> BlockTransport::ConnectToPeer(const std::string& peer) {
 }
 
 absl::StatusOr<int> BlockTransport::AcquireConnection(const std::string& peer) {
+  int numa_node = 0;
+  unsigned cpu, node;
+  if (syscall(SYS_getcpu, &cpu, &node, nullptr) == 0) {
+    numa_node = static_cast<int>(node);
+  }
+  std::string pool_key = absl::StrCat(peer, "#", numa_node);
   if (pooling_enabled_) {
     absl::MutexLock lock(pool_mu_);
-    auto it = conn_pool_.find(peer);
+    auto it = conn_pool_.find(pool_key);
     if (it != conn_pool_.end()) {
       while (!it->second.empty()) {
         int fd = it->second.back();
@@ -328,6 +480,12 @@ absl::StatusOr<int> BlockTransport::AcquireConnection(const std::string& peer) {
 
 void BlockTransport::ReleaseConnection(const std::string& peer, int fd) {
   if (fd < 0) return;
+  int numa_node = 0;
+  unsigned cpu, node;
+  if (syscall(SYS_getcpu, &cpu, &node, nullptr) == 0) {
+    numa_node = static_cast<int>(node);
+  }
+  std::string pool_key = absl::StrCat(peer, "#", numa_node);
   // Only return healthy fds to the pool; on stop/disabled, just close. The
   // producer's ConnectionWorker keeps the matching fd open (blocked in
   // ReadExact) so a returned connection stays valid for the next pull.
@@ -337,7 +495,7 @@ void BlockTransport::ReleaseConnection(const std::string& peer, int fd) {
     close(fd);
     return;
   }
-  conn_pool_[peer].push_back(fd);
+  conn_pool_[pool_key].push_back(fd);
 }
 
 void BlockTransport::ClosePooledConnections() {
@@ -359,17 +517,29 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
 
   if (header.op == 1) {  // Push
     TF_ASSIGN_OR_RETURN(MajorOrder major_order,
-                          ParseMajorOrder(header.major_order));
+                        ParseMajorOrder(header.major_order));
     TF_ASSIGN_OR_RETURN(
         std::vector<int> allocated_ids,
         delegate_->AllocateBlocks(header.num_blocks, /*entity_id=*/0));
 
     RETURN_IF_ERROR(WriteExact(client_fd, allocated_ids.data(),
-                                    header.num_blocks * sizeof(int)));
+                               header.num_blocks * sizeof(int)));
+
+    std::optional<int> filter_numa = std::nullopt;
+    if (header.flags & kBlockTransportFlagPartitionByNuma) {
+      unsigned cpu, node;
+      if (syscall(SYS_getcpu, &cpu, &node, nullptr) == 0) {
+        filter_numa = static_cast<int>(node);
+      }
+    }
 
     RETURN_IF_ERROR(ForEachPayload(
         major_order, delegate_->num_layers(), delegate_->num_shards(),
         header.num_blocks, [&](size_t l, size_t sh, size_t k) -> absl::Status {
+          if (filter_numa.has_value() &&
+              delegate_->GetShardNumaNode(sh) != *filter_numa) {
+            return absl::OkStatus();
+          }
           ABSL_DCHECK_LT(k, allocated_ids.size());
           const int dst_id = allocated_ids[k];
           RETURN_IF_ERROR(ValidateBlockRange(
@@ -383,7 +553,7 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
     RETURN_IF_ERROR(delegate_->OnDataReceived());
   } else if (header.op == 2) {  // Pull request
     TF_ASSIGN_OR_RETURN(MajorOrder major_order,
-                          ParseMajorOrder(header.major_order));
+                        ParseMajorOrder(header.major_order));
     if (delegate_->shard_factor() == 0) {
       return absl::InvalidArgumentError("shard_factor must be positive");
     }
@@ -394,12 +564,20 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
     BlockPacketHeader resp_header = {};
     resp_header.op = 2;
     resp_header.major_order = header.major_order;
+    resp_header.flags = header.flags;  // Propagate flags
     resp_header.remote_block_id = header.local_block_id;
     resp_header.local_block_id = 0;
     resp_header.num_blocks = header.num_blocks;
 
-    RETURN_IF_ERROR(
-        WriteExact(client_fd, &resp_header, sizeof(resp_header)));
+    RETURN_IF_ERROR(WriteExact(client_fd, &resp_header, sizeof(resp_header)));
+
+    std::optional<int> filter_numa = std::nullopt;
+    if (header.flags & kBlockTransportFlagPartitionByNuma) {
+      unsigned cpu, node;
+      if (syscall(SYS_getcpu, &cpu, &node, nullptr) == 0) {
+        filter_numa = static_cast<int>(node);
+      }
+    }
 
     size_t local_blocks = header.num_blocks / delegate_->shard_factor();
     if (header.remote_block_id >
@@ -412,6 +590,10 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
     RETURN_IF_ERROR(ForEachPayload(
         major_order, delegate_->num_layers(), delegate_->num_shards(),
         local_blocks, [&](size_t l, size_t sh, size_t k) -> absl::Status {
+          if (filter_numa.has_value() &&
+              delegate_->GetShardNumaNode(sh) != *filter_numa) {
+            return absl::OkStatus();
+          }
           const int read_id = static_cast<int>(header.remote_block_id + k);
           RETURN_IF_ERROR(ValidateBlockRange(
               delegate_, l, sh, read_id, /*num_blocks=*/1, bytes_per_block));
@@ -453,8 +635,8 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
 
     RETURN_IF_ERROR(ValidateBlockRange(delegate_, /*layer_idx=*/0,
-                                            /*shard_idx=*/0, dst_id,
-                                            /*num_blocks=*/1, size_bytes));
+                                       /*shard_idx=*/0, dst_id,
+                                       /*num_blocks=*/1, size_bytes));
     uint8_t* dest_ptr = delegate_->GetBlockHostPointer(0, 0, dst_id);
     RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, size_bytes));
 
@@ -491,7 +673,17 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
   return absl::OkStatus();
 }
 
-void BlockTransport::ConnectionWorker(int client_fd) {
+void BlockTransport::ConnectionWorker(int client_fd,
+                                      std::optional<int> numa_node) {
+  if (numa_node.has_value() && *numa_node >= 0) {
+    if (PinCurrentThreadToNumaNode(*numa_node) != 0) {
+      LOG(ERROR) << "Failed to pin ConnectionWorker thread to NUMA node "
+                 << *numa_node;
+    } else {
+      VLOG(1) << "Successfully pinned ConnectionWorker thread to NUMA node "
+              << *numa_node;
+    }
+  }
   while (!stopping_) {
     struct pollfd pfd;
     pfd.fd = client_fd;
@@ -509,6 +701,7 @@ void BlockTransport::ConnectionWorker(int client_fd) {
   close(client_fd);
   {
     absl::MutexLock _(mu_);
+    active_threads_--;
     active_client_fds_.erase(std::remove(active_client_fds_.begin(),
                                          active_client_fds_.end(), client_fd),
                              active_client_fds_.end());
@@ -517,47 +710,64 @@ void BlockTransport::ConnectionWorker(int client_fd) {
 
 void BlockTransport::ListenerLoop() {
   while (!stopping_) {
-    struct pollfd pfd;
-    pfd.fd = server_fd_;
-    pfd.events = POLLIN;
-    int ret = poll(&pfd, 1, 50);
+    std::vector<struct pollfd> pfds;
+    for (int fd : server_fds_) {
+      pfds.push_back({fd, POLLIN, 0});
+    }
+    int ret = poll(pfds.data(), pfds.size(), 50);
     if (ret < 0) {
       if (stopping_) break;
       continue;
     }
     if (ret == 0) continue;
 
-    struct sockaddr_in6 client_addr;
-    socklen_t clilen = sizeof(client_addr);
-    int client_fd = accept(
-        server_fd_, reinterpret_cast<struct sockaddr*>(&client_addr), &clilen);
-    if (client_fd < 0) {
-      if (stopping_) break;
-      continue;
+    for (const auto& pfd : pfds) {
+      if (pfd.revents & POLLIN) {
+        struct sockaddr_in6 client_addr;
+        socklen_t clilen = sizeof(client_addr);
+        int client_fd = accept(
+            pfd.fd, reinterpret_cast<struct sockaddr*>(&client_addr), &clilen);
+        if (client_fd < 0) {
+          if (stopping_) break;
+          continue;
+        }
+
+        int opt = 1;
+        setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+        int buf_opt = 16 * 1024 * 1024;  // 16MB
+        setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &buf_opt, sizeof(buf_opt));
+        setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &buf_opt, sizeof(buf_opt));
+
+        {
+          absl::MutexLock _(mu_);
+          active_client_fds_.push_back(client_fd);
+          active_threads_++;
+
+          std::optional<int> numa_node;
+          auto it = server_fd_to_numa_.find(pfd.fd);
+          if (it != server_fd_to_numa_.end()) {
+            numa_node = it->second;
+          }
+
+          if (worker_pool_ != nullptr) {
+            worker_pool_->Schedule(numa_node, [this, client_fd, numa_node]() {
+              ConnectionWorker(client_fd, numa_node);
+            });
+          } else {
+            std::thread([this, client_fd, numa_node]() {
+              ConnectionWorker(client_fd, numa_node);
+            }).detach();
+          }
+        }
+      }
     }
-
-    int opt = 1;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
-    // Match the connect side (ConnectToPeer): without these the accepted
-    // (producer send) socket falls back to the small default buffer, capping
-    // the per-flow window on a high-BDP link.
-    int buf_opt = 16 * 1024 * 1024;  // 16MB
-    setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &buf_opt, sizeof(buf_opt));
-    setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &buf_opt, sizeof(buf_opt));
-
-    {
-      absl::MutexLock _(mu_);
-      active_client_fds_.push_back(client_fd);
-    }
-
-    worker_threads_.push_back(
-        std::thread([this, client_fd]() { ConnectionWorker(client_fd); }));
   }
 }
 
 absl::StatusOr<std::vector<int>> BlockTransport::Push(
     const std::string& peer, const std::vector<int>& src_block_ids,
-    int parallelism, MajorOrder major_order) {
+    int parallelism, MajorOrder major_order,
+    std::optional<int> target_numa_node) {
   size_t num_blocks = src_block_ids.size();
   if (num_blocks == 0) {
     return absl::InvalidArgumentError("Block list cannot be empty");
@@ -570,26 +780,54 @@ absl::StatusOr<std::vector<int>> BlockTransport::Push(
   if (static_cast<int>(num_blocks) < P) P = num_blocks;
 
   std::vector<int> allocated_ids(num_blocks, 0);
+  std::vector<std::future<void>> futures;
   std::vector<std::thread> threads;
   std::vector<absl::Status> statuses(P, absl::OkStatus());
 
+  futures.reserve(P);
   threads.reserve(P);
   const size_t base_blocks_per_stream = num_blocks / P;
   const size_t remainder = num_blocks % P;
   size_t block_offset = 0;
+
+  NumaThreadPool* local_pool = nullptr;
+  {
+    absl::MutexLock lock(&mu_);
+    local_pool = worker_pool_;
+  }
+
   for (int i = 0; i < P; ++i) {
     const size_t block_count =
         base_blocks_per_stream + (static_cast<size_t>(i) < remainder ? 1 : 0);
-    threads.push_back(std::thread(&BlockTransport::H2hWriteWorker, this, i,
-                                  peer, block_offset, block_count,
-                                  std::ref(src_block_ids),
-                                  std::ref(allocated_ids), std::ref(statuses),
-                                  major_order));
+
+    if (local_pool) {
+      futures.push_back(local_pool->Schedule(
+          target_numa_node, &BlockTransport::H2hWriteWorker, this, i, peer,
+          block_offset, block_count, std::ref(src_block_ids),
+          std::ref(allocated_ids), std::ref(statuses), major_order,
+          target_numa_node));
+    } else {
+      threads.push_back(std::thread([this, i, peer, block_offset, block_count,
+                                     &src_block_ids, &allocated_ids, &statuses,
+                                     major_order, target_numa_node]() {
+        if (target_numa_node.has_value() && *target_numa_node >= 0) {
+          PinCurrentThreadToNumaNode(*target_numa_node);
+        }
+        H2hWriteWorker(i, peer, block_offset, block_count, src_block_ids,
+                       allocated_ids, statuses, major_order, target_numa_node);
+      }));
+    }
     block_offset += block_count;
   }
 
-  for (auto& t : threads) {
-    if (t.joinable()) t.join();
+  if (local_pool) {
+    for (auto& f : futures) {
+      f.wait();
+    }
+  } else {
+    for (auto& t : threads) {
+      if (t.joinable()) t.join();
+    }
   }
 
   for (int i = 0; i < P; ++i) {
@@ -646,7 +884,8 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
     const std::string& peer, const std::vector<int>& src_block_ids,
     const std::vector<int>& local_block_ids,
     const std::vector<uint8_t*>& explicit_dst_ptrs, int parallelism,
-    MajorOrder major_order, BlockReceivedCallback on_block_received) {
+    MajorOrder major_order, BlockReceivedCallback on_block_received,
+    std::optional<int> target_numa_node) {
   size_t num_blocks = src_block_ids.size();
   if (num_blocks == 0) {
     return absl::InvalidArgumentError("Block list cannot be empty");
@@ -677,7 +916,7 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
     allocated_ids = local_block_ids;
   } else {
     TF_ASSIGN_OR_RETURN(allocated_ids, delegate_->AllocateBlocks(
-                                             local_blocks, /*entity_id=*/0));
+                                           local_blocks, /*entity_id=*/0));
   }
 
   int P = parallelism;
@@ -686,13 +925,22 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
   }
   if (static_cast<int>(local_blocks) < P) P = local_blocks;
 
+  std::vector<std::future<void>> futures;
   std::vector<std::thread> threads;
   std::vector<absl::Status> statuses(P, absl::OkStatus());
 
+  futures.reserve(P);
   threads.reserve(P);
   const size_t base_blocks_per_stream = local_blocks / P;
   const size_t remainder = local_blocks % P;
   size_t local_block_offset = 0;
+
+  NumaThreadPool* local_pool = nullptr;
+  {
+    absl::MutexLock lock(&mu_);
+    local_pool = worker_pool_;
+  }
+
   for (int i = 0; i < P; ++i) {
     const size_t local_block_count =
         base_blocks_per_stream + (static_cast<size_t>(i) < remainder ? 1 : 0);
@@ -700,17 +948,41 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
         local_block_offset * delegate_->shard_factor();
     const size_t remote_block_count =
         local_block_count * delegate_->shard_factor();
-    threads.push_back(std::thread(
-        &BlockTransport::H2hReadWorker, this, i, peer, local_block_offset,
-        local_block_count, remote_block_offset, remote_block_count,
-        std::ref(src_block_ids), std::ref(allocated_ids),
-        std::ref(explicit_dst_ptrs), std::ref(statuses), major_order,
-        on_block_received));
+
+    if (local_pool) {
+      futures.push_back(local_pool->Schedule(
+          target_numa_node, &BlockTransport::H2hReadWorker, this, i, peer,
+          local_block_offset, local_block_count, remote_block_offset,
+          remote_block_count, std::ref(src_block_ids), std::ref(allocated_ids),
+          std::ref(explicit_dst_ptrs), std::ref(statuses), major_order,
+          on_block_received, target_numa_node));
+    } else {
+      threads.push_back(
+          std::thread([this, i, peer, local_block_offset, local_block_count,
+                       remote_block_offset, remote_block_count, &src_block_ids,
+                       &allocated_ids, &explicit_dst_ptrs, &statuses,
+                       major_order, on_block_received, target_numa_node]() {
+            if (target_numa_node.has_value() && *target_numa_node >= 0) {
+              PinCurrentThreadToNumaNode(*target_numa_node);
+            }
+            H2hReadWorker(i, peer, local_block_offset, local_block_count,
+                          remote_block_offset, remote_block_count,
+                          src_block_ids, allocated_ids, explicit_dst_ptrs,
+                          statuses, major_order, on_block_received,
+                          target_numa_node);
+          }));
+    }
     local_block_offset += local_block_count;
   }
 
-  for (auto& t : threads) {
-    if (t.joinable()) t.join();
+  if (local_pool) {
+    for (auto& f : futures) {
+      f.wait();
+    }
+  } else {
+    for (auto& t : threads) {
+      if (t.joinable()) t.join();
+    }
   }
 
   for (int i = 0; i < P; ++i) {
@@ -725,7 +997,8 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
                                     const std::vector<int>& src_block_ids,
                                     std::vector<int>& allocated_ids,
                                     std::vector<absl::Status>& statuses,
-                                    MajorOrder major_order) {
+                                    MajorOrder major_order,
+                                    std::optional<int> target_numa_node) {
   auto status_or_fd = AcquireConnection(peer);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
@@ -745,6 +1018,9 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
   BlockPacketHeader header = {};
   header.op = 1;  // Push
   header.major_order = static_cast<uint8_t>(major_order);
+  if (target_numa_node.has_value()) {
+    header.flags |= kBlockTransportFlagPartitionByNuma;
+  }
   header.remote_block_id = 0;
   header.local_block_id = 0;
   if (block_count > std::numeric_limits<uint32_t>::max()) {
@@ -774,17 +1050,21 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
 
   size_t bytes_per_block = delegate_->bytes_per_block();
 
-  s = ForEachPayload(major_order, delegate_->num_layers(),
-                     delegate_->num_shards(), block_count,
-                     [&](size_t l, size_t sh, size_t k) -> absl::Status {
-      const uint8_t* base_host_ptr = delegate_->GetHostPointer(l, sh);
-      ABSL_DCHECK_LT(block_offset + k, src_block_ids.size());
-      const int src_id = src_block_ids[block_offset + k];
-      RETURN_IF_ERROR(ValidateBlockRange(
-          delegate_, l, sh, src_id, /*num_blocks=*/1, bytes_per_block));
-      const uint8_t* src_ptr = base_host_ptr + src_id * bytes_per_block;
-      return WriteExact(fd, src_ptr, bytes_per_block);
-    });
+  s = ForEachPayload(
+      major_order, delegate_->num_layers(), delegate_->num_shards(),
+      block_count, [&](size_t l, size_t sh, size_t k) -> absl::Status {
+        if (target_numa_node.has_value() &&
+            delegate_->GetShardNumaNode(sh) != *target_numa_node) {
+          return absl::OkStatus();
+        }
+        const uint8_t* base_host_ptr = delegate_->GetHostPointer(l, sh);
+        ABSL_DCHECK_LT(block_offset + k, src_block_ids.size());
+        const int src_id = src_block_ids[block_offset + k];
+        RETURN_IF_ERROR(ValidateBlockRange(delegate_, l, sh, src_id,
+                                           /*num_blocks=*/1, bytes_per_block));
+        const uint8_t* src_ptr = base_host_ptr + src_id * bytes_per_block;
+        return WriteExact(fd, src_ptr, bytes_per_block);
+      });
   if (!s.ok()) {
     statuses[stream_idx] = s;
     return;
@@ -806,7 +1086,8 @@ void BlockTransport::H2hReadWorker(
     const std::vector<int>& allocated_ids,
     const std::vector<uint8_t*>& explicit_dst_ptrs,
     std::vector<absl::Status>& statuses, MajorOrder major_order,
-    BlockReceivedCallback on_block_received) {
+    BlockReceivedCallback on_block_received,
+    std::optional<int> target_numa_node) {
   auto status_or_fd = AcquireConnection(peer);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
@@ -872,6 +1153,9 @@ void BlockTransport::H2hReadWorker(
     BlockPacketHeader header = {};
     header.op = 2;  // Pull request
     header.major_order = static_cast<uint8_t>(major_order);
+    if (target_numa_node.has_value()) {
+      header.flags |= kBlockTransportFlagPartitionByNuma;
+    }
     int remote_read_block_id =
         delegate_->GetRemoteReadBlockId(chunk.base_remote_id, 0);
     if (remote_read_block_id < 0 ||
@@ -922,35 +1206,38 @@ void BlockTransport::H2hReadWorker(
     s = ForEachPayload(
         major_order, delegate_->num_layers(), delegate_->num_shards(),
         chunk.local_count, [&](size_t l, size_t sh, size_t k) -> absl::Status {
-        uint8_t* base_host_ptr =
-            explicit_dst_ptrs.empty()
-                ? delegate_->GetHostPointer(l, sh)
-                : explicit_dst_ptrs[l * delegate_->num_shards() + sh];
-        if (base_host_ptr == nullptr) {
-          return absl::FailedPreconditionError(
-              "Destination host pointer is null");
-        }
+          if (target_numa_node.has_value() &&
+              delegate_->GetShardNumaNode(sh) != *target_numa_node) {
+            return absl::OkStatus();
+          }
+          uint8_t* base_host_ptr =
+              explicit_dst_ptrs.empty()
+                  ? delegate_->GetHostPointer(l, sh)
+                  : explicit_dst_ptrs[l * delegate_->num_shards() + sh];
+          if (base_host_ptr == nullptr) {
+            return absl::FailedPreconditionError(
+                "Destination host pointer is null");
+          }
 
-        ABSL_DCHECK_LT(local_block_offset + chunk.local_start_idx + k,
-                       allocated_ids.size());
-        const int dst_id =
-            allocated_ids[local_block_offset + chunk.local_start_idx + k];
-        if (dst_id < 0) {
-          return absl::InvalidArgumentError(
-              "Destination block id is negative");
-        }
-        if (explicit_dst_ptrs.empty()) {
-          RETURN_IF_ERROR(ValidateBlockRange(
-              delegate_, l, sh, dst_id, /*num_blocks=*/1, bytes_per_block));
-        }
-        uint8_t* dest_ptr = base_host_ptr + dst_id * bytes_per_block;
-        RETURN_IF_ERROR(ReadExact(fd, dest_ptr, bytes_per_block));
-        if (on_block_received) {
-          RETURN_IF_ERROR(
-              on_block_received(l, sh, dst_id, bytes_per_block));
-        }
-        return absl::OkStatus();
-      });
+          ABSL_DCHECK_LT(local_block_offset + chunk.local_start_idx + k,
+                         allocated_ids.size());
+          const int dst_id =
+              allocated_ids[local_block_offset + chunk.local_start_idx + k];
+          if (dst_id < 0) {
+            return absl::InvalidArgumentError(
+                "Destination block id is negative");
+          }
+          if (explicit_dst_ptrs.empty()) {
+            RETURN_IF_ERROR(ValidateBlockRange(
+                delegate_, l, sh, dst_id, /*num_blocks=*/1, bytes_per_block));
+          }
+          uint8_t* dest_ptr = base_host_ptr + dst_id * bytes_per_block;
+          RETURN_IF_ERROR(ReadExact(fd, dest_ptr, bytes_per_block));
+          if (on_block_received) {
+            RETURN_IF_ERROR(on_block_received(l, sh, dst_id, bytes_per_block));
+          }
+          return absl::OkStatus();
+        });
     if (!s.ok()) {
       statuses[stream_idx] = s;
       return;

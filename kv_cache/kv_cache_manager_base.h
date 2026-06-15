@@ -70,15 +70,19 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<std::vector<const uint8_t*>> external_host_ptrs =
           std::nullopt,
       bool unsafe_skip_buffer_lock = false, int parallelism = 1,
+      std::optional<std::vector<std::string>> local_ips = std::nullopt,
+      std::optional<std::vector<std::string>> peer_ips = std::nullopt,
       HostBufferAllocator host_allocator = nullptr);
 
   // Standard CPU-only Constructor for remote workers E2E
-  KVCacheManagerBase(size_t num_layers, size_t num_shards,
-                     size_t slice_byte_size, int block_size = 1,
-                     std::optional<int> local_port = std::nullopt,
-                     std::optional<int> host_blocks_to_allocate = std::nullopt,
-                     int parallelism = 1,
-                     HostBufferAllocator host_allocator = nullptr);
+  KVCacheManagerBase(
+      size_t num_layers, size_t num_shards, size_t slice_byte_size,
+      int block_size = 1, std::optional<int> local_port = std::nullopt,
+      std::optional<int> host_blocks_to_allocate = std::nullopt,
+      int parallelism = 1,
+      std::optional<std::vector<std::string>> local_ips = std::nullopt,
+      std::optional<std::vector<std::string>> peer_ips = std::nullopt,
+      HostBufferAllocator host_allocator = nullptr);
 
   ~KVCacheManagerBase() override;
 
@@ -122,7 +126,8 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       const std::vector<uint8_t*>& explicit_dst_ptrs, int parallelism = 1,
       tpu_raiden::transport::MajorOrder major_order =
           tpu_raiden::transport::MajorOrder::kLayerMajor,
-      tpu_raiden::transport::BlockReceivedCallback on_block_received = {});
+      tpu_raiden::transport::BlockReceivedCallback on_block_received = {},
+      std::optional<int> target_numa_node = std::nullopt);
 
   // Pure StreamExecutor H2D copy using raw C++ device pointers
   absl::Status H2dDirect(stream_executor::Stream* stream,
@@ -172,6 +177,9 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   LogicalBlockManager* block_manager() const { return block_manager_.get(); }
 
   size_t bytes_per_block() const override;
+
+  NumaThreadPool* push_pool() const override { return push_pool_.get(); }
+  int GetShardNumaNode(size_t shard_idx) const override;
 
  protected:
   const PJRT_Api* c_api_ = nullptr;

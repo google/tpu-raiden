@@ -69,19 +69,25 @@ NB_MODULE(_tpu_raiden_torch, m) {
   nb::class_<KVCacheManager>(m, "KVCacheManager")
       .def(nb::init<const std::vector<std::vector<at::Tensor>>&, int,
                     std::optional<int>, std::optional<int>,
-                    std::optional<std::vector<uintptr_t>>, bool, int>(),
+                    std::optional<std::vector<uintptr_t>>, bool, int,
+                    std::optional<std::vector<std::string>>,
+                    std::optional<std::vector<std::string>>>(),
            nb::arg("device_tensors"), nb::arg("block_size") = 1,
            nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("external_host_ptrs") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
-           nb::arg("parallelism") = 1)
+           nb::arg("parallelism") = 1, nb::arg("local_ips") = nb::none(),
+           nb::arg("peer_ips") = nb::none())
       .def(nb::init<const std::vector<at::Tensor>&, int64_t, int64_t, int64_t,
-                    int64_t, double, bool>(),
+                    int64_t, double, bool,
+                    std::optional<std::vector<std::string>>,
+                    std::optional<std::vector<std::string>>>(),
            nb::arg("kv_caches"), nb::arg("tp_rank"),
            nb::arg("local_control_port"), nb::arg("max_blocks"),
            nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
-           nb::arg("unsafe_skip_buffer_lock") = true)
+           nb::arg("unsafe_skip_buffer_lock") = true,
+           nb::arg("local_ips") = nb::none(), nb::arg("peer_ips") = nb::none())
       .def(
           "H2d",
           [](KVCacheManager& self,

@@ -1,0 +1,96 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: raiden-perf-test
+  namespace: default
+spec:
+  network:
+    enableDNSHostnames: true
+  replicatedJobs:
+    - name: workers
+      replicas: 1
+      template:
+        metadata:
+          labels:
+            app: raiden-perf-test
+        spec:
+          parallelism: 2
+          completions: 2
+          backoffLimit: 0
+          template:
+            metadata:
+              labels:
+                app: raiden-perf-test
+            spec:
+              hostNetwork: true
+              dnsPolicy: ClusterFirstWithHostNet
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu7x
+                cloud.google.com/gke-tpu-topology: 2x2x1
+                cloud.google.com/gke-accelerator-count: "4"
+              initContainers:
+                - name: sysctl-tuner
+                  image: alpine:3.18
+                  command:
+                    - sh
+                    - -c
+                    - |
+                      sysctl -w net.core.default_qdisc=fq
+                      sysctl -w net.ipv4.tcp_congestion_control=bbr
+                      sysctl -w net.ipv4.tcp_wmem="4096 41943040 314572800"
+                      sysctl -w net.ipv4.tcp_rmem="4096 41943040 314572800"
+                      sysctl -w net.core.wmem_max=314572800
+                      sysctl -w net.core.rmem_max=314572800
+                      sysctl -w net.core.netdev_max_backlog=100000
+                      sysctl -w net.ipv4.tcp_notsent_lowat=131072
+                  securityContext:
+                    privileged: true
+              containers:
+                - name: raiden-container
+                  image: us-central1-docker.pkg.dev/tpu-prod-env-one-vm/tpu-raiden-repo/tpu_raiden@sha256:f9757ed7161b650d6672d8d44ebb4ea582adeda1900377645d5f84b6eb462e82
+                  command: ["sleep", "infinity"]
+                  volumeMounts:
+                    - name: bazel-cache-volume
+                      mountPath: /workspace/bazel-disk-cache
+                    - name: gcs-key-volume
+                      mountPath: /var/secrets/google
+                      readOnly: true
+                    - name: host-sys
+                      mountPath: /sys
+                      readOnly: true
+                  securityContext:
+                    privileged: true
+                    capabilities:
+                      add: ["IPC_LOCK", "SYS_NICE"]
+                  resources:
+                    requests:
+                      memory: "250Gi"
+                      cpu: "32"
+                    limits:
+                      memory: "250Gi"
+                      cpu: "32"
+                      google.com/tpu: "4"
+                  env:
+                    - name: LD_LIBRARY_PATH
+                      value: "/usr/local/lib/python3.12/site-packages/libtpu"
+                    - name: PYTHONPATH
+                      value: "/workspace:/workspace/google3/third_party/tpu_raiden"
+                    - name: JAX_PJRT_CLIENT_CREATE_OPTIONS
+                      value: "pinned_host_allocation_mode:recycle"
+                    - name: LIBTPU_INIT_ARGS
+                      value: "--xla_tpu_use_enhanced_launch_barrier=false"
+                    - name: GOOGLE_APPLICATION_CREDENTIALS
+                      value: /var/secrets/google/key.json
+              volumes:
+                - name: bazel-cache-volume
+                  hostPath:
+                    path: /tmp/bazel-disk-cache
+                    type: DirectoryOrCreate
+                - name: gcs-key-volume
+                  secret:
+                    secretName: gcs-cache-key
+                - name: host-sys
+                  hostPath:
+                    path: /sys
+                    type: Directory
+              restartPolicy: Never

@@ -51,10 +51,12 @@ using BlockReadinessCallback =
 
 class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
  public:
-  RaidenManagerBase(size_t num_layers, size_t num_shards,
-                    size_t slice_byte_size, int block_size = 1,
-                    std::optional<int> local_port = std::nullopt,
-                    int parallelism = 1, size_t max_staging_blocks = 4);
+  RaidenManagerBase(
+      size_t num_layers, size_t num_shards, size_t slice_byte_size,
+      int block_size = 1, std::optional<int> local_port = std::nullopt,
+      int parallelism = 1, size_t max_staging_blocks = 4,
+      std::optional<std::vector<std::string>> local_ips = std::nullopt,
+      std::optional<std::vector<std::string>> peer_ips = std::nullopt);
 
   xla::Future<> RemoteD2DBlockWrite(const BlockMetadata& src,
                                     const BlockMetadata& dst,
@@ -103,8 +105,11 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   int block_size() const override { return block_size_; }
   size_t bytes_per_block() const override;
   size_t shard_factor() const override { return shard_factor_; }
+  int GetShardNumaNode(size_t shard_idx) const override { return 0; }
   absl::Status WaitForBlockRead(size_t layer_idx, size_t shard_idx,
                                 int block_id) override;
+
+  virtual NumaThreadPool* push_pool() const { return nullptr; }
 
  protected:
   struct ShardBufferInfoBase {

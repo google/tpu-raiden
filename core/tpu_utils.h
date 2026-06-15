@@ -56,6 +56,13 @@ int GetPjRtDeviceNumaNode(const xla::PjRtDevice* device);
 // Prints the detected TPU hardware topology to std::cout.
 void PrintTpuHardwareTopology();
 
+// Returns the number of NUMA nodes in the system.
+int GetNumaNodeCount();
+
+// Dynamically auto-detects the NUMA node for a given IP address.
+// Supports manual override via RAIDEN_NUMA_IPS environment variable.
+int GetNumaNodeForIp(const std::string& ip);
+
 }  // namespace tpu_raiden
 
 #endif  // THIRD_PARTY_TPU_RAIDEN_CORE_TPU_UTILS_H_

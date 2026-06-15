@@ -16,14 +16,12 @@
 #define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_JAX_WEIGHT_SYNCHRONIZER_FFI_H_
 
 namespace tpu_raiden {
-namespace jax {
-class WeightSynchronizer;
-}  // namespace jax
-
 namespace weight_sync {
 
+class WeightSynchronizerBase;
+
 // Global registry map for distributed JAX meshes multi-device support
-extern jax::WeightSynchronizer* g_weight_synchronizers[32];
+extern WeightSynchronizerBase* g_weight_synchronizers[32];
 
 }  // namespace weight_sync
 }  // namespace tpu_raiden

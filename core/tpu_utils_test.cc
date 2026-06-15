@@ -14,6 +14,7 @@
 
 #include "core/tpu_utils.h"
 
+#include <cstdlib>
 #include <vector>
 
 #include "xla/pjrt/pjrt_client.h"
@@ -92,6 +93,30 @@ TEST(TpuUtilsTest, PinCurrentThreadToNumaNodeTest) {
     LOG(WARNING)
         << "Could not resolve NUMA node for device, skipping pinning test.";
   }
+}
+
+TEST(TpuUtilsTest, GetNumaNodeCountTest) {
+  int count = GetNumaNodeCount();
+  LOG(INFO) << "GetNumaNodeCount returned " << count;
+  EXPECT_GE(count, 1);
+}
+
+TEST(TpuUtilsTest, GetNumaNodeForIp_Loopback) {
+  int node = GetNumaNodeForIp("127.0.0.1");
+  LOG(INFO) << "GetNumaNodeForIp(127.0.0.1) returned " << node;
+  EXPECT_GE(node, 0);
+}
+
+TEST(TpuUtilsTest, GetNumaNodeForIp_EnvOverride) {
+  int set_rc = setenv("RAIDEN_NUMA_IPS", "0:10.10.0.4,1:10.10.0.5", 1);
+  ASSERT_EQ(set_rc, 0);
+
+  EXPECT_EQ(GetNumaNodeForIp("10.10.0.4"), 0);
+  EXPECT_EQ(GetNumaNodeForIp("10.10.0.5"), 1);
+  EXPECT_EQ(GetNumaNodeForIp("10.10.0.6"), 0);
+
+  int unset_rc = unsetenv("RAIDEN_NUMA_IPS");
+  ASSERT_EQ(unset_rc, 0);
 }
 
 }  // namespace

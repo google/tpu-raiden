@@ -22,15 +22,6 @@
 
 #ifndef WITHOUT_PYTHON
 #include <nanobind/nanobind.h>
-#else
-namespace nanobind {
-struct list {
-  list() = default;
-  ~list() = default;
-  list(const list&) = default;
-  list& operator=(const list&) = default;
-};
-}  // namespace nanobind
 #endif
 #include "core/kv_cache_manager_with_transfer.h"
 
@@ -44,25 +35,33 @@ namespace jax {
 
 struct UnpackedCache {
   std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers;
+#ifndef WITHOUT_PYTHON
   nanobind::list device_arrays;
+#endif
 };
 
 class KVCacheManager : public KVCacheManagerWithTransfer {
  public:
+#ifndef WITHOUT_PYTHON
   // JAX sharded constructor E2E (cache-only by default)
   KVCacheManager(
       nanobind::list device_arrays, int block_size = 1,
       std::optional<int> local_port = std::nullopt,
       std::optional<int> host_blocks_to_allocate = std::nullopt,
       std::optional<std::vector<uintptr_t>> external_host_ptrs = std::nullopt,
-      bool unsafe_skip_buffer_lock = false, int parallelism = 1);
+      bool unsafe_skip_buffer_lock = false, int parallelism = 1,
+      std::optional<std::vector<std::string>> local_ips = std::nullopt,
+      std::optional<std::vector<std::string>> peer_ips = std::nullopt);
 
   // New transfer-enabled constructor (flat list of arrays, single shard per
   // layer)
-  KVCacheManager(nanobind::list kv_caches, int64_t tp_rank,
-                 int64_t local_control_port, int64_t max_blocks,
-                 int64_t num_slots, double timeout_s,
-                 bool unsafe_skip_buffer_lock);
+  KVCacheManager(
+      nanobind::list kv_caches, int64_t tp_rank, int64_t local_control_port,
+      int64_t max_blocks, int64_t num_slots, double timeout_s,
+      bool unsafe_skip_buffer_lock,
+      std::optional<std::vector<std::string>> local_ips = std::nullopt,
+      std::optional<std::vector<std::string>> peer_ips = std::nullopt);
+#endif
 
   // FFI metadata constructor (cache-only by default)
   KVCacheManager(size_t num_layers, size_t num_shards, size_t slice_byte_size,
@@ -72,25 +71,33 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
 
   ~KVCacheManager() override;
 
+#ifndef WITHOUT_PYTHON
   nanobind::list kv_caches() const {
     return device_arrays_.value_or(nanobind::list());
   }
+#endif
 
  private:
+#ifndef WITHOUT_PYTHON
   // Private constructor for sharded (cache-only)
-  KVCacheManager(UnpackedCache&& cache, int block_size,
-                 std::optional<int> local_port,
-                 std::optional<int> host_blocks_to_allocate,
-                 std::optional<std::vector<uintptr_t>> external_host_ptrs,
-                 bool unsafe_skip_buffer_lock, int parallelism);
+  KVCacheManager(
+      UnpackedCache&& cache, int block_size, std::optional<int> local_port,
+      std::optional<int> host_blocks_to_allocate,
+      std::optional<std::vector<uintptr_t>> external_host_ptrs,
+      bool unsafe_skip_buffer_lock, int parallelism,
+      std::optional<std::vector<std::string>> local_ips = std::nullopt,
+      std::optional<std::vector<std::string>> peer_ips = std::nullopt);
 
   // Private constructor for flat (transfer-enabled)
-  KVCacheManager(UnpackedCache&& cache, int64_t tp_rank,
-                 int64_t local_control_port, int64_t max_blocks,
-                 int64_t num_slots, double timeout_s,
-                 bool unsafe_skip_buffer_lock);
+  KVCacheManager(
+      UnpackedCache&& cache, int64_t tp_rank, int64_t local_control_port,
+      int64_t max_blocks, int64_t num_slots, double timeout_s,
+      bool unsafe_skip_buffer_lock,
+      std::optional<std::vector<std::string>> local_ips = std::nullopt,
+      std::optional<std::vector<std::string>> peer_ips = std::nullopt);
 
   std::optional<nanobind::list> device_arrays_;
+#endif
 };
 
 }  // namespace jax
