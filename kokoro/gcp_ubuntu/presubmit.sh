@@ -98,9 +98,9 @@ BAZEL_COMMAND_FLAGS=(
   "--experimental_repo_remote_exec"
 )
 
-echo "Running build_raw_transfer.sh..."
+echo "Running build.sh..."
 export BAZEL_BIN
-./build_raw_transfer.sh jax "${BAZEL_COMMAND_FLAGS[@]}"
+./build.sh jax "${BAZEL_COMMAND_FLAGS[@]}"
 
 echo "=== 5. Running CPU-bound standard unit tests ==="
 "${BAZEL_BIN}" "${BAZEL_STARTUP_FLAGS[@]}" test -c opt --check_visibility=false --verbose_failures \

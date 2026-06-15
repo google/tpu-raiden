@@ -33,7 +33,7 @@
 # Unlike torch_tpu, raiden needs (a) clang-18 for XLA's .ll codegen targets and
 # (b) a local torch for the torch_tpu shim headers, plus the torch_tpu module.
 # This script installs clang-18 + CPU torch into the container, mounts a sibling
-# torch_tpu checkout, and runs build_raw_transfer.sh for the wheel target.
+# torch_tpu checkout, and runs build.sh for the wheel target.
 #
 # Usage:
 #   ci/build_wheel.sh                  # JAX + Torch (needs ../torch_tpu)
@@ -76,7 +76,7 @@ if [[ "${WITH_TORCH}" == "1" ]]; then
 fi
 
 # The in-container build: install clang-18 (XLA .ll targets) + CPU torch (shim
-# headers), then drive the existing build_raw_transfer.sh for the wheel target.
+# headers), then drive the existing build.sh for the wheel target.
 read -r -d '' INNER <<'INNER_EOF' || true
 set -exu -o pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -105,7 +105,7 @@ export BAZEL_CACHE_DIR=/cache
 export BAZEL_OUTPUT_BASE=/cache/output_base
 
 cd /workspace
-./build_raw_transfer.sh "${BUILD_MODE}" //ci/wheel:raiden_wheel \
+./build.sh "${BUILD_MODE}" //ci/wheel:raiden_wheel \
   --repo_env=WHEEL_VERSION_EXTRAS="${WHEEL_VERSION_EXTRAS}"
 
 mkdir -p /workspace/dist

@@ -39,7 +39,7 @@ bazel --version
 We provide a script to handle the build process and install the required Python dependencies. Run the following command from the repository root:
 
 ```bash
-./build_raw_transfer.sh
+./build.sh
 ```
 
 **What this script does:**
@@ -53,7 +53,7 @@ We provide a script to handle the build process and install the required Python 
 Once the build is complete, you can run the tests to verify the installation and check performance:
 
 ```bash
-./test_raw_transfer.sh
+./run_test.sh
 ```
 
 **What this script does:**
