@@ -34,6 +34,7 @@ namespace tpu_raiden {
 namespace weight_sync {
 
 class WeightSynchronizerControlService;
+class StartTransferRequest;
 
 class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
  public:
@@ -61,6 +62,24 @@ class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
   // Trainer pushes current weights to all inference server peers E2E (D2H +
   // network push)
   absl::Status PushWeights(const std::vector<std::string>& peers);
+
+  /**
+   * Executes a distributed resharding push transfer based on precise
+   * centralized Controller schedules.
+   *
+   * Automatically copies active local weight buffers from TPU device HBM to
+   * Host staging memory (via D2H), iterates over all active local shards, and
+   * pipelines non-contiguous byte chunks across persistent TCP connections to
+   * target remote peer host buffers.
+   *
+   * @param request Demarshaled StartTransferRequest protobuf containing exact
+   *                1D memory copy byte chunks, peer network coordinates, and
+   *                offset schedules.
+   * @return absl::OkStatus() upon complete, successfully ACK-handshaked
+   * delivery to all remote peers.
+   */
+  absl::Status PushWeightsResharded(
+      const tpu_raiden::weight_sync::StartTransferRequest& request);
 
   // Inference server pulls current weights from the source peer E2E (network
   // pull + H2D)

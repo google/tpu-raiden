@@ -160,6 +160,18 @@ absl::Status RaidenManagerBase::PullWeightsChunk(
                                    dst_shard_idx, dst_offset_bytes, size_bytes);
 }
 
+absl::Status RaidenManagerBase::PushWeightsChunk(const std::string& peer,
+                                                 size_t dst_shard_idx,
+                                                 size_t dst_offset_bytes,
+                                                 const uint8_t* data_ptr,
+                                                 size_t size_bytes) {
+  if (!server_) {
+    return absl::FailedPreconditionError("Transport server is not running");
+  }
+  return server_->PushWeightsChunk(peer, dst_shard_idx, dst_offset_bytes,
+                                   data_ptr, size_bytes);
+}
+
 size_t RaidenManagerBase::bytes_per_block() const {
   return block_size_ * slice_byte_size_;
 }

@@ -41,6 +41,7 @@
 #include "core/raiden_manager_base.h"
 #include "core/raw_transfer_core.h"
 #include "weight_sync/weight_synchronizer_control_service.h"
+#include "weight_sync/weight_synchronizer_service.pb.h"
 
 ABSL_FLAG(size_t, raiden_weight_sync_host_buffer_scratchpad_size, 256 * 1024,
           "Amount of scratchpad to allocate to host buffers for resharding "
@@ -514,6 +515,43 @@ absl::Status WeightSynchronizerBase::PushWeights(
   for (const std::string& peer : peers) {
     TF_RETURN_IF_ERROR(
         H2hWriteDirect(peer, weights_block_id, /*entity_id=*/0).status());
+  }
+  return absl::OkStatus();
+}
+
+absl::Status WeightSynchronizerBase::PushWeightsResharded(
+    const tpu_raiden::weight_sync::StartTransferRequest& request) {
+  const auto& schedules = request.shard_push_schedules();
+  TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2h());
+  TF_RETURN_IF_ERROR(d2h_future.Await().status());
+
+  for (size_t i = 0; i < num_shards_; ++i) {
+    auto it = schedules.find(static_cast<int32_t>(i));
+    if (it == schedules.end()) {
+      continue;
+    }
+    const auto& schedule = it->second;
+    const uint8_t* base_host_ptr = GetHostPointer(0, i);
+    if (base_host_ptr == nullptr) {
+      return absl::InternalError("Host pointer is null during resharded push");
+    }
+    size_t shard_host_size = GetHostSize(0, i);
+
+    for (const auto& entry : schedule.entries()) {
+      const std::string& dst_peer = entry.dst_peer();
+      size_t dst_shard_idx = entry.dst_shard_idx();
+      size_t dst_offset = entry.dst_offset_bytes();
+      size_t src_offset = entry.src_offset_bytes();
+      size_t size = entry.size_bytes();
+
+      if (src_offset + size > shard_host_size) {
+        return absl::InvalidArgumentError("Push range out of bounds");
+      }
+
+      const uint8_t* data_ptr = base_host_ptr + src_offset;
+      TF_RETURN_IF_ERROR(PushWeightsChunk(dst_peer, dst_shard_idx, dst_offset,
+                                          data_ptr, size));
+    }
   }
   return absl::OkStatus();
 }

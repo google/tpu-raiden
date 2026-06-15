@@ -167,6 +167,32 @@ class RaidenControllerTest(absltest.TestCase):
         ],
     )
 
+  def test_enforce_itemsize_when_shard_nd_slices_provided(self):
+    controller = raiden_controller.RaidenController(port=10003)
+    unit = raiden_controller.RaidenId(
+        job_name="trainer", job_replica_id="0", data_name="weights"
+    )
+
+    # 1. Verification during register_work_unit
+    with self.assertRaisesWithPredicateMatch(
+        ValueError, lambda e: "itemsize must not be None" in str(e)
+    ):
+      controller.register_work_unit(
+          unit, ["10.0.0.1:8000"], shard_nd_slices=[[[(0, 2)]]]
+      )
+
+    # 2. Verification during start_transfer if bypassed
+    controller._registered_shard_slices[unit] = [[[(0, 2)]]]
+    controller._registered_itemsizes.pop(unit, None)
+    dst = raiden_controller.RaidenId(
+        job_name="sampler", job_replica_id="0", data_name="weights"
+    )
+
+    with self.assertRaisesWithPredicateMatch(
+        ValueError, lambda e: "itemsize must be registered" in str(e)
+    ):
+      controller.start_transfer(src_units=[unit], dst_units=[dst])
+
 
 if __name__ == "__main__":
 

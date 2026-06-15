@@ -80,6 +80,10 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
                                 size_t src_offset_bytes, size_t dst_shard_idx,
                                 size_t dst_offset_bytes, size_t size_bytes);
 
+  absl::Status PushWeightsChunk(const std::string& peer, size_t dst_shard_idx,
+                                size_t dst_offset_bytes,
+                                const uint8_t* data_ptr, size_t size_bytes);
+
   std::optional<int> local_port() const;
 
   uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) override;

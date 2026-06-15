@@ -461,6 +461,32 @@ absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
     ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
     RETURN_IF_ERROR(delegate_->OnSingleBlockReceived(dst_id, size_bytes));
+  } else if (header.op ==
+             5) {  // Arbitrary Byte Slice Push (Distributed Resharding)
+    uint32_t dst_offset = header.remote_block_id;
+    uint32_t dst_shard_idx = header.local_block_id;
+    uint32_t size_bytes = header.num_blocks;
+
+    if (delegate_->num_layers() == 0) {
+      return absl::InternalError("Server host buffers are not initialized");
+    }
+    if (dst_shard_idx >= delegate_->num_shards()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Invalid destination shard index: ", dst_shard_idx,
+                       ", total shards: ", delegate_->num_shards()));
+    }
+    uint8_t* base_host_ptr = delegate_->GetHostPointer(0, dst_shard_idx);
+    size_t host_size = delegate_->GetHostSize(0, dst_shard_idx);
+    if (dst_offset + size_bytes > host_size) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Destination out of bounds. Offset: ", dst_offset,
+          ", Size: ", size_bytes, ", Shard Host Size: ", host_size));
+    }
+    uint8_t* dest_ptr = base_host_ptr + dst_offset;
+    RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, size_bytes));
+
+    uint8_t ack = 1;
+    RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
   }
   return absl::OkStatus();
 }
@@ -974,6 +1000,49 @@ absl::Status BlockTransport::PullWeightsChunk(
   uint8_t* dest_ptr =
       delegate_->GetHostPointer(0, dst_shard_idx) + dst_offset_bytes;
   RETURN_IF_ERROR(ReadExact(fd, dest_ptr, size_bytes));
+
+  ok_to_pool = true;
+  return absl::OkStatus();
+}
+
+absl::Status BlockTransport::PushWeightsChunk(const std::string& peer,
+                                              size_t dst_shard_idx,
+                                              size_t dst_offset_bytes,
+                                              const uint8_t* data_ptr,
+                                              size_t size_bytes) {
+  if (peer.empty()) {
+    return absl::InvalidArgumentError(
+        "Destination peer address cannot be empty");
+  }
+
+  TF_ASSIGN_OR_RETURN(const int fd, AcquireConnection(peer));
+  bool ok_to_pool = false;
+  auto fd_cleaner = absl::MakeCleanup([&] {
+    if (ok_to_pool) {
+      ReleaseConnection(peer, fd);
+    } else {
+      shutdown(fd, SHUT_RDWR);
+      close(fd);
+    }
+  });
+
+  BlockPacketHeader header = {};
+  // Operation code 5 signals low-overhead streaming of arbitrary,
+  // non-contiguous strided byte slices directly into a remote TPU shard Host
+  // buffer offset.
+  header.op = 5;
+  header.remote_block_id = static_cast<uint32_t>(dst_offset_bytes);
+  header.local_block_id = static_cast<uint32_t>(dst_shard_idx);
+  header.num_blocks = static_cast<uint32_t>(size_bytes);
+
+  RETURN_IF_ERROR(WriteExact(fd, &header, sizeof(header)));
+  RETURN_IF_ERROR(WriteExact(fd, data_ptr, size_bytes));
+
+  uint8_t ack = 0;
+  RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
+  if (ack != 1) {
+    return absl::InternalError("PushWeightsChunk verification failed");
+  }
 
   ok_to_pool = true;
   return absl::OkStatus();

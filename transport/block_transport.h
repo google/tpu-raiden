@@ -88,7 +88,9 @@ class BlockTransport {
  public:
   // Binary packet header layout for H2H transfers.
   struct alignas(8) BlockPacketHeader {
-    uint8_t op;  // 1 = Push, 2 = Pull, 3 = Byte-Range Pull
+    // 1 = Push, 2 = Pull, 3 = Byte-Range Pull, 4 = Single Block Push, 5 =
+    // Resharding Slice Push
+    uint8_t op;
     uint8_t major_order;  // See MajorOrder. Ignored by legacy ops.
     uint16_t reserved = 0;
     uint32_t remote_block_id;
@@ -123,6 +125,31 @@ class BlockTransport {
   // Write a single block of data directly from a host pointer to a remote
   // block ID (Direct Push).
   absl::Status WriteBlockDirect(const std::string& peer, int remote_block_id,
+                                const uint8_t* data_ptr, size_t size_bytes);
+
+  /**
+   * Directly pushes an arbitrary byte slice from local Host memory into a
+   * specific memory offset of a remote peer's destination shard buffer.
+   *
+   * Utilizes a highly optimized request packet framing to stream raw
+   * bytes and blocks synchronously until an explicit TCP ACK response is
+   * returned, ensuring perfect end-to-end memory consistency.
+   *
+   * @param peer Direct network coordinate "ip:port" of the remote destination
+   * worker.
+   * @param dst_shard_idx Target logical shard index residing on the remote
+   * peer.
+   * @param dst_offset_bytes Exact linear byte offset into the target shard
+   * buffer.
+   * @param data_ptr Pointer to the beginning of the local staging source byte
+   * array.
+   * @param size_bytes Number of continuous bytes to push across the network
+   * stream.
+   * @return absl::OkStatus() upon verified written completion confirmed by the
+   * destination.
+   */
+  absl::Status PushWeightsChunk(const std::string& peer, size_t dst_shard_idx,
+                                size_t dst_offset_bytes,
                                 const uint8_t* data_ptr, size_t size_bytes);
 
   int local_port() const { return local_port_; }

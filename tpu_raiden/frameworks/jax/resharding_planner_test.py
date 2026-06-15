@@ -92,6 +92,30 @@ class ReshardingPlannerTest(absltest.TestCase):
     self.assertEqual(chunk_3_7.dst_slice, (0, 16, 768, 1024))
     self.assertEqual(chunk_3_7.shape, (16, 256))
 
+  def test_compute_nd_shard_slices(self):
+    # Test 2D grid: 128x1024 across 2x4 mesh
+    slices_2d = resharding_planner.compute_nd_shard_slices((128, 1024), (2, 4))
+    self.assertLen(slices_2d, 8)
+    # Shard 0 (0, 0)
+    s0 = slices_2d[0].dimensions
+    self.assertEqual((s0[0].start, s0[0].end), (0, 64))
+    self.assertEqual((s0[1].start, s0[1].end), (0, 256))
+    # Shard 7 (1, 3)
+    s7 = slices_2d[7].dimensions
+    self.assertEqual((s7[0].start, s7[0].end), (64, 128))
+    self.assertEqual((s7[1].start, s7[1].end), (768, 1024))
+
+    # Test 3D grid: 16x32x64 across 2x1x4 mesh
+    slices_3d = resharding_planner.compute_nd_shard_slices(
+        (16, 32, 64), (2, 1, 4)
+    )
+    self.assertLen(slices_3d, 8)
+    # Shard 5 (1, 0, 1) -> index 1*4 + 0*4 + 1 = 5
+    s5 = slices_3d[5].dimensions
+    self.assertEqual((s5[0].start, s5[0].end), (8, 16))
+    self.assertEqual((s5[1].start, s5[1].end), (0, 32))
+    self.assertEqual((s5[2].start, s5[2].end), (16, 32))
+
 
 if __name__ == "__main__":
   absltest.main()

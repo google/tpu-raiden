@@ -526,7 +526,10 @@ py_library(
     name = "resharding_planner",
     srcs = ["resharding_planner.py"],
     visibility = ["//visibility:public"],
-    deps = ["@jax//jax"],
+    deps = [
+        "//weight_sync:weight_synchronizer_service_py_pb2",
+        "@jax//jax",
+    ],
 )
 
 py_library(

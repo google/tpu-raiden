@@ -163,15 +163,29 @@ void WeightSynchronizerControlService::ConnectionWorker(int client_fd) {
 
   if (req.command() ==
       tpu_raiden::weight_sync::ControlRequest::COMMAND_START_TRANSFER) {
-    std::vector<std::string> peers(req.peers().begin(), req.peers().end());
-    LOG(INFO) << "C++ Control Service received START_TRANSFER request to "
-              << peers.size() << " peers";
-    if (!peers.empty()) {
-      absl::Status status = engine_->PushWeights(peers);
+    if (req.has_start_transfer_request() &&
+        !req.start_transfer_request().shard_push_schedules().empty()) {
+      LOG(INFO) << "C++ Control Service received START_TRANSFER with "
+                   "shard_push_schedules";
+      const auto& start_req = req.start_transfer_request();
+      absl::Status status = engine_->PushWeightsResharded(start_req);
       if (!status.ok()) {
         resp.set_success(false);
         resp.set_message(std::string(status.message()));
-        LOG(ERROR) << "PushWeights native execution failed: " << status;
+        LOG(ERROR) << "PushWeightsResharded native execution failed: "
+                   << status;
+      }
+    } else {
+      std::vector<std::string> peers(req.peers().begin(), req.peers().end());
+      LOG(INFO) << "C++ Control Service received START_TRANSFER request to "
+                << peers.size() << " peers";
+      if (!peers.empty()) {
+        absl::Status status = engine_->PushWeights(peers);
+        if (!status.ok()) {
+          resp.set_success(false);
+          resp.set_message(std::string(status.message()));
+          LOG(ERROR) << "PushWeights native execution failed: " << status;
+        }
       }
     }
   } else if (req.command() ==
