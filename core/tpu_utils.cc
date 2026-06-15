@@ -17,6 +17,7 @@
 #include <dirent.h>
 #include <pthread.h>
 #include <sched.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <algorithm>
