@@ -94,6 +94,7 @@ KVCacheManagerBase::KVCacheManagerBase(
 
   xla::PjRtBuffer* first_buffer = layer_buffers[0][0];
   const xla::Shape& shape = first_buffer->on_device_shape();
+  LOG(ERROR) << "KVCacheManagerBase: on_device_shape: " << shape.ToString();
 
   is_blocked_layout_ = (shape.dimensions().size() == 5);
 
@@ -183,6 +184,10 @@ KVCacheManagerBase::KVCacheManagerBase(
                 static_cast<uint8_t*>(ptr), [](void* p) { free(p); });
         shard_info.host_ptr = shard_info.owned_host_buffer.get();
         shard_info.host_size = alloc_size;
+        VLOG(1) << "KVCacheManagerBase: allocated host buffer for layer "
+                << layer_idx << ", shard " << i << " at "
+                << (void*)shard_info.host_ptr
+                << ", size " << shard_info.host_size;
       }
 
       auto status_or_hold = raiden::BufferHoldAndAlias::Acquire(
@@ -871,21 +876,6 @@ absl::Status KVCacheManagerBase::ConfigureHostStagingSlots(
   if (max_major_per_slot <= 0) {
     return absl::InvalidArgumentError("max_major_per_slot must be positive");
   }
-  const size_t required_size = static_cast<size_t>(num_slots) *
-                               static_cast<size_t>(max_major_per_slot) *
-                               slice_byte_size_;
-  for (size_t l = 0; l < layers_.size(); ++l) {
-    const auto& layer_info = layers_[l];
-    for (size_t s = 0; s < layer_info.shards.size(); ++s) {
-      const auto& shard_info = layer_info.shards[s];
-      if (shard_info.host_size < required_size) {
-        return absl::InvalidArgumentError(absl::StrCat(
-            "Host staging buffer is too small for requested slots at layer ", l,
-            ", shard ", s, ". host_size: ", shard_info.host_size,
-            ", required_size: ", required_size));
-      }
-    }
-  }
   staging_num_slots_ = num_slots;
   staging_max_major_per_slot_ = max_major_per_slot;
   return absl::OkStatus();
@@ -957,6 +947,10 @@ KVCacheManagerBase::DispatchH2dWork(
       base_host_ptr = shard_info.host_ptr;
       host_size = shard_info.host_size;
     }
+    VLOG(1) << "DispatchH2dWork: Layer: " << work.layer_idx
+            << ", Shard: " << work.shard_idx
+            << ", base_host_ptr: " << (void*)base_host_ptr
+            << ", host_size: " << host_size;
 
     std::vector<xla::Future<>> shard_futures;
     if (!is_partial) {
@@ -1040,6 +1034,10 @@ KVCacheManagerBase::DispatchD2hWork(const std::vector<CopyWork>& works,
       dst_host_ptr = const_cast<uint8_t*>(shard_info.host_ptr);
       host_size = shard_info.host_size;
     }
+    VLOG(1) << "DispatchD2hWork: Layer: " << work.layer_idx
+            << ", Shard: " << work.shard_idx
+            << ", dst_host_ptr: " << (void*)dst_host_ptr
+            << ", host_size: " << host_size;
 
     std::vector<xla::Future<>> shard_futures;
     if (!is_partial) {

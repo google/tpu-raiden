@@ -224,11 +224,45 @@ static kv_cache::KVCacheCopySpec ToKVCacheCopySpecImpl(const CopySpec& spec) {
           .sizes = spec.sizes};
 }
 
-static CopyPlan BuildLoadCopyPlan(const std::vector<int64_t>& remote_block_ids,
-                                  const std::vector<int64_t>& local_block_ids) {
-  if (remote_block_ids.size() != local_block_ids.size()) {
+static CopySpec BuildH2dCopySpec(const std::vector<int64_t>& src_block_ids,
+                                 const std::vector<int64_t>& dst_block_ids) {
+  if (src_block_ids.size() != dst_block_ids.size()) {
+    throw std::invalid_argument("src and dst block lists must have same length");
+  }
+  CopySpec spec;
+  if (src_block_ids.empty()) {
+    return spec;
+  }
+  const int64_t n = static_cast<int64_t>(src_block_ids.size());
+  spec.src_offsets.reserve(n);
+  spec.dst_offsets.reserve(n);
+  spec.sizes.reserve(n);
+
+  for (int64_t start = 0; start < n;) {
+    int64_t end = start + 1;
+    while (end < n &&
+           src_block_ids[end] == src_block_ids[end - 1] + 1 &&
+           dst_block_ids[end] == dst_block_ids[end - 1] + 1) {
+      ++end;
+    }
+    const int64_t run_size = end - start;
+    spec.src_offsets.push_back(src_block_ids[start]);
+    spec.dst_offsets.push_back(dst_block_ids[start]);
+    spec.sizes.push_back(run_size);
+    start = end;
+  }
+  return spec;
+}
+
+static CopyPlan BuildLoadCopyPlan(
+    const std::vector<int64_t>& remote_block_ids,
+    const std::vector<int64_t>& local_block_ids,
+    const std::vector<int64_t>& local_host_block_ids) {
+  if (remote_block_ids.size() != local_block_ids.size() ||
+      local_block_ids.size() != local_host_block_ids.size()) {
     throw std::invalid_argument(
-        "remote_block_ids and local_block_ids must have same length");
+        "remote_block_ids, local_block_ids, and local_host_block_ids must have "
+        "same length");
   }
   CopyPlan plan;
   plan.num_blocks = static_cast<int64_t>(remote_block_ids.size());
@@ -237,43 +271,47 @@ static CopyPlan BuildLoadCopyPlan(const std::vector<int64_t>& remote_block_ids,
   if (remote_block_ids.empty()) {
     return plan;
   }
+
+  // 1. Determine transport order (sorted by remote_block_ids)
   std::vector<size_t> remote_order(remote_block_ids.size());
-  std::vector<size_t> local_order(local_block_ids.size());
   for (size_t i = 0; i < remote_order.size(); ++i) {
     remote_order[i] = i;
-    local_order[i] = i;
   }
   std::stable_sort(remote_order.begin(), remote_order.end(),
                    [&](size_t a, size_t b) {
                      return remote_block_ids[a] < remote_block_ids[b];
                    });
+
+  plan.producer_remote_block_ids.reserve(remote_order.size());
+  plan.transport_host_block_ids.reserve(remote_order.size());
+  for (size_t i = 0; i < remote_order.size(); ++i) {
+    const size_t original_idx = remote_order[i];
+    plan.producer_remote_block_ids.push_back(remote_block_ids[original_idx]);
+    plan.transport_host_block_ids.push_back(local_host_block_ids[original_idx]);
+  }
+
+  // 2. Determine H2D copy plan (sorted by local_block_ids for opt)
+  std::vector<size_t> local_order(local_block_ids.size());
+  for (size_t i = 0; i < local_order.size(); ++i) {
+    local_order[i] = i;
+  }
   std::stable_sort(local_order.begin(), local_order.end(),
                    [&](size_t a, size_t b) {
                      return local_block_ids[a] < local_block_ids[b];
                    });
 
-  plan.producer_remote_block_ids.reserve(remote_order.size());
   plan.h2d_local_block_ids.reserve(local_order.size());
-  plan.host_dst_to_src.reserve(local_order.size());
-  std::vector<size_t> source_pos_by_original_idx(remote_order.size());
-  for (size_t source_pos = 0; source_pos < remote_order.size(); ++source_pos) {
-    const size_t original_idx = remote_order[source_pos];
-    plan.producer_remote_block_ids.push_back(remote_block_ids[original_idx]);
-    source_pos_by_original_idx[original_idx] = source_pos;
-  }
-  bool identity_reorder = true;
-  for (size_t dst_pos = 0; dst_pos < local_order.size(); ++dst_pos) {
-    const size_t original_idx = local_order[dst_pos];
-    const size_t src_pos = source_pos_by_original_idx[original_idx];
+  std::vector<int64_t> h2d_host_block_ids;
+  h2d_host_block_ids.reserve(local_order.size());
+  for (size_t i = 0; i < local_order.size(); ++i) {
+    const size_t original_idx = local_order[i];
     plan.h2d_local_block_ids.push_back(local_block_ids[original_idx]);
-    plan.host_dst_to_src.push_back(src_pos);
-    identity_reorder = identity_reorder && (src_pos == dst_pos);
+    h2d_host_block_ids.push_back(local_host_block_ids[original_idx]);
   }
-  if (identity_reorder) {
-    plan.host_dst_to_src.clear();
-  }
+
   plan.h2d_copy =
-      OffsetsImpl(plan.h2d_local_block_ids, /*source_is_compact=*/true);
+      BuildH2dCopySpec(h2d_host_block_ids, plan.h2d_local_block_ids);
+  plan.host_dst_to_src.clear();  // No host reordering needed!
   return plan;
 }
 
@@ -474,12 +512,16 @@ void KVCacheManagerWithTransfer::StartRead(
     const std::string& req_id, uint64_t uuid,
     const std::string& remote_endpoint,
     const std::vector<int64_t>& remote_block_ids,
-    const std::vector<int64_t>& local_block_ids, int parallelism) {
+    const std::vector<int64_t>& local_block_ids, int parallelism,
+    std::optional<std::vector<int64_t>> local_host_block_ids) {
   VLOG(1) << "KVCacheManagerWithTransfer::StartRead called. req_id: " << req_id
           << ", uuid: " << uuid << ", remote: " << remote_endpoint
           << ", Thread: " << std::this_thread::get_id();
   const auto submit_start = std::chrono::steady_clock::now();
-  CopyPlan load_plan = BuildLoadCopyPlan(remote_block_ids, local_block_ids);
+  std::vector<int64_t> host_block_ids =
+      local_host_block_ids.value_or(local_block_ids);
+  CopyPlan load_plan =
+      BuildLoadCopyPlan(remote_block_ids, local_block_ids, host_block_ids);
   xla::PjRtBuffer* representative_buf = nullptr;
   if (!buffer_holds_.empty() && !buffer_holds_[0].empty()) {
     representative_buf = buffer_holds_[0][0].buffer;
@@ -619,7 +661,8 @@ void KVCacheManagerWithTransfer::StartRead(
                     << ", Thread: " << std::this_thread::get_id();
             auto future_or = H2d(
                 h2d_transfer_spec.src_offsets, h2d_transfer_spec.dst_offsets,
-                h2d_transfer_spec.sizes, slot_idx, layer_idx, shard_idx);
+                h2d_transfer_spec.sizes, /*slot_idx=*/std::nullopt, layer_idx,
+                shard_idx);
             if (!future_or.ok()) {
               VLOG(1) << "on_block_received: H2d failed: "
                       << future_or.status().ToString();
@@ -644,11 +687,17 @@ void KVCacheManagerWithTransfer::StartRead(
           };
         }
         const auto h2h_start = std::chrono::steady_clock::now();
+        std::vector<int> remote_block_ids_int(
+            load_plan.producer_remote_block_ids.begin(),
+            load_plan.producer_remote_block_ids.end());
+        std::vector<int> local_host_block_ids_int(
+            load_plan.transport_host_block_ids.begin(),
+            load_plan.transport_host_block_ids.end());
         auto h2h_future_or = H2hReadExplicit(
             EndpointWithPort(remote_endpoint, response.data_port),
-            remote_staging_block_ids, local_compact_block_ids,
-            explicit_dst_ptrs, parallelism, transport::MajorOrder::kLayerMajor,
-            on_block_received);
+            remote_block_ids_int, local_host_block_ids_int,
+            /*explicit_dst_ptrs=*/{}, parallelism,
+            transport::MajorOrder::kLayerMajor, on_block_received);
         if (!h2h_future_or.ok()) {
           ThrowStatus("BlockTransport pull failed", h2h_future_or.status());
         }
@@ -868,6 +917,9 @@ void KVCacheManagerWithTransfer::ReleaseEntrySlotLocked(
     const std::shared_ptr<SendEntry>& entry) {
   if (!entry || entry->slot_idx < 0 || entry->slot_released) return;
   RemoveStagingReadinessLocked(entry->slot_idx);
+  for (int64_t block_id : entry->registered_block_ids) {
+    active_producer_blocks_.erase(block_id);
+  }
   ReleaseSlotLocked(entry->slot_idx);
   entry->slot_released = true;
 }
@@ -925,19 +977,32 @@ absl::Status KVCacheManagerWithTransfer::WaitForStagingBlockRead(
   if (block_id < 0 || max_blocks_ <= 0) {
     return absl::OkStatus();
   }
-  const int64_t slot_idx = static_cast<int64_t>(block_id) / max_blocks_;
-  const int64_t local_block_idx = static_cast<int64_t>(block_id) % max_blocks_;
   std::shared_ptr<StagingReadinessState> state;
+  bool is_legacy = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
-    auto it = staging_readiness_.find(slot_idx);
-    if (it == staging_readiness_.end()) {
+    auto it = active_producer_blocks_.find(block_id);
+    if (it != active_producer_blocks_.end()) {
+      state = it->second;
+    } else {
+      // Fallback to legacy staging slot lookup
+      const int64_t slot_idx = static_cast<int64_t>(block_id) / max_blocks_;
+      auto it_legacy = staging_readiness_.find(slot_idx);
+      if (it_legacy != staging_readiness_.end()) {
+        state = it_legacy->second;
+        is_legacy = true;
+      }
+    }
+  }
+  if (!state) {
+    return absl::OkStatus();
+  }
+  if (is_legacy) {
+    const int64_t local_block_idx =
+        static_cast<int64_t>(block_id) % max_blocks_;
+    if (local_block_idx < 0 || local_block_idx >= state->num_blocks) {
       return absl::OkStatus();
     }
-    state = it->second;
-  }
-  if (local_block_idx < 0 || local_block_idx >= state->num_blocks) {
-    return absl::OkStatus();
   }
   if (layer_idx >= state->num_layers || shard_idx >= state->num_shards) {
     return absl::OutOfRangeError(
@@ -1113,42 +1178,56 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
   const auto slot_ms = DurationMs(slot_start, std::chrono::steady_clock::now());
 
   const auto issue_start = std::chrono::steady_clock::now();
-  CopySpec d2h_copy = Offsets(requested_block_ids, /*source_is_compact=*/false);
+  // Use BuildH2dCopySpec for identity copy (device X to host X)
+  CopySpec d2h_copy =
+      BuildH2dCopySpec(requested_block_ids, requested_block_ids);
   kv_cache::KVCacheCopySpec d2h_transfer_spec = ToKVCacheCopySpec(d2h_copy);
-  std::vector<kv_cache::KVCacheHostSpan> host_spans =
-      LayerSpans(slot_idx, entry->num_blocks);
+
   auto readiness = CreateStagingReadiness(slot_idx, entry->num_blocks);
-  auto d2h_future = std::make_shared<TransferFuture>();
-  int64_t d2h_total_bytes = 0;
-  for (const kv_cache::KVCacheHostSpan& span : host_spans) {
-    d2h_total_bytes += static_cast<int64_t>(span.nbytes);
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (int64_t block_id : requested_block_ids) {
+      active_producer_blocks_[block_id] = readiness;
+    }
   }
+  auto d2h_future = std::make_shared<TransferFuture>();
+  int64_t d2h_total_bytes = entry->num_blocks * bytes_per_block();
+
+  // Pass std::nullopt to D2h for slotless direct copy
   auto d2h_futures_or =
       D2h(d2h_transfer_spec.src_offsets, d2h_transfer_spec.dst_offsets,
-          d2h_transfer_spec.sizes, slot_idx);
+          d2h_transfer_spec.sizes, /*slot_idx=*/std::nullopt);
   if (!d2h_futures_or.ok()) {
-    for (const kv_cache::KVCacheHostSpan& span : host_spans) {
-      MarkStagingLayerReady(readiness, span.layer_idx, span.shard_idx,
-                            d2h_futures_or.status());
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      for (int64_t block_id : requested_block_ids) {
+        active_producer_blocks_.erase(block_id);
+      }
+    }
+    for (size_t l = 0; l < num_layers(); ++l) {
+      for (size_t s = 0; s < num_shards(); ++s) {
+        MarkStagingLayerReady(readiness, l, s, d2h_futures_or.status());
+      }
     }
     ThrowStatus("Failed to issue D2H transfer", d2h_futures_or.status());
   }
   auto& d2h_futures = d2h_futures_or.value();
-  for (const kv_cache::KVCacheHostSpan& span : host_spans) {
-    size_t flat_idx = span.layer_idx * num_shards() + span.shard_idx;
-    auto& single_future = d2h_futures[flat_idx];
-    std::vector<xla::Future<raiden::BufferHolder>> single_future_vec;
-    single_future_vec.push_back(std::move(single_future));
-    auto pjrt_future = xla::JoinFutures(absl::MakeSpan(single_future_vec));
-    pjrt_future.OnReady(
-        [this, readiness, layer_idx = span.layer_idx,
-         shard_idx = span.shard_idx](
-            const absl::StatusOr<raiden::BufferHolders>& status_or) {
-          MarkStagingLayerReady(
-              readiness, layer_idx, shard_idx,
-              status_or.ok() ? absl::OkStatus() : status_or.status());
-        });
-    d2h_future->Add(std::move(pjrt_future));
+  for (size_t l = 0; l < num_layers(); ++l) {
+    for (size_t s = 0; s < num_shards(); ++s) {
+      size_t flat_idx = l * num_shards() + s;
+      auto& single_future = d2h_futures[flat_idx];
+      std::vector<xla::Future<raiden::BufferHolder>> single_future_vec;
+      single_future_vec.push_back(std::move(single_future));
+      auto pjrt_future = xla::JoinFutures(absl::MakeSpan(single_future_vec));
+      pjrt_future.OnReady(
+          [this, readiness, l, s](
+              const absl::StatusOr<raiden::BufferHolders>& status_or) {
+            MarkStagingLayerReady(
+                readiness, l, s,
+                status_or.ok() ? absl::OkStatus() : status_or.status());
+          });
+      d2h_future->Add(std::move(pjrt_future));
+    }
   }
   entry->total_bytes = d2h_total_bytes;
   entry->copy_segments = static_cast<int64_t>(d2h_copy.sizes.size());
@@ -1159,13 +1238,13 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
   ControlResponseHeader response;
   response.magic = kResponseMagic;
   response.status = 0;
-  response.num_layers = static_cast<uint32_t>(host_spans.size());
+  response.num_layers = static_cast<uint32_t>(num_layers());
   response.data_port = static_cast<uint32_t>(local_data_port_);
   CheckStatus("control stream response header write",
               WriteExact(fd, &response, sizeof(response)));
 
   PullBlockDescriptor descriptor;
-  descriptor.remote_block_base = StagingBlockBase(slot_idx);
+  descriptor.remote_block_base = 0;  // Slotless: ignored by consumer
   descriptor.num_blocks = static_cast<uint64_t>(entry->num_blocks);
   CheckStatus("control stream block descriptor write",
               WriteExact(fd, &descriptor, sizeof(descriptor)));
@@ -1196,7 +1275,7 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
          << " req_id=" << entry->req_id << " uuid=" << entry->uuid
          << " rank=" << tp_rank_ << " total_blocks=" << entry->num_blocks
          << " total_bytes=" << entry->total_bytes
-         << " total_layers=" << host_spans.size()
+         << " total_layers=" << num_layers()
          << " copy_segments=" << entry->copy_segments
          << " wait_producer_ms=" << wait_producer_ms << " parse_ms=" << parse_ms
          << " slot_acquire_ms=" << slot_ms << " d2h_issue_ms=" << issue_ms

@@ -107,6 +107,7 @@ struct CopyPlan {
   std::vector<int64_t> requested_local_block_ids;
   std::vector<int64_t> producer_remote_block_ids;
   std::vector<int64_t> h2d_local_block_ids;
+  std::vector<int64_t> transport_host_block_ids;
   std::vector<size_t> host_dst_to_src;
   CopySpec d2h_copy;
   CopySpec h2d_copy;
@@ -158,11 +159,12 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   int64_t NotifyForRead(const std::string& req_id, uint64_t uuid,
                         const std::vector<int64_t>& block_ids);
 
-  void StartRead(const std::string& req_id, uint64_t uuid,
-                 const std::string& remote_endpoint,
-                 const std::vector<int64_t>& remote_block_ids,
-                 const std::vector<int64_t>& local_block_ids,
-                 int parallelism = 1);
+  void StartRead(
+      const std::string& req_id, uint64_t uuid,
+      const std::string& remote_endpoint,
+      const std::vector<int64_t>& remote_block_ids,
+      const std::vector<int64_t>& local_block_ids, int parallelism = 1,
+      std::optional<std::vector<int64_t>> local_host_block_ids = std::nullopt);
 
   std::tuple<std::vector<std::string>, std::vector<std::string>,
              std::vector<std::string>>
@@ -292,7 +294,8 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   // map (e.g. on timeout, cancellation, or slot release) before the async
   // callback runs.
   std::map<int64_t, std::shared_ptr<StagingReadinessState>> staging_readiness_;
-
+  std::map<int64_t, std::shared_ptr<StagingReadinessState>>
+      active_producer_blocks_;
   std::mutex mu_;
   std::condition_variable cv_;
   int control_fd_ = -1;
