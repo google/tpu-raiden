@@ -17,8 +17,11 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <set>
 #include <vector>
 
+#include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/api/ffi.h"
 #include "xla/stream_executor/platform_manager.h"
@@ -59,13 +62,21 @@ class KVCacheManagerFfiTest : public ::testing::Test {
   }
 
   void TearDown() override {
-    // Clean up global registry between tests
+    // Clean up global registry between tests safely to avoid double-free
+    std::set<KVCacheManagerWithTransfer*> unique_managers;
     for (int i = 0; i < 32; ++i) {
       if (g_kv_cache_managers[i] != nullptr) {
-        delete g_kv_cache_managers[i];
+        unique_managers.insert(g_kv_cache_managers[i]);
         g_kv_cache_managers[i] = nullptr;
       }
       g_streams[i].reset();
+    }
+    for (auto* mgr : unique_managers) {
+      delete mgr;
+    }
+    {
+      absl::MutexLock lock(g_manager_mutex);
+      g_kv_cache_managers_map.clear();
     }
   }
 };
@@ -90,7 +101,7 @@ TEST_F(KVCacheManagerFfiTest, TriggerRaidenInitSucceeds) {
 
   xla::ffi::Error err = TriggerRaidenInitImpl(
       x, shard_idx_buf, slice_byte_size, local_port, parallelism,
-      host_blocks_to_allocate, num_layers, out);
+      host_blocks_to_allocate, num_layers, "", out);
 
   EXPECT_TRUE(err.success()) << "Raiden Init failed: " << err.message();
   EXPECT_NE(g_kv_cache_managers[0], nullptr);
@@ -110,7 +121,7 @@ TEST_F(KVCacheManagerFfiTest, TriggerRaidenH2dAndD2hDMAOrchestration) {
   // 1. Initialize FFI Manager
   xla::ffi::Error init_err = TriggerRaidenInitImpl(
       anchor_fixture.AsAnyBuffer(), shard_idx_fixture.AsAnyBuffer(),
-      slice_byte_size, -1, 1, host_blocks_to_allocate, num_layers,
+      slice_byte_size, -1, 1, host_blocks_to_allocate, num_layers, "",
       anchor_fixture.AsAnyBuffer());
   ASSERT_TRUE(init_err.success());
 
@@ -198,6 +209,43 @@ TEST_F(KVCacheManagerFfiTest, TriggerRaidenH2dAndD2hDMAOrchestration) {
     ASSERT_EQ(h_block5[j], static_cast<uint8_t>(j % 256))
         << "Mismatch at index " << j << " on host block 5 after D2H";
   }
+}
+
+TEST_F(KVCacheManagerFfiTest, TriggerRaidenInitSharesManagerForSameIP) {
+  int32_t shard_idx_0 = 0;
+  FfiBufferFixture shard_idx_0_fixture(XLA_FFI_DataType_S32, &shard_idx_0, {1});
+  int32_t shard_idx_1 = 1;
+  FfiBufferFixture shard_idx_1_fixture(XLA_FFI_DataType_S32, &shard_idx_1, {1});
+
+  int32_t anchor = 0;
+  FfiBufferFixture anchor_fixture(XLA_FFI_DataType_S32, &anchor, {1});
+
+  xla::ffi::AnyBuffer x = anchor_fixture.AsAnyBuffer();
+  xla::ffi::Result<xla::ffi::AnyBuffer> out = anchor_fixture.AsAnyBuffer();
+
+  int64_t slice_byte_size = 1024;
+  int32_t local_port = -1;
+  int32_t parallelism = 2;
+  int32_t host_blocks_to_allocate = 8;
+  int32_t num_layers = 2;
+  absl::string_view local_ip = "127.0.0.1";
+
+  // Initialize shard 0
+  xla::ffi::Error err0 = TriggerRaidenInitImpl(
+      x, shard_idx_0_fixture.AsAnyBuffer(), slice_byte_size, local_port,
+      parallelism, host_blocks_to_allocate, num_layers, local_ip, out);
+  ASSERT_TRUE(err0.success()) << err0.message();
+
+  // Initialize shard 1 with same IP
+  xla::ffi::Error err1 = TriggerRaidenInitImpl(
+      x, shard_idx_1_fixture.AsAnyBuffer(), slice_byte_size, local_port,
+      parallelism, host_blocks_to_allocate, num_layers, local_ip, out);
+  ASSERT_TRUE(err1.success()) << err1.message();
+
+  // Verify that both shards share the same manager instance
+  EXPECT_NE(g_kv_cache_managers[0], nullptr);
+  EXPECT_NE(g_kv_cache_managers[1], nullptr);
+  EXPECT_EQ(g_kv_cache_managers[0], g_kv_cache_managers[1]);
 }
 
 }  // namespace

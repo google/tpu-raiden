@@ -65,6 +65,9 @@ class RawBufferTransport {
 
   RawBufferTransport(RawBufferTransportDelegate* delegate, int local_port,
                      bool enable_conn_pool = true);
+  RawBufferTransport(RawBufferTransportDelegate* delegate,
+                     const std::string& local_ip, int& local_port,
+                     bool enable_conn_pool = true);
   virtual ~RawBufferTransport();
 
   // Directly pushes an arbitrary continuous byte array into a specific offset
@@ -114,6 +117,12 @@ class RawBufferTransport {
 
   std::thread listener_thread_;
   std::vector<std::thread> worker_threads_;
+
+  absl::Mutex finished_mu_;
+  std::vector<std::thread::id> finished_thread_ids_
+      ABSL_GUARDED_BY(finished_mu_);
+
+  void ReapFinishedWorkerThreads();
 };
 
 }  // namespace transport

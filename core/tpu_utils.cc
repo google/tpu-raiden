@@ -14,16 +14,24 @@
 
 #include "core/tpu_utils.h"
 
+#include <arpa/inet.h>
 #include <dirent.h>
+#include <ifaddrs.h>
+#include <netdb.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <sched.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -31,6 +39,11 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_split.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/logging.h"
 
@@ -301,6 +314,214 @@ void PrintTpuHardwareTopology() {
   if (devices.empty()) {
     LOG(INFO) << "  No Google TPU PCI devices found in sysfs.";
   }
+}
+
+bool IsPhysicalInterface(const std::string& iface,
+                         const std::string& sysfs_root) {
+  std::string device_path = sysfs_root + "/sys/class/net/" + iface + "/device";
+  struct stat st;
+  if (lstat(device_path.c_str(), &st) != 0) {
+    return false;
+  }
+  return S_ISLNK(st.st_mode);
+}
+
+std::string GetInterfaceBdf(const std::string& iface,
+                            const std::string& sysfs_root) {
+  std::string device_path = sysfs_root + "/sys/class/net/" + iface + "/device";
+  char buf[PATH_MAX];
+  ssize_t len = readlink(device_path.c_str(), buf, sizeof(buf) - 1);
+  if (len != -1) {
+    buf[len] = '\0';
+    std::string target(buf);
+    size_t last_slash = target.find_last_of('/');
+    if (last_slash != std::string::npos) {
+      return target.substr(last_slash + 1);
+    }
+  }
+  return "";
+}
+
+int GetInterfaceNumaNode(const std::string& iface,
+                         const std::string& sysfs_root) {
+  std::string numa_path =
+      sysfs_root + "/sys/class/net/" + iface + "/device/numa_node";
+  std::ifstream file(numa_path);
+  int node = -1;
+  if (file >> node) {
+    return node;
+  }
+  return -1;
+}
+
+absl::flat_hash_map<std::string, int> DiscoverNumaNicIPs(
+    const std::string& sysfs_root) {
+  absl::flat_hash_map<std::string, int> ip_to_numa;
+
+  struct PhysIfaceInfo {
+    std::string name;
+    std::string bdf;
+    int detected_numa = -1;
+    int assigned_numa = -1;
+  };
+  std::vector<PhysIfaceInfo> phys_ifaces;
+
+  std::string net_dir = sysfs_root + "/sys/class/net";
+  DIR* dir = opendir(net_dir.c_str());
+  if (dir == nullptr) {
+    LOG(ERROR) << "Failed to open " << net_dir;
+    return ip_to_numa;
+  }
+  struct dirent* entry;
+  while ((entry = readdir(dir)) != nullptr) {
+    std::string name = entry->d_name;
+    if (name == "." || name == "..") continue;
+    if (name == "lo") continue;
+    if (name.rfind("veth", 0) == 0 || name.rfind("docker", 0) == 0 ||
+        name.rfind("br-", 0) == 0)
+      continue;
+
+    if (IsPhysicalInterface(name, sysfs_root)) {
+      PhysIfaceInfo info;
+      info.name = name;
+      info.bdf = GetInterfaceBdf(name, sysfs_root);
+      info.detected_numa = GetInterfaceNumaNode(name, sysfs_root);
+      phys_ifaces.push_back(info);
+    }
+  }
+  closedir(dir);
+
+  if (phys_ifaces.empty()) {
+    LOG(WARNING) << "No physical network interfaces found.";
+    return ip_to_numa;
+  }
+
+  std::sort(phys_ifaces.begin(), phys_ifaces.end(),
+            [](const PhysIfaceInfo& a, const PhysIfaceInfo& b) {
+              return a.bdf < b.bdf;
+            });
+
+  std::vector<int> preferred_numa_nodes;
+  const char* env_val = std::getenv("WORKLOAD_NIC_PREFERRED_NUMA");
+  if (env_val != nullptr && std::strlen(env_val) > 0) {
+    std::vector<std::string> parts = absl::StrSplit(env_val, ',');
+    for (const auto& part : parts) {
+      int node;
+      if (absl::SimpleAtoi(part, &node)) {
+        preferred_numa_nodes.push_back(node);
+      }
+    }
+  }
+
+  for (size_t i = 0; i < phys_ifaces.size(); ++i) {
+    if (i < preferred_numa_nodes.size()) {
+      phys_ifaces[i].assigned_numa = preferred_numa_nodes[i];
+    } else if (phys_ifaces[i].detected_numa != -1) {
+      phys_ifaces[i].assigned_numa = phys_ifaces[i].detected_numa;
+    } else {
+      phys_ifaces[i].assigned_numa = (i % 2 == 0) ? 0 : 1;
+    }
+    LOG(INFO) << "Interface " << phys_ifaces[i].name
+              << " (BDF: " << phys_ifaces[i].bdf
+              << ", detected NUMA: " << phys_ifaces[i].detected_numa
+              << ") assigned to NUMA " << phys_ifaces[i].assigned_numa;
+  }
+
+  struct ifaddrs* ifaddr = nullptr;
+  if (getifaddrs(&ifaddr) == -1) {
+    LOG(ERROR) << "getifaddrs failed: " << std::strerror(errno);
+    return ip_to_numa;
+  }
+
+  for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+    if (ifa->ifa_addr == nullptr) continue;
+    if (ifa->ifa_addr->sa_family == AF_INET) {
+      std::string name(ifa->ifa_name);
+      auto it = std::find_if(
+          phys_ifaces.begin(), phys_ifaces.end(),
+          [&name](const PhysIfaceInfo& info) { return info.name == name; });
+      if (it != phys_ifaces.end()) {
+        char host[NI_MAXHOST];
+        int s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host,
+                            NI_MAXHOST, nullptr, 0, NI_NUMERICHOST);
+        if (s == 0) {
+          ip_to_numa[host] = it->assigned_numa;
+          LOG(INFO) << "Mapped IP " << host << " (interface " << name
+                    << ") to NUMA " << it->assigned_numa;
+        }
+      }
+    }
+  }
+  freeifaddrs(ifaddr);
+
+  return ip_to_numa;
+}
+
+std::string GetLocalIp() {
+  struct ifaddrs* ifaddr = nullptr;
+  if (getifaddrs(&ifaddr) == -1) {
+    return "127.0.0.1";
+  }
+
+  std::string local_ip = "127.0.0.1";
+  for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+    if (ifa->ifa_addr == nullptr) continue;
+
+    int family = ifa->ifa_addr->sa_family;
+    // Skip loopback
+    if (std::string(ifa->ifa_name) == "lo") continue;
+
+    if (family == AF_INET) {
+      char host[NI_MAXHOST];
+      int s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host,
+                          NI_MAXHOST, nullptr, 0, NI_NUMERICHOST);
+      if (s == 0) {
+        local_ip = host;
+        break;  // Pick first non-loopback IPv4
+      }
+    } else if (family == AF_INET6) {
+      char host[NI_MAXHOST];
+      int s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in6), host,
+                          NI_MAXHOST, nullptr, 0, NI_NUMERICHOST);
+      if (s == 0) {
+        local_ip = host;  // Fallback to IPv6 if no IPv4 found yet
+      }
+    }
+  }
+
+  freeifaddrs(ifaddr);
+  return local_ip;
+}
+
+absl::Status SplitHostPort(const std::string& address, std::string& host,
+                           int& port) {
+  if (address.empty()) {
+    return absl::InvalidArgumentError("Address is empty");
+  }
+  if (address.front() == '[') {
+    size_t closing_bracket = address.find(']');
+    if (closing_bracket == std::string::npos ||
+        closing_bracket + 1 >= address.size() ||
+        address[closing_bracket + 1] != ':') {
+      return absl::InvalidArgumentError("Invalid IPv6 address format");
+    }
+    host = address.substr(1, closing_bracket - 1);
+    std::string port_str = address.substr(closing_bracket + 2);
+    if (!absl::SimpleAtoi(port_str, &port)) {
+      return absl::InvalidArgumentError("Invalid port number");
+    }
+  } else {
+    std::vector<std::string> parts = absl::StrSplit(address, ':');
+    if (parts.size() != 2) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Invalid address format: ", address));
+    }
+    host = parts[0];
+    if (!absl::SimpleAtoi(parts[1], &port)) {
+      return absl::InvalidArgumentError("Invalid port number");
+    }
+  }
+  return absl::OkStatus();
 }
 
 }  // namespace tpu_raiden

@@ -40,7 +40,8 @@ struct UnpackedCache {
 #endif
 };
 
-class KVCacheManager : public KVCacheManagerWithTransfer {
+class __attribute__((visibility("default"))) KVCacheManager
+    : public KVCacheManagerWithTransfer {
  public:
 #ifndef WITHOUT_PYTHON
   // JAX sharded constructor E2E (cache-only by default)
@@ -55,7 +56,8 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
   KVCacheManager(nanobind::list kv_caches, int64_t node_id,
                  int64_t local_control_port, int64_t max_blocks,
                  int64_t num_slots, double timeout_s,
-                 bool unsafe_skip_buffer_lock);
+                 bool unsafe_skip_buffer_lock,
+                 std::optional<std::string> local_ip = std::nullopt);
 #endif
 
   // FFI metadata constructor (cache-only by default)
@@ -75,8 +77,7 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
  private:
 #ifndef WITHOUT_PYTHON
   // Private constructor for sharded (cache-only)
-  KVCacheManager(UnpackedCache&& cache,
-                 std::optional<int> local_port,
+  KVCacheManager(UnpackedCache&& cache, std::optional<int> local_port,
                  std::optional<int> host_blocks_to_allocate,
                  bool unsafe_skip_buffer_lock, int parallelism);
 
@@ -84,7 +85,8 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
   KVCacheManager(UnpackedCache&& cache, int64_t node_id,
                  int64_t local_control_port, int64_t max_blocks,
                  int64_t num_slots, double timeout_s,
-                 bool unsafe_skip_buffer_lock);
+                 bool unsafe_skip_buffer_lock,
+                 std::optional<std::string> local_ip = std::nullopt);
 
   std::optional<nanobind::list> device_arrays_;
 #endif

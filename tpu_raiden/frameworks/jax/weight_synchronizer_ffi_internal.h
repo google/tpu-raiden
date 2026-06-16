@@ -36,8 +36,6 @@ xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
     int64_t slice_byte_size, int32_t local_port, int32_t parallelism,
     int32_t num_layers, xla::ffi::Result<xla::ffi::AnyBuffer> out);
 
-
-
 xla::ffi::Error TriggerExecuteReshardingImpl(
     xla::ffi::AnyBuffer anchor, xla::ffi::AnyBuffer shard_idx_buf,
     xla::ffi::AnyBuffer src_ips, xla::ffi::AnyBuffer src_ports,

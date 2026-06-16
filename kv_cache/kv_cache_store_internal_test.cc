@@ -63,8 +63,7 @@ TEST(KVCacheStoreInternalTest, LocalInsertAndLookup) {
   };
 
   // Create KVCacheStoreInternal (local only, capacity = 2)
-  auto store =
-      std::make_unique<KVCacheStoreInternal>(/*capacity=*/2);
+  auto store = std::make_unique<KVCacheStoreInternal>(/*capacity=*/2);
 
   // 1. Insert slice 0 (hash 100) into store using a fresh manager
   auto kv_manager1 = make_manager(buffer.get());
@@ -127,8 +126,7 @@ TEST(KVCacheStoreInternalTest, LruEviction) {
   };
 
   // Capacity = 2
-  auto store =
-      std::make_unique<KVCacheStoreInternal>(/*capacity=*/2);
+  auto store = std::make_unique<KVCacheStoreInternal>(/*capacity=*/2);
 
   // Insert hash 101 (slice 0)
   auto kv_manager1 = make_manager(buffer.get());

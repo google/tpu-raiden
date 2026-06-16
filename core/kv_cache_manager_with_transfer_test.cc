@@ -14,9 +14,19 @@
 
 #include "core/kv_cache_manager_with_transfer.h"
 
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
+#include <exception>
 #include <memory>
 #include <optional>
 #include <string>
@@ -25,6 +35,7 @@
 #include <vector>
 
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/tsl/platform/logging.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
 #include "core/tpu_pjrt_manager.h"
@@ -155,7 +166,8 @@ TEST(KVCacheManagerWithTransferTest, StartReadAcceptsParallelism) {
   engine->StartRead("req_parallel", 99999, "127.0.0.1:8888", {0}, {0},
                     /*parallelism=*/2);
 }
-TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransferToCustomHostBlock) {
+TEST(KVCacheManagerWithTransferTest,
+     LocalOrchestratedTransferToCustomHostBlock) {
   TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
                           TpuPjrtManager::GetDefault());
 
@@ -250,12 +262,6 @@ TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransferToCustomHostBlock)
   float* host_block_0_float = reinterpret_cast<float*>(host_block_0);
   float* host_block_1_float = reinterpret_cast<float*>(host_block_1);
 
-
-
-
-
-
-
   // Host Block 0 should contain the transferred data in tiled layout.
   // Tile width is 128 floats (512 bytes) due to TPU alignment.
   const int tile_width = 128;
@@ -272,6 +278,75 @@ TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransferToCustomHostBlock)
   for (int i = 0; i < elements_per_slice; ++i) {
     EXPECT_EQ(host_block_1_float[i], 0.0f);
   }
+}
+
+bool CanConnect(const std::string& ip, int port) {
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return false;
+
+  sockaddr_in addr;
+  std::memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0) {
+    close(fd);
+    return false;
+  }
+
+  fcntl(fd, F_SETFL, O_NONBLOCK);
+
+  int rc = connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+  if (rc == 0) {
+    close(fd);
+    return true;
+  }
+
+  if (errno == EINPROGRESS) {
+    struct pollfd pfd;
+    pfd.fd = fd;
+    pfd.events = POLLOUT;
+    int poll_rc = poll(&pfd, 1, 100);  // 100ms timeout
+    if (poll_rc > 0) {
+      int err = 0;
+      socklen_t len = sizeof(err);
+      getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
+      if (err == 0) {
+        close(fd);
+        return true;
+      }
+    }
+  }
+
+  close(fd);
+  return false;
+}
+
+TEST(KVCacheManagerWithTransferTest, SpecificIpBinding) {
+  std::unique_ptr<KVCacheManagerWithTransfer> engine;
+  try {
+    engine = std::make_unique<KVCacheManagerWithTransfer>(
+        /*num_layers=*/1, /*num_shards=*/1, /*slice_byte_size=*/1024,
+        /*local_port=*/std::nullopt,
+        /*host_blocks_to_allocate=*/std::nullopt,
+        /*parallelism=*/1,
+        /*tp_rank=*/0,
+        /*local_control_port=*/0,  // Auto-select port
+        /*max_blocks=*/2,
+        /*num_slots=*/2,
+        /*timeout_s=*/10.0,
+        /*local_ip=*/"127.0.0.2");
+  } catch (const std::exception& e) {
+    LOG(WARNING)
+        << "Failed to instantiate manager on 127.0.0.2: " << e.what()
+        << ". This can happen if 127.0.0.2 is not configured. Skipping test.";
+    return;
+  }
+
+  int port = engine->local_control_port();
+  ASSERT_GT(port, 0);
+
+  EXPECT_TRUE(CanConnect("127.0.0.2", port));
+  EXPECT_FALSE(CanConnect("127.0.0.1", port));
 }
 
 }  // namespace

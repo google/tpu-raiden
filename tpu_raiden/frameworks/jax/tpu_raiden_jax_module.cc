@@ -48,7 +48,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
              nb::gil_scoped_release release;
              absl::Status status = self.Await();
              if (!status.ok()) {
-               throw std::runtime_error("Async copy failed: " +
+               throw std::runtime_error("Async copy failed (v2): " +
                                         std::string(status.message()));
              }
            })
@@ -57,7 +57,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
              nb::gil_scoped_release release;
              absl::Status status = self.Await();
              if (!status.ok()) {
-               throw std::runtime_error("Async copy failed: " +
+               throw std::runtime_error("Async copy failed (v2): " +
                                         std::string(status.message()));
              }
            })
@@ -67,17 +67,17 @@ NB_MODULE(_tpu_raiden_jax, m) {
   nb::class_<tpu_raiden::kv_cache::jax::KVCacheManager>(m, "KVCacheManager")
       .def(nb::init<nb::list, std::optional<int>, std::optional<int>, bool,
                     int>(),
-           nb::arg("device_arrays"),
-           nb::arg("local_port") = nb::none(),
+           nb::arg("device_arrays"), nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
            nb::arg("parallelism") = 1)
       .def(nb::init<nanobind::list, int64_t, int64_t, int64_t, int64_t, double,
-                    bool>(),
+                    bool, std::optional<std::string>>(),
            nb::arg("kv_caches"), nb::arg("node_id") = 0,
            nb::arg("local_control_port"), nb::arg("max_blocks"),
            nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
-           nb::arg("unsafe_skip_buffer_lock") = true)
+           nb::arg("unsafe_skip_buffer_lock") = true,
+           nb::arg("local_ip") = nb::none())
 
       // Use lambdas to wrap the returned raiden::PjRtCopyFuture into
       // KVCacheManagerFuture
@@ -94,7 +94,8 @@ NB_MODULE(_tpu_raiden_jax, m) {
           },
           nb::arg("src_offsets_major_dim") = nb::list(),
           nb::arg("dst_offsets_major_dim") = nb::list(),
-          nb::arg("copy_sizes_major_dim") = nb::list())
+          nb::arg("copy_sizes_major_dim") = nb::list(),
+          nb::call_guard<nb::gil_scoped_release>())
 
       .def(
           "d2h",
@@ -109,7 +110,8 @@ NB_MODULE(_tpu_raiden_jax, m) {
           },
           nb::arg("src_offsets_major_dim") = nb::list(),
           nb::arg("dst_offsets_major_dim") = nb::list(),
-          nb::arg("copy_sizes_major_dim") = nb::list())
+          nb::arg("copy_sizes_major_dim") = nb::list(),
+          nb::call_guard<nb::gil_scoped_release>())
 
       .def(
           "d2h_auto_allocate",
@@ -245,8 +247,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
              size_t host_offset_bytes, size_t device_offset_bytes,
              size_t size_bytes) {
             auto status_or_future = self.H2dChunk(
-                shard_idx, host_offset_bytes, device_offset_bytes, size_bytes
-            );
+                shard_idx, host_offset_bytes, device_offset_bytes, size_bytes);
             if (!status_or_future.ok()) {
               throw std::runtime_error(
                   "Weight sync H2DChunk failed: " +
@@ -268,13 +269,10 @@ NB_MODULE(_tpu_raiden_jax, m) {
              size_t dst_shard_idx, size_t dst_offset_bytes, size_t size_bytes) {
             absl::Status s = self.PullWeightsChunk(
                 source, src_shard_idx, src_offset_bytes, dst_shard_idx,
-                dst_offset_bytes, size_bytes
-            );
+                dst_offset_bytes, size_bytes);
             if (!s.ok()) {
-              throw std::runtime_error(
-                  "Weight sync PullWeightsChunk failed: " +
-                  std::string(s.message())
-              );
+              throw std::runtime_error("Weight sync PullWeightsChunk failed: " +
+                                       std::string(s.message()));
             }
           },
           nb::arg("source"), nb::arg("src_shard_idx"),

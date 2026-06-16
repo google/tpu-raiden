@@ -24,7 +24,6 @@
 #include <vector>
 
 #include "absl/status/status.h"
-#include "core/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "xla/future.h"
@@ -35,8 +34,8 @@
 #include "xla/pjrt/raw_buffer.h"
 #include "xla/shape.h"
 #include "xla/tsl/platform/logging.h"
-#include "xla/tsl/platform/statusor.h"
 #include "core/raw_transfer_core.h"
+#include "core/status_macros.h"
 
 namespace raiden {
 
@@ -90,7 +89,7 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_core(
   }
 
   ASSIGN_OR_RETURN(int64_t physical_size,
-                        first_buffer->GetOnDeviceSizeInBytes());
+                   first_buffer->GetOnDeviceSizeInBytes());
 
   const PJRT_Api* c_api = nullptr;
   const PJRT_RawBuffer_Extension* extension =
@@ -123,9 +122,9 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_core(
     PjRtBuffer* src_buffer = src_buffers[i];
 
     BufferHoldAndAlias hold;
-    ASSIGN_OR_RETURN(
-        hold, BufferHoldAndAlias::Acquire(src_buffer, c_api, extension,
-                                          unsafe_skip_buffer_lock));
+    ASSIGN_OR_RETURN(hold,
+                     BufferHoldAndAlias::Acquire(src_buffer, c_api, extension,
+                                                 unsafe_skip_buffer_lock));
 
     if (!is_partial) {
       // Full copy.
@@ -251,9 +250,9 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_core(
     PjRtBuffer* dst_buffer = dst_buffers[i];
 
     BufferHoldAndAlias hold;
-    ASSIGN_OR_RETURN(
-        hold, BufferHoldAndAlias::Acquire(dst_buffer, c_api, extension,
-                                          unsafe_skip_buffer_lock));
+    ASSIGN_OR_RETURN(hold,
+                     BufferHoldAndAlias::Acquire(dst_buffer, c_api, extension,
+                                                 unsafe_skip_buffer_lock));
 
     if (!is_partial) {
       // Full copy.

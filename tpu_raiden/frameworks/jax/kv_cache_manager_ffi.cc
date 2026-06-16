@@ -20,10 +20,16 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
 #include "xla/ffi/api/ffi.h"
+#include "xla/stream_executor/device_address.h"
 #include "xla/stream_executor/platform.h"
 #include "xla/stream_executor/platform_manager.h"
 #include "xla/stream_executor/stream.h"
@@ -34,6 +40,9 @@ namespace tpu_raiden {
 namespace kv_cache {
 
 KVCacheManagerWithTransfer* g_kv_cache_managers[32] = {nullptr};
+absl::Mutex g_manager_mutex;
+absl::flat_hash_map<std::string, KVCacheManagerWithTransfer*>
+    g_kv_cache_managers_map;
 std::unique_ptr<stream_executor::Stream> g_streams[32] = {nullptr};
 
 int64_t g_block_byte_size = 0;
@@ -42,11 +51,12 @@ int64_t g_local_blocks_per_shard = 0;
 // FFI Init custom call implementation (Host CPU Executed)
 xla::ffi::Error TriggerRaidenInitImpl(
     xla::ffi::AnyBuffer x, xla::ffi::AnyBuffer shard_idx_buf,
-    int64_t slice_byte_size, int32_t local_port,
-    int32_t parallelism, int32_t host_blocks_to_allocate, int32_t num_layers,
-    xla::ffi::Result<xla::ffi::AnyBuffer> out) {
+    int64_t slice_byte_size, int32_t local_port, int32_t parallelism,
+    int32_t host_blocks_to_allocate, int32_t num_layers,
+    absl::string_view local_ip, xla::ffi::Result<xla::ffi::AnyBuffer> out) {
   (void)x;
   (void)out;
+  (void)local_ip;
   if (shard_idx_buf.untyped_data() == nullptr) {
     return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
                            "shard_idx_buf has null untyped data.");
@@ -63,21 +73,46 @@ xla::ffi::Error TriggerRaidenInitImpl(
     VLOG(1) << "[TPU Worker FFI] >>> SERVER-SIDE LAZY INITIALIZATION "
                "TRIGGERED <<< Shard: "
             << shard_idx;
-    VLOG(1) << "[TPU Worker FFI] Instantiating pure C++ KVCacheManager on "
-               "worker C++ heap for Shard: "
-            << shard_idx;
-    VLOG(1) << "[TPU Worker FFI] Configuration: layers=" << num_layers
-            << ", parallelism=" << parallelism
-            << ", global_blocks=" << host_blocks_to_allocate;
 
-    g_kv_cache_managers[shard_idx] = new KVCacheManagerWithTransfer(
-        static_cast<size_t>(num_layers), static_cast<size_t>(parallelism),
-        static_cast<size_t>(slice_byte_size),
-        local_port > 0 ? std::make_optional(local_port) : std::nullopt,
-        host_blocks_to_allocate > 0
-            ? std::make_optional(host_blocks_to_allocate)
-            : std::nullopt,
-        parallelism);
+    std::optional<std::string> resolved_ip = std::nullopt;
+    if (!local_ip.empty()) {
+      resolved_ip = std::string(local_ip);
+    }
+
+    KVCacheManagerWithTransfer* manager = nullptr;
+    {
+      absl::MutexLock lock(g_manager_mutex);
+      std::string ip_key = resolved_ip.value_or("");
+      auto it = g_kv_cache_managers_map.find(ip_key);
+      if (it != g_kv_cache_managers_map.end()) {
+        VLOG(1) << "[TPU Worker FFI] Reusing existing KVCacheManager for IP: "
+                << ip_key;
+        manager = it->second;
+      } else {
+        VLOG(1) << "[TPU Worker FFI] Instantiating pure C++ KVCacheManager on "
+                   "worker C++ heap for Shard: "
+                << shard_idx << " with IP: " << ip_key;
+        VLOG(1) << "[TPU Worker FFI] Configuration: layers=" << num_layers
+                << ", parallelism=" << parallelism
+                << ", global_blocks=" << host_blocks_to_allocate;
+
+        manager = new KVCacheManagerWithTransfer(
+            static_cast<size_t>(num_layers), static_cast<size_t>(parallelism),
+            static_cast<size_t>(slice_byte_size),
+            local_port > 0 ? std::make_optional(local_port) : std::nullopt,
+            host_blocks_to_allocate > 0
+                ? std::make_optional(host_blocks_to_allocate)
+                : std::nullopt,
+            parallelism,
+            /*tp_rank=*/0,
+            /*local_control_port=*/-1,
+            /*max_blocks=*/0,
+            /*num_slots=*/0,
+            /*timeout_s=*/120.0, resolved_ip);
+        g_kv_cache_managers_map[ip_key] = manager;
+      }
+    }
+    g_kv_cache_managers[shard_idx] = manager;
 
     // Allocate the StreamExecutor Stream once per shard, and cache E2E!
     int64_t dev_id = static_cast<int64_t>(shard_idx);
@@ -169,8 +204,11 @@ xla::ffi::Error TriggerRaidenH2dImpl(
   const int32_t* h_copy_sizes =
       reinterpret_cast<const int32_t*>(copy_sizes.untyped_data());
 
+  int parallelism = g_kv_cache_managers[shard_idx]->num_shards();
+  int local_shard_idx = shard_idx % parallelism;
+
   const uint8_t* h_base = g_kv_cache_managers[shard_idx]->GetHostPointer(
-      static_cast<size_t>(layer_idx), 0);
+      static_cast<size_t>(layer_idx), local_shard_idx);
 
   uint8_t* d_base = reinterpret_cast<uint8_t*>(cache_slice_buf.untyped_data());
 
@@ -263,9 +301,13 @@ xla::ffi::Error TriggerRaidenD2hImpl(
   const int32_t* h_copy_sizes =
       reinterpret_cast<const int32_t*>(copy_sizes.untyped_data());
 
+  int parallelism = g_kv_cache_managers[shard_idx]->num_shards();
+  int local_shard_idx =
+      (parallelism > 1) ? (shard_idx % (parallelism / 2)) : shard_idx;
+
   uint8_t* h_base =
       const_cast<uint8_t*>(g_kv_cache_managers[shard_idx]->GetHostPointer(
-          static_cast<size_t>(layer_idx), 0));
+          static_cast<size_t>(layer_idx), local_shard_idx));
 
   const uint8_t* d_base =
       reinterpret_cast<const uint8_t*>(cache_slice_buf.untyped_data());
@@ -328,6 +370,7 @@ XLA_FFI_DEFINE_HANDLER(
         .Attr<int32_t>("parallelism")
         .Attr<int32_t>("host_blocks_to_allocate")
         .Attr<int32_t>("num_layers")
+        .Attr<absl::string_view>("local_ip")
         .Ret<xla::ffi::AnyBuffer>());  // return JAX output array
 
 // Register Stateless H2D execution handlers

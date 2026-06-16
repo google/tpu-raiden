@@ -69,17 +69,17 @@ NB_MODULE(_tpu_raiden_torch, m) {
   nb::class_<KVCacheManager>(m, "KVCacheManager")
       .def(nb::init<const std::vector<std::vector<at::Tensor>>&,
                     std::optional<int>, std::optional<int>, bool, int>(),
-           nb::arg("device_tensors"),
-           nb::arg("local_port") = nb::none(),
+           nb::arg("device_tensors"), nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
            nb::arg("parallelism") = 1)
       .def(nb::init<const std::vector<at::Tensor>&, int64_t, int64_t, int64_t,
-                    int64_t, double, bool>(),
+                    int64_t, double, bool, std::optional<std::string>>(),
            nb::arg("kv_caches"), nb::arg("node_id"),
            nb::arg("local_control_port"), nb::arg("max_blocks"),
            nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
-           nb::arg("unsafe_skip_buffer_lock") = true)
+           nb::arg("unsafe_skip_buffer_lock") = true,
+           nb::arg("local_ip") = nb::none())
       .def(
           "H2d",
           [](KVCacheManager& self,
@@ -171,6 +171,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
           nb::arg("peer"), nb::arg("src_block_ids"),
           nb::call_guard<nb::gil_scoped_release>())
       .def_prop_ro("local_port", &KVCacheManager::local_port)
+      .def_prop_ro("local_ip", &KVCacheManager::local_ip)
       .def_prop_ro("num_layers", &KVCacheManager::num_layers)
       .def_prop_ro("num_shards", &KVCacheManager::num_shards)
       .def_prop_ro("slice_byte_size", &KVCacheManager::slice_byte_size)

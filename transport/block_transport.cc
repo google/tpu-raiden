@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <string>
 #include <thread>  // NOLINT
@@ -34,6 +35,7 @@
 #include "absl/strings/str_cat.h"
 #include "xla/tsl/platform/statusor.h"
 #include "core/status_macros.h"
+#include "transport/raw_buffer_transport.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -120,9 +122,10 @@ absl::Status ForEachPayload(MajorOrder major_order, size_t num_layers,
 
 }  // namespace
 
-BlockTransport::BlockTransport(BlockTransportDelegate* delegate, int local_port,
+BlockTransport::BlockTransport(BlockTransportDelegate* delegate,
+                               const std::string& local_ip, int& local_port,
                                bool enable_conn_pool)
-    : RawBufferTransport(delegate, local_port, enable_conn_pool),
+    : RawBufferTransport(delegate, local_ip, local_port, enable_conn_pool),
       block_delegate_(delegate) {}
 
 BlockTransport::~BlockTransport() = default;
@@ -395,7 +398,6 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
                     remote_block_count, std::ref(src_block_ids),
                     std::ref(allocated_ids), std::ref(explicit_dst_ptrs),
                     std::ref(statuses), major_order, on_block_received));
-
     local_block_offset += local_block_count;
     remote_block_offset += remote_block_count;
   }

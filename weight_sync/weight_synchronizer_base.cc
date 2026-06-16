@@ -187,14 +187,14 @@ WeightSynchronizerBase::WeightSynchronizerBase(
     std::optional<int> local_port,
     std::optional<std::vector<const uint8_t*>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism,
-    std::optional<int> control_port)
+    std::optional<int> control_port, std::optional<std::string> local_ip)
     : tpu_raiden::RaidenManagerBase(
           layer_buffers.size(),
           layer_buffers.empty() ? 0 : layer_buffers[0].size(),
           layer_buffers.empty()
               ? 0
               : layer_buffers[0][0]->GetOnDeviceSizeInBytes().value(),
-          local_port, parallelism) {
+          local_port, parallelism, /*max_staging_blocks=*/4, local_ip) {
   if (num_layers_ == 0 || num_shards_ == 0) {
     return;
   }
@@ -285,9 +285,11 @@ WeightSynchronizerBase::WeightSynchronizerBase(
 WeightSynchronizerBase::WeightSynchronizerBase(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
-    int parallelism, std::optional<int> control_port)
+    int parallelism, std::optional<int> control_port,
+    std::optional<std::string> local_ip)
     : tpu_raiden::RaidenManagerBase(num_layers, num_shards, slice_byte_size,
-                                    local_port, parallelism) {
+                                    local_port, parallelism,
+                                    /*max_staging_blocks=*/4, local_ip) {
   physical_size_ = slice_byte_size_;
   shard_factor_ = 1;
   major_dim_size_ = 1;
