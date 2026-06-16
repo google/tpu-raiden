@@ -19,6 +19,7 @@
 #define THIRD_PARTY_TPU_RAIDEN_CORE_STATUS_MACROS_H_
 
 #include <utility>
+
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 

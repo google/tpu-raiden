@@ -14,18 +14,16 @@
 
 #include "core/host_memory_allocator.h"
 
-#include "xla/tsl/platform/test.h"
-
 #include <cstdint>
 #include <cstring>
 
 #include "xla/tsl/platform/statusor.h"
+#include "xla/tsl/platform/test.h"
 #include "core/tpu_pjrt_manager.h"
 
 namespace tpu_raiden {
 namespace {
 
-using ::absl_testing::IsOk;
 
 TEST(HostMemoryAllocatorTest, FallbackAllocationWithoutClient) {
   TF_ASSERT_OK_AND_ASSIGN(auto allocator, HostMemoryAllocator::Create(nullptr));

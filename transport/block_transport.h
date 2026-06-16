@@ -54,6 +54,17 @@ class BlockTransportDelegate : public RawBufferTransportDelegate {
     return OnDataReceived();
   }
 
+  virtual absl::Status OnPushStarted(uint64_t uuid, size_t num_blocks) {
+    return absl::OkStatus();
+  }
+
+  virtual absl::Status OnBlockPayloadReceived(size_t layer_idx,
+                                              size_t shard_idx, int block_id,
+                                              size_t size_bytes,
+                                              uint64_t uuid = 0) {
+    return absl::OkStatus();
+  }
+
   virtual absl::Status WaitForBlockRead(size_t layer_idx, size_t shard_idx,
                                         int block_id) {
     return absl::OkStatus();
@@ -79,8 +90,8 @@ class BlockTransport : public RawBufferTransport {
  public:
   using BlockPacketHeader = RawBufferTransport::PacketHeader;
 
-  BlockTransport(BlockTransportDelegate* delegate, int local_port,
-                 bool enable_conn_pool = true);
+  BlockTransport(BlockTransportDelegate* delegate, const std::string& local_ip,
+                 int& local_port, bool enable_conn_pool = true);
   ~BlockTransport() override;
 
   // Standard Scatter-Gather Push (op = 1 / op = 6)

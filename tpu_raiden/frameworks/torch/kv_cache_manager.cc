@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
@@ -66,12 +67,12 @@ KVCacheManager::KVCacheManager(
 KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
                                int64_t node_id, int64_t local_control_port,
                                int64_t max_blocks, int64_t num_slots,
-                               double timeout_s, bool unsafe_skip_buffer_lock)
+                               double timeout_s, bool unsafe_skip_buffer_lock,
+                               std::optional<std::string> local_ip)
     : KVCacheManagerWithTransfer(
           UnpackTorchTensors(SingleShardLayers(kv_caches)),
           /*local_port=*/std::nullopt,
-          /*host_blocks_to_allocate=*/std::nullopt,
-          unsafe_skip_buffer_lock,
+          /*host_blocks_to_allocate=*/std::nullopt, unsafe_skip_buffer_lock,
           /*parallelism=*/1,
           tpu_raiden::CreateHostMemoryAllocator(
               kv_caches.empty()

@@ -139,7 +139,6 @@ int GetPointerNumaNode(const void* ptr) {
 namespace raiden {
 namespace {
 
-
 // Helper to compute and print the distribution of bandwidth numbers
 void PrintDistribution(const std::string& label,
                        std::vector<double> bandwidths) {

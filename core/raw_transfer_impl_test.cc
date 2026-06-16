@@ -14,8 +14,6 @@
 
 #include "core/raw_transfer_impl.h"
 
-#include "xla/tsl/platform/test.h"
-
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -25,6 +23,7 @@
 
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/statusor.h"
+#include "xla/tsl/platform/test.h"
 #include "core/raw_transfer_core.h"
 #include "core/tpu_pjrt_manager.h"
 

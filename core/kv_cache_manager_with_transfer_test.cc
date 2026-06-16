@@ -14,6 +14,13 @@
 
 #include "core/kv_cache_manager_with_transfer.h"
 
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -155,7 +162,8 @@ TEST(KVCacheManagerWithTransferTest, StartReadAcceptsParallelism) {
   engine->StartRead("req_parallel", 99999, "127.0.0.1:8888", {0}, {0},
                     /*parallelism=*/2);
 }
-TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransferToCustomHostBlock) {
+TEST(KVCacheManagerWithTransferTest,
+     LocalOrchestratedTransferToCustomHostBlock) {
   TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
                           TpuPjrtManager::GetDefault());
 
@@ -249,12 +257,6 @@ TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransferToCustomHostBlock)
 
   float* host_block_0_float = reinterpret_cast<float*>(host_block_0);
   float* host_block_1_float = reinterpret_cast<float*>(host_block_1);
-
-
-
-
-
-
 
   // Host Block 0 should contain the transferred data in tiled layout.
   // Tile width is 128 floats (512 bytes) due to TPU alignment.

@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <string>
 #include <thread>  // NOLINT
@@ -34,6 +35,7 @@
 #include "absl/strings/str_cat.h"
 #include "xla/tsl/platform/statusor.h"
 #include "core/status_macros.h"
+#include "transport/raw_buffer_transport.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -120,9 +122,10 @@ absl::Status ForEachPayload(MajorOrder major_order, size_t num_layers,
 
 }  // namespace
 
-BlockTransport::BlockTransport(BlockTransportDelegate* delegate, int local_port,
+BlockTransport::BlockTransport(BlockTransportDelegate* delegate,
+                               const std::string& local_ip, int& local_port,
                                bool enable_conn_pool)
-    : RawBufferTransport(delegate, local_port, enable_conn_pool),
+    : RawBufferTransport(delegate, local_ip, local_port, enable_conn_pool),
       block_delegate_(delegate) {}
 
 BlockTransport::~BlockTransport() = default;
@@ -165,6 +168,10 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
     uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
 
+    // Notify delegate that a multi-block push has started.
+    RETURN_IF_ERROR(
+        block_delegate_->OnPushStarted(header.uuid, header.count_or_size));
+
     RETURN_IF_ERROR(ForEachPayload(
         major_order, block_delegate_->num_layers(),
         block_delegate_->num_shards(), header.count_or_size,
@@ -175,7 +182,10 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
                                              bytes_per_block));
           uint8_t* dest_ptr =
               block_delegate_->GetBlockHostPointer(l, sh, dst_id);
-          return ReadExact(client_fd, dest_ptr, bytes_per_block);
+          RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, bytes_per_block));
+          // Notify delegate immediately as each block payload is received.
+          return block_delegate_->OnBlockPayloadReceived(
+              l, sh, dst_id, bytes_per_block, header.uuid);
         }));
 
     RETURN_IF_ERROR(
@@ -395,7 +405,6 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
                     remote_block_count, std::ref(src_block_ids),
                     std::ref(allocated_ids), std::ref(explicit_dst_ptrs),
                     std::ref(statuses), major_order, on_block_received));
-
     local_block_offset += local_block_count;
     remote_block_offset += remote_block_count;
   }
@@ -454,7 +463,12 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
   }
 
   if (header.op == 6) {
-    ABSL_DCHECK_LE(block_offset + block_count, dst_block_ids.size());
+    if (block_offset + block_count > dst_block_ids.size() ||
+        block_offset + block_count > allocated_ids.size()) {
+      statuses[stream_idx] =
+          absl::InvalidArgumentError("Vector sizes mismatch for explicit push");
+      return;
+    }
     s = WriteExact(fd, &dst_block_ids[block_offset], block_count * sizeof(int));
     if (!s.ok()) {
       statuses[stream_idx] = s;
@@ -471,6 +485,11 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
       allocated_ids[block_offset + k] = dst_block_ids[block_offset + k];
     }
   } else {
+    if (block_offset + block_count > allocated_ids.size()) {
+      statuses[stream_idx] =
+          absl::InvalidArgumentError("allocated_ids size mismatch for pull");
+      return;
+    }
     std::vector<int> stream_allocated_ids(block_count, 0);
     s = ReadExact(fd, stream_allocated_ids.data(), block_count * sizeof(int));
     if (!s.ok()) {
@@ -495,6 +514,10 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
         const int src_id = src_block_ids[block_offset + k];
         RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, src_id, 1,
                                            bytes_per_block));
+        // Block until the local D2H copy has finished writing to this host
+        // buffer block!
+        RETURN_IF_ERROR(block_delegate_->WaitForBlockRead(l, sh, src_id));
+
         const uint8_t* src_ptr = base_host_ptr + src_id * bytes_per_block;
         return WriteExact(fd, src_ptr, bytes_per_block);
       });

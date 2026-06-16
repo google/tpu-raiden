@@ -19,9 +19,29 @@
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
 #include "xla/pjrt/pjrt_client.h"
 
 namespace tpu_raiden {
+
+// Returns a default local IP by scanning network interfaces (excluding
+// loopback). Returns "127.0.0.1" as a fallback.
+std::string GetLocalIp();
+
+// Discovers physical NICs, maps their local IPs to their NUMA nodes.
+// Returns a map from IP address string to NUMA node ID.
+absl::flat_hash_map<std::string, int> DiscoverNumaNicIPs(
+    const std::string& sysfs_root = "");
+
+// Detects the correct physical NIC IP to bind to based on the NUMA node of PJRT
+// buffers.
+absl::StatusOr<std::string> DetectLocalIpFromPjRtBuffers(
+    const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers);
+
+// Splits a "host:port" or "[ipv6]:port" address into host and port.
+absl::Status SplitHostPort(const std::string& address, std::string& host,
+                           int& port);
 
 struct TpuPciDevice {
   std::string bdf;        // BDF address, e.g. "0000:16:00.0"

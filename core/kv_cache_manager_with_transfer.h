@@ -132,26 +132,23 @@ struct CommitResult {
   int64_t total_bytes;
 };
 
-class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
+class __attribute__((visibility("default"))) KVCacheManagerWithTransfer
+    : public kv_cache::KVCacheManagerBase {
  public:
   KVCacheManagerWithTransfer(
       const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
-      std::optional<int> local_port,
-      std::optional<int> host_blocks_to_allocate,
+      std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
       bool unsafe_skip_buffer_lock, int parallelism,
       HostBufferAllocator host_allocator, int64_t node_id = 0,
       int64_t local_control_port = -1, int64_t max_blocks = 0,
       int64_t num_slots = 0, double timeout_s = 120.0);
 
   // Metadata-based constructor for FFI / CPU-only testing
-  KVCacheManagerWithTransfer(size_t num_layers, size_t num_shards,
-                             size_t slice_byte_size,
-                             std::optional<int> local_port,
-                             std::optional<int> host_blocks_to_allocate,
-                             int parallelism = 1, int64_t node_id = 0,
-                             int64_t local_control_port = -1,
-                             int64_t max_blocks = 0, int64_t num_slots = 0,
-                             double timeout_s = 120.0);
+  KVCacheManagerWithTransfer(
+      size_t num_layers, size_t num_shards, size_t slice_byte_size,
+      std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
+      int parallelism = 1, int64_t node_id = 0, int64_t local_control_port = -1,
+      int64_t max_blocks = 0, int64_t num_slots = 0, double timeout_s = 120.0);
 
   virtual ~KVCacheManagerWithTransfer();
 
@@ -265,14 +262,37 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
       size_t shard_idx, absl::Status status);
   void RemoveStagingReadinessLocked(int64_t slot_idx);
 
+  absl::Status OnPushStarted(uint64_t uuid, size_t num_blocks) override;
+  absl::Status OnBlockPayloadReceived(size_t layer_idx, size_t shard_idx,
+                                      int block_id, size_t size_bytes,
+                                      uint64_t uuid = 0) override;
   absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
                                 uint64_t uuid = 0) override;
 
   struct RecvEntry {
     std::string req_id;
     std::vector<int64_t> chip_block_ids;
+    std::vector<int64_t> h2d_src_offsets;
+    std::vector<int64_t> h2d_dst_offsets;
+    std::vector<int64_t> h2d_sizes;
+    size_t num_blocks = 0;
+    bool overlap_h2d = false;
+    std::optional<int64_t> slot_idx;
+    std::vector<size_t> host_dst_to_src;
+
+    std::mutex h2d_mu;
+    // Track received block count per [layer][shard]
+    std::vector<std::vector<size_t>> h2d_received_counts;
+    // Track if H2D has been issued per [layer][shard]
+    std::vector<std::vector<bool>> h2d_issued;
+    // Store H2D futures to await them at the end
+    std::vector<raiden::PjRtCopyFuture> h2d_futures;
+
+    bool h2d_started = false;
+    std::chrono::steady_clock::time_point h2d_started_at;
   };
-  absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
+  absl::flat_hash_map<uint64_t, std::shared_ptr<RecvEntry>>
+      active_recv_entries_;
 
   void StartPushInternal(
       uint64_t uuid,

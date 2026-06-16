@@ -65,6 +65,9 @@ class RawBufferTransport {
 
   RawBufferTransport(RawBufferTransportDelegate* delegate, int local_port,
                      bool enable_conn_pool = true);
+  RawBufferTransport(RawBufferTransportDelegate* delegate,
+                     const std::string& local_ip, int& local_port,
+                     bool enable_conn_pool = true);
   virtual ~RawBufferTransport();
 
   // Directly pushes an arbitrary continuous byte array into a specific offset
@@ -81,6 +84,7 @@ class RawBufferTransport {
                           size_t size_bytes);
 
   int local_port() const { return local_port_; }
+  int numa_node() const { return numa_node_; }
 
   // Shared socket IO helpers.
   static absl::Status WriteExact(int fd, const void* buffer, size_t length);
@@ -103,6 +107,7 @@ class RawBufferTransport {
   int local_port_;
   int server_fd_ = -1;
   std::atomic<bool> stopping_{false};
+  int numa_node_ = -1;
 
   absl::Mutex mu_;
   std::vector<int> active_client_fds_ ABSL_GUARDED_BY(mu_);
@@ -114,6 +119,12 @@ class RawBufferTransport {
 
   std::thread listener_thread_;
   std::vector<std::thread> worker_threads_;
+
+  absl::Mutex finished_mu_;
+  std::vector<std::thread::id> finished_thread_ids_
+      ABSL_GUARDED_BY(finished_mu_);
+
+  void ReapFinishedWorkerThreads();
 };
 
 }  // namespace transport
