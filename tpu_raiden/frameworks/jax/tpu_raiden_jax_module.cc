@@ -64,9 +64,9 @@ NB_MODULE(_tpu_raiden_jax, m) {
       .def("is_ready", &tpu_raiden::RaidenFuture::IsReady);
 
   nb::class_<tpu_raiden::kv_cache::jax::KVCacheManager>(m, "KVCacheManager")
-      .def(nb::init<nb::list, int, std::optional<int>, std::optional<int>,
+      .def(nb::init<nb::list, std::optional<int>, std::optional<int>,
                     std::optional<std::vector<uintptr_t>>, bool, int>(),
-           nb::arg("device_arrays"), nb::arg("block_size") = 1,
+           nb::arg("device_arrays"),
            nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("external_host_ptrs") = nb::none(),

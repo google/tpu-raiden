@@ -28,7 +28,7 @@ extern std::unique_ptr<stream_executor::Stream> g_streams[32];
 
 xla::ffi::Error TriggerRaidenInitImpl(
     xla::ffi::AnyBuffer x, xla::ffi::AnyBuffer shard_idx_buf,
-    int64_t slice_byte_size, int32_t block_size, int32_t local_port,
+    int64_t slice_byte_size, int32_t local_port,
     int32_t parallelism, int32_t host_blocks_to_allocate, int32_t num_layers,
     xla::ffi::Result<xla::ffi::AnyBuffer> out);
 

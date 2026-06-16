@@ -81,7 +81,6 @@ TEST_F(KVCacheManagerFfiTest, TriggerRaidenInitSucceeds) {
   xla::ffi::AnyBuffer shard_idx_buf = shard_idx_fixture.AsAnyBuffer();
 
   int64_t slice_byte_size = 1024;
-  int32_t block_size = 4;
   int32_t local_port = -1;  // Disable symmetrical H2H network loopback
   int32_t parallelism = 1;
   int32_t host_blocks_to_allocate = 8;
@@ -90,7 +89,7 @@ TEST_F(KVCacheManagerFfiTest, TriggerRaidenInitSucceeds) {
   xla::ffi::Result<xla::ffi::AnyBuffer> out = anchor_fixture.AsAnyBuffer();
 
   xla::ffi::Error err = TriggerRaidenInitImpl(
-      x, shard_idx_buf, slice_byte_size, block_size, local_port, parallelism,
+      x, shard_idx_buf, slice_byte_size, local_port, parallelism,
       host_blocks_to_allocate, num_layers, out);
 
   EXPECT_TRUE(err.success()) << "Raiden Init failed: " << err.message();
@@ -104,21 +103,20 @@ TEST_F(KVCacheManagerFfiTest, TriggerRaidenH2dAndD2hDMAOrchestration) {
   int32_t anchor = 0;
   FfiBufferFixture anchor_fixture(XLA_FFI_DataType_S32, &anchor, {1});
 
-  int64_t slice_byte_size = 1024;
-  int32_t block_size = 4;
+  int64_t slice_byte_size = 4096;
   int32_t host_blocks_to_allocate = 8;
   int32_t num_layers = 2;
 
   // 1. Initialize FFI Manager
   xla::ffi::Error init_err = TriggerRaidenInitImpl(
       anchor_fixture.AsAnyBuffer(), shard_idx_fixture.AsAnyBuffer(),
-      slice_byte_size, block_size, -1, 1, host_blocks_to_allocate, num_layers,
+      slice_byte_size, -1, 1, host_blocks_to_allocate, num_layers,
       anchor_fixture.AsAnyBuffer());
   ASSERT_TRUE(init_err.success());
 
   // Verify manager internal footprint: block_byte_size = 4096,
   // local_blocks_per_shard = 8
-  int64_t block_byte_size = block_size * slice_byte_size;
+  int64_t block_byte_size = slice_byte_size;
   ASSERT_EQ(block_byte_size, 4096);
 
   // 2. Setup Test Data & Mock Device Cache Buffers

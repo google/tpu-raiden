@@ -52,7 +52,7 @@ using BlockReadinessCallback =
 class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
  public:
   RaidenManagerBase(size_t num_layers, size_t num_shards,
-                    size_t slice_byte_size, int block_size = 1,
+                    size_t slice_byte_size,
                     std::optional<int> local_port = std::nullopt,
                     int parallelism = 1, size_t max_staging_blocks = 4);
 
@@ -100,7 +100,6 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   size_t num_layers() const override { return num_layers_; }
   size_t num_shards() const override { return num_shards_; }
   size_t slice_byte_size() const override { return slice_byte_size_; }
-  int block_size() const override { return block_size_; }
   size_t bytes_per_block() const override;
   size_t shard_factor() const override { return shard_factor_; }
   absl::Status WaitForBlockRead(size_t layer_idx, size_t shard_idx,
@@ -123,7 +122,6 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   size_t num_layers_ = 0;
   size_t num_shards_ = 0;
   size_t slice_byte_size_ = 0;
-  int block_size_ = 1;
   int parallelism_ = 1;
   size_t shard_factor_ = 1;
   int64_t major_dim_size_ = 0;

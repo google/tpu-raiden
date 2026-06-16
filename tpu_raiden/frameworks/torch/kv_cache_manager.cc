@@ -44,12 +44,12 @@ std::vector<std::vector<at::Tensor>> SingleShardLayers(
 }  // namespace
 
 KVCacheManager::KVCacheManager(
-    const std::vector<std::vector<at::Tensor>>& device_tensors, int block_size,
+    const std::vector<std::vector<at::Tensor>>& device_tensors,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     std::optional<std::vector<uintptr_t>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism)
     : KVCacheManagerWithTransfer(
-          UnpackTorchTensors(device_tensors), block_size, local_port,
+          UnpackTorchTensors(device_tensors), local_port,
           host_blocks_to_allocate,
           tpu_raiden::CastExternalPointers(external_host_ptrs),
           unsafe_skip_buffer_lock, parallelism,
@@ -71,7 +71,6 @@ KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
                                double timeout_s, bool unsafe_skip_buffer_lock)
     : KVCacheManagerWithTransfer(
           UnpackTorchTensors(SingleShardLayers(kv_caches)),
-          /*block_size=*/1,
           /*local_port=*/std::nullopt,
           /*host_blocks_to_allocate=*/std::nullopt,
           /*external_host_ptrs=*/std::nullopt, unsafe_skip_buffer_lock,

@@ -71,7 +71,7 @@ class BlockTransportDelegate {
   }
 
   virtual size_t bytes_per_block() const {
-    return block_size() * slice_byte_size();
+    return slice_byte_size();
   }
 
   virtual int GetRemoteReadBlockId(int base_remote_id, int chunk_k) = 0;
@@ -79,7 +79,6 @@ class BlockTransportDelegate {
   virtual size_t num_layers() const = 0;
   virtual size_t num_shards() const = 0;
   virtual size_t slice_byte_size() const = 0;
-  virtual int block_size() const = 0;
   virtual size_t shard_factor() const = 0;
 };
 

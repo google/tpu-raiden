@@ -42,7 +42,7 @@ int64_t g_local_blocks_per_shard = 0;
 // FFI Init custom call implementation (Host CPU Executed)
 xla::ffi::Error TriggerRaidenInitImpl(
     xla::ffi::AnyBuffer x, xla::ffi::AnyBuffer shard_idx_buf,
-    int64_t slice_byte_size, int32_t block_size, int32_t local_port,
+    int64_t slice_byte_size, int32_t local_port,
     int32_t parallelism, int32_t host_blocks_to_allocate, int32_t num_layers,
     xla::ffi::Result<xla::ffi::AnyBuffer> out) {
   (void)x;
@@ -67,12 +67,12 @@ xla::ffi::Error TriggerRaidenInitImpl(
                "worker C++ heap for Shard: "
             << shard_idx;
     VLOG(1) << "[TPU Worker FFI] Configuration: layers=" << num_layers
-            << ", parallelism=" << parallelism << ", block_size=" << block_size
+            << ", parallelism=" << parallelism
             << ", global_blocks=" << host_blocks_to_allocate;
 
     g_kv_cache_managers[shard_idx] = new jax::KVCacheManager(
         static_cast<size_t>(num_layers), static_cast<size_t>(parallelism),
-        static_cast<size_t>(slice_byte_size), block_size,
+        static_cast<size_t>(slice_byte_size),
         local_port > 0 ? std::make_optional(local_port) : std::nullopt,
         host_blocks_to_allocate > 0
             ? std::make_optional(host_blocks_to_allocate)
@@ -114,14 +114,14 @@ xla::ffi::Error TriggerRaidenInitImpl(
     }
     g_streams[shard_idx] = std::move(stream_or.value());
 
-    g_block_byte_size = static_cast<int64_t>(block_size) * slice_byte_size;
+    g_block_byte_size = slice_byte_size;
     g_local_blocks_per_shard = host_blocks_to_allocate / parallelism;
     VLOG(1)
         << "[TPU Worker FFI] KVCacheManager successfully allocated for Shard: "
         << shard_idx << "! block_byte_size=" << g_block_byte_size
         << ", local_blocks_per_shard=" << g_local_blocks_per_shard;
   } else {
-    g_block_byte_size = static_cast<int64_t>(block_size) * slice_byte_size;
+    g_block_byte_size = slice_byte_size;
     g_local_blocks_per_shard = host_blocks_to_allocate / parallelism;
   }
   return xla::ffi::Error::Success();
@@ -324,7 +324,6 @@ XLA_FFI_DEFINE_HANDLER(
         .Arg<xla::ffi::AnyBuffer>()  // anchor JAX input array (Arg 0)
         .Arg<xla::ffi::AnyBuffer>()  // shard_idx JAX input array (Arg 1)
         .Attr<int64_t>("slice_byte_size")
-        .Attr<int32_t>("block_size")
         .Attr<int32_t>("local_port")
         .Attr<int32_t>("parallelism")
         .Attr<int32_t>("host_blocks_to_allocate")

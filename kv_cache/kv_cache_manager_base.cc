@@ -77,7 +77,7 @@ absl::Status ValidateOffsetsAndSizes(const std::vector<int64_t>& src_offsets,
 
 KVCacheManagerBase::KVCacheManagerBase(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
-    int block_size, std::optional<int> local_port,
+    std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate,
     std::optional<std::vector<const uint8_t*>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism,
@@ -87,7 +87,7 @@ KVCacheManagerBase::KVCacheManagerBase(
                         layer_buffers.empty() ? 0
                                               : raiden::GetMajorSliceByteSize(
                                                     layer_buffers[0][0]),
-                        block_size, local_port, parallelism) {
+                        local_port, parallelism) {
   if (num_layers_ == 0 || num_shards_ == 0) {
     return;
   }
@@ -104,8 +104,7 @@ KVCacheManagerBase::KVCacheManagerBase(
   int total_blocks = 0;
   if (!shape.dimensions().empty()) {
     major_dim_size_ = shape.dimensions(0);
-    total_blocks =
-        is_blocked_layout_ ? major_dim_size_ : (major_dim_size_ / block_size_);
+    total_blocks = major_dim_size_;
     block_manager_ = std::make_unique<LogicalBlockManager>(total_blocks);
   }
 
@@ -234,10 +233,10 @@ KVCacheManagerBase::KVCacheManagerBase(
 
 KVCacheManagerBase::KVCacheManagerBase(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
-    int block_size, std::optional<int> local_port,
+    std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate, int parallelism,
     HostBufferAllocator host_allocator)
-    : RaidenManagerBase(num_layers, num_shards, slice_byte_size, block_size,
+    : RaidenManagerBase(num_layers, num_shards, slice_byte_size,
                         local_port, parallelism) {
   int total_blocks = host_blocks_to_allocate.value_or(0);
   block_manager_ = std::make_unique<LogicalBlockManager>(total_blocks);
@@ -604,11 +603,7 @@ KVCacheManagerBase::D2hAutoAllocate(
 
   for (size_t j = 0; j < num_chunks; ++j) {
     int64_t copy_size = copy_sizes_major_dim[j];
-    if (copy_size % block_size_ != 0) {
-      return absl::InvalidArgumentError(
-          "Copy size must be a multiple of block size");
-    }
-    int needed = copy_size / block_size_;
+    int needed = copy_size;
     total_blocks_to_allocate += needed;
     blocks_per_chunk.push_back(needed);
   }
@@ -630,9 +625,9 @@ KVCacheManagerBase::D2hAutoAllocate(
 
     for (int k = 0; k < needed; ++k) {
       int assigned_block_id = allocated_block_ids[block_id_idx++];
-      flat_src_offsets.push_back(src_major_dim_offset + k * block_size_);
-      flat_dst_offsets.push_back(assigned_block_id * block_size_);
-      flat_copy_sizes.push_back(block_size_);
+      flat_src_offsets.push_back(src_major_dim_offset + k);
+      flat_dst_offsets.push_back(assigned_block_id);
+      flat_copy_sizes.push_back(1);
     }
   }
 
@@ -717,7 +712,7 @@ absl::Status KVCacheManagerBase::H2dDirect(
         "Number of device buffers must match layer count");
   }
 
-  int64_t block_byte_size = block_size_ * slice_byte_size_;
+  int64_t block_byte_size = slice_byte_size_;
   int64_t num_chunks = src_offsets.size();
 
   for (size_t l = 0; l < num_layers_; ++l) {
@@ -760,7 +755,7 @@ absl::Status KVCacheManagerBase::D2hDirect(
         "Number of device buffers must match layer count");
   }
 
-  int64_t block_byte_size = block_size_ * slice_byte_size_;
+  int64_t block_byte_size = slice_byte_size_;
   int64_t num_chunks = src_offsets.size();
 
   for (size_t l = 0; l < num_layers_; ++l) {
@@ -915,10 +910,7 @@ absl::StatusOr<KVCacheHostSpan> KVCacheManagerBase::HostSpan(
 }
 
 size_t KVCacheManagerBase::bytes_per_block() const {
-  if (is_blocked_layout_) {
-    return slice_byte_size_;
-  }
-  return block_size_ * slice_byte_size_;
+  return slice_byte_size_;
 }
 
 absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>

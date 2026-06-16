@@ -67,10 +67,10 @@ NB_MODULE(_tpu_raiden_torch, m) {
   // 2. Bind KVCacheManager
   // =========================================================================
   nb::class_<KVCacheManager>(m, "KVCacheManager")
-      .def(nb::init<const std::vector<std::vector<at::Tensor>>&, int,
+      .def(nb::init<const std::vector<std::vector<at::Tensor>>&,
                     std::optional<int>, std::optional<int>,
                     std::optional<std::vector<uintptr_t>>, bool, int>(),
-           nb::arg("device_tensors"), nb::arg("block_size") = 1,
+           nb::arg("device_tensors"),
            nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("external_host_ptrs") = nb::none(),
@@ -179,7 +179,6 @@ NB_MODULE(_tpu_raiden_torch, m) {
       .def_prop_ro("local_port", &KVCacheManager::local_port)
       .def_prop_ro("num_layers", &KVCacheManager::num_layers)
       .def_prop_ro("num_shards", &KVCacheManager::num_shards)
-      .def_prop_ro("block_size", &KVCacheManager::block_size)
       .def_prop_ro("slice_byte_size", &KVCacheManager::slice_byte_size)
       .def_prop_ro("local_control_port", &KVCacheManager::local_control_port)
       .def("notify_for_read", &KVCacheManager::NotifyForRead, nb::arg("req_id"),

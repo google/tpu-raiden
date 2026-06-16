@@ -245,7 +245,6 @@ void RunBenchmarkScenarioA(TpuPjrtManager* manager,
 
   auto engine = std::make_unique<kv_cache::KVCacheManagerBase>(
       layer_buffers,
-      /*block_size=*/1,
       /*local_port=*/std::nullopt,
       /*host_blocks_to_allocate=*/host_blocks_to_allocate,
       /*external_host_ptrs=*/std::nullopt,
@@ -426,7 +425,6 @@ void RunBenchmarkScenarioB(TpuPjrtManager* manager,
 
   auto engine = std::make_unique<kv_cache::KVCacheManagerBase>(
       layer_buffers,
-      /*block_size=*/1,
       /*local_port=*/std::nullopt,
       /*host_blocks_to_allocate=*/host_blocks_to_allocate,
       /*external_host_ptrs=*/std::nullopt,

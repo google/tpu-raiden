@@ -62,7 +62,6 @@ TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransfer) {
   std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers = {{buffer.get()}};
   auto engine = std::make_unique<KVCacheManagerWithTransfer>(
       layer_buffers,
-      /*block_size=*/1,
       /*local_port=*/std::nullopt,
       /*host_blocks_to_allocate=*/std::nullopt,
       /*external_host_ptrs=*/std::nullopt,
@@ -140,7 +139,6 @@ TEST(KVCacheManagerWithTransferTest, StartReadAcceptsParallelism) {
   std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers = {{buffer.get()}};
   auto engine = std::make_unique<KVCacheManagerWithTransfer>(
       layer_buffers,
-      /*block_size=*/1,
       /*local_port=*/std::nullopt,
       /*host_blocks_to_allocate=*/std::nullopt,
       /*external_host_ptrs=*/std::nullopt,
@@ -187,7 +185,6 @@ TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransferToCustomHostBlock)
   std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers = {{buffer.get()}};
   auto engine = std::make_unique<KVCacheManagerWithTransfer>(
       layer_buffers,
-      /*block_size=*/1,
       /*local_port=*/std::nullopt,
       /*host_blocks_to_allocate=*/2,  // Allocate 2 blocks in host
       /*external_host_ptrs=*/std::nullopt,

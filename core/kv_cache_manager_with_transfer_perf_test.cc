@@ -173,7 +173,6 @@ void RunSlotBenchmark(TpuPjrtManager* manager,
   // server
   auto engine = std::make_unique<KVCacheManagerWithTransfer>(
       layer_buffers,
-      /*block_size=*/1,
       /*local_port=*/std::nullopt,
       /*host_blocks_to_allocate=*/kNumBlocks,  // 1 slot capacity
       /*external_host_ptrs=*/std::nullopt,

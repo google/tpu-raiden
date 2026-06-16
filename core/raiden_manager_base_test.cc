@@ -45,10 +45,10 @@ namespace {
 class TestRaidenManager : public RaidenManagerBase {
  public:
   TestRaidenManager(size_t num_layers, size_t num_shards,
-                    size_t slice_byte_size, int block_size = 1,
+                    size_t slice_byte_size,
                     std::optional<int> local_port = std::nullopt,
                     int parallelism = 1)
-      : RaidenManagerBase(num_layers, num_shards, slice_byte_size, block_size,
+      : RaidenManagerBase(num_layers, num_shards, slice_byte_size,
                           local_port, parallelism) {
     layers_.resize(num_layers);
     for (size_t l = 0; l < num_layers; ++l) {
@@ -68,12 +68,11 @@ class TestRaidenManager : public RaidenManagerBase {
 
 TEST(RaidenManagerBaseTest, LifecycleAndConfig) {
   TestRaidenManager manager(/*num_layers=*/2, /*num_shards=*/4,
-                            /*slice_byte_size=*/1024, /*block_size=*/1);
+                            /*slice_byte_size=*/1024);
 
   EXPECT_EQ(manager.num_layers(), 2);
   EXPECT_EQ(manager.num_shards(), 4);
   EXPECT_EQ(manager.slice_byte_size(), 1024);
-  EXPECT_EQ(manager.block_size(), 1);
   EXPECT_TRUE(manager.local_port().has_value());
   EXPECT_GT(manager.local_port().value(), 0);
 }
@@ -235,7 +234,6 @@ TEST(RaidenManagerBaseTest, E2eRemoteD2DBlockWrite) {
   // 5. Create the RaidenManagerBase sender instance.
   RaidenManagerBase sender(/*num_layers=*/1, /*num_shards=*/1,
                            /*slice_byte_size=*/physical_size,
-                           /*block_size=*/1,
                            /*local_port=*/std::nullopt,
                            /*parallelism=*/1, /*max_staging_blocks=*/4);
 
@@ -326,7 +324,6 @@ TEST(RaidenManagerBaseTest, E2eRemoteD2DBlockWriteConcurrent) {
   // 5. Create the RaidenManagerBase sender instance.
   RaidenManagerBase sender(/*num_layers=*/1, /*num_shards=*/1,
                            /*slice_byte_size=*/single_buffer_size,
-                           /*block_size=*/1,
                            /*local_port=*/std::nullopt,
                            /*parallelism=*/1, /*max_staging_blocks=*/4);
 

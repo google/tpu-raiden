@@ -65,14 +65,12 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
     # 2. Instantiate two real managers locally on ephemeral loopback ports!
     ws_source = _kv_cache_manager.KVCacheManager(
         src_tensors,
-        block_size=self.block_size,
         local_port=0,
         host_blocks_to_allocate=num_blocks,
         parallelism=1,
     )
     ws_dest = _kv_cache_manager.KVCacheManager(
         dst_tensors,
-        block_size=self.block_size,
         local_port=0,
         host_blocks_to_allocate=num_blocks,
         parallelism=1,

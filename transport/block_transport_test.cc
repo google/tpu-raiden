@@ -104,7 +104,6 @@ class MockDelegate : public BlockTransportDelegate {
   size_t num_layers() const override { return num_layers_; }
   size_t num_shards() const override { return num_shards_; }
   size_t slice_byte_size() const override { return slice_size_; }
-  int block_size() const override { return 1; }
   size_t shard_factor() const override { return 1; }
 
   uint8_t* data(size_t layer_idx = 0, size_t shard_idx = 0) {

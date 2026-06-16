@@ -63,7 +63,7 @@ TEST_F(KVCacheManagerTorchTest, ConstructorSucceedsWithMocks) {
   std::vector<std::vector<at::Tensor>> device_tensors = {{tensor}};
 
   // Construct KVCacheManager (should use mocks internally)
-  KVCacheManager manager(device_tensors, /*block_size=*/1,
+  KVCacheManager manager(device_tensors,
                          /*local_port=*/std::nullopt,
                          /*host_blocks_to_allocate=*/8);
 

@@ -35,7 +35,7 @@ UnpackedCache UnpackAndMove(nanobind::list device_arrays) {
 }  // namespace
 
 KVCacheManager::KVCacheManager(
-    nb::list device_arrays, int block_size, std::optional<int> local_port,
+    nb::list device_arrays, std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate,
     std::optional<std::vector<uintptr_t>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism)
@@ -46,17 +46,17 @@ KVCacheManager::KVCacheManager(
     // function call boundary acts as a strict sequencing barrier, guaranteeing
     // that `UnpackJaxArrays` is fully evaluated before the Python list handle
     // is moved into ownership, preventing use-after-move segfaults.
-    : KVCacheManager(UnpackAndMove(std::move(device_arrays)), block_size,
+    : KVCacheManager(UnpackAndMove(std::move(device_arrays)),
                      local_port, host_blocks_to_allocate, external_host_ptrs,
                      unsafe_skip_buffer_lock, parallelism) {}
 
 KVCacheManager::KVCacheManager(
-    UnpackedCache&& cache, int block_size, std::optional<int> local_port,
+    UnpackedCache&& cache, std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate,
     std::optional<std::vector<uintptr_t>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism)
     : KVCacheManagerWithTransfer(
-          cache.layer_buffers, block_size, local_port, host_blocks_to_allocate,
+          cache.layer_buffers, local_port, host_blocks_to_allocate,
           tpu_raiden::CastExternalPointers(external_host_ptrs),
           unsafe_skip_buffer_lock, parallelism,
           tpu_raiden::CreateHostMemoryAllocator(
@@ -84,7 +84,6 @@ KVCacheManager::KVCacheManager(UnpackedCache&& cache, int64_t tp_rank,
                                bool unsafe_skip_buffer_lock)
     : KVCacheManagerWithTransfer(
           cache.layer_buffers,
-          /*block_size=*/1,
           /*local_port=*/std::nullopt,
           /*host_blocks_to_allocate=*/std::nullopt,
           /*external_host_ptrs=*/std::nullopt, unsafe_skip_buffer_lock,
@@ -97,12 +96,12 @@ KVCacheManager::KVCacheManager(UnpackedCache&& cache, int64_t tp_rank,
       device_arrays_(std::move(cache.device_arrays)) {}
 
 KVCacheManager::KVCacheManager(size_t num_layers, size_t num_shards,
-                               size_t slice_byte_size, int block_size,
+                               size_t slice_byte_size,
                                std::optional<int> local_port,
                                std::optional<int> host_blocks_to_allocate,
                                int parallelism)
     : KVCacheManagerWithTransfer(num_layers, num_shards, slice_byte_size,
-                                 block_size, local_port,
+                                 local_port,
                                  host_blocks_to_allocate, parallelism) {}
 
 KVCacheManager::~KVCacheManager() = default;

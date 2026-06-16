@@ -136,7 +136,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
  public:
   KVCacheManagerWithTransfer(
       const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
-      int block_size, std::optional<int> local_port,
+      std::optional<int> local_port,
       std::optional<int> host_blocks_to_allocate,
       std::optional<std::vector<const uint8_t*>> external_host_ptrs,
       bool unsafe_skip_buffer_lock, int parallelism,
@@ -146,7 +146,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
 
   // Metadata-based constructor for FFI / CPU-only testing
   KVCacheManagerWithTransfer(size_t num_layers, size_t num_shards,
-                             size_t slice_byte_size, int block_size,
+                             size_t slice_byte_size,
                              std::optional<int> local_port,
                              std::optional<int> host_blocks_to_allocate,
                              int parallelism = 1, int64_t tp_rank = 0,

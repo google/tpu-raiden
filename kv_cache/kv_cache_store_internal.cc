@@ -55,11 +55,10 @@ int ParsePort(const std::string& addr) {
 }
 }  // namespace
 
-KVCacheStoreInternal::KVCacheStoreInternal(int block_size, int capacity,
+KVCacheStoreInternal::KVCacheStoreInternal(int capacity,
                                            std::string global_registry_address,
                                            std::string local_address)
-    : block_size_(block_size),
-      capacity_(capacity),
+    : capacity_(capacity),
       local_address_(local_address) {
   if (!global_registry_address.empty()) {
     auto channel = grpc::CreateChannel(global_registry_address,
@@ -178,7 +177,7 @@ KVCacheStoreInternal::LookupAndFetch(
       if (insert_future.IsValid()) {
         (void)insert_future.Await();
       }
-      int needed = copy_sizes_major_dim[i] / block_size_;
+      int needed = copy_sizes_major_dim[i];
       if (host_block_ids.size() < needed) {
         return absl::InternalError("Cached entry does not have enough blocks");
       }
@@ -192,9 +191,9 @@ KVCacheStoreInternal::LookupAndFetch(
       hit_sizes.reserve(needed);
 
       for (int k = 0; k < needed; ++k) {
-        dummy_src_offsets.push_back(k * block_size_);
-        hit_dst_offsets.push_back(dst_major_dim_offset + k * block_size_);
-        hit_sizes.push_back(block_size_);
+        dummy_src_offsets.push_back(k);
+        hit_dst_offsets.push_back(dst_major_dim_offset + k);
+        hit_sizes.push_back(1);
       }
 
       std::vector<const uint8_t*> host_ptrs;
@@ -253,14 +252,14 @@ absl::Status KVCacheStoreInternal::Insert(
     shard_factor_ = manager.shard_factor();
   }
 
-  size_t bytes_per_block = block_size_ * slice_byte_size_;
+  size_t bytes_per_block = slice_byte_size_;
 
   std::vector<int> store_block_ids;
   int total_needed_blocks = 0;
   std::vector<int> blocks_per_chunk;
   blocks_per_chunk.reserve(num_chunks);
   for (int copy_size : copy_sizes_major_dim) {
-    int needed = copy_size / block_size_;
+    int needed = copy_size;
     total_needed_blocks += needed;
     blocks_per_chunk.push_back(needed);
   }
@@ -385,7 +384,7 @@ absl::Status KVCacheStoreInternal::LookupAndFetchRemote(
     const auto& meta = lookup_results[idx];
     std::string peer = meta.host_address();
     int start_remote_id = meta.block_id();
-    int needed = copy_sizes_major_dim[idx] / block_size_;
+    int needed = copy_sizes_major_dim[idx];
 
     auto& task = fetch_tasks[peer];
     task.peer = peer;
@@ -403,7 +402,7 @@ absl::Status KVCacheStoreInternal::LookupAndFetchRemote(
   std::vector<ActiveFetch> active_fetches;
   active_fetches.reserve(fetch_tasks.size());
 
-  size_t bytes_per_block = block_size_ * slice_byte_size_;
+  size_t bytes_per_block = slice_byte_size_;
 
   for (auto& [peer, task] : fetch_tasks) {
     size_t total_blocks = 0;
@@ -517,7 +516,7 @@ absl::Status KVCacheStoreInternal::RegisterBlocksInGlobalRegistry(
     meta.block_id = allocated_block_ids[block_idx];
     metadata_list.push_back(std::move(meta));
 
-    int needed = copy_sizes_major_dim[i] / block_size_;
+    int needed = copy_sizes_major_dim[i];
     block_idx += needed;
   }
 

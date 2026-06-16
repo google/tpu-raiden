@@ -51,7 +51,7 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
  public:
   // JAX sharded constructor E2E (cache-only by default)
   KVCacheManager(
-      nanobind::list device_arrays, int block_size = 1,
+      nanobind::list device_arrays,
       std::optional<int> local_port = std::nullopt,
       std::optional<int> host_blocks_to_allocate = std::nullopt,
       std::optional<std::vector<uintptr_t>> external_host_ptrs = std::nullopt,
@@ -66,7 +66,7 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
 
   // FFI metadata constructor (cache-only by default)
   KVCacheManager(size_t num_layers, size_t num_shards, size_t slice_byte_size,
-                 int block_size, std::optional<int> local_port,
+                 std::optional<int> local_port,
                  std::optional<int> host_blocks_to_allocate,
                  int parallelism = 1);
 
@@ -78,7 +78,7 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
 
  private:
   // Private constructor for sharded (cache-only)
-  KVCacheManager(UnpackedCache&& cache, int block_size,
+  KVCacheManager(UnpackedCache&& cache,
                  std::optional<int> local_port,
                  std::optional<int> host_blocks_to_allocate,
                  std::optional<std::vector<uintptr_t>> external_host_ptrs,

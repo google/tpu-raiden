@@ -378,14 +378,14 @@ void KVCacheManagerWithTransfer::ValidateRequestedBlocks(
 
 KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
-    int block_size, std::optional<int> local_port,
+    std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate,
     std::optional<std::vector<const uint8_t*>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism,
     HostBufferAllocator host_allocator, int64_t tp_rank,
     int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
     double timeout_s)
-    : KVCacheManagerBase(layer_buffers, block_size, local_port,
+    : KVCacheManagerBase(layer_buffers, local_port,
                          host_blocks_to_allocate.has_value()
                              ? *host_blocks_to_allocate
                              : num_slots * max_blocks,
@@ -420,12 +420,12 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
 
 KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
-    int block_size, std::optional<int> local_port,
+    std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate, int parallelism,
     int64_t tp_rank, int64_t local_control_port, int64_t max_blocks,
     int64_t num_slots, double timeout_s)
     : KVCacheManagerBase(
-          num_layers, num_shards, slice_byte_size, block_size, local_port,
+          num_layers, num_shards, slice_byte_size, local_port,
           host_blocks_to_allocate.has_value() ? *host_blocks_to_allocate
                                               : num_slots * max_blocks,
           parallelism),

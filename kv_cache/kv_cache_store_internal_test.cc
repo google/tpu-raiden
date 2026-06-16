@@ -57,7 +57,7 @@ TEST(KVCacheStoreInternalTest, LocalInsertAndLookup) {
   auto make_manager = [&](xla::PjRtBuffer* buf) {
     std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers = {{buf}};
     return std::make_unique<kv_cache::KVCacheManagerBase>(
-        layer_buffers, /*block_size=*/1, /*local_port=*/std::nullopt,
+        layer_buffers, /*local_port=*/std::nullopt,
         /*host_blocks_to_allocate=*/4,
         /*external_host_ptrs=*/std::nullopt,
         /*unsafe_skip_buffer_lock=*/true);
@@ -65,7 +65,7 @@ TEST(KVCacheStoreInternalTest, LocalInsertAndLookup) {
 
   // Create KVCacheStoreInternal (local only, capacity = 2)
   auto store =
-      std::make_unique<KVCacheStoreInternal>(/*block_size=*/1, /*capacity=*/2);
+      std::make_unique<KVCacheStoreInternal>(/*capacity=*/2);
 
   // 1. Insert slice 0 (hash 100) into store using a fresh manager
   auto kv_manager1 = make_manager(buffer.get());
@@ -122,7 +122,7 @@ TEST(KVCacheStoreInternalTest, LruEviction) {
   auto make_manager = [&](xla::PjRtBuffer* buf) {
     std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers = {{buf}};
     return std::make_unique<kv_cache::KVCacheManagerBase>(
-        layer_buffers, /*block_size=*/1, /*local_port=*/std::nullopt,
+        layer_buffers, /*local_port=*/std::nullopt,
         /*host_blocks_to_allocate=*/4,
         /*external_host_ptrs=*/std::nullopt,
         /*unsafe_skip_buffer_lock=*/true);
@@ -130,7 +130,7 @@ TEST(KVCacheStoreInternalTest, LruEviction) {
 
   // Capacity = 2
   auto store =
-      std::make_unique<KVCacheStoreInternal>(/*block_size=*/1, /*capacity=*/2);
+      std::make_unique<KVCacheStoreInternal>(/*capacity=*/2);
 
   // Insert hash 101 (slice 0)
   auto kv_manager1 = make_manager(buffer.get());

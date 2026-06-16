@@ -40,7 +40,7 @@ namespace kv_cache {
 class KVCacheStoreInternal
     : public tpu_raiden::transport::BlockTransportDelegate {
  public:
-  KVCacheStoreInternal(int block_size, int capacity,
+  KVCacheStoreInternal(int capacity,
                        std::string global_registry_address = "",
                        std::string local_address = "");
   virtual ~KVCacheStoreInternal();
@@ -78,7 +78,6 @@ class KVCacheStoreInternal
   size_t num_layers() const override { return num_layers_; }
   size_t num_shards() const override { return num_shards_; }
   size_t slice_byte_size() const override { return slice_byte_size_; }
-  int block_size() const override { return block_size_; }
   size_t shard_factor() const override { return shard_factor_; }
 
  private:
@@ -105,7 +104,6 @@ class KVCacheStoreInternal
   void CleanupCompletedFuturesLocked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   absl::Mutex mutex_;
 
-  int block_size_;
   int capacity_;
 
   std::list<CacheEntry> lru_list_;

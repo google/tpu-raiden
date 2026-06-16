@@ -30,7 +30,7 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
   // PyTorch sharded constructor E2E (cache-only by default)
   KVCacheManager(
       const std::vector<std::vector<at::Tensor>>& device_tensors,
-      int block_size = 1, std::optional<int> local_port = std::nullopt,
+      std::optional<int> local_port = std::nullopt,
       std::optional<int> host_blocks_to_allocate = std::nullopt,
       std::optional<std::vector<uintptr_t>> external_host_ptrs = std::nullopt,
       bool unsafe_skip_buffer_lock = false, int parallelism = 1);

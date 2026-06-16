@@ -65,7 +65,7 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   // PyTorch E2E)
   KVCacheManagerBase(
       const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
-      int block_size = 1, std::optional<int> local_port = std::nullopt,
+      std::optional<int> local_port = std::nullopt,
       std::optional<int> host_blocks_to_allocate = std::nullopt,
       std::optional<std::vector<const uint8_t*>> external_host_ptrs =
           std::nullopt,
@@ -74,7 +74,7 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   // Standard CPU-only Constructor for remote workers E2E
   KVCacheManagerBase(size_t num_layers, size_t num_shards,
-                     size_t slice_byte_size, int block_size = 1,
+                     size_t slice_byte_size,
                      std::optional<int> local_port = std::nullopt,
                      std::optional<int> host_blocks_to_allocate = std::nullopt,
                      int parallelism = 1,

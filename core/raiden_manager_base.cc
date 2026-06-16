@@ -45,13 +45,12 @@ xla::Future<> ReturnFuture(const absl::Status& status) {
 }
 
 RaidenManagerBase::RaidenManagerBase(size_t num_layers, size_t num_shards,
-                                     size_t slice_byte_size, int block_size,
+                                     size_t slice_byte_size,
                                      std::optional<int> local_port,
                                      int parallelism, size_t max_staging_blocks)
     : num_layers_(num_layers),
       num_shards_(num_shards),
       slice_byte_size_(slice_byte_size),
-      block_size_(block_size),
       parallelism_(parallelism) {
   shard_factor_ = 1;
 
@@ -173,7 +172,7 @@ absl::Status RaidenManagerBase::PushWeightsChunk(const std::string& peer,
 }
 
 size_t RaidenManagerBase::bytes_per_block() const {
-  return block_size_ * slice_byte_size_;
+  return slice_byte_size_;
 }
 
 xla::Future<> RaidenManagerBase::RemoteD2DBlockWrite(const BlockMetadata& src,
