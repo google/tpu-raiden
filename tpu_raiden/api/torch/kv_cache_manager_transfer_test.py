@@ -40,7 +40,7 @@ class KVCacheManagerTransferTest(parameterized.TestCase):
 
     engine = KVCacheManager(
         kv_caches=kv_caches,
-        tp_rank=0,
+        node_id=0,
         local_control_port=0,
         max_blocks=4,
         num_slots=2,
@@ -67,7 +67,7 @@ class KVCacheManagerTransferTest(parameterized.TestCase):
 
     producer = KVCacheManager(
         kv_caches=src_caches,
-        tp_rank=0,
+        node_id=0,
         local_control_port=0,
         max_blocks=2,
         num_slots=2,
@@ -75,7 +75,7 @@ class KVCacheManagerTransferTest(parameterized.TestCase):
 
     consumer = KVCacheManager(
         kv_caches=dst_caches,
-        tp_rank=0,
+        node_id=0,
         local_control_port=0,
         max_blocks=2,
         num_slots=2,
@@ -146,7 +146,7 @@ class KVCacheManagerTransferTest(parameterized.TestCase):
 
     producer = KVCacheManager(
         kv_caches=src_caches,
-        tp_rank=0,
+        node_id=0,
         local_control_port=0,
         max_blocks=2,
         num_slots=2,
@@ -154,7 +154,7 @@ class KVCacheManagerTransferTest(parameterized.TestCase):
 
     consumer = KVCacheManager(
         kv_caches=dst_caches,
-        tp_rank=0,
+        node_id=0,
         local_control_port=0,
         max_blocks=2,
         num_slots=2,

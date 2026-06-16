@@ -63,7 +63,7 @@ TEST_F(KVCacheManagerTransferTest, Basic) {
   std::vector<at::Tensor> kv_caches = {tensor};
 
   // Construct KVCacheManager with transfer enabled
-  KVCacheManager engine(kv_caches, /*tp_rank=*/0,
+  KVCacheManager engine(kv_caches, /*node_id=*/0,
                         /*local_control_port=*/0, /*max_blocks=*/2,
                         /*num_slots=*/2, /*timeout_s=*/10.0,
                         /*unsafe_skip_buffer_lock=*/true);

@@ -36,7 +36,7 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
 
   // New transfer-enabled constructor (flat list of tensors, single shard per
   // layer)
-  KVCacheManager(const std::vector<at::Tensor>& kv_caches, int64_t tp_rank,
+  KVCacheManager(const std::vector<at::Tensor>& kv_caches, int64_t node_id,
                  int64_t local_control_port, int64_t max_blocks,
                  int64_t num_slots, double timeout_s,
                  bool unsafe_skip_buffer_lock);
@@ -47,7 +47,7 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
   std::vector<int64_t> RegisterKvCache(
       const std::vector<at::Tensor>& kv_caches);
 
-  void RegisterHostBuffers(int64_t tp_rank);
+  void RegisterHostBuffers(int64_t node_id);
 
   const std::vector<at::Tensor>& kv_caches() const { return kv_caches_; }
 

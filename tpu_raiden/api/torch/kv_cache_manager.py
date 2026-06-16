@@ -65,7 +65,7 @@ class KVCacheManager:
   def __init__(
       self,
       kv_caches: List[Any],
-      tp_rank: int,
+      node_id: int,
       local_control_port: int,
       max_blocks: int,
       num_slots: int,
@@ -77,7 +77,7 @@ class KVCacheManager:
     Args:
       kv_caches: List of device-placed contiguous Tensors representing the
         sharded KV caches.
-      tp_rank: Tensor Parallel rank.
+      node_id: Worker or Shard ID (e.g., Tensor Parallel rank).
       local_control_port: TCP socket server port for control plane coordination.
       max_blocks: Maximum number of blocks in the host pool.
       num_slots: Number of transfer slots to allocate.
@@ -86,13 +86,18 @@ class KVCacheManager:
     """
     self._impl = _impl.KVCacheManager(
         kv_caches=kv_caches,
-        tp_rank=tp_rank,
+        node_id=node_id,
         local_control_port=local_control_port,
         max_blocks=max_blocks,
         num_slots=num_slots,
         timeout_s=timeout_s,
         unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
     )
+
+  @property
+  def node_id(self) -> int:
+    """Returns the active Worker or Shard ID."""
+    return self._impl.node_id()
 
   @property
   def local_control_port(self) -> int:

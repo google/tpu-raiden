@@ -76,7 +76,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
            nb::arg("parallelism") = 1)
       .def(nb::init<const std::vector<at::Tensor>&, int64_t, int64_t, int64_t,
                     int64_t, double, bool>(),
-           nb::arg("kv_caches"), nb::arg("tp_rank"),
+           nb::arg("kv_caches"), nb::arg("node_id"),
            nb::arg("local_control_port"), nb::arg("max_blocks"),
            nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
            nb::arg("unsafe_skip_buffer_lock") = true)

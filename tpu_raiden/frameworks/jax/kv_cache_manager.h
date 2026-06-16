@@ -52,7 +52,7 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
 
   // New transfer-enabled constructor (flat list of arrays, single shard per
   // layer)
-  KVCacheManager(nanobind::list kv_caches, int64_t tp_rank,
+  KVCacheManager(nanobind::list kv_caches, int64_t node_id,
                  int64_t local_control_port, int64_t max_blocks,
                  int64_t num_slots, double timeout_s,
                  bool unsafe_skip_buffer_lock);
@@ -81,7 +81,7 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
                  bool unsafe_skip_buffer_lock, int parallelism);
 
   // Private constructor for flat (transfer-enabled)
-  KVCacheManager(UnpackedCache&& cache, int64_t tp_rank,
+  KVCacheManager(UnpackedCache&& cache, int64_t node_id,
                  int64_t local_control_port, int64_t max_blocks,
                  int64_t num_slots, double timeout_s,
                  bool unsafe_skip_buffer_lock);

@@ -381,7 +381,7 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate,
     bool unsafe_skip_buffer_lock, int parallelism,
-    HostBufferAllocator host_allocator, int64_t tp_rank,
+    HostBufferAllocator host_allocator, int64_t node_id,
     int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
     double timeout_s)
     : KVCacheManagerBase(layer_buffers, local_port,
@@ -390,7 +390,7 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
                              : num_slots * max_blocks,
                          unsafe_skip_buffer_lock,
                          parallelism, host_allocator),
-      tp_rank_(tp_rank),
+      node_id_(node_id),
       local_control_port_(static_cast<int>(local_control_port)),
       local_data_port_(0),
       max_blocks_(max_blocks),
@@ -421,14 +421,14 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
     std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate, int parallelism,
-    int64_t tp_rank, int64_t local_control_port, int64_t max_blocks,
+    int64_t node_id, int64_t local_control_port, int64_t max_blocks,
     int64_t num_slots, double timeout_s)
     : KVCacheManagerBase(
           num_layers, num_shards, slice_byte_size, local_port,
           host_blocks_to_allocate.has_value() ? *host_blocks_to_allocate
                                               : num_slots * max_blocks,
           parallelism),
-      tp_rank_(tp_rank),
+      node_id_(node_id),
       local_control_port_(static_cast<int>(local_control_port)),
       local_data_port_(0),
       max_blocks_(max_blocks),
@@ -499,7 +499,7 @@ int64_t KVCacheManagerWithTransfer::NotifyForRead(
 
   std::ostringstream timing;
   timing << "RAIDEN_TIMING event=producer_register"
-         << " req_id=" << req_id << " uuid=" << uuid << " rank=" << tp_rank_
+         << " req_id=" << req_id << " uuid=" << uuid << " node_id=" << node_id_
          << " blocks=" << block_ids.size() << " enqueue_ms="
          << DurationMs(register_start, std::chrono::steady_clock::now())
          << " failed=0";
@@ -781,7 +781,7 @@ void KVCacheManagerWithTransfer::StartRead(
 
     std::ostringstream timing;
     timing << "RAIDEN_TIMING event=consumer_pipeline"
-           << " req_id=" << req_id << " uuid=" << uuid << " rank=" << tp_rank_
+           << " req_id=" << req_id << " uuid=" << uuid << " node_id=" << node_id_
            << " release_only=" << (release_only ? 1 : 0)
            << " total_blocks=" << load_plan.num_blocks
            << " total_bytes=" << (h2h_bytes + h2d_bytes)
@@ -1259,7 +1259,7 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
   std::ostringstream timing;
   timing << "RAIDEN_TIMING event=producer_pipeline"
          << " req_id=" << entry->req_id << " uuid=" << entry->uuid
-         << " rank=" << tp_rank_ << " total_blocks=" << entry->num_blocks
+         << " node_id=" << node_id_ << " total_blocks=" << entry->num_blocks
          << " total_bytes=" << entry->total_bytes
          << " total_layers=" << num_layers()
          << " copy_segments=" << entry->copy_segments
@@ -1333,7 +1333,7 @@ void KVCacheManagerWithTransfer::AckSend(uint64_t uuid) {
   std::ostringstream timing;
   timing << "RAIDEN_TIMING event=producer_ack"
          << " req_id=" << entry->req_id << " uuid=" << entry->uuid
-         << " rank=" << tp_rank_ << " blocks=" << entry->num_blocks
+         << " node_id=" << node_id_ << " blocks=" << entry->num_blocks
          << " bytes=" << entry->total_bytes
          << " stage_to_ack_ms=" << DurationMs(entry->d2h_done, ack_done)
          << " register_to_ack_ms="

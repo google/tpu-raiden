@@ -139,7 +139,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
       std::optional<int> local_port,
       std::optional<int> host_blocks_to_allocate,
       bool unsafe_skip_buffer_lock, int parallelism,
-      HostBufferAllocator host_allocator, int64_t tp_rank = 0,
+      HostBufferAllocator host_allocator, int64_t node_id = 0,
       int64_t local_control_port = -1, int64_t max_blocks = 0,
       int64_t num_slots = 0, double timeout_s = 120.0);
 
@@ -148,7 +148,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
                              size_t slice_byte_size,
                              std::optional<int> local_port,
                              std::optional<int> host_blocks_to_allocate,
-                             int parallelism = 1, int64_t tp_rank = 0,
+                             int parallelism = 1, int64_t node_id = 0,
                              int64_t local_control_port = -1,
                              int64_t max_blocks = 0, int64_t num_slots = 0,
                              double timeout_s = 120.0);
@@ -170,7 +170,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   CompleteReadRaw();
 
   int local_control_port() const { return local_control_port_; }
-  int64_t tp_rank() const { return tp_rank_; }
+  int64_t node_id() const { return node_id_; }
 
  protected:
   struct SendEntry {
@@ -270,7 +270,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
                           bool source_is_compact);
   static kv_cache::KVCacheCopySpec ToKVCacheCopySpec(const CopySpec& spec);
 
-  int64_t tp_rank_ = 0;
+  int64_t node_id_ = 0;
   int local_control_port_ = 0;
   int local_data_port_ = 0;
   int64_t max_blocks_ = 0;

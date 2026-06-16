@@ -60,22 +60,22 @@ KVCacheManager::KVCacheManager(
               cache.layer_buffers.empty() || cache.layer_buffers[0].empty()
                   ? nullptr
                   : cache.layer_buffers[0][0]->device()->client()),
-          /*tp_rank=*/0,
+          /*node_id=*/0,
           /*local_control_port=*/-1,
           /*max_blocks=*/0,
           /*num_slots=*/0,
           /*timeout_s=*/120.0),
       device_arrays_(std::move(cache.device_arrays)) {}
 
-KVCacheManager::KVCacheManager(nanobind::list kv_caches, int64_t tp_rank,
+KVCacheManager::KVCacheManager(nanobind::list kv_caches, int64_t node_id,
                                int64_t local_control_port, int64_t max_blocks,
                                int64_t num_slots, double timeout_s,
                                bool unsafe_skip_buffer_lock)
-    : KVCacheManager(UnpackAndMove(std::move(kv_caches)), tp_rank,
+    : KVCacheManager(UnpackAndMove(std::move(kv_caches)), node_id,
                      local_control_port, max_blocks, num_slots, timeout_s,
                      unsafe_skip_buffer_lock) {}
 
-KVCacheManager::KVCacheManager(UnpackedCache&& cache, int64_t tp_rank,
+KVCacheManager::KVCacheManager(UnpackedCache&& cache, int64_t node_id,
                                int64_t local_control_port, int64_t max_blocks,
                                int64_t num_slots, double timeout_s,
                                bool unsafe_skip_buffer_lock)
@@ -89,7 +89,7 @@ KVCacheManager::KVCacheManager(UnpackedCache&& cache, int64_t tp_rank,
               cache.layer_buffers.empty() || cache.layer_buffers[0].empty()
                   ? nullptr
                   : cache.layer_buffers[0][0]->device()->client()),
-          tp_rank, local_control_port, max_blocks, num_slots, timeout_s),
+          node_id, local_control_port, max_blocks, num_slots, timeout_s),
       device_arrays_(std::move(cache.device_arrays)) {}
 
 KVCacheManager::KVCacheManager(size_t num_layers, size_t num_shards,

@@ -177,7 +177,7 @@ void RunSlotBenchmark(TpuPjrtManager* manager,
       /*unsafe_skip_buffer_lock=*/true,
       /*parallelism=*/1,
       /*host_allocator=*/allocator_fn,
-      /*tp_rank=*/0,
+      /*node_id=*/0,
       /*local_control_port=*/-1,
       /*max_blocks=*/kNumBlocks,
       /*num_slots=*/1);

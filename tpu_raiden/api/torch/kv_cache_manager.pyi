@@ -16,13 +16,15 @@ class KVCacheManager:
   def __init__(
       self,
       kv_caches: list,
-      tp_rank: int,
+      node_id: int,
       local_control_port: int,
       max_blocks: int,
       num_slots: int,
       timeout_s: float = ...,
       unsafe_skip_buffer_lock: bool = ...,
   ) -> None: ...
+  @property
+  def node_id(self) -> int: ...
   @property
   def local_control_port(self) -> int: ...
   def register_read(
