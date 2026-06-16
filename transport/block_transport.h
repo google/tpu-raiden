@@ -15,19 +15,15 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_TRANSPORT_BLOCK_TRANSPORT_H_
 #define THIRD_PARTY_TPU_RAIDEN_TRANSPORT_BLOCK_TRANSPORT_H_
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
-#include <thread>  // NOLINT
 #include <vector>
 
-#include "absl/base/thread_annotations.h"
-#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/synchronization/mutex.h"
+#include "transport/raw_buffer_transport.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -37,19 +33,17 @@ enum class MajorOrder : uint8_t {
   kBlockMajor = 1,
 };
 
-using BlockReceivedCallback = std::function<absl::Status(
-    size_t layer_idx, size_t shard_idx, int block_id, size_t size_bytes)>;
+using BlockReceivedCallback =
+    std::function<absl::Status(size_t layer_idx, size_t shard_idx,
+                               int block_id, size_t size_bytes)>;
 
-// Delegate interface for BlockTransport to access layers/shards host memory
-// and allocate blocks on the receiver dynamically.
-class BlockTransportDelegate {
+// Delegate interface for BlockTransport inheriting raw memory primitives.
+class BlockTransportDelegate : public RawBufferTransportDelegate {
  public:
-  virtual ~BlockTransportDelegate() = default;
+  ~BlockTransportDelegate() override = default;
 
   virtual absl::StatusOr<std::vector<int>> AllocateBlocks(
       size_t num_blocks, uint64_t uuid = 0) = 0;
-
-  virtual absl::Status OnDataReceived() = 0;
 
   virtual absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
                                         uint64_t uuid = 0) {
@@ -64,10 +58,6 @@ class BlockTransportDelegate {
                                         int block_id) {
     return absl::OkStatus();
   }
-
-  virtual uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) = 0;
-
-  virtual size_t GetHostSize(size_t layer_idx, size_t shard_idx) = 0;
 
   virtual uint8_t* GetBlockHostPointer(size_t layer_idx, size_t shard_idx,
                                        int block_id) {
@@ -84,33 +74,22 @@ class BlockTransportDelegate {
   virtual size_t shard_factor() const = 0;
 };
 
-// Standalone block-based POSIX TCP socket transport engine for TPU Raiden.
-class BlockTransport {
+// High-speed Key-Value block transport engine extending RawBufferTransport.
+class BlockTransport : public RawBufferTransport {
  public:
-  // Binary packet header layout for H2H transfers.
-  struct alignas(8) BlockPacketHeader {
-    // 1 = Push, 2 = Pull, 3 = Byte-Range Pull, 4 = Single Block Push, 5 =
-    // Resharding Slice Push
-    uint8_t op;
-    uint8_t major_order;  // See MajorOrder. Ignored by legacy ops.
-    uint16_t reserved = 0;
-    uint32_t remote_block_id;
-    uint32_t local_block_id;
-    uint32_t num_blocks;
-    uint64_t uuid;
-  };
+  using BlockPacketHeader = RawBufferTransport::PacketHeader;
 
   BlockTransport(BlockTransportDelegate* delegate, int local_port,
                  bool enable_conn_pool = true);
-  ~BlockTransport();
+  ~BlockTransport() override;
 
-  // Push block data to remote peer (H2H Write)
+  // Standard Scatter-Gather Push (op = 1 / op = 6)
   absl::StatusOr<std::vector<int>> Push(
       const std::string& peer, const std::vector<int>& src_block_ids,
       const std::vector<int>& dst_block_ids = {}, int parallelism = 1,
       MajorOrder major_order = MajorOrder::kLayerMajor, uint64_t uuid = 0);
 
-  // Pull block data from remote peer (H2H Read)
+  // Synchronous Scatter-Gather Pull (op = 2)
   absl::StatusOr<std::vector<int>> Pull(
       const std::string& peer, const std::vector<int>& src_block_ids,
       const std::vector<int>& local_block_ids = {},
@@ -118,57 +97,15 @@ class BlockTransport {
       MajorOrder major_order = MajorOrder::kLayerMajor,
       BlockReceivedCallback on_block_received = {});
 
-  // Pull byte-range weights chunk directly (Resharding Pull)
-  absl::Status PullWeightsChunk(const std::string& source, size_t src_shard_idx,
-                                size_t src_offset_bytes, size_t dst_shard_idx,
-                                size_t dst_offset_bytes, size_t size_bytes);
-
-  // Write a single block of data directly from a host pointer to a remote
-  // block ID (Direct Push).
+  // Write a single block of data directly from a host pointer to a remote block ID.
   absl::Status WriteBlockDirect(const std::string& peer, int remote_block_id,
                                 const uint8_t* data_ptr, size_t size_bytes);
 
-  /**
-   * Directly pushes an arbitrary byte slice from local Host memory into a
-   * specific memory offset of a remote peer's destination shard buffer.
-   *
-   * Utilizes a highly optimized request packet framing to stream raw
-   * bytes and blocks synchronously until an explicit TCP ACK response is
-   * returned, ensuring perfect end-to-end memory consistency.
-   *
-   * @param peer Direct network coordinate "ip:port" of the remote destination
-   * worker.
-   * @param dst_shard_idx Target logical shard index residing on the remote
-   * peer.
-   * @param dst_offset_bytes Exact linear byte offset into the target shard
-   * buffer.
-   * @param data_ptr Pointer to the beginning of the local staging source byte
-   * array.
-   * @param size_bytes Number of continuous bytes to push across the network
-   * stream.
-   * @return absl::OkStatus() upon verified written completion confirmed by the
-   * destination.
-   */
-  absl::Status PushWeightsChunk(const std::string& peer, size_t dst_shard_idx,
-                                size_t dst_offset_bytes,
-                                const uint8_t* data_ptr, size_t size_bytes);
-
-  int local_port() const { return local_port_; }
+ protected:
+  absl::Status HandleCustomRequest(int client_fd,
+                                   const PacketHeader& header) override;
 
  private:
-  absl::StatusOr<int> ConnectToPeer(const std::string& peer);
-
-  // Persistent connection pool (consumer side). Reuse warm, congestion-window-
-  // ramped TCP connections across pulls instead of opening a fresh slow-start
-  // connection every transfer.
-  absl::StatusOr<int> AcquireConnection(const std::string& peer);
-  void ReleaseConnection(const std::string& peer, int fd);
-  void ClosePooledConnections();
-
-  absl::Status ProcessSingleRequest(int client_fd);
-  void ConnectionWorker(int client_fd);
-  void ListenerLoop();
-
   void H2hWriteWorker(int stream_idx, const std::string& peer,
                       size_t block_offset, size_t block_count,
                       const std::vector<int>& src_block_ids,
@@ -187,21 +124,7 @@ class BlockTransport {
                      MajorOrder major_order,
                      BlockReceivedCallback on_block_received);
 
-  BlockTransportDelegate* delegate_;
-  int local_port_;
-  int server_fd_ = -1;
-  std::atomic<bool> stopping_{false};
-
-  absl::Mutex mu_;
-  std::vector<int> active_client_fds_ ABSL_GUARDED_BY(mu_);
-
-  absl::Mutex pool_mu_;
-  absl::flat_hash_map<std::string, std::vector<int>> conn_pool_
-      ABSL_GUARDED_BY(pool_mu_);
-  bool pooling_enabled_ = true;
-
-  std::thread listener_thread_;
-  std::vector<std::thread> worker_threads_;
+  BlockTransportDelegate* block_delegate_;
 };
 
 }  // namespace transport

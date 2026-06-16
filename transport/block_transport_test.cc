@@ -211,35 +211,6 @@ TEST(BlockTransportTest, PushAndPullWithoutConnectionPool) {
   EXPECT_EQ(delegate2.data()[size - 1], 0xAB);
 }
 
-TEST(BlockTransportTest, PullWeightsChunk) {
-  size_t size = 4096;
-  MockDelegate delegate1(size);
-  MockDelegate delegate2(size);
-
-  std::memset(delegate1.data(), 0xEF, size);
-  std::memset(delegate2.data(), 0x00, size);
-
-  BlockTransport transport1(&delegate1, 0);
-  BlockTransport transport2(&delegate2, 0);
-
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-  std::string peer1 = "localhost:" + std::to_string(transport1.local_port());
-
-  // Pull 1024 bytes starting from offset 512 in remote buffer, into offset 1024
-  // in local buffer!
-  auto pull_res = transport2.PullWeightsChunk(
-      peer1, /*src_shard_idx=*/0, /*src_offset_bytes=*/512,
-      /*dst_shard_idx=*/0, /*dst_offset_bytes=*/1024, /*size_bytes=*/1024);
-  ASSERT_TRUE(pull_res.ok()) << pull_res.message();
-
-  // Verify correct byte-range copy
-  EXPECT_EQ(delegate2.data()[1023], 0x00);
-  EXPECT_EQ(delegate2.data()[1024], 0xEF);
-  EXPECT_EQ(delegate2.data()[2047], 0xEF);
-  EXPECT_EQ(delegate2.data()[2048], 0x00);
-}
-
 TEST(BlockTransportTest, PullNonContiguous) {
   size_t size = 1024;
   // Delegate 1 has 3 blocks capacity

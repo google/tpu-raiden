@@ -14,23 +14,14 @@
 
 #include "transport/block_transport.h"
 
-#include <asm-generic/socket.h>
-#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <poll.h>
-#include <stdio.h>
-#include <sys/poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include <algorithm>
-#include <atomic>
-#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <functional>
 #include <limits>
 #include <string>
 #include <thread>  // NOLINT
@@ -40,55 +31,14 @@
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "core/status_macros.h"
 #include "absl/strings/str_cat.h"
-#include "absl/strings/str_split.h"
-#include "absl/synchronization/mutex.h"
-#include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
+#include "core/status_macros.h"
 
 namespace tpu_raiden {
 namespace transport {
 
 namespace {
-
-absl::Status WriteExact(int fd, const void* buffer, size_t length) {
-  const uint8_t* ptr = static_cast<const uint8_t*>(buffer);
-  size_t remaining = length;
-  while (remaining > 0) {
-    ssize_t written = write(fd, ptr, remaining);
-    if (written < 0) {
-      if (errno == EINTR) continue;
-      return absl::InternalError(
-          absl::StrCat("Socket write failed: ", std::strerror(errno)));
-    }
-    if (written == 0) {
-      return absl::InternalError("Socket closed unexpectedly during write");
-    }
-    ptr += written;
-    remaining -= written;
-  }
-  return absl::OkStatus();
-}
-
-absl::Status ReadExact(int fd, void* buffer, size_t length) {
-  uint8_t* ptr = static_cast<uint8_t*>(buffer);
-  size_t remaining = length;
-  while (remaining > 0) {
-    ssize_t bytes_read = read(fd, ptr, remaining);
-    if (bytes_read < 0) {
-      if (errno == EINTR) continue;
-      return absl::InternalError(
-          absl::StrCat("Socket read failed: ", std::strerror(errno)));
-    }
-    if (bytes_read == 0) {
-      return absl::InternalError("Socket closed unexpectedly during read");
-    }
-    ptr += bytes_read;
-    remaining -= bytes_read;
-  }
-  return absl::OkStatus();
-}
 
 absl::Status ValidateBlockRange(BlockTransportDelegate* delegate,
                                 size_t layer_idx, size_t shard_idx,
@@ -114,14 +64,15 @@ absl::Status ValidateBlockRange(BlockTransportDelegate* delegate,
     const size_t byte_count = num_blocks * bytes_per_block;
     if (byte_offset > host_size || byte_count > host_size - byte_offset) {
       return absl::OutOfRangeError(absl::StrCat(
-          "Block range out of bounds. Block: ", block_id, ", Count: ", num_blocks,
-          ", Bytes per block: ", bytes_per_block, ", Host size: ", host_size));
+          "Block range out of bounds. Block: ", block_id,
+          ", Count: ", num_blocks, ", Bytes per block: ", bytes_per_block,
+          ", Host size: ", host_size));
     }
   } else {
     for (size_t i = 0; i < num_blocks; ++i) {
       int target_id = block_id + static_cast<int>(i);
-      if (delegate->GetBlockHostPointer(layer_idx, shard_idx,
-                                        target_id) == nullptr) {
+      if (delegate->GetBlockHostPointer(layer_idx, shard_idx, target_id) ==
+          nullptr) {
         return absl::FailedPreconditionError("Block host pointer is null");
       }
     }
@@ -171,411 +122,128 @@ absl::Status ForEachPayload(MajorOrder major_order, size_t num_layers,
 
 BlockTransport::BlockTransport(BlockTransportDelegate* delegate, int local_port,
                                bool enable_conn_pool)
-    : delegate_(delegate),
-      local_port_(local_port),
-      pooling_enabled_(enable_conn_pool) {
-  server_fd_ = socket(AF_INET6, SOCK_STREAM, 0);
-  if (server_fd_ < 0) {
-    LOG(FATAL) << "Failed to create server socket: " << std::strerror(errno);
-  }
-  int opt = 1;
-  setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    : RawBufferTransport(delegate, local_port, enable_conn_pool),
+      block_delegate_(delegate) {}
 
-  struct sockaddr_in6 serv_addr;
-  std::memset(&serv_addr, 0, sizeof(serv_addr));
-  serv_addr.sin6_family = AF_INET6;
-  serv_addr.sin6_addr = in6addr_any;
-  serv_addr.sin6_port = htons(local_port_);
+BlockTransport::~BlockTransport() = default;
 
-  if (bind(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
-           sizeof(serv_addr)) < 0) {
-    LOG(FATAL) << "Failed to bind server socket to port " << local_port_ << ": "
-               << std::strerror(errno);
-  }
-
-  socklen_t addr_len = sizeof(serv_addr);
-  if (getsockname(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
-                  &addr_len) == 0) {
-    local_port_ = ntohs(serv_addr.sin6_port);
-  }
-
-  if (listen(server_fd_, 128) < 0) {
-    LOG(FATAL) << "Failed to listen on server socket: " << std::strerror(errno);
-  }
-  listener_thread_ = std::thread(&BlockTransport::ListenerLoop, this);
-}
-
-BlockTransport::~BlockTransport() {
-  stopping_ = true;
-  ClosePooledConnections();
-  if (server_fd_ >= 0) {
-    shutdown(server_fd_, SHUT_RDWR);
-    close(server_fd_);
-  }
-  {
-    absl::MutexLock _(mu_);
-    for (int fd : active_client_fds_) {
-      shutdown(fd, SHUT_RDWR);
-      close(fd);
-    }
-    active_client_fds_.clear();
-  }
-  if (listener_thread_.joinable()) {
-    listener_thread_.join();
-  }
-  for (auto& t : worker_threads_) {
-    if (t.joinable()) {
-      t.join();
-    }
-  }
-}
-
-absl::StatusOr<int> BlockTransport::ConnectToPeer(const std::string& peer) {
-  std::string host;
-  std::string port_str;
-
-  if (!peer.empty() && peer.front() == '[') {
-    size_t closing_bracket = peer.find(']');
-    if (closing_bracket == std::string::npos ||
-        closing_bracket + 1 >= peer.size() ||
-        peer[closing_bracket + 1] != ':') {
-      return absl::InvalidArgumentError(
-          "Invalid IPv6 peer bracket string format");
-    }
-    host = peer.substr(1, closing_bracket - 1);
-    port_str = peer.substr(closing_bracket + 2);
-  } else {
-    std::vector<std::string> parts = absl::StrSplit(peer, ':');
-    if (parts.size() != 2) {
-      return absl::InvalidArgumentError("Invalid peer string format");
-    }
-    host = parts[0];
-    port_str = parts[1];
-  }
-
-  struct addrinfo hints;
-  struct addrinfo* result = nullptr;
-  std::memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = SOCK_STREAM;
-
-  int ret = getaddrinfo(host.c_str(), port_str.c_str(), &hints, &result);
-  if (ret != 0 || result == nullptr) {
-    return absl::InvalidArgumentError(absl::StrCat(
-        "getaddrinfo failed for host ", host, ": ", gai_strerror(ret)));
-  }
-
-  int sock_fd = -1;
-  struct addrinfo* rp;
-  int last_errno = 0;
-  for (rp = result; rp != nullptr; rp = rp->ai_next) {
-    sock_fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-    if (sock_fd < 0) {
-      last_errno = errno;
-      continue;
-    }
-
-    int opt = 1;
-    setsockopt(sock_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
-    int buf_opt = 16 * 1024 * 1024;  // 16MB
-    setsockopt(sock_fd, SOL_SOCKET, SO_SNDBUF, &buf_opt, sizeof(buf_opt));
-    setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, &buf_opt, sizeof(buf_opt));
-
-    if (connect(sock_fd, rp->ai_addr, rp->ai_addrlen) >= 0) {
-      break; /* Success */
-    }
-
-    last_errno = errno;
-    close(sock_fd);
-    sock_fd = -1;
-  }
-
-  freeaddrinfo(result);
-
-  if (sock_fd < 0) {
-    return absl::UnavailableError(absl::StrCat(
-        "Failed to connect to peer ", peer, ": ", std::strerror(last_errno)));
-  }
-
-  return sock_fd;
-}
-
-absl::StatusOr<int> BlockTransport::AcquireConnection(const std::string& peer) {
-  if (pooling_enabled_) {
-    absl::MutexLock lock(pool_mu_);
-    auto it = conn_pool_.find(peer);
-    if (it != conn_pool_.end()) {
-      while (!it->second.empty()) {
-        int fd = it->second.back();
-        it->second.pop_back();
-
-        struct pollfd pfd;
-        pfd.fd = fd;
-        pfd.events = POLLIN;
-        // Non-blocking poll: if > 0, the socket either has unexpected data
-        // (it should be idle) or has reached EOF/error state.
-        if (poll(&pfd, 1, 0) > 0) {
-          shutdown(fd, SHUT_RDWR);
-          close(fd);
-          continue;
-        }
-        return fd;
-      }
-    }
-  }
-  return ConnectToPeer(peer);
-}
-
-void BlockTransport::ReleaseConnection(const std::string& peer, int fd) {
-  if (fd < 0) return;
-  // Only return healthy fds to the pool; on stop/disabled, just close. The
-  // producer's ConnectionWorker keeps the matching fd open (blocked in
-  // ReadExact) so a returned connection stays valid for the next pull.
-  absl::MutexLock lock(pool_mu_);
-  if (!pooling_enabled_ || stopping_) {
-    shutdown(fd, SHUT_RDWR);
-    close(fd);
-    return;
-  }
-  conn_pool_[peer].push_back(fd);
-}
-
-void BlockTransport::ClosePooledConnections() {
-  absl::MutexLock lock(pool_mu_);
-  for (auto& entry : conn_pool_) {
-    for (int fd : entry.second) {
-      shutdown(fd, SHUT_RDWR);
-      close(fd);
-    }
-  }
-  conn_pool_.clear();
-}
-
-absl::Status BlockTransport::ProcessSingleRequest(int client_fd) {
-  BlockPacketHeader header = {};
-  RETURN_IF_ERROR(ReadExact(client_fd, &header, sizeof(header)));
-
-  size_t bytes_per_block = delegate_->bytes_per_block();
+absl::Status BlockTransport::HandleCustomRequest(int client_fd,
+                                                 const PacketHeader& header) {
+  size_t bytes_per_block = block_delegate_->bytes_per_block();
 
   if (header.op == 1) {  // Push
-    TF_ASSIGN_OR_RETURN(MajorOrder major_order,
-                          ParseMajorOrder(header.major_order));
+    TF_ASSIGN_OR_RETURN(MajorOrder major_order, ParseMajorOrder(header.flags));
     TF_ASSIGN_OR_RETURN(
         std::vector<int> allocated_ids,
-        delegate_->AllocateBlocks(header.num_blocks, header.uuid));
+        block_delegate_->AllocateBlocks(header.count_or_size, header.uuid));
 
     RETURN_IF_ERROR(WriteExact(client_fd, allocated_ids.data(),
-                                    header.num_blocks * sizeof(int)));
+                               header.count_or_size * sizeof(int)));
 
     RETURN_IF_ERROR(ForEachPayload(
-        major_order, delegate_->num_layers(), delegate_->num_shards(),
-        header.num_blocks, [&](size_t l, size_t sh, size_t k) -> absl::Status {
+        major_order, block_delegate_->num_layers(),
+        block_delegate_->num_shards(), header.count_or_size,
+        [&](size_t l, size_t sh, size_t k) -> absl::Status {
           ABSL_DCHECK_LT(k, allocated_ids.size());
           const int dst_id = allocated_ids[k];
-          RETURN_IF_ERROR(ValidateBlockRange(
-              delegate_, l, sh, dst_id, /*num_blocks=*/1, bytes_per_block));
-          uint8_t* dest_ptr = delegate_->GetBlockHostPointer(l, sh, dst_id);
+          RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, dst_id, 1,
+                                             bytes_per_block));
+          uint8_t* dest_ptr =
+              block_delegate_->GetBlockHostPointer(l, sh, dst_id);
           return ReadExact(client_fd, dest_ptr, bytes_per_block);
         }));
 
+    RETURN_IF_ERROR(
+        block_delegate_->OnBlocksReceived(allocated_ids, header.uuid));
     uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
-    RETURN_IF_ERROR(delegate_->OnBlocksReceived(allocated_ids, header.uuid));
   } else if (header.op == 6) {  // Explicit Multi-Block Targeted Push
-    TF_ASSIGN_OR_RETURN(MajorOrder major_order,
-                        ParseMajorOrder(header.major_order));
-    std::vector<int> allocated_ids(header.num_blocks, 0);
+    TF_ASSIGN_OR_RETURN(MajorOrder major_order, ParseMajorOrder(header.flags));
+    std::vector<int> allocated_ids(header.count_or_size, 0);
     RETURN_IF_ERROR(ReadExact(client_fd, allocated_ids.data(),
-                              header.num_blocks * sizeof(int)));
+                              header.count_or_size * sizeof(int)));
     uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
 
     RETURN_IF_ERROR(ForEachPayload(
-        major_order, delegate_->num_layers(), delegate_->num_shards(),
-        header.num_blocks, [&](size_t l, size_t sh, size_t k) -> absl::Status {
+        major_order, block_delegate_->num_layers(),
+        block_delegate_->num_shards(), header.count_or_size,
+        [&](size_t l, size_t sh, size_t k) -> absl::Status {
           ABSL_DCHECK_LT(k, allocated_ids.size());
           const int dst_id = allocated_ids[k];
-          RETURN_IF_ERROR(ValidateBlockRange(
-              delegate_, l, sh, dst_id, /*num_blocks=*/1, bytes_per_block));
-          uint8_t* dest_ptr = delegate_->GetBlockHostPointer(l, sh, dst_id);
+          RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, dst_id, 1,
+                                             bytes_per_block));
+          uint8_t* dest_ptr =
+              block_delegate_->GetBlockHostPointer(l, sh, dst_id);
           return ReadExact(client_fd, dest_ptr, bytes_per_block);
         }));
 
+    RETURN_IF_ERROR(
+        block_delegate_->OnBlocksReceived(allocated_ids, header.uuid));
     ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
-    RETURN_IF_ERROR(delegate_->OnBlocksReceived(allocated_ids, header.uuid));
   } else if (header.op == 2) {  // Pull request
-    TF_ASSIGN_OR_RETURN(MajorOrder major_order,
-                          ParseMajorOrder(header.major_order));
-    if (delegate_->shard_factor() == 0) {
+    TF_ASSIGN_OR_RETURN(MajorOrder major_order, ParseMajorOrder(header.flags));
+    if (block_delegate_->shard_factor() == 0) {
       return absl::InvalidArgumentError("shard_factor must be positive");
     }
-    if (header.num_blocks % delegate_->shard_factor() != 0) {
+    if (header.count_or_size % block_delegate_->shard_factor() != 0) {
       return absl::InvalidArgumentError(
           "Requested remote block count is not divisible by shard_factor");
     }
-    BlockPacketHeader resp_header = {};
+    PacketHeader resp_header = {};
     resp_header.op = 2;
-    resp_header.major_order = header.major_order;
-    resp_header.remote_block_id = header.local_block_id;
-    resp_header.local_block_id = 0;
-    resp_header.num_blocks = header.num_blocks;
+    resp_header.flags = header.flags;
+    resp_header.remote_id = header.local_id;
+    resp_header.local_id = 0;
+    resp_header.count_or_size = header.count_or_size;
 
-    RETURN_IF_ERROR(
-        WriteExact(client_fd, &resp_header, sizeof(resp_header)));
+    RETURN_IF_ERROR(WriteExact(client_fd, &resp_header, sizeof(resp_header)));
 
-    size_t local_blocks = header.num_blocks / delegate_->shard_factor();
-    if (header.remote_block_id >
+    size_t local_blocks =
+        header.count_or_size / block_delegate_->shard_factor();
+    if (header.remote_id >
             static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
         local_blocks > static_cast<size_t>(std::numeric_limits<int>::max()) ||
         local_blocks > static_cast<size_t>(std::numeric_limits<int>::max()) -
-                           static_cast<size_t>(header.remote_block_id)) {
+                           static_cast<size_t>(header.remote_id)) {
       return absl::OutOfRangeError("Requested block range exceeds int range");
     }
     RETURN_IF_ERROR(ForEachPayload(
-        major_order, delegate_->num_layers(), delegate_->num_shards(),
-        local_blocks, [&](size_t l, size_t sh, size_t k) -> absl::Status {
-          const int read_id = static_cast<int>(header.remote_block_id + k);
-          RETURN_IF_ERROR(ValidateBlockRange(
-              delegate_, l, sh, read_id, /*num_blocks=*/1, bytes_per_block));
-          RETURN_IF_ERROR(delegate_->WaitForBlockRead(l, sh, read_id));
+        major_order, block_delegate_->num_layers(),
+        block_delegate_->num_shards(), local_blocks,
+        [&](size_t l, size_t sh, size_t k) -> absl::Status {
+          const int read_id = static_cast<int>(header.remote_id + k);
+          RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, read_id, 1,
+                                             bytes_per_block));
+          RETURN_IF_ERROR(block_delegate_->WaitForBlockRead(l, sh, read_id));
           const uint8_t* src_ptr =
-              delegate_->GetBlockHostPointer(l, sh, read_id);
+              block_delegate_->GetBlockHostPointer(l, sh, read_id);
           return WriteExact(client_fd, src_ptr, bytes_per_block);
         }));
-  } else if (header.op == 3) {
-    // Byte-range Resharding Pull Request!
-    uint32_t src_offset = header.remote_block_id;
-    uint32_t src_shard_idx = header.local_block_id;
-    uint32_t size_bytes = header.num_blocks;
-
-    if (delegate_->num_layers() == 0) {
-      return absl::InternalError("Server host buffers are not initialized");
-    }
-    if (src_shard_idx >= delegate_->num_shards()) {
-      return absl::InvalidArgumentError(
-          absl::StrCat("Invalid source shard index: ", src_shard_idx,
-                       ", total shards: ", delegate_->num_shards()));
-    }
-    const uint8_t* base_host_ptr = delegate_->GetHostPointer(0, src_shard_idx);
-    size_t host_size = delegate_->GetHostSize(0, src_shard_idx);
-    if (src_offset + size_bytes > host_size) {
-      return absl::InvalidArgumentError(absl::StrCat(
-          "Request out of bounds. Offset: ", src_offset, ", Size: ", size_bytes,
-          ", Shard Host Size: ", host_size));
-    }
-
-    const uint8_t* src_ptr = base_host_ptr + src_offset;
-    RETURN_IF_ERROR(WriteExact(client_fd, src_ptr, size_bytes));
   } else if (header.op == 4) {  // Single Block Push (Direct)
-    int dst_id = header.remote_block_id;
-    size_t size_bytes = header.num_blocks;
+    int dst_id = static_cast<int>(header.remote_id);
+    size_t size_bytes = header.count_or_size;
+    uint16_t buf_id = header.buffer_id;
 
-    // Handshake response
     uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
 
-    RETURN_IF_ERROR(ValidateBlockRange(delegate_, /*layer_idx=*/0,
-                                            /*shard_idx=*/0, dst_id,
-                                            /*num_blocks=*/1, size_bytes));
-    uint8_t* dest_ptr = delegate_->GetBlockHostPointer(0, 0, dst_id);
+    RETURN_IF_ERROR(
+        ValidateBlockRange(block_delegate_, buf_id, 0, dst_id, 1, size_bytes));
+    uint8_t* dest_ptr = block_delegate_->GetBlockHostPointer(buf_id, 0, dst_id);
+    if (dest_ptr == nullptr)
+      return absl::InvalidArgumentError("Null block pointer");
     RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, size_bytes));
 
+    RETURN_IF_ERROR(block_delegate_->OnSingleBlockReceived(dst_id, size_bytes));
     ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
-    RETURN_IF_ERROR(delegate_->OnSingleBlockReceived(dst_id, size_bytes));
-  } else if (header.op ==
-             5) {  // Arbitrary Byte Slice Push (Distributed Resharding)
-    uint32_t dst_offset = header.remote_block_id;
-    uint32_t dst_shard_idx = header.local_block_id;
-    uint32_t size_bytes = header.num_blocks;
-
-    if (delegate_->num_layers() == 0) {
-      return absl::InternalError("Server host buffers are not initialized");
-    }
-    if (dst_shard_idx >= delegate_->num_shards()) {
-      return absl::InvalidArgumentError(
-          absl::StrCat("Invalid destination shard index: ", dst_shard_idx,
-                       ", total shards: ", delegate_->num_shards()));
-    }
-    uint8_t* base_host_ptr = delegate_->GetHostPointer(0, dst_shard_idx);
-    size_t host_size = delegate_->GetHostSize(0, dst_shard_idx);
-    if (dst_offset + size_bytes > host_size) {
-      return absl::InvalidArgumentError(absl::StrCat(
-          "Destination out of bounds. Offset: ", dst_offset,
-          ", Size: ", size_bytes, ", Shard Host Size: ", host_size));
-    }
-    uint8_t* dest_ptr = base_host_ptr + dst_offset;
-    RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, size_bytes));
-
-    uint8_t ack = 1;
-    RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
+  } else {
+    return absl::UnimplementedError(
+        absl::StrCat("Unsupported block transport op: ", header.op));
   }
   return absl::OkStatus();
-}
-
-void BlockTransport::ConnectionWorker(int client_fd) {
-  while (!stopping_) {
-    struct pollfd pfd;
-    pfd.fd = client_fd;
-    pfd.events = POLLIN;
-    int ret = poll(&pfd, 1, 50);
-    if (ret < 0) {
-      break;
-    }
-    if (ret == 0) continue;
-
-    if (!ProcessSingleRequest(client_fd).ok()) {
-      break;
-    }
-  }
-  close(client_fd);
-  {
-    absl::MutexLock _(mu_);
-    active_client_fds_.erase(std::remove(active_client_fds_.begin(),
-                                         active_client_fds_.end(), client_fd),
-                             active_client_fds_.end());
-  }
-}
-
-void BlockTransport::ListenerLoop() {
-  while (!stopping_) {
-    struct pollfd pfd;
-    pfd.fd = server_fd_;
-    pfd.events = POLLIN;
-    int ret = poll(&pfd, 1, 50);
-    if (ret < 0) {
-      if (stopping_) break;
-      continue;
-    }
-    if (ret == 0) continue;
-
-    struct sockaddr_in6 client_addr;
-    socklen_t clilen = sizeof(client_addr);
-    int client_fd = accept(
-        server_fd_, reinterpret_cast<struct sockaddr*>(&client_addr), &clilen);
-    if (client_fd < 0) {
-      if (stopping_) break;
-      continue;
-    }
-
-    int opt = 1;
-    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
-    // Match the connect side (ConnectToPeer): without these the accepted
-    // (producer send) socket falls back to the small default buffer, capping
-    // the per-flow window on a high-BDP link.
-    int buf_opt = 16 * 1024 * 1024;  // 16MB
-    setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &buf_opt, sizeof(buf_opt));
-    setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &buf_opt, sizeof(buf_opt));
-
-    {
-      absl::MutexLock _(mu_);
-      active_client_fds_.push_back(client_fd);
-    }
-
-    worker_threads_.push_back(
-        std::thread([this, client_fd]() { ConnectionWorker(client_fd); }));
-  }
 }
 
 absl::StatusOr<std::vector<int>> BlockTransport::Push(
@@ -639,27 +307,24 @@ absl::Status BlockTransport::WriteBlockDirect(const std::string& peer,
     }
   });
 
-  BlockPacketHeader header;
-  header.op = 4;  // Single Block Push (Direct)
-  header.remote_block_id = remote_block_id;
-  header.local_block_id = 0;
-  header.num_blocks = size_bytes;
+  PacketHeader header = {};
+  header.op = 4;
+  header.buffer_id = 0;
+  header.remote_id = static_cast<uint32_t>(remote_block_id);
+  header.count_or_size = static_cast<uint32_t>(size_bytes);
 
   RETURN_IF_ERROR(WriteExact(fd, &header, sizeof(header)));
 
   uint8_t ack = 0;
   RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
-  if (ack != 1) {
-    return absl::InternalError("Direct push handshaking failed");
-  }
+  if (ack != 1) return absl::InternalError("WriteBlockDirect handshake failed");
 
   RETURN_IF_ERROR(WriteExact(fd, data_ptr, size_bytes));
 
   ack = 0;
   RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
-  if (ack != 1) {
-    return absl::InternalError("Direct push verification failed");
-  }
+  if (ack != 1)
+    return absl::InternalError("WriteBlockDirect completion ack failed");
 
   ok_to_pool = true;
   return absl::OkStatus();
@@ -675,20 +340,20 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
     return absl::InvalidArgumentError("Block list cannot be empty");
   }
 
-  if (delegate_->shard_factor() == 0) {
+  if (block_delegate_->shard_factor() == 0) {
     return absl::InvalidArgumentError("shard_factor must be positive");
   }
-  if (num_blocks % delegate_->shard_factor() != 0) {
+  if (num_blocks % block_delegate_->shard_factor() != 0) {
     return absl::InvalidArgumentError(
         "Block count must be divisible by shard_factor");
   }
-  size_t local_blocks = num_blocks / delegate_->shard_factor();
+  size_t local_blocks = num_blocks / block_delegate_->shard_factor();
   if (local_blocks == 0) {
     return absl::InvalidArgumentError("Local block list cannot be empty");
   }
   if (!explicit_dst_ptrs.empty() &&
       explicit_dst_ptrs.size() !=
-          delegate_->num_layers() * delegate_->num_shards()) {
+          block_delegate_->num_layers() * block_delegate_->num_shards()) {
     return absl::InvalidArgumentError("explicit_dst_ptrs size mismatch");
   }
 
@@ -699,8 +364,8 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
     }
     allocated_ids = local_block_ids;
   } else {
-    TF_ASSIGN_OR_RETURN(allocated_ids, delegate_->AllocateBlocks(
-                                             local_blocks));
+    TF_ASSIGN_OR_RETURN(allocated_ids,
+                        block_delegate_->AllocateBlocks(local_blocks));
   }
 
   int P = parallelism;
@@ -716,20 +381,23 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
   const size_t base_blocks_per_stream = local_blocks / P;
   const size_t remainder = local_blocks % P;
   size_t local_block_offset = 0;
+  size_t remote_block_offset = 0;
+
   for (int i = 0; i < P; ++i) {
     const size_t local_block_count =
         base_blocks_per_stream + (static_cast<size_t>(i) < remainder ? 1 : 0);
-    const size_t remote_block_offset =
-        local_block_offset * delegate_->shard_factor();
     const size_t remote_block_count =
-        local_block_count * delegate_->shard_factor();
-    threads.push_back(std::thread(
-        &BlockTransport::H2hReadWorker, this, i, peer, local_block_offset,
-        local_block_count, remote_block_offset, remote_block_count,
-        std::ref(src_block_ids), std::ref(allocated_ids),
-        std::ref(explicit_dst_ptrs), std::ref(statuses), major_order,
-        on_block_received));
+        local_block_count * block_delegate_->shard_factor();
+
+    threads.push_back(
+        std::thread(&BlockTransport::H2hReadWorker, this, i, peer,
+                    local_block_offset, local_block_count, remote_block_offset,
+                    remote_block_count, std::ref(src_block_ids),
+                    std::ref(allocated_ids), std::ref(explicit_dst_ptrs),
+                    std::ref(statuses), major_order, on_block_received));
+
     local_block_offset += local_block_count;
+    remote_block_offset += remote_block_count;
   }
 
   for (auto& t : threads) {
@@ -766,17 +434,18 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
     }
   });
 
-  BlockPacketHeader header = {};
+  PacketHeader header = {};
   header.op = dst_block_ids.empty() ? 1 : 6;
-  header.major_order = static_cast<uint8_t>(major_order);
-  header.remote_block_id = 0;
-  header.local_block_id = 0;
+  header.flags = static_cast<uint8_t>(major_order);
+  header.buffer_id = 0;
+  header.remote_id = 0;
+  header.local_id = 0;
   header.uuid = uuid;
   if (block_count > std::numeric_limits<uint32_t>::max()) {
     statuses[stream_idx] = absl::OutOfRangeError("Block count exceeds uint32");
     return;
   }
-  header.num_blocks = static_cast<uint32_t>(block_count);
+  header.count_or_size = static_cast<uint32_t>(block_count);
 
   absl::Status s = WriteExact(fd, &header, sizeof(header));
   if (!s.ok()) {
@@ -786,8 +455,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
 
   if (header.op == 6) {
     ABSL_DCHECK_LE(block_offset + block_count, dst_block_ids.size());
-    s = WriteExact(fd, &dst_block_ids[block_offset],
-                   block_count * sizeof(int));
+    s = WriteExact(fd, &dst_block_ids[block_offset], block_count * sizeof(int));
     if (!s.ok()) {
       statuses[stream_idx] = s;
       return;
@@ -817,19 +485,19 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
     }
   }
 
-  size_t bytes_per_block = delegate_->bytes_per_block();
+  size_t bytes_per_block = block_delegate_->bytes_per_block();
 
-  s = ForEachPayload(major_order, delegate_->num_layers(),
-                     delegate_->num_shards(), block_count,
-                     [&](size_t l, size_t sh, size_t k) -> absl::Status {
-      const uint8_t* base_host_ptr = delegate_->GetHostPointer(l, sh);
-      ABSL_DCHECK_LT(block_offset + k, src_block_ids.size());
-      const int src_id = src_block_ids[block_offset + k];
-      RETURN_IF_ERROR(ValidateBlockRange(
-          delegate_, l, sh, src_id, /*num_blocks=*/1, bytes_per_block));
-      const uint8_t* src_ptr = base_host_ptr + src_id * bytes_per_block;
-      return WriteExact(fd, src_ptr, bytes_per_block);
-    });
+  s = ForEachPayload(
+      major_order, block_delegate_->num_layers(), block_delegate_->num_shards(),
+      block_count, [&](size_t l, size_t sh, size_t k) -> absl::Status {
+        const uint8_t* base_host_ptr = block_delegate_->GetHostPointer(l, sh);
+        ABSL_DCHECK_LT(block_offset + k, src_block_ids.size());
+        const int src_id = src_block_ids[block_offset + k];
+        RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, src_id, 1,
+                                           bytes_per_block));
+        const uint8_t* src_ptr = base_host_ptr + src_id * bytes_per_block;
+        return WriteExact(fd, src_ptr, bytes_per_block);
+      });
   if (!s.ok()) {
     statuses[stream_idx] = s;
     return;
@@ -837,11 +505,12 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
 
   uint8_t ack = 0;
   s = ReadExact(fd, &ack, 1);
-  if (!s.ok()) {
-    statuses[stream_idx] = s;
+  if (!s.ok() || ack != 1) {
+    statuses[stream_idx] = absl::InternalError("Push verification failed");
     return;
   }
-  ok_to_pool = true;  // clean completion → keep the warm connection (Exp-3)
+
+  ok_to_pool = true;
 }
 
 void BlockTransport::H2hReadWorker(
@@ -868,7 +537,7 @@ void BlockTransport::H2hReadWorker(
     }
   });
 
-  size_t SF = delegate_->shard_factor();
+  size_t SF = block_delegate_->shard_factor();
 
   if (remote_block_offset > src_block_ids.size() ||
       remote_block_count > src_block_ids.size() - remote_block_offset) {
@@ -911,14 +580,14 @@ void BlockTransport::H2hReadWorker(
                       curr_local_count * SF});
   }
 
-  size_t bytes_per_block = delegate_->bytes_per_block();
+  size_t bytes_per_block = block_delegate_->bytes_per_block();
 
   for (const auto& chunk : chunks) {
-    BlockPacketHeader header = {};
+    PacketHeader header = {};
     header.op = 2;  // Pull request
-    header.major_order = static_cast<uint8_t>(major_order);
+    header.flags = static_cast<uint8_t>(major_order);
     int remote_read_block_id =
-        delegate_->GetRemoteReadBlockId(chunk.base_remote_id, 0);
+        block_delegate_->GetRemoteReadBlockId(chunk.base_remote_id, 0);
     if (remote_read_block_id < 0 ||
         static_cast<uint64_t>(remote_read_block_id) >
             std::numeric_limits<uint32_t>::max() ||
@@ -927,19 +596,8 @@ void BlockTransport::H2hReadWorker(
           absl::OutOfRangeError("Remote block range exceeds transport header");
       return;
     }
-    header.remote_block_id = static_cast<uint32_t>(remote_read_block_id);
-    ABSL_DCHECK_LT(local_block_offset + chunk.local_start_idx,
-                   allocated_ids.size());
-    int local_block_id =
-        allocated_ids[local_block_offset + chunk.local_start_idx];
-    if (local_block_id < 0 || static_cast<uint64_t>(local_block_id) >
-                                  std::numeric_limits<uint32_t>::max()) {
-      statuses[stream_idx] =
-          absl::OutOfRangeError("Local block id exceeds transport header");
-      return;
-    }
-    header.local_block_id = static_cast<uint32_t>(local_block_id);
-    header.num_blocks = static_cast<uint32_t>(chunk.remote_count);
+    header.remote_id = static_cast<uint32_t>(remote_read_block_id);
+    header.count_or_size = static_cast<uint32_t>(chunk.remote_count);
 
     absl::Status s = WriteExact(fd, &header, sizeof(header));
     if (!s.ok()) {
@@ -947,150 +605,65 @@ void BlockTransport::H2hReadWorker(
       return;
     }
 
-    BlockPacketHeader resp_header = {};
+    PacketHeader resp_header = {};
     s = ReadExact(fd, &resp_header, sizeof(resp_header));
     if (!s.ok()) {
       statuses[stream_idx] = s;
       return;
     }
-    if (resp_header.op != 2 || resp_header.num_blocks != chunk.remote_count) {
+    if (resp_header.op != 2 ||
+        resp_header.count_or_size != chunk.remote_count) {
       statuses[stream_idx] =
           absl::InternalError("Unexpected block pull response header");
       return;
     }
-    if (resp_header.major_order != static_cast<uint8_t>(major_order)) {
+    if (resp_header.flags != static_cast<uint8_t>(major_order)) {
       statuses[stream_idx] =
           absl::InternalError("Unexpected block pull response major order");
       return;
     }
 
     s = ForEachPayload(
-        major_order, delegate_->num_layers(), delegate_->num_shards(),
-        chunk.local_count, [&](size_t l, size_t sh, size_t k) -> absl::Status {
-        uint8_t* base_host_ptr =
-            explicit_dst_ptrs.empty()
-                ? delegate_->GetHostPointer(l, sh)
-                : explicit_dst_ptrs[l * delegate_->num_shards() + sh];
-        if (base_host_ptr == nullptr) {
-          return absl::FailedPreconditionError(
-              "Destination host pointer is null");
-        }
+        major_order, block_delegate_->num_layers(),
+        block_delegate_->num_shards(), chunk.local_count,
+        [&](size_t l, size_t sh, size_t k) -> absl::Status {
+          uint8_t* base_host_ptr = nullptr;
+          if (!explicit_dst_ptrs.empty()) {
+            base_host_ptr =
+                explicit_dst_ptrs[l * block_delegate_->num_shards() + sh];
+          } else {
+            base_host_ptr = block_delegate_->GetHostPointer(l, sh);
+          }
+          if (base_host_ptr == nullptr) {
+            return absl::FailedPreconditionError(
+                "Destination host pointer is null");
+          }
 
-        ABSL_DCHECK_LT(local_block_offset + chunk.local_start_idx + k,
-                       allocated_ids.size());
-        const int dst_id =
-            allocated_ids[local_block_offset + chunk.local_start_idx + k];
-        if (dst_id < 0) {
-          return absl::InvalidArgumentError(
-              "Destination block id is negative");
-        }
-        if (explicit_dst_ptrs.empty()) {
-          RETURN_IF_ERROR(ValidateBlockRange(
-              delegate_, l, sh, dst_id, /*num_blocks=*/1, bytes_per_block));
-        }
-        uint8_t* dest_ptr = base_host_ptr + dst_id * bytes_per_block;
-        RETURN_IF_ERROR(ReadExact(fd, dest_ptr, bytes_per_block));
-        if (on_block_received) {
-          RETURN_IF_ERROR(
-              on_block_received(l, sh, dst_id, bytes_per_block));
-        }
-        return absl::OkStatus();
-      });
+          ABSL_DCHECK_LT(local_block_offset + chunk.local_start_idx + k,
+                         allocated_ids.size());
+          const int dst_id =
+              allocated_ids[local_block_offset + chunk.local_start_idx + k];
+          if (dst_id < 0) {
+            return absl::InvalidArgumentError(
+                "Destination block id is negative");
+          }
+          if (explicit_dst_ptrs.empty()) {
+            RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, dst_id,
+                                               1, bytes_per_block));
+          }
+          uint8_t* dst_ptr = base_host_ptr + dst_id * bytes_per_block;
+          RETURN_IF_ERROR(ReadExact(fd, dst_ptr, bytes_per_block));
+          if (on_block_received != nullptr) {
+            RETURN_IF_ERROR(on_block_received(l, sh, dst_id, bytes_per_block));
+          }
+          return absl::OkStatus();
+        });
     if (!s.ok()) {
       statuses[stream_idx] = s;
       return;
     }
   }
-  ok_to_pool = true;  // clean completion → keep the warm connection (Exp-3)
-}
-
-absl::Status BlockTransport::PullWeightsChunk(
-    const std::string& source, size_t src_shard_idx, size_t src_offset_bytes,
-    size_t dst_shard_idx, size_t dst_offset_bytes, size_t size_bytes) {
-  if (source.empty()) {
-    return absl::InvalidArgumentError("Source peer address cannot be empty");
-  }
-
-  size_t host_size = delegate_->GetHostSize(0, dst_shard_idx);
-  if (dst_offset_bytes + size_bytes > host_size) {
-    return absl::InvalidArgumentError(absl::StrCat(
-        "Destination offset out of bounds. Offset: ", dst_offset_bytes,
-        ", Size: ", size_bytes, ", Shard Host Size: ", host_size));
-  }
-
-  // Establish peer socket connection
-  auto status_or_fd = AcquireConnection(source);
-  if (!status_or_fd.ok()) return status_or_fd.status();
-  int fd = status_or_fd.value();
-  bool ok_to_pool = false;
-  auto fd_cleaner = absl::MakeCleanup([&] {
-    if (ok_to_pool) {
-      ReleaseConnection(source, fd);
-    } else {
-      shutdown(fd, SHUT_RDWR);
-      close(fd);
-    }
-  });
-
-  // Send our customized resharding pull header (op = 3)
-  BlockPacketHeader header = {};
-  header.op = 3;
-  header.remote_block_id = static_cast<uint32_t>(src_offset_bytes);
-  header.local_block_id = static_cast<uint32_t>(src_shard_idx);
-  header.num_blocks = static_cast<uint32_t>(size_bytes);
-
-  RETURN_IF_ERROR(WriteExact(fd, &header, sizeof(header)));
-
-  // Read bytes directly into our local Host buffer!
-  uint8_t* dest_ptr =
-      delegate_->GetHostPointer(0, dst_shard_idx) + dst_offset_bytes;
-  RETURN_IF_ERROR(ReadExact(fd, dest_ptr, size_bytes));
-
   ok_to_pool = true;
-  return absl::OkStatus();
-}
-
-absl::Status BlockTransport::PushWeightsChunk(const std::string& peer,
-                                              size_t dst_shard_idx,
-                                              size_t dst_offset_bytes,
-                                              const uint8_t* data_ptr,
-                                              size_t size_bytes) {
-  if (peer.empty()) {
-    return absl::InvalidArgumentError(
-        "Destination peer address cannot be empty");
-  }
-
-  TF_ASSIGN_OR_RETURN(const int fd, AcquireConnection(peer));
-  bool ok_to_pool = false;
-  auto fd_cleaner = absl::MakeCleanup([&] {
-    if (ok_to_pool) {
-      ReleaseConnection(peer, fd);
-    } else {
-      shutdown(fd, SHUT_RDWR);
-      close(fd);
-    }
-  });
-
-  BlockPacketHeader header = {};
-  // Operation code 5 signals low-overhead streaming of arbitrary,
-  // non-contiguous strided byte slices directly into a remote TPU shard Host
-  // buffer offset.
-  header.op = 5;
-  header.remote_block_id = static_cast<uint32_t>(dst_offset_bytes);
-  header.local_block_id = static_cast<uint32_t>(dst_shard_idx);
-  header.num_blocks = static_cast<uint32_t>(size_bytes);
-
-  RETURN_IF_ERROR(WriteExact(fd, &header, sizeof(header)));
-  RETURN_IF_ERROR(WriteExact(fd, data_ptr, size_bytes));
-
-  uint8_t ack = 0;
-  RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
-  if (ack != 1) {
-    return absl::InternalError("PushWeightsChunk verification failed");
-  }
-
-  ok_to_pool = true;
-  return absl::OkStatus();
 }
 
 }  // namespace transport
