@@ -61,6 +61,7 @@ cc_library(
         ":raw_transfer_core",
         ":raw_transfer_impl",
         ":status_macros",
+        ":tpu_utils",
         ":xla_raw_transfer_headers",
         "//transport:block_transport",
         "@com_google_absl//absl/base:core_headers",
@@ -117,6 +118,7 @@ cc_library(
     deps = [
         ":tpu_utils",
         ":xla_raw_transfer_headers",
+        "@com_google_absl//absl/base",
         "@com_google_absl//absl/base:nullability",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
@@ -140,6 +142,10 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/tsl/platform:logging",
     ],
@@ -197,6 +203,7 @@ cc_library(
     features = ["-use_header_modules"],
     deps = [
         ":xla_raw_transfer_headers",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
@@ -246,17 +253,17 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":host_memory_allocator",
-        ":numa_thread_pool",
         ":raw_transfer_core",
         ":tpu_utils",
         "//kv_cache:kv_cache_manager_base",
-        "//transport:block_transport",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/types:span",
+        "@com_google_absl//absl/synchronization",
         "@xla//xla:future",
         "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/tsl/concurrency:future",
     ],
 )
 
@@ -351,6 +358,7 @@ cc_test(
     deps = [
         ":tpu_pjrt_manager",
         ":tpu_utils",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/tsl/platform:logging",
         "@xla//xla/tsl/platform:statusor",
@@ -379,7 +387,6 @@ cc_test(
         ":raiden_manager_base",
         ":raw_transfer_core",
         ":tpu_pjrt_manager",
-        "//transport:block_transport",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",

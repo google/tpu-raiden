@@ -46,6 +46,7 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
+    self._managers = []
     device_type = "tpu"
     try:
       self.devices = jax.devices(device_type)
@@ -59,6 +60,19 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     self.num_layers = 2
     self.block_size = 1
     self.skip_lock = True
+
+  def tearDown(self):
+    for mgr in self._managers:
+      try:
+        mgr.close()
+      except Exception:  # pylint: disable=broad-except
+        pass
+    self._managers.clear()
+    super().tearDown()
+
+  def manage(self, manager):
+    self._managers.append(manager)
+    return manager
 
   def create_mesh(self, axis_shapes, axis_names, devices=None):
     try:
@@ -100,12 +114,14 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     shape = (4, 128, 8, 8, 128)
     kv_caches = [jax.device_put(jnp.zeros(shape), tpu_sharding)]
 
-    engine = KVCacheManager(
-        kv_caches=kv_caches,
-        local_control_port=0,
-        max_blocks=4,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    engine = self.manage(
+        KVCacheManager(
+            kv_caches=kv_caches,
+            local_control_port=0,
+            max_blocks=4,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
     self.assertIsNotNone(engine)
 
@@ -135,30 +151,36 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = KVCacheManager(
-        kv_caches=src_caches,
-        local_control_port=0,
-        max_blocks=2,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    producer = self.manage(
+        KVCacheManager(
+            kv_caches=src_caches,
+            local_control_port=0,
+            max_blocks=2,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
-    consumer = KVCacheManager(
-        kv_caches=dst_caches,
-        local_control_port=0,
-        max_blocks=2,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    consumer = self.manage(
+        KVCacheManager(
+            kv_caches=dst_caches,
+            local_control_port=0,
+            max_blocks=2,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
-    port = getattr(producer, "local_control_port", 0)
-    self.assertGreater(port, 0)
+    ports = producer.local_ports
+    self.assertGreater(len(ports), 0)
+    for p in ports:
+      self.assertGreater(p, 0)
 
     req_id = "test_req_poll_jax"
     uuid = 12345
     producer.register_read(req_id, uuid, [0, 1])
 
-    remote_endpoint = f"127.0.0.1:{port}"
+    remote_endpoint = ",".join([f"127.0.0.1:{p}" for p in ports])
     consumer.start_read(
         req_id=req_id,
         uuid=uuid,
@@ -221,30 +243,36 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = KVCacheManager(
-        kv_caches=src_caches,
-        local_control_port=0,
-        max_blocks=3,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    producer = self.manage(
+        KVCacheManager(
+            kv_caches=src_caches,
+            local_control_port=0,
+            max_blocks=3,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
-    consumer = KVCacheManager(
-        kv_caches=dst_caches,
-        local_control_port=0,
-        max_blocks=3,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    consumer = self.manage(
+        KVCacheManager(
+            kv_caches=dst_caches,
+            local_control_port=0,
+            max_blocks=3,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
-    port = getattr(producer, "local_control_port", 0)
-    self.assertGreater(port, 0)
+    ports = producer.local_ports
+    self.assertGreater(len(ports), 0)
+    for p in ports:
+      self.assertGreater(p, 0)
 
     req_id = "test_req_non_contig"
     uuid = 54321
     producer.register_read(req_id, uuid, [0, 2])
 
-    remote_endpoint = f"127.0.0.1:{port}"
+    remote_endpoint = ",".join([f"127.0.0.1:{p}" for p in ports])
     consumer.start_read(
         req_id=req_id,
         uuid=uuid,
@@ -309,30 +337,36 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = KVCacheManager(
-        kv_caches=src_caches,
-        local_control_port=0,
-        max_blocks=2,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    producer = self.manage(
+        KVCacheManager(
+            kv_caches=src_caches,
+            local_control_port=0,
+            max_blocks=2,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
-    consumer = KVCacheManager(
-        kv_caches=dst_caches,
-        local_control_port=0,
-        max_blocks=2,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    consumer = self.manage(
+        KVCacheManager(
+            kv_caches=dst_caches,
+            local_control_port=0,
+            max_blocks=2,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
-    port = getattr(producer, "local_control_port", 0)
-    self.assertGreater(port, 0)
+    ports = producer.local_ports
+    self.assertGreater(len(ports), 0)
+    for p in ports:
+      self.assertGreater(p, 0)
 
     req_id = "test_req_reorder"
     uuid = 98765
     producer.register_read(req_id, uuid, [0, 1])
 
-    remote_endpoint = f"127.0.0.1:{port}"
+    remote_endpoint = ",".join([f"127.0.0.1:{p}" for p in ports])
     consumer.start_read(
         req_id=req_id,
         uuid=uuid,
@@ -395,24 +429,30 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = KVCacheManager(
-        kv_caches=src_caches,
-        local_control_port=0,
-        max_blocks=16,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    producer = self.manage(
+        KVCacheManager(
+            kv_caches=src_caches,
+            local_control_port=0,
+            max_blocks=16,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
-    consumer = KVCacheManager(
-        kv_caches=dst_caches,
-        local_control_port=0,
-        max_blocks=16,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    consumer = self.manage(
+        KVCacheManager(
+            kv_caches=dst_caches,
+            local_control_port=0,
+            max_blocks=16,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
-    port = getattr(producer, "local_control_port", 0)
-    self.assertGreater(port, 0)
+    ports = producer.local_ports
+    self.assertGreater(len(ports), 0)
+    for p in ports:
+      self.assertGreater(p, 0)
 
     req_id = "test_req_large_complex"
     uuid = 13579
@@ -423,7 +463,7 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
 
     producer.register_read(req_id, uuid, remote_blocks)
 
-    remote_endpoint = f"127.0.0.1:{port}"
+    remote_endpoint = ",".join([f"127.0.0.1:{p}" for p in ports])
     consumer.start_read(
         req_id=req_id,
         uuid=uuid,
@@ -488,30 +528,36 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = KVCacheManager(
-        kv_caches=src_caches,
-        local_control_port=0,
-        max_blocks=2,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    producer = self.manage(
+        KVCacheManager(
+            kv_caches=src_caches,
+            local_control_port=0,
+            max_blocks=2,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
-    consumer = KVCacheManager(
-        kv_caches=dst_caches,
-        local_control_port=0,
-        max_blocks=2,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    consumer = self.manage(
+        KVCacheManager(
+            kv_caches=dst_caches,
+            local_control_port=0,
+            max_blocks=2,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
-    port = getattr(producer, "local_control_port", 0)
-    self.assertGreater(port, 0)
+    ports = producer.local_ports
+    self.assertGreater(len(ports), 0)
+    for p in ports:
+      self.assertGreater(p, 0)
 
     req_id = "test_req_parallel"
     uuid = 77777
     producer.register_read(req_id, uuid, [0, 1])
 
-    remote_endpoint = f"127.0.0.1:{port}"
+    remote_endpoint = ",".join([f"127.0.0.1:{p}" for p in ports])
     consumer.start_read(
         req_id=req_id,
         uuid=uuid,

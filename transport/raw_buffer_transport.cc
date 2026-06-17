@@ -38,9 +38,32 @@
 #include "absl/synchronization/mutex.h"
 #include "xla/tsl/platform/statusor.h"
 #include "core/status_macros.h"
+#include "core/tpu_utils.h"
 
 namespace tpu_raiden {
 namespace transport {
+
+namespace {
+void GracefulClose(int fd) {
+  if (fd < 0) return;
+  shutdown(fd, SHUT_WR);
+  char buf[1024];
+  struct pollfd pfd;
+  pfd.fd = fd;
+  pfd.events = POLLIN;
+  while (true) {
+    int ret = poll(&pfd, 1, 100);
+    if (ret <= 0) {
+      break;
+    }
+    ssize_t n = read(fd, buf, sizeof(buf));
+    if (n <= 0) {
+      break;
+    }
+  }
+  close(fd);
+}
+}  // namespace
 
 absl::Status RawBufferTransport::WriteExact(int fd, const void* buffer,
                                             size_t length) {
@@ -74,7 +97,7 @@ absl::Status RawBufferTransport::ReadExact(int fd, void* buffer,
           absl::StrCat("Socket read failed: ", std::strerror(errno)));
     }
     if (bytes_read == 0) {
-      return absl::InternalError("Socket closed unexpectedly during read");
+      return absl::OutOfRangeError("EOF / Socket closed");
     }
     ptr += bytes_read;
     remaining -= bytes_read;
@@ -84,33 +107,130 @@ absl::Status RawBufferTransport::ReadExact(int fd, void* buffer,
 
 RawBufferTransport::RawBufferTransport(RawBufferTransportDelegate* delegate,
                                        int local_port, bool enable_conn_pool)
+    : RawBufferTransport(delegate, "", local_port, enable_conn_pool) {}
+
+RawBufferTransport::RawBufferTransport(RawBufferTransportDelegate* delegate,
+                                       const std::string& local_ip,
+                                       int& local_port, bool enable_conn_pool)
     : raw_delegate_(delegate),
-      local_port_(local_port),
+      local_ip_(local_ip),
       pooling_enabled_(enable_conn_pool) {
-  server_fd_ = socket(AF_INET6, SOCK_STREAM, 0);
-  if (server_fd_ < 0) {
-    LOG(FATAL) << "Failed to create server socket: " << std::strerror(errno);
+  if (!local_ip.empty()) {
+    auto ip_to_numa = tpu_raiden::DiscoverNumaNicIPs();
+    auto it = ip_to_numa.find(local_ip);
+    if (it != ip_to_numa.end()) {
+      numa_node_ = it->second;
+      LOG(INFO) << "RawBufferTransport bound to local_ip " << local_ip
+                << " mapped to NUMA node " << numa_node_;
+    } else {
+      LOG(WARNING)
+          << "RawBufferTransport bound to local_ip " << local_ip
+          << " could not be mapped to a NUMA node. Thread pinning disabled.";
+    }
   }
-  int opt = 1;
-  setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+  struct addrinfo hints;
+  struct addrinfo* result = nullptr;
+  std::memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;  // Allow IPv4 or IPv6
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_flags = AI_PASSIVE;
 
-  struct sockaddr_in6 serv_addr;
-  std::memset(&serv_addr, 0, sizeof(serv_addr));
-  serv_addr.sin6_family = AF_INET6;
-  serv_addr.sin6_addr = in6addr_any;
-  serv_addr.sin6_port = htons(local_port_);
-
-  if (bind(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
-           sizeof(serv_addr)) < 0) {
-    LOG(FATAL) << "Failed to bind server socket to port " << local_port_ << ": "
-               << std::strerror(errno);
+  std::string port_str = std::to_string(local_port);
+  int ret = getaddrinfo(local_ip.empty() ? nullptr : local_ip.c_str(),
+                        port_str.c_str(), &hints, &result);
+  if (ret != 0 || result == nullptr) {
+    LOG(FATAL) << "getaddrinfo failed for local_ip " << local_ip << ": "
+               << gai_strerror(ret);
   }
 
-  socklen_t addr_len = sizeof(serv_addr);
-  if (getsockname(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
+  int sock_fd = -1;
+  bool bound = false;
+  int bound_port = local_port;
+
+  if (local_port == 0) {
+    // Bind once to port 0 to let the OS assign an ephemeral port
+    for (struct addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
+      sock_fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+      if (sock_fd < 0) {
+        continue;
+      }
+
+      int opt = 1;
+      setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+      if (bind(sock_fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+        server_fd_ = sock_fd;
+        bound = true;
+        break;
+      }
+
+      close(sock_fd);
+    }
+  } else {
+    // Sequential port hunting for fixed port requests
+    for (int port_attempt = 0; port_attempt < 100; ++port_attempt) {
+      int target_port = local_port + port_attempt;
+      if (target_port > 65535) {
+        target_port = 1024 + (target_port % 64512);
+      }
+      bound_port = target_port;
+
+      for (struct addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
+        sock_fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (sock_fd < 0) {
+          continue;
+        }
+
+        int opt = 1;
+        setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        // Update the port in the resolved sockaddr
+        if (rp->ai_family == AF_INET) {
+          struct sockaddr_in* addr =
+              reinterpret_cast<struct sockaddr_in*>(rp->ai_addr);
+          addr->sin_port = htons(bound_port);
+        } else if (rp->ai_family == AF_INET6) {
+          struct sockaddr_in6* addr =
+              reinterpret_cast<struct sockaddr_in6*>(rp->ai_addr);
+          addr->sin6_port = htons(bound_port);
+        }
+
+        if (bind(sock_fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+          server_fd_ = sock_fd;
+          bound = true;
+          break;
+        }
+
+        close(sock_fd);
+      }
+
+      if (bound) {
+        break;
+      }
+    }
+  }
+
+  freeaddrinfo(result);
+
+  if (!bound) {
+    LOG(FATAL) << "Failed to bind server socket to any port in range ["
+               << local_port << ", " << local_port + 99 << "] on IP "
+               << local_ip;
+  }
+
+  struct sockaddr_storage bound_addr;
+  socklen_t addr_len = sizeof(bound_addr);
+  if (getsockname(server_fd_, reinterpret_cast<struct sockaddr*>(&bound_addr),
                   &addr_len) == 0) {
-    local_port_ = ntohs(serv_addr.sin6_port);
+    if (bound_addr.ss_family == AF_INET) {
+      local_port =
+          ntohs(reinterpret_cast<struct sockaddr_in*>(&bound_addr)->sin_port);
+    } else if (bound_addr.ss_family == AF_INET6) {
+      local_port =
+          ntohs(reinterpret_cast<struct sockaddr_in6*>(&bound_addr)->sin6_port);
+    }
   }
+  local_port_ = local_port;
 
   if (listen(server_fd_, 128) < 0) {
     LOG(FATAL) << "Failed to listen on server socket: " << std::strerror(errno);
@@ -126,7 +246,7 @@ RawBufferTransport::~RawBufferTransport() {
     close(server_fd_);
   }
   {
-    absl::MutexLock _(&mu_);
+    absl::MutexLock _(mu_);
     for (int fd : active_client_fds_) {
       shutdown(fd, SHUT_RDWR);
       close(fd);
@@ -188,11 +308,33 @@ absl::StatusOr<int> RawBufferTransport::ConnectToPeer(const std::string& peer) {
       continue;
     }
 
+    if (!local_ip_.empty()) {
+      struct addrinfo bind_hints;
+      struct addrinfo* bind_result = nullptr;
+      std::memset(&bind_hints, 0, sizeof(bind_hints));
+      bind_hints.ai_family = rp->ai_family;
+      bind_hints.ai_socktype = SOCK_STREAM;
+      bind_hints.ai_flags = AI_PASSIVE;
+
+      int bind_ret =
+          getaddrinfo(local_ip_.c_str(), "0", &bind_hints, &bind_result);
+      if (bind_ret == 0 && bind_result != nullptr) {
+        if (bind(sock_fd, bind_result->ai_addr, bind_result->ai_addrlen) < 0) {
+          VLOG(1) << "ConnectToPeer: Failed to bind source socket to "
+                  << local_ip_ << ": " << std::strerror(errno);
+        } else {
+          VLOG(1) << "ConnectToPeer: Successfully bound source socket to "
+                  << local_ip_;
+        }
+        freeaddrinfo(bind_result);
+      } else {
+        VLOG(1) << "ConnectToPeer: getaddrinfo failed for source bind IP "
+                << local_ip_ << ": " << gai_strerror(bind_ret);
+      }
+    }
+
     int opt = 1;
     setsockopt(sock_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
-    int buf_opt = 16 * 1024 * 1024;  // 16MB
-    setsockopt(sock_fd, SOL_SOCKET, SO_SNDBUF, &buf_opt, sizeof(buf_opt));
-    setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, &buf_opt, sizeof(buf_opt));
 
     if (connect(sock_fd, rp->ai_addr, rp->ai_addrlen) >= 0) {
       break; /* Success */
@@ -216,7 +358,7 @@ absl::StatusOr<int> RawBufferTransport::ConnectToPeer(const std::string& peer) {
 absl::StatusOr<int> RawBufferTransport::AcquireConnection(
     const std::string& peer) {
   if (pooling_enabled_) {
-    absl::MutexLock lock(&pool_mu_);
+    absl::MutexLock lock(pool_mu_);
     auto it = conn_pool_.find(peer);
     if (it != conn_pool_.end()) {
       while (!it->second.empty()) {
@@ -240,21 +382,19 @@ absl::StatusOr<int> RawBufferTransport::AcquireConnection(
 
 void RawBufferTransport::ReleaseConnection(const std::string& peer, int fd) {
   if (fd < 0) return;
-  absl::MutexLock lock(&pool_mu_);
+  absl::MutexLock lock(pool_mu_);
   if (!pooling_enabled_ || stopping_) {
-    shutdown(fd, SHUT_RDWR);
-    close(fd);
+    GracefulClose(fd);
     return;
   }
   conn_pool_[peer].push_back(fd);
 }
 
 void RawBufferTransport::ClosePooledConnections() {
-  absl::MutexLock lock(&pool_mu_);
+  absl::MutexLock lock(pool_mu_);
   for (auto& entry : conn_pool_) {
     for (int fd : entry.second) {
-      shutdown(fd, SHUT_RDWR);
-      close(fd);
+      GracefulClose(fd);
     }
   }
   conn_pool_.clear();
@@ -296,6 +436,14 @@ absl::Status RawBufferTransport::ProcessSingleRequest(int client_fd) {
     uint8_t* src_ptr = base_host_ptr + src_offset;
     RETURN_IF_ERROR(WriteExact(client_fd, src_ptr, size_bytes));
   } else {
+    LOG(ERROR) << "[RAIDEN_DEBUG] Received unknown op: "
+               << static_cast<int>(header.op)
+               << ", flags: " << static_cast<int>(header.flags)
+               << ", buffer_id: " << header.buffer_id
+               << ", remote_id: " << header.remote_id
+               << ", local_id: " << header.local_id
+               << ", count_or_size: " << header.count_or_size
+               << ", uuid: " << header.uuid;
     return HandleCustomRequest(client_fd, header);
   }
   return absl::OkStatus();
@@ -308,6 +456,12 @@ absl::Status RawBufferTransport::HandleCustomRequest(
 }
 
 void RawBufferTransport::ConnectionWorker(int client_fd) {
+  if (numa_node_ >= 0) {
+    if (tpu_raiden::PinCurrentThreadToNumaNode(numa_node_) != 0) {
+      LOG(WARNING) << "Failed to pin ConnectionWorker thread to NUMA node "
+                   << numa_node_;
+    }
+  }
   while (!stopping_) {
     struct pollfd pfd;
     pfd.fd = client_fd;
@@ -318,21 +472,59 @@ void RawBufferTransport::ConnectionWorker(int client_fd) {
     }
     if (ret == 0) continue;
 
-    if (!ProcessSingleRequest(client_fd).ok()) {
+    absl::Status status = ProcessSingleRequest(client_fd);
+    if (!status.ok()) {
+      if (absl::IsOutOfRange(status)) {
+        break;
+      }
+      LOG(ERROR) << "ConnectionWorker: ProcessSingleRequest failed: " << status;
       break;
     }
   }
-  close(client_fd);
+  GracefulClose(client_fd);
   {
-    absl::MutexLock _(&mu_);
+    absl::MutexLock _(mu_);
     active_client_fds_.erase(std::remove(active_client_fds_.begin(),
                                          active_client_fds_.end(), client_fd),
                              active_client_fds_.end());
   }
+  {
+    absl::MutexLock lock(finished_mu_);
+    finished_thread_ids_.push_back(std::this_thread::get_id());
+  }
+}
+
+void RawBufferTransport::ReapFinishedWorkerThreads() {
+  std::vector<std::thread::id> finished_ids;
+  {
+    absl::MutexLock lock(finished_mu_);
+    finished_ids.swap(finished_thread_ids_);
+  }
+  if (finished_ids.empty()) return;
+
+  absl::MutexLock lock(mu_);
+  for (auto id : finished_ids) {
+    auto it =
+        std::find_if(worker_threads_.begin(), worker_threads_.end(),
+                     [id](const std::thread& t) { return t.get_id() == id; });
+    if (it != worker_threads_.end()) {
+      if (it->joinable()) {
+        it->join();
+      }
+      worker_threads_.erase(it);
+    }
+  }
 }
 
 void RawBufferTransport::ListenerLoop() {
+  if (numa_node_ >= 0) {
+    if (tpu_raiden::PinCurrentThreadToNumaNode(numa_node_) != 0) {
+      LOG(WARNING) << "Failed to pin ListenerLoop thread to NUMA node "
+                   << numa_node_;
+    }
+  }
   while (!stopping_) {
+    ReapFinishedWorkerThreads();
     struct pollfd pfd;
     pfd.fd = server_fd_;
     pfd.events = POLLIN;
@@ -354,12 +546,9 @@ void RawBufferTransport::ListenerLoop() {
 
     int opt = 1;
     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
-    int buf_opt = 16 * 1024 * 1024;  // 16MB
-    setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &buf_opt, sizeof(buf_opt));
-    setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &buf_opt, sizeof(buf_opt));
 
     {
-      absl::MutexLock _(&mu_);
+      absl::MutexLock _(mu_);
       active_client_fds_.push_back(client_fd);
     }
 

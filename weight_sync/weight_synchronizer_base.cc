@@ -31,6 +31,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
 #include "xla/future.h"
 #include "xla/layout.h"
@@ -40,6 +41,7 @@
 #include "xla/tsl/platform/statusor.h"
 #include "core/raiden_manager_base.h"
 #include "core/raw_transfer_core.h"
+#include "core/tpu_utils.h"
 #include "weight_sync/weight_synchronizer_control_service.h"
 #include "weight_sync/weight_synchronizer_service.pb.h"
 
@@ -180,6 +182,14 @@ absl::Status TileBuffer(const uint8_t* src_linear, uint8_t* dst_tiled,
   return absl::OkStatus();
 }
 
+size_t GetBufferSizeOrDie(xla::PjRtBuffer* buffer) {
+  auto size_or = buffer->GetOnDeviceSizeInBytes();
+  if (!size_or.ok()) {
+    LOG(FATAL) << "Failed to get device size: " << size_or.status().ToString();
+  }
+  return *size_or;
+}
+
 }  // namespace
 
 WeightSynchronizerBase::WeightSynchronizerBase(
@@ -191,16 +201,23 @@ WeightSynchronizerBase::WeightSynchronizerBase(
     : tpu_raiden::RaidenManagerBase(
           layer_buffers.size(),
           layer_buffers.empty() ? 0 : layer_buffers[0].size(),
-          layer_buffers.empty()
-              ? 0
-              : layer_buffers[0][0]->GetOnDeviceSizeInBytes().value(),
-          local_port, parallelism) {
+          layer_buffers.empty() ? 0 : GetBufferSizeOrDie(layer_buffers[0][0]),
+          local_port, parallelism, /*max_staging_blocks=*/parallelism, [&]() {
+            auto detected = DetectLocalIpFromPjRtBuffers(layer_buffers);
+            if (detected.ok()) return std::optional<std::string>(*detected);
+            return std::optional<std::string>(std::nullopt);
+          }()) {
   if (num_layers_ == 0 || num_shards_ == 0) {
     return;
   }
 
   xla::PjRtBuffer* first_buffer = layer_buffers[0][0];
-  physical_size_ = first_buffer->GetOnDeviceSizeInBytes().value();
+  auto physical_size_or = first_buffer->GetOnDeviceSizeInBytes();
+  if (!physical_size_or.ok()) {
+    throw std::runtime_error(absl::StrCat(
+        "Failed to get device size: ", physical_size_or.status().ToString()));
+  }
+  physical_size_ = *physical_size_or;
   extension_ = raiden::GetRawBufferExtension(first_buffer, &c_api_);
 
   // Symmetrically register single, unified memory blocks representing the
@@ -228,7 +245,12 @@ WeightSynchronizerBase::WeightSynchronizerBase(
       xla::PjRtBuffer* dst_buffer = dst_buffers[i];
       ShardBufferInfoBase shard_info;
 
-      shard_info.device_size = dst_buffer->GetOnDeviceSizeInBytes().value();
+      auto device_size_or = dst_buffer->GetOnDeviceSizeInBytes();
+      if (!device_size_or.ok()) {
+        throw std::runtime_error(absl::StrCat(
+            "Failed to get device size: ", device_size_or.status().ToString()));
+      }
+      shard_info.device_size = *device_size_or;
       if (shard_info.device_size < physical_size_) {
         throw std::runtime_error(
             "Device buffer shard size smaller than physical weights size");
@@ -286,8 +308,9 @@ WeightSynchronizerBase::WeightSynchronizerBase(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     int parallelism, std::optional<int> control_port)
-    : tpu_raiden::RaidenManagerBase(num_layers, num_shards, slice_byte_size,
-                                    local_port, parallelism) {
+    : tpu_raiden::RaidenManagerBase(
+          num_layers, num_shards, slice_byte_size, local_port, parallelism,
+          /*max_staging_blocks=*/parallelism, std::nullopt) {
   physical_size_ = slice_byte_size_;
   shard_factor_ = 1;
   major_dim_size_ = 1;
@@ -579,19 +602,21 @@ absl::Status WeightSynchronizerBase::PullWeights(const std::string& source) {
 void WeightSynchronizerBase::SetExternalHostBuffer(
     const std::vector<raiden::BufferHoldAndAlias>& buffer_holds) {
   size_t idx = 0;
-  for (size_t l = 0; l < num_layers_; ++l) {
-    for (size_t sh = 0; sh < num_shards_; ++sh) {
-      if (idx < buffer_holds.size()) {
-        auto u_ptr_or = buffer_holds[idx].buffer->client()->UnsafeBufferPointer(
-            buffer_holds[idx].buffer);
-        if (u_ptr_or.ok()) {
-          layers_[l].shards[sh].host_ptr =
-              reinterpret_cast<uint8_t*>(u_ptr_or.value());
-          layers_[l].shards[sh].host_size =
-              buffer_holds[idx].buffer->GetOnDeviceSizeInBytes().value();
+  for (auto& layer : layers_) {
+    for (auto& shard : layer.shards) {
+      if (idx >= buffer_holds.size()) break;
+      auto u_ptr_or = buffer_holds[idx].buffer->client()->UnsafeBufferPointer(
+          buffer_holds[idx].buffer);
+      if (u_ptr_or.ok()) {
+        shard.host_ptr = reinterpret_cast<uint8_t*>(u_ptr_or.value());
+        auto size_or = buffer_holds[idx].buffer->GetOnDeviceSizeInBytes();
+        if (size_or.ok()) {
+          shard.host_size = *size_or;
+        } else {
+          LOG(ERROR) << "Failed to get device size: " << size_or.status();
         }
-        idx++;
       }
+      idx++;
     }
   }
 }

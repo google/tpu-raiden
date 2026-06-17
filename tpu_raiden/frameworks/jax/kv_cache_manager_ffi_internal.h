@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <memory>
 
+#include "absl/strings/string_view.h"
 #include "xla/ffi/api/ffi.h"
 #include "xla/stream_executor/stream.h"
 
@@ -28,25 +29,22 @@ extern std::unique_ptr<stream_executor::Stream> g_streams[32];
 
 xla::ffi::Error TriggerRaidenInitImpl(
     xla::ffi::AnyBuffer x, xla::ffi::AnyBuffer shard_idx_buf,
-    int64_t slice_byte_size, int32_t local_port,
-    int32_t parallelism, int32_t host_blocks_to_allocate, int32_t num_layers,
+    int64_t slice_byte_size, int32_t local_port, int32_t parallelism,
+    int32_t host_blocks_to_allocate, int32_t num_layers,
     xla::ffi::Result<xla::ffi::AnyBuffer> out);
 
-xla::ffi::Error TriggerRaidenH2dImpl(xla::ffi::AnyBuffer src_offsets,
-                                     xla::ffi::AnyBuffer dst_offsets,
-                                     xla::ffi::AnyBuffer copy_sizes,
-                                     xla::ffi::AnyBuffer shard_idx_buf,
-                                     xla::ffi::AnyBuffer cache_slice_buf,
-                                     int32_t layer_idx,
-                                     xla::ffi::Result<xla::ffi::AnyBuffer> out);
+xla::ffi::Error TriggerRaidenH2dImpl(
+    xla::ffi::AnyBuffer src_offsets, xla::ffi::AnyBuffer dst_offsets,
+    xla::ffi::AnyBuffer copy_sizes, xla::ffi::AnyBuffer shard_idx_buf,
+    xla::ffi::AnyBuffer stream_ptr_buf, xla::ffi::AnyBuffer cache_slice_buf,
+    int32_t layer_idx, xla::ffi::Result<xla::ffi::AnyBuffer> out);
 
-xla::ffi::Error TriggerRaidenD2hImpl(xla::ffi::AnyBuffer src_offsets,
-                                     xla::ffi::AnyBuffer dst_offsets,
-                                     xla::ffi::AnyBuffer copy_sizes,
-                                     xla::ffi::AnyBuffer shard_idx_buf,
-                                     xla::ffi::AnyBuffer cache_slice_buf,
-                                     int32_t layer_idx,
-                                     xla::ffi::Result<xla::ffi::AnyBuffer> out);
+xla::ffi::Error TriggerRaidenD2hImpl(
+    xla::ffi::AnyBuffer src_offsets, xla::ffi::AnyBuffer dst_offsets,
+    xla::ffi::AnyBuffer copy_sizes, xla::ffi::AnyBuffer shard_idx_buf,
+    xla::ffi::AnyBuffer stream_ptr_buf, xla::ffi::AnyBuffer uuid_buf,
+    xla::ffi::AnyBuffer cache_slice_buf, int32_t layer_idx,
+    xla::ffi::Result<xla::ffi::AnyBuffer> out);
 
 }  // namespace kv_cache
 }  // namespace tpu_raiden

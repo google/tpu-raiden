@@ -29,6 +29,7 @@
 #include "core/kv_cache_manager_with_transfer.h"
 
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -54,6 +55,7 @@
 #include <optional>
 #include <ratio>
 #include <set>
+#include <shared_mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -65,14 +67,12 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/types/span.h"
-#include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/tsl/concurrency/future.h"
 #include "core/host_memory_allocator.h"
 #include "core/raw_transfer_core.h"
 #include "core/tpu_utils.h"
 #include "kv_cache/kv_cache_manager_base.h"
-#include "transport/block_transport.h"
 
 namespace tpu_raiden {
 namespace {
@@ -88,7 +88,7 @@ void CheckStatus(const std::string& context, const absl::Status& status) {
   }
 }
 
-void EmitTimingLog(const std::string& message) { LOG(INFO) << message; }
+void EmitTimingLog(const std::string& message) { LOG(WARNING) << message; }
 
 template <typename T>
 T ValueOrThrow(const std::string& context, absl::StatusOr<T> value_or) {
@@ -144,28 +144,74 @@ std::pair<std::string, int> SplitEndpoint(const std::string& endpoint) {
   return {endpoint.substr(0, colon), std::stoi(endpoint.substr(colon + 1))};
 }
 
-int ConnectTcp(const std::string& endpoint) {
+int ConnectTcp(const std::string& endpoint, const std::string& local_ip) {
   auto [host, port] = SplitEndpoint(endpoint);
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) {
-    throw std::runtime_error("socket() failed: " +
-                             std::string(std::strerror(errno)));
-  }
-  int opt = 1;
-  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+  std::string port_str = std::to_string(port);
 
-  sockaddr_in addr;
-  std::memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(port);
-  if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
-    close(fd);
-    throw std::runtime_error("invalid IPv4 endpoint host: " + host);
+  struct addrinfo hints;
+  struct addrinfo* result = nullptr;
+  std::memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+
+  int ret = getaddrinfo(host.c_str(), port_str.c_str(), &hints, &result);
+  if (ret != 0 || result == nullptr) {
+    throw std::runtime_error("getaddrinfo failed for endpoint " + endpoint +
+                             ": " + gai_strerror(ret));
   }
-  if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-    std::string err = std::strerror(errno);
+
+  int fd = -1;
+  int last_errno = 0;
+  for (struct addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
+    fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+    if (fd < 0) {
+      last_errno = errno;
+      continue;
+    }
+
+    int opt = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+
+    if (!local_ip.empty() && local_ip != "127.0.0.1" && local_ip != "::1" &&
+        local_ip != "localhost") {
+      struct addrinfo bind_hints;
+      struct addrinfo* bind_result = nullptr;
+      std::memset(&bind_hints, 0, sizeof(bind_hints));
+      bind_hints.ai_family = rp->ai_family;
+      bind_hints.ai_socktype = SOCK_STREAM;
+      bind_hints.ai_flags = AI_PASSIVE;
+
+      int bind_ret =
+          getaddrinfo(local_ip.c_str(), "0", &bind_hints, &bind_result);
+      if (bind_ret == 0 && bind_result != nullptr) {
+        if (bind(fd, bind_result->ai_addr, bind_result->ai_addrlen) < 0) {
+          VLOG(1) << "ConnectTcp: Failed to bind source socket to " << local_ip
+                  << ": " << std::strerror(errno);
+        } else {
+          VLOG(1) << "ConnectTcp: Successfully bound source socket to "
+                  << local_ip;
+        }
+        freeaddrinfo(bind_result);
+      } else {
+        VLOG(1) << "ConnectTcp: getaddrinfo failed for source bind IP "
+                << local_ip << ": " << gai_strerror(bind_ret);
+      }
+    }
+
+    if (connect(fd, rp->ai_addr, rp->ai_addrlen) >= 0) {
+      break;
+    }
+
+    last_errno = errno;
     close(fd);
-    throw std::runtime_error("connect(" + endpoint + ") failed: " + err);
+    fd = -1;
+  }
+
+  freeaddrinfo(result);
+
+  if (fd < 0) {
+    throw std::runtime_error("connect(" + endpoint + ") failed: " +
+                             std::string(std::strerror(last_errno)));
   }
   return fd;
 }
@@ -174,21 +220,24 @@ static std::string GetPeerIp(int fd) {
   sockaddr_in addr;
   socklen_t len = sizeof(addr);
   if (getpeername(fd, reinterpret_cast<sockaddr*>(&addr), &len) < 0) {
-    throw std::runtime_error("getpeername() failed: " +
-                             std::string(std::strerror(errno)));
+    LOG(WARNING) << "getpeername() failed: " << std::strerror(errno)
+                 << ". Falling back to 127.0.0.1 for peer IP.";
+    return "127.0.0.1";
   }
   char ip_buf[INET_ADDRSTRLEN];
   if (inet_ntop(AF_INET, &addr.sin_addr, ip_buf, sizeof(ip_buf)) == nullptr) {
-    throw std::runtime_error("inet_ntop() failed: " +
-                             std::string(std::strerror(errno)));
+    LOG(WARNING) << "inet_ntop() failed: " << std::strerror(errno)
+                 << ". Falling back to 127.0.0.1 for peer IP.";
+    return "127.0.0.1";
   }
   return std::string(ip_buf);
 }
+
 static void WriteBlockIds(int fd, const std::vector<int64_t>& block_ids) {
   if (block_ids.empty()) return;
-  CheckStatus(
-      "control block ids write",
-      WriteExact(fd, block_ids.data(), block_ids.size() * sizeof(int64_t)));
+  CheckStatus("control block ids write",
+              WriteExact(fd, block_ids.empty() ? nullptr : &block_ids[0],
+                         block_ids.size() * sizeof(int64_t)));
 }
 
 static std::vector<int64_t> ReadBlockIds(int fd, uint64_t num_blocks) {
@@ -393,12 +442,12 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     bool unsafe_skip_buffer_lock, int parallelism,
     HostBufferAllocator host_allocator, int64_t node_id,
     int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
-    double timeout_s)
-    : KVCacheManagerBase(layer_buffers, local_port,
-                         host_blocks_to_allocate.has_value()
-                             ? *host_blocks_to_allocate
-                             : num_slots * max_blocks,
-                         unsafe_skip_buffer_lock, parallelism, host_allocator),
+    double timeout_s, std::optional<std::string> local_ip)
+    : KVCacheManagerBase(
+          layer_buffers, local_port,
+          host_blocks_to_allocate.has_value() ? *host_blocks_to_allocate
+                                              : num_slots * max_blocks,
+          unsafe_skip_buffer_lock, parallelism, host_allocator, local_ip),
       node_id_(node_id),
       local_control_port_(static_cast<int>(local_control_port)),
       local_data_port_(0),
@@ -430,12 +479,13 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     int parallelism, int64_t node_id, int64_t local_control_port,
-    int64_t max_blocks, int64_t num_slots, double timeout_s)
+    int64_t max_blocks, int64_t num_slots, double timeout_s,
+    std::optional<std::string> local_ip)
     : KVCacheManagerBase(num_layers, num_shards, slice_byte_size, local_port,
                          host_blocks_to_allocate.has_value()
                              ? *host_blocks_to_allocate
                              : num_slots * max_blocks,
-                         parallelism),
+                         parallelism, /*host_allocator=*/nullptr, local_ip),
       node_id_(node_id),
       local_control_port_(static_cast<int>(local_control_port)),
       local_data_port_(0),
@@ -481,7 +531,7 @@ int64_t KVCacheManagerWithTransfer::NotifyForRead(
   }
 
   {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     if (pending_acks_.erase(uuid) > 0) {
       done_sending_.insert(req_id);
       return 0;
@@ -500,7 +550,7 @@ int64_t KVCacheManagerWithTransfer::NotifyForRead(
   entry->register_start = register_start;
 
   {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     send_entries_[uuid] = entry;
   }
   cv_.notify_all();
@@ -515,32 +565,56 @@ int64_t KVCacheManagerWithTransfer::NotifyForRead(
   return static_cast<int64_t>(uuid);
 }
 
-void KVCacheManagerWithTransfer::StartRead(
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerWithTransfer::StartRead(
     const std::string& req_id, uint64_t uuid,
     const std::string& remote_endpoint,
     const std::vector<int64_t>& remote_block_ids,
     const std::vector<int64_t>& local_block_ids, int parallelism,
     std::optional<std::vector<int64_t>> local_host_block_ids) {
-  VLOG(1) << "KVCacheManagerWithTransfer::StartRead (Hybrid Bridge) called. "
+  const auto submit_start = std::chrono::steady_clock::now();
+  VLOG(1) << "KVCacheManagerWithTransfer::StartRead (Hybrid PUSH) called. "
              "req_id: "
-          << req_id << ", uuid: " << uuid << ", remote: " << remote_endpoint
-          << ", Thread: " << std::this_thread::get_id();
+          << req_id << ", uuid: " << uuid << ", remote: " << remote_endpoint;
+
   std::vector<int64_t> host_block_ids =
       local_host_block_ids.value_or(local_block_ids);
   CopyPlan load_plan =
       BuildLoadCopyPlan(remote_block_ids, local_block_ids, host_block_ids);
 
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    active_recv_entries_[uuid] =
-        RecvEntry{req_id, load_plan.h2d_local_block_ids};
-  }
+  auto [promise, future] = xla::MakePromise<void>();
+  auto shared_promise =
+      std::make_shared<xla::Promise<void>>(std::move(promise));
 
   if (load_plan.num_blocks == 0) {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     done_recving_.insert(req_id);
-    active_recv_entries_.erase(uuid);
-    return;
+    shared_promise->Set(absl::OkStatus());
+    return raiden::PjRtCopyFuture(std::move(future), {});
+  }
+
+  // Register the RecvEntry with all pipelining state
+  auto entry = std::make_shared<RecvEntry>();
+  entry->req_id = req_id;
+  entry->chip_block_ids = load_plan.h2d_local_block_ids;
+  entry->h2d_src_offsets = load_plan.h2d_copy.src_offsets;
+  entry->h2d_dst_offsets = load_plan.h2d_copy.dst_offsets;
+  entry->h2d_sizes = load_plan.h2d_copy.sizes;
+  entry->num_blocks = load_plan.num_blocks;
+  entry->overlap_h2d = !load_plan.RequiresHostReorder();
+  entry->host_dst_to_src = load_plan.host_dst_to_src;
+  entry->promise = shared_promise;
+  entry->submit_start = submit_start;
+
+  entry->h2d_received_counts.clear();
+  for (size_t i = 0; i < num_layers(); ++i) {
+    entry->h2d_received_counts.emplace_back(num_shards());
+  }
+  entry->h2d_issued.assign(num_layers(),
+                           std::vector<bool>(num_shards(), false));
+
+  {
+    std::unique_lock<std::shared_mutex> lock(mu_);
+    active_recv_entries_[uuid] = entry;
   }
 
   xla::PjRtBuffer* representative_buf = nullptr;
@@ -549,10 +623,51 @@ void KVCacheManagerWithTransfer::StartRead(
   }
   std::optional<int> target_node = GetLocalTpuNumaNode(representative_buf);
 
+  // Schedule the control setup on the push pool
+  VLOG(1)
+      << "StartRead: scheduling control setup task on push_pool_. Target NUMA: "
+      << (target_node.has_value() ? std::to_string(*target_node) : "none");
+
   push_pool_->Schedule(target_node, [this, req_id, uuid, remote_endpoint,
-                                     load_plan = std::move(load_plan)]() {
+                                     load_plan = std::move(load_plan),
+                                     shared_promise, parallelism]() {
+    VLOG(1) << "StartRead control setup task started in worker thread. req_id: "
+            << req_id << ", Thread: " << std::this_thread::get_id();
+    const auto worker_start = std::chrono::steady_clock::now();
+    bool failed = false;
+    int slot_idx = -1;
+    std::vector<int64_t> transport_blocks;
+
     try {
-      int control_fd = ConnectTcp(remote_endpoint);
+      if (load_plan.RequiresHostReorder()) {
+        // Must acquire a slot to write compact blocks before reordering
+        slot_idx = static_cast<int>(AcquireSlot());
+        VLOG(1) << "StartRead (PUSH): Acquired slot " << slot_idx
+                << " for req_id " << req_id;
+
+        // Update RecvEntry with slot_idx
+        std::shared_ptr<RecvEntry> entry;
+        {
+          std::shared_lock<std::shared_mutex> lock(mu_);
+          auto it = active_recv_entries_.find(uuid);
+          if (it != active_recv_entries_.end()) {
+            entry = it->second;
+          }
+        }
+        if (entry) {
+          std::lock_guard<std::mutex> lock(entry->h2d_mu);
+          entry->slot_idx = slot_idx;
+        }
+
+        // Use slot's contiguous blocks for H2H
+        std::vector<int> slot_blocks = ContiguousBlockIds(
+            StagingBlockBase(slot_idx), load_plan.num_blocks);
+        transport_blocks.assign(slot_blocks.begin(), slot_blocks.end());
+      } else {
+        transport_blocks = load_plan.transport_host_block_ids;
+      }
+
+      int control_fd = ConnectTcp(remote_endpoint, local_ip());
       auto control_cleanup =
           std::unique_ptr<int, void (*)(int*)>(&control_fd, [](int* p) {
             if (p && *p >= 0) close(*p);
@@ -565,29 +680,40 @@ void KVCacheManagerWithTransfer::StartRead(
       stream_request.num_blocks = static_cast<uint64_t>(load_plan.num_blocks);
       stream_request.consumer_data_port =
           static_cast<uint32_t>(local_data_port_);
+      stream_request.parallelism = static_cast<uint32_t>(parallelism);
+
       CheckStatus(
           "control pull stream write",
           WriteExact(control_fd, &stream_request, sizeof(stream_request)));
       WriteBlockIds(control_fd, load_plan.producer_remote_block_ids);
-      WriteBlockIds(control_fd, load_plan.transport_host_block_ids);
+      WriteBlockIds(control_fd, transport_blocks);
 
       ControlResponseHeader response = ReadControlResponseHeader(control_fd);
       if (response.status != 0) {
         throw std::runtime_error(
             "Remote producer rejected Hybrid Bridge read request");
       }
-      VLOG(1) << "StartRead (Hybrid Bridge) successfully registered pull "
-                 "request with Producer. req_id: "
-              << req_id;
+      VLOG(1) << "StartRead: Remote accepted PUSH request for UUID " << uuid;
     } catch (const std::exception& e) {
-      LOG(ERROR)
-          << "Raiden consumer error during Hybrid Bridge StartRead connect: "
-          << e.what();
-      std::lock_guard<std::mutex> lock(mu_);
+      LOG(ERROR) << "StartRead control request failed for req_id " << req_id
+                 << ": " << e.what();
+      failed = true;
+      std::unique_lock<std::shared_mutex> lock(mu_);
       failed_recving_.insert(req_id);
       active_recv_entries_.erase(uuid);
+      if (slot_idx >= 0) {
+        ReleaseSlotLocked(slot_idx);
+      }
+      shared_promise->Set(absl::InternalError(
+          absl::StrCat("Control setup failed: ", e.what())));
     }
+
+    const auto worker_done = std::chrono::steady_clock::now();
+    VLOG(1) << "StartRead control setup task finished. req_id: " << req_id
+            << ", failed: " << failed
+            << ", duration_ms: " << DurationMs(worker_start, worker_done);
   });
+  return raiden::PjRtCopyFuture(std::move(future), {});
 }
 
 std::tuple<std::vector<std::string>, std::vector<std::string>,
@@ -597,7 +723,7 @@ KVCacheManagerWithTransfer::CompleteReadRaw() {
   std::vector<std::string> done_recving;
   std::vector<std::string> failed_recving;
   {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     const auto now = std::chrono::steady_clock::now();
     for (auto it = send_entries_.begin(); it != send_entries_.end();) {
       const auto& entry = it->second;
@@ -675,7 +801,7 @@ void KVCacheManagerWithTransfer::InitializeSlotPool(int64_t num_slots) {
 }
 
 int64_t KVCacheManagerWithTransfer::AcquireSlot() {
-  std::lock_guard<std::mutex> lock(mu_);
+  std::unique_lock<std::shared_mutex> lock(mu_);
   return AcquireSlotLocked();
 }
 
@@ -714,7 +840,7 @@ KVCacheManagerWithTransfer::CreateStagingReadiness(int64_t slot_idx,
   state->num_shards = num_shards();
   state->layers.resize(state->num_layers * state->num_shards);
   {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     staging_readiness_[slot_idx] = state;
   }
   return state;
@@ -760,7 +886,7 @@ absl::Status KVCacheManagerWithTransfer::WaitForStagingBlockRead(
   std::shared_ptr<StagingReadinessState> state;
   bool is_legacy = false;
   {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::shared_lock<std::shared_mutex> lock(mu_);
     auto it = active_producer_blocks_.find(block_id);
     if (it != active_producer_blocks_.end()) {
       state = it->second;
@@ -789,14 +915,16 @@ absl::Status KVCacheManagerWithTransfer::WaitForStagingBlockRead(
         "staging readiness layer or shard out of range");
   }
   const size_t layer_state_idx = layer_idx * state->num_shards + shard_idx;
+  if (layer_state_idx >= state->layers.size()) {
+    return absl::InternalError("layer_state_idx out of bounds");
+  }
+  auto& layer_state = state->layers[layer_state_idx];
   std::unique_lock<std::mutex> lock(state->mu);
-  state->cv.wait(lock, [&]() {
-    return state->layers[layer_state_idx].done || stopping_.load();
-  });
-  if (stopping_.load() && !state->layers[layer_state_idx].done) {
+  state->cv.wait(lock, [&]() { return layer_state.done || stopping_.load(); });
+  if (stopping_.load() && !layer_state.done) {
     return absl::CancelledError("Raiden transfer engine is stopping");
   }
-  return state->layers[layer_state_idx].status;
+  return layer_state.status;
 }
 
 void KVCacheManagerWithTransfer::StartControlServer() {
@@ -812,7 +940,16 @@ void KVCacheManagerWithTransfer::StartControlServer() {
   sockaddr_in addr;
   std::memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = INADDR_ANY;
+  std::string ip = local_ip();
+  if (ip.empty() || ip == "127.0.0.1" || ip == "localhost") {
+    addr.sin_addr.s_addr = INADDR_ANY;
+  } else {
+    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0) {
+      LOG(WARNING) << "Invalid local_ip \"" << ip
+                   << "\", falling back to INADDR_ANY";
+      addr.sin_addr.s_addr = INADDR_ANY;
+    }
+  }
   addr.sin_port = htons(local_control_port_);
 
   if (bind(control_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
@@ -844,7 +981,7 @@ void KVCacheManagerWithTransfer::StartControlServer() {
 void KVCacheManagerWithTransfer::StopControlServer() {
   stopping_ = true;
   {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     while (!staging_readiness_.empty()) {
       RemoveStagingReadinessLocked(staging_readiness_.begin()->first);
     }
@@ -921,7 +1058,7 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
     int fd, const ControlRequestHeader& req) {
   std::shared_ptr<SendEntry> entry;
   {
-    std::unique_lock<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     cv_.wait(lock, [this, &entry, &req]() {
       auto it = send_entries_.find(req.uuid);
       if (it != send_entries_.end()) {
@@ -950,28 +1087,41 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
   CheckStatus("control stream response header write",
               WriteExact(fd, &response, sizeof(response)));
 
+  PullBlockDescriptor block_descriptor;
+  block_descriptor.remote_block_base = 0;
+  block_descriptor.num_blocks = req.num_blocks;
+  CheckStatus("control stream block descriptor write",
+              WriteExact(fd, &block_descriptor, sizeof(block_descriptor)));
+
+  int parallelism = 1;
+  if (req.parallelism > 0) {
+    parallelism = static_cast<int>(req.parallelism);
+  } else {
+    VLOG(1) << "Received invalid/zero parallelism: " << req.parallelism
+            << ". Falling back to legacy default (1).";
+  }
   std::string peer_ip = GetPeerIp(fd);
   std::string remote_data_endpoint =
       peer_ip + ":" + std::to_string(req.consumer_data_port);
 
   VLOG(1) << "ProcessPullStream (Hybrid Bridge) successfully acknowledged "
              "consumer. Intercepting and launching StartPushInternal to "
-          << remote_data_endpoint;
+          << remote_data_endpoint << " with parallelism " << parallelism;
 
   // Intercept and Execute Hybrid Push on behalf of remote consumer!
   StartPushInternal(req.uuid, remote_data_endpoint, src_block_ids,
-                    dst_block_ids);
+                    dst_block_ids, parallelism);
 }
 
 void KVCacheManagerWithTransfer::StartPushInternal(
     uint64_t uuid, const std::string& remote_data_endpoint,
     const std::vector<int64_t>& src_block_ids,
-    const std::vector<int64_t>& dst_block_ids) {
+    const std::vector<int64_t>& dst_block_ids, int parallelism) {
   std::vector<int64_t> sizes(src_block_ids.size(), 1);
   auto future_or =
       D2h(src_block_ids, src_block_ids, sizes, /*slot_idx=*/std::nullopt);
   if (!future_or.ok()) {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     auto it = send_entries_.find(uuid);
     if (it != send_entries_.end()) {
       done_sending_.insert(it->second->req_id);
@@ -981,84 +1131,308 @@ void KVCacheManagerWithTransfer::StartPushInternal(
   }
 
   auto future = std::move(future_or.value());
-  future.OnReady(
-      [this, uuid, remote_data_endpoint, src_block_ids,
-       dst_block_ids](const absl::StatusOr<raiden::BufferHolders>& s) {
-        if (!s.ok()) {
-          std::lock_guard<std::mutex> lock(mu_);
-          auto it = send_entries_.find(uuid);
-          if (it != send_entries_.end()) {
-            done_sending_.insert(it->second->req_id);
-            send_entries_.erase(it);
-          }
-          return;
-        }
-        std::vector<int> src_ints(src_block_ids.begin(), src_block_ids.end());
-        std::vector<int> dst_ints(dst_block_ids.begin(), dst_block_ids.end());
-        // Push across Data Plane socket!
-        auto push_s = H2hWrite(remote_data_endpoint, src_ints, dst_ints, uuid);
-        std::lock_guard<std::mutex> lock(mu_);
-        auto it = send_entries_.find(uuid);
-        if (it != send_entries_.end()) {
-          done_sending_.insert(it->second->req_id);
-          send_entries_.erase(it);
-        }
-      });
+  future.OnReady([this, uuid, remote_data_endpoint, src_block_ids,
+                  dst_block_ids,
+                  parallelism](const absl::StatusOr<raiden::BufferHolders>& s) {
+    if (!s.ok()) {
+      std::unique_lock<std::shared_mutex> lock(mu_);
+      auto it = send_entries_.find(uuid);
+      if (it != send_entries_.end()) {
+        done_sending_.insert(it->second->req_id);
+        send_entries_.erase(it);
+      }
+      return;
+    }
+    std::vector<int> src_ints(src_block_ids.begin(), src_block_ids.end());
+    std::vector<int> dst_ints(dst_block_ids.begin(), dst_block_ids.end());
+    // Push across Data Plane socket!
+    auto push_s =
+        H2hWrite(remote_data_endpoint, src_ints, dst_ints, uuid, parallelism);
+    if (!push_s.ok()) {
+      LOG(ERROR) << "H2hWrite failed in StartPushInternal for UUID " << uuid
+                 << ": " << push_s.status().ToString();
+    }
+    std::unique_lock<std::shared_mutex> lock(mu_);
+    auto it = send_entries_.find(uuid);
+    if (it != send_entries_.end()) {
+      done_sending_.insert(it->second->req_id);
+      send_entries_.erase(it);
+    }
+  });
+}
+
+absl::Status KVCacheManagerWithTransfer::OnPushStarted(uint64_t uuid,
+                                                       size_t num_blocks) {
+  std::shared_ptr<RecvEntry> entry;
+  {
+    std::shared_lock<std::shared_mutex> lock(mu_);
+    auto it = active_recv_entries_.find(uuid);
+    if (it != active_recv_entries_.end()) {
+      entry = it->second;
+    }
+  }
+  if (!entry) {
+    return absl::NotFoundError("No active RecvEntry matching Push UUID");
+  }
+
+  std::lock_guard<std::mutex> lock(entry->h2d_mu);
+  entry->h2d_started = true;
+  entry->h2d_started_at = std::chrono::steady_clock::now();
+  entry->active_streams++;
+  VLOG(1) << "OnPushStarted: Pipelined PUSH started for req_id "
+          << entry->req_id << " with " << num_blocks << " blocks.";
+  return absl::OkStatus();
+}
+
+absl::Status KVCacheManagerWithTransfer::OnBlockPayloadReceived(
+    size_t layer_idx, size_t shard_idx, int block_id, size_t size_bytes,
+    uint64_t uuid) {
+  std::shared_ptr<RecvEntry> entry;
+  {
+    std::shared_lock<std::shared_mutex> lock(mu_);
+    auto it = active_recv_entries_.find(uuid);
+    if (it != active_recv_entries_.end()) {
+      entry = it->second;
+    }
+  }
+  if (!entry) {
+    return absl::NotFoundError("No active RecvEntry matching Push UUID");
+  }
+
+  if (!entry->overlap_h2d) {
+    // Pipelining disabled. Do nothing here.
+    return absl::OkStatus();
+  }
+
+  const size_t num_layers_val = num_layers();
+  const size_t num_shards_val = num_shards();
+
+  if (layer_idx >= num_layers_val || shard_idx >= num_shards_val) {
+    return absl::OutOfRangeError("received block layer or shard out of range");
+  }
+  if (layer_idx >= entry->h2d_received_counts.size() ||
+      shard_idx >= entry->h2d_received_counts[layer_idx].size()) {
+    return absl::OutOfRangeError(
+        "received block layer or shard out of range in h2d_received_counts");
+  }
+  if (layer_idx >= entry->h2d_issued.size() ||
+      shard_idx >= entry->h2d_issued[layer_idx].size()) {
+    return absl::OutOfRangeError(
+        "received block layer or shard out of range in h2d_issued");
+  }
+
+  // Lock-free increment
+  size_t received = ++entry->h2d_received_counts[layer_idx][shard_idx];
+  VLOG(1) << "OnBlockPayloadReceived: Layer: " << layer_idx
+          << ", Shard: " << shard_idx
+          << ", Received blocks for this shard: " << received << "/"
+          << entry->num_blocks << ", uuid: " << uuid;
+
+  if (received < entry->num_blocks) {
+    return absl::OkStatus();
+  }
+  if (received > entry->num_blocks) {
+    return absl::FailedPreconditionError(
+        "received too many blocks for H2D layer");
+  }
+
+  // Only lock to trigger H2D and mutate h2d_futures and h2d_issued
+  std::lock_guard<std::mutex> lock(entry->h2d_mu);
+  if (entry->h2d_issued[layer_idx][shard_idx]) {
+    return absl::OkStatus();
+  }
+
+  LOG(INFO) << "[RAIDEN_DIAG] OnBlockPayloadReceived: Triggering H2D overlap "
+               "for Layer: "
+            << layer_idx << ", Shard: " << shard_idx << ", uuid: " << uuid;
+
+  auto future_or =
+      H2d(entry->h2d_src_offsets, entry->h2d_dst_offsets, entry->h2d_sizes,
+          /*slot_idx=*/std::nullopt, layer_idx, shard_idx);
+  if (!future_or.ok()) {
+    return future_or.status();
+  }
+
+  entry->h2d_futures.push_back(std::move(future_or.value()));
+  entry->h2d_issued[layer_idx][shard_idx] = true;
+  return absl::OkStatus();
 }
 
 absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
     const std::vector<int>& block_ids, uint64_t uuid) {
-  std::vector<int64_t> chip_dst_blocks;
-  std::string target_req_id;
+  if (uuid == 0) {
+    VLOG(1) << "OnBlocksReceived (Hybrid Bridge) received manual/simple push "
+               "(uuid=0). No-op, accepting into host buffer.";
+    return absl::OkStatus();
+  }
+  std::shared_ptr<RecvEntry> entry;
   {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::shared_lock<std::shared_mutex> lock(mu_);
     auto it = active_recv_entries_.find(uuid);
-    if (it == active_recv_entries_.end()) {
-      return absl::NotFoundError(
-          "No active RecvEntry matching incoming Push UUID");
+    if (it != active_recv_entries_.end()) {
+      entry = it->second;
     }
-    chip_dst_blocks = it->second.chip_block_ids;
-    target_req_id = it->second.req_id;
+  }
+  if (!entry) {
+    return absl::NotFoundError("No active RecvEntry matching Push UUID");
   }
 
-  VLOG(1) << "OnBlocksReceived (Hybrid Bridge) triggered for UUID " << uuid
-          << " with " << block_ids.size()
-          << " blocks. Launching decoupled autonomous H2D copy for req_id "
-          << target_req_id;
+  std::string target_req_id = entry->req_id;
+  LOG(INFO)
+      << "[RAIDEN_DIAG] OnBlocksReceived (Hybrid PUSH) triggered for UUID "
+      << uuid << " (req_id: " << target_req_id << ") with " << block_ids.size()
+      << " blocks. active_streams before dec: " << entry->active_streams;
 
-  std::vector<int64_t> host_src_blocks(block_ids.begin(), block_ids.end());
-  std::vector<int64_t> copy_sizes(host_src_blocks.size(), 1);
+  int remaining_streams = --entry->active_streams;
 
-  if (host_src_blocks.size() != chip_dst_blocks.size()) {
-    std::lock_guard<std::mutex> lock(mu_);
-    failed_recving_.insert(target_req_id);
+  bool is_done = false;
+  bool should_cleanup = false;
+  {
+    std::lock_guard<std::mutex> lock(entry->h2d_mu);
+    entry->total_blocks_received += block_ids.size();
+    if (entry->total_blocks_received > entry->num_blocks) {
+      return absl::FailedPreconditionError(
+          "Received more blocks than expected for this transfer");
+    }
+    if (entry->total_blocks_received == entry->num_blocks &&
+        !entry->completed_signaled) {
+      is_done = true;
+      entry->completed_signaled = true;
+    }
+    if (entry->total_blocks_received == entry->num_blocks &&
+        remaining_streams == 0) {
+      should_cleanup = true;
+    }
+  }
+
+  // Handshake teardown: promise is now set in SignalTransferComplete after
+  // transport ACK is written.
+
+  if (should_cleanup) {
+    std::unique_lock<std::shared_mutex> lock(mu_);
     active_recv_entries_.erase(uuid);
-    return absl::FailedPreconditionError(
-        "Received block count does not match requested chip destination block "
-        "count");
   }
 
-  auto future_or = H2d(host_src_blocks, chip_dst_blocks, copy_sizes,
-                       /*slot_idx=*/std::nullopt);
-  if (!future_or.ok()) {
-    std::lock_guard<std::mutex> lock(mu_);
-    failed_recving_.insert(target_req_id);
-    active_recv_entries_.erase(uuid);
-    return future_or.status();
-  }
-
-  auto future = std::move(future_or.value());
-  future.OnReady([this, uuid, target_req_id](
-                     const absl::StatusOr<raiden::BufferHolders>& s) {
-    std::lock_guard<std::mutex> lock(mu_);
-    if (s.ok()) {
-      done_recving_.insert(target_req_id);
+  if (!is_done) {
+    if (entry->completed_signaled) {
+      LOG(INFO) << "[RAIDEN_DIAG] OnBlocksReceived: Stream exited after "
+                   "completion for UUID "
+                << uuid;
     } else {
-      failed_recving_.insert(target_req_id);
+      LOG(INFO) << "[RAIDEN_DIAG] OnBlocksReceived: Received "
+                << block_ids.size() << " blocks, total "
+                << entry->total_blocks_received << "/" << entry->num_blocks
+                << " for UUID " << uuid
+                << ". Waiting for more. remaining_streams: "
+                << remaining_streams;
     }
-    active_recv_entries_.erase(uuid);
-  });
+    return absl::OkStatus();
+  }
+
+  LOG(INFO) << "[RAIDEN_DIAG] OnBlocksReceived: All " << entry->num_blocks
+            << " blocks received for UUID " << uuid << ". Finishing transfer.";
+
+  if (entry->overlap_h2d) {
+    // Pipelined case: H2D copies were already issued in OnBlockPayloadReceived.
+    // Schedule a background task to await them and mark done to avoid blocking
+    // transport.
+    push_pool_->Schedule(std::nullopt, [this, uuid, target_req_id, entry]() {
+      std::vector<raiden::PjRtCopyFuture> futures;
+      {
+        std::lock_guard<std::mutex> lock(entry->h2d_mu);
+        futures = std::move(entry->h2d_futures);
+      }
+      bool ok = true;
+      absl::Status first_error;
+      for (auto& future : futures) {
+        if (future.IsValid()) {
+          absl::Status status = future.Await();
+          if (!status.ok()) {
+            LOG(ERROR) << "Pipelined H2D copy failed for req_id "
+                       << target_req_id << ": " << status.ToString();
+            ok = false;
+            first_error = status;
+            break;
+          }
+        }
+      }
+      std::unique_lock<std::shared_mutex> lock(mu_);
+      if (ok) {
+        done_recving_.insert(target_req_id);
+        entry->promise->Set(absl::OkStatus());
+        VLOG(1)
+            << "OnBlocksReceived (Pipelined) completed successfully for req_id "
+            << target_req_id;
+        std::ostringstream timing;
+        timing << "RAIDEN_TIMING event=consumer_pipeline"
+               << " req_id=" << target_req_id << " uuid=" << uuid
+               << " total_blocks=" << entry->num_blocks << " pipelined=1"
+               << " enqueue_to_done_ms="
+               << DurationMs(entry->submit_start,
+                             std::chrono::steady_clock::now());
+        EmitTimingLog(timing.str());
+      } else {
+        failed_recving_.insert(target_req_id);
+        entry->promise->Set(first_error);
+      }
+    });
+  } else {
+    // Non-pipelined case (requires host reorder).
+    if (!entry->slot_idx.has_value()) {
+      return absl::FailedPreconditionError(
+          "Non-pipelined mode requires an active slot");
+    }
+    const int64_t slot_val = *entry->slot_idx;
+
+    // 1. Do host reorder
+    std::vector<kv_cache::KVCacheHostSpan> local_spans =
+        LayerSpans(slot_val, static_cast<int64_t>(entry->num_blocks));
+    for (const kv_cache::KVCacheHostSpan& span : local_spans) {
+      ReorderCompactBlocks(span, entry->host_dst_to_src);
+    }
+
+    // 2. Issue H2D from slot
+    auto future_or = H2d(entry->h2d_src_offsets, entry->h2d_dst_offsets,
+                         entry->h2d_sizes, slot_val);
+    if (!future_or.ok()) {
+      std::unique_lock<std::shared_mutex> lock(mu_);
+      failed_recving_.insert(target_req_id);
+      entry->promise->Set(future_or.status());
+      ReleaseSlotLocked(slot_val);
+      return future_or.status();
+    }
+
+    // 3. Await H2D asynchronously
+    auto future = std::move(future_or.value());
+    future.OnReady([this, uuid, target_req_id, slot_val,
+                    entry](const absl::StatusOr<raiden::BufferHolders>& s) {
+      std::unique_lock<std::shared_mutex> lock(mu_);
+      if (s.ok()) {
+        done_recving_.insert(target_req_id);
+        entry->promise->Set(absl::OkStatus());
+        VLOG(1) << "OnBlocksReceived (Non-Pipelined) completed successfully "
+                   "for req_id "
+                << target_req_id;
+        std::ostringstream timing;
+        timing << "RAIDEN_TIMING event=consumer_pipeline"
+               << " req_id=" << target_req_id << " uuid=" << uuid
+               << " total_blocks=" << entry->num_blocks << " pipelined=0"
+               << " enqueue_to_done_ms="
+               << DurationMs(entry->submit_start,
+                             std::chrono::steady_clock::now());
+        EmitTimingLog(timing.str());
+      } else {
+        failed_recving_.insert(target_req_id);
+        entry->promise->Set(s.status());
+      }
+      ReleaseSlotLocked(slot_val);
+    });
+  }
   return absl::OkStatus();
+}
+
+void KVCacheManagerWithTransfer::SignalTransferComplete(uint64_t uuid) {
+  VLOG(1) << "SignalTransferComplete (no-op) triggered for UUID " << uuid;
 }
 
 std::string KVCacheManagerWithTransfer::EndpointWithPort(
@@ -1070,7 +1444,7 @@ std::string KVCacheManagerWithTransfer::EndpointWithPort(
 
 void KVCacheManagerWithTransfer::AckRemote(const std::string& remote_endpoint,
                                            uint64_t uuid) {
-  int control_fd = ConnectTcp(remote_endpoint);
+  int control_fd = ConnectTcp(remote_endpoint, local_ip());
   auto control_cleanup =
       std::unique_ptr<int, void (*)(int*)>(&control_fd, [](int* p) {
         if (p && *p >= 0) close(*p);
@@ -1107,7 +1481,7 @@ KVCacheManagerWithTransfer::ReadControlResponseHeader(int fd) {
 void KVCacheManagerWithTransfer::AckSend(uint64_t uuid) {
   std::shared_ptr<SendEntry> entry;
   {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::unique_lock<std::shared_mutex> lock(mu_);
     auto it = send_entries_.find(uuid);
     if (it == send_entries_.end()) {
       pending_acks_.insert(uuid);
@@ -1196,6 +1570,31 @@ std::optional<int> KVCacheManagerWithTransfer::GetLocalTpuNumaNode(
     }
   }
   return std::nullopt;
+}
+
+void KVCacheManagerWithTransfer::RegisterFfiD2h(uint64_t uuid) {
+  std::lock_guard<std::mutex> lock(ffi_d2h_mu_);
+  active_ffi_d2h_uuids_.insert(uuid);
+}
+
+void KVCacheManagerWithTransfer::SignalD2hComplete(uint64_t uuid) {
+  {
+    std::lock_guard<std::mutex> lock(ffi_d2h_mu_);
+    active_ffi_d2h_uuids_.erase(uuid);
+  }
+  ffi_d2h_cv_.notify_all();
+
+  std::unique_lock<std::shared_mutex> lock(mu_);
+  auto it = send_entries_.find(uuid);
+  if (it != send_entries_.end()) {
+    done_sending_.insert(it->second->req_id);
+    send_entries_.erase(it);
+  }
+}
+
+void KVCacheManagerWithTransfer::BlockUntilFfiD2hDone() {
+  std::unique_lock<std::mutex> lock(ffi_d2h_mu_);
+  ffi_d2h_cv_.wait(lock, [this]() { return active_ffi_d2h_uuids_.empty(); });
 }
 
 }  // namespace tpu_raiden

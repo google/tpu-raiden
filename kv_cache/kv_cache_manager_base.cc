@@ -73,20 +73,56 @@ absl::Status ValidateOffsetsAndSizes(const std::vector<int64_t>& src_offsets,
   return absl::OkStatus();
 }
 
+std::optional<std::string> ResolveLocalIp(
+    const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers) {
+  auto detected = DetectLocalIpFromPjRtBuffers(layer_buffers);
+  if (detected.ok()) return *detected;
+  return std::nullopt;
+}
+
 }  // namespace
 
 KVCacheManagerBase::KVCacheManagerBase(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
-    std::optional<int> local_port,
-    std::optional<int> host_blocks_to_allocate,
+    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     bool unsafe_skip_buffer_lock, int parallelism,
-    HostBufferAllocator host_allocator)
-    : RaidenManagerBase(layer_buffers.size(),
-                        layer_buffers.empty() ? 0 : layer_buffers[0].size(),
-                        layer_buffers.empty() ? 0
-                                              : raiden::GetMajorSliceByteSize(
-                                                    layer_buffers[0][0]),
-                        local_port, parallelism) {
+    HostBufferAllocator host_allocator, std::optional<std::string> local_ip)
+    : RaidenManagerBase(
+          layer_buffers.size(),
+          layer_buffers.empty() ? 0 : layer_buffers[0].size(),
+          layer_buffers.empty()
+              ? 0
+              : raiden::GetMajorSliceByteSize(layer_buffers[0][0]),
+          local_port, parallelism, /*max_staging_blocks=*/parallelism,
+          local_ip.has_value() ? *local_ip
+                               : ResolveLocalIp(layer_buffers)
+                                     .value_or(tpu_raiden::GetLocalIp())) {
+  // 1. Resolve and validate NUMA node across all buffers
+  int resolved_numa_node = -1;
+  for (const auto& layer : layer_buffers) {
+    for (xla::PjRtBuffer* buf : layer) {
+      if (buf == nullptr) continue;
+      int node = tpu_raiden::GetPjRtDeviceNumaNode(buf->device());
+      if (node >= 0) {
+        if (resolved_numa_node == -1) {
+          resolved_numa_node = node;
+        } else if (resolved_numa_node != node) {
+          throw std::runtime_error(
+              absl::StrCat("Multi-NUMA buffers detected in Single-NUMA "
+                           "manager! Buffers span NUMA ",
+                           resolved_numa_node, " and ", node));
+        }
+      }
+    }
+  }
+  numa_node_ = resolved_numa_node;
+
+  // 2. Temporarily pin the current thread to the resolved NUMA node to force
+  // posix_memalign allocations and setup tasks onto this NUMA node.
+  if (numa_node_ >= 0) {
+    tpu_raiden::PinCurrentThreadToNumaNode(numa_node_);
+  }
+
   if (num_layers_ == 0 || num_shards_ == 0) {
     return;
   }
@@ -97,7 +133,12 @@ KVCacheManagerBase::KVCacheManagerBase(
 
   is_blocked_layout_ = (shape.dimensions().size() == 5);
 
-  physical_size_ = first_buffer->GetOnDeviceSizeInBytes().value();
+  auto physical_size_or = first_buffer->GetOnDeviceSizeInBytes();
+  if (!physical_size_or.ok()) {
+    throw std::runtime_error(absl::StrCat(
+        "Failed to get device size: ", physical_size_or.status().ToString()));
+  }
+  physical_size_ = *physical_size_or;
   extension_ = raiden::GetRawBufferExtension(first_buffer, &c_api_);
 
   int total_blocks = 0;
@@ -127,7 +168,12 @@ KVCacheManagerBase::KVCacheManagerBase(
       xla::PjRtBuffer* dst_buffer = dst_buffers[i];
       ShardBufferInfoBase shard_info;
 
-      shard_info.device_size = dst_buffer->GetOnDeviceSizeInBytes().value();
+      auto device_size_or = dst_buffer->GetOnDeviceSizeInBytes();
+      if (!device_size_or.ok()) {
+        throw std::runtime_error(absl::StrCat(
+            "Failed to get device size: ", device_size_or.status().ToString()));
+      }
+      shard_info.device_size = *device_size_or;
       if (shard_info.device_size < physical_size_) {
         throw std::runtime_error(
             "Device buffer shard size smaller than physical size");
@@ -172,8 +218,8 @@ KVCacheManagerBase::KVCacheManagerBase(
         shard_info.host_size = alloc_size;
         VLOG(1) << "KVCacheManagerBase: allocated host buffer for layer "
                 << layer_idx << ", shard " << i << " at "
-                << (void*)shard_info.host_ptr
-                << ", size " << shard_info.host_size;
+                << (void*)shard_info.host_ptr << ", size "
+                << shard_info.host_size;
       }
 
       auto status_or_hold = raiden::BufferHoldAndAlias::Acquire(
@@ -212,7 +258,7 @@ KVCacheManagerBase::KVCacheManagerBase(
     }
   }
   size_t pool_size = std::max<size_t>(
-      {1, static_cast<size_t>(parallelism), unique_numa_nodes.size()});
+      {1, std::min<size_t>(8, parallelism), unique_numa_nodes.size()});
   dma_pool_ = std::make_unique<NumaThreadPool>(pool_size);
   push_pool_ = std::make_unique<NumaThreadPool>(pool_size);
   pull_pool_ = std::make_unique<NumaThreadPool>(pool_size);
@@ -220,11 +266,28 @@ KVCacheManagerBase::KVCacheManagerBase(
 
 KVCacheManagerBase::KVCacheManagerBase(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
-    std::optional<int> local_port,
-    std::optional<int> host_blocks_to_allocate, int parallelism,
-    HostBufferAllocator host_allocator)
-    : RaidenManagerBase(num_layers, num_shards, slice_byte_size,
-                        local_port, parallelism) {
+    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
+    int parallelism, HostBufferAllocator host_allocator,
+    std::optional<std::string> local_ip)
+    : RaidenManagerBase(
+          num_layers, num_shards, slice_byte_size, local_port, parallelism,
+          /*max_staging_blocks=*/parallelism,
+          local_ip.has_value() ? *local_ip : tpu_raiden::GetLocalIp()) {
+  // Resolve NUMA node from bound local IP
+  std::string ip = this->local_ip();
+  if (!ip.empty()) {
+    auto ip_to_numa = tpu_raiden::DiscoverNumaNicIPs();
+    auto it = ip_to_numa.find(ip);
+    if (it != ip_to_numa.end()) {
+      numa_node_ = it->second;
+    }
+  }
+
+  // Temporarily pin thread if NUMA is resolved
+  if (numa_node_ >= 0) {
+    tpu_raiden::PinCurrentThreadToNumaNode(numa_node_);
+  }
+
   int total_blocks = host_blocks_to_allocate.value_or(0);
   block_manager_ = std::make_unique<LogicalBlockManager>(total_blocks);
 
@@ -279,7 +342,7 @@ KVCacheManagerBase::KVCacheManagerBase(
     }
     layers_.push_back(std::move(layer_info));
   }
-  size_t pool_size = std::max<size_t>(1, parallelism);
+  size_t pool_size = std::max<size_t>(1, std::min<size_t>(8, parallelism));
   dma_pool_ = std::make_unique<NumaThreadPool>(pool_size);
   push_pool_ = std::make_unique<NumaThreadPool>(pool_size);
   pull_pool_ = std::make_unique<NumaThreadPool>(pool_size);
@@ -321,8 +384,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
   }
   bool is_partial = !src_offsets_major_dim.empty();
 
-  std::vector<xla::Future<raiden::BufferHolder>> logical_futures(num_layers_ *
-                                                                 num_shards_);
+  std::vector<xla::Future<raiden::BufferHolder>> active_futures;
 
   // Group work by NUMA node
   std::map<int, std::vector<CopyWork>> grouped_work;
@@ -351,6 +413,8 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
     total_works += works.size();
   }
 
+  active_futures.reserve(total_works);
+
   VLOG(1) << "H2d: grouped work into " << grouped_work.size()
           << " NUMA groups. Total works: " << total_works;
 
@@ -377,17 +441,17 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
         return status_or_local_futures.status();
       }
       auto local_futures = std::move(status_or_local_futures).value();
-      for (size_t i = 0; i < works.size(); ++i) {
-        const auto& work = works[i];
-        logical_futures[work.layer_idx * num_shards_ + work.shard_idx] =
-            std::move(local_futures[i]);
+      for (auto& fut : local_futures) {
+        active_futures.push_back(std::move(fut));
       }
     }
   } else {
     // Safe to parallelize via the dedicated dma_pool_.
     VLOG(1) << "H2d: Parallelizing dispatches on dma_pool_. Thread: "
             << std::this_thread::get_id();
-    for (const auto& [node, works] : grouped_work) {
+    for (const auto& pair : grouped_work) {
+      int node = pair.first;
+      const auto& works = pair.second;
       VLOG(1) << "H2d: Scheduling dispatch for NUMA node " << node
               << ", works count: " << works.size();
       auto future = dma_pool_->Schedule(
@@ -411,16 +475,14 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
       }
       VLOG(1) << "H2d: Scheduled dispatch completed successfully.";
       auto local_futures = std::move(status_or_local_futures).value();
-      for (size_t i = 0; i < pf.works.size(); ++i) {
-        const auto& work = pf.works[i];
-        logical_futures[work.layer_idx * num_shards_ + work.shard_idx] =
-            std::move(local_futures[i]);
+      for (auto& fut : local_futures) {
+        active_futures.push_back(std::move(fut));
       }
     }
   }
 
-  VLOG(1) << "KVCacheManagerBase::H2d completed. Returning logical futures.";
-  auto joined_future = xla::JoinFutures(absl::MakeSpan(logical_futures));
+  VLOG(1) << "KVCacheManagerBase::H2d completed. Returning active futures.";
+  auto joined_future = xla::JoinFutures(absl::MakeSpan(active_futures));
   return raiden::PjRtCopyFuture::FromFuture(std::move(joined_future));
 }
 
@@ -457,8 +519,7 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
   }
   bool is_partial = !src_offsets.empty();
 
-  std::vector<xla::Future<raiden::BufferHolder>> logical_futures(num_layers_ *
-                                                                 num_shards_);
+  std::vector<xla::Future<raiden::BufferHolder>> active_futures;
 
   std::map<int, std::vector<CopyWork>> grouped_work;
   for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
@@ -489,6 +550,8 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
     total_works += works.size();
   }
 
+  active_futures.reserve(total_works);
+
   VLOG(1) << "DispatchD2hChunks: grouped work into " << grouped_work.size()
           << " NUMA groups. Total works: " << total_works;
 
@@ -514,10 +577,8 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
         return status_or_local_futures.status();
       }
       auto local_futures = std::move(status_or_local_futures).value();
-      for (size_t i = 0; i < works.size(); ++i) {
-        const auto& work = works[i];
-        logical_futures[work.layer_idx * num_shards_ + work.shard_idx] =
-            std::move(local_futures[i]);
+      for (auto& fut : local_futures) {
+        active_futures.push_back(std::move(fut));
       }
     }
   } else {
@@ -525,7 +586,9 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
     VLOG(1)
         << "DispatchD2hChunks: Parallelizing dispatches on dma_pool_. Thread: "
         << std::this_thread::get_id();
-    for (const auto& [node, works] : grouped_work) {
+    for (const auto& pair : grouped_work) {
+      int node = pair.first;
+      const auto& works = pair.second;
       VLOG(1) << "DispatchD2hChunks: Scheduling dispatch for NUMA node " << node
               << ", works count: " << works.size();
       auto future = dma_pool_->Schedule(
@@ -549,17 +612,15 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
       VLOG(1)
           << "DispatchD2hChunks: Scheduled dispatch completed successfully.";
       auto local_futures = std::move(status_or_local_futures).value();
-      for (size_t i = 0; i < pf.works.size(); ++i) {
-        const auto& work = pf.works[i];
-        logical_futures[work.layer_idx * num_shards_ + work.shard_idx] =
-            std::move(local_futures[i]);
+      for (auto& fut : local_futures) {
+        active_futures.push_back(std::move(fut));
       }
     }
   }
 
   VLOG(1) << "KVCacheManagerBase::DispatchD2hChunks completed. Returning "
-             "logical futures.";
-  return logical_futures;
+             "active futures.";
+  return active_futures;
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2h(
@@ -613,6 +674,9 @@ KVCacheManagerBase::D2hAutoAllocate(
     int needed = blocks_per_chunk[j];
 
     for (int k = 0; k < needed; ++k) {
+      if (block_id_idx >= allocated_block_ids.size()) {
+        return absl::InternalError("allocated_block_ids size mismatch");
+      }
       int assigned_block_id = allocated_block_ids[block_id_idx++];
       flat_src_offsets.push_back(src_major_dim_offset + k);
       flat_dst_offsets.push_back(assigned_block_id);
@@ -632,10 +696,10 @@ absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
 KVCacheManagerBase::H2hWrite(std::string peer,
                              const std::vector<int>& src_block_ids,
                              const std::vector<int>& dst_block_ids,
-                             uint64_t uuid) {
+                             uint64_t uuid, std::optional<int> parallelism) {
   ASSIGN_OR_RETURN(
       std::vector<int> allocated_ids,
-      H2hWriteDirect(peer, src_block_ids, dst_block_ids, uuid));
+      H2hWriteDirect(peer, src_block_ids, dst_block_ids, uuid, parallelism));
   return std::make_pair(
       allocated_ids,
       raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{}));
@@ -670,19 +734,21 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2hReadExplicit(
 void KVCacheManagerBase::SetExternalHostBuffer(
     const std::vector<raiden::BufferHoldAndAlias>& buffer_holds) {
   size_t idx = 0;
-  for (size_t l = 0; l < num_layers_; ++l) {
-    for (size_t sh = 0; sh < num_shards_; ++sh) {
-      if (idx < buffer_holds.size()) {
-        auto u_ptr_or = buffer_holds[idx].buffer->client()->UnsafeBufferPointer(
-            buffer_holds[idx].buffer);
-        if (u_ptr_or.ok()) {
-          layers_[l].shards[sh].host_ptr =
-              reinterpret_cast<uint8_t*>(u_ptr_or.value());
-          layers_[l].shards[sh].host_size =
-              buffer_holds[idx].buffer->GetOnDeviceSizeInBytes().value();
+  for (auto& layer : layers_) {
+    for (auto& shard : layer.shards) {
+      if (idx >= buffer_holds.size()) break;
+      auto u_ptr_or = buffer_holds[idx].buffer->client()->UnsafeBufferPointer(
+          buffer_holds[idx].buffer);
+      if (u_ptr_or.ok()) {
+        shard.host_ptr = reinterpret_cast<uint8_t*>(u_ptr_or.value());
+        auto size_or = buffer_holds[idx].buffer->GetOnDeviceSizeInBytes();
+        if (size_or.ok()) {
+          shard.host_size = *size_or;
+        } else {
+          LOG(ERROR) << "Failed to get device size: " << size_or.status();
         }
-        idx++;
       }
+      idx++;
     }
   }
 }
@@ -706,8 +772,14 @@ absl::Status KVCacheManagerBase::H2dDirect(
   int64_t block_byte_size = slice_byte_size_;
   int64_t num_chunks = src_offsets.size();
 
-  for (size_t l = 0; l < num_layers_; ++l) {
+  for (size_t l = 0; l < layers_.size(); ++l) {
+    if (l >= device_buffers.size()) {
+      return absl::InvalidArgumentError("device_buffers size mismatch");
+    }
     const auto& layer_info = layers_[l];
+    if (layer_info.shards.empty()) {
+      return absl::InternalError("shards is empty");
+    }
     const auto& shard_info = layer_info.shards[0];
     const uint8_t* h_base = shard_info.host_ptr;
     uint8_t* d_base = device_buffers[l];
@@ -749,8 +821,14 @@ absl::Status KVCacheManagerBase::D2hDirect(
   int64_t block_byte_size = slice_byte_size_;
   int64_t num_chunks = src_offsets.size();
 
-  for (size_t l = 0; l < num_layers_; ++l) {
+  for (size_t l = 0; l < layers_.size(); ++l) {
+    if (l >= device_buffers.size()) {
+      return absl::InvalidArgumentError("device_buffers size mismatch");
+    }
     const auto& layer_info = layers_[l];
+    if (layer_info.shards.empty()) {
+      return absl::InternalError("shards is empty");
+    }
     const auto& shard_info = layer_info.shards[0];
     uint8_t* h_base = const_cast<uint8_t*>(shard_info.host_ptr);
     const uint8_t* d_base = device_buffers[l];
@@ -788,10 +866,16 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dDirect(
   }
 
   std::vector<xla::Future<raiden::BufferHolder>> shard_futures_to_join;
-  for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
+  for (size_t layer_idx = 0; layer_idx < layers_.size(); ++layer_idx) {
+    if (layer_idx >= buffer_holds_.size()) {
+      return absl::InternalError("buffer_holds_ size mismatch");
+    }
     const auto& layer_info = layers_[layer_idx];
     const auto& layer_holds = buffer_holds_[layer_idx];
     for (size_t i = 0; i < num_shards_; ++i) {
+      if (i >= layer_info.shards.size() || i >= layer_holds.size()) {
+        return absl::InternalError("shards or holds size mismatch");
+      }
       if (device_id >= 0 && static_cast<int64_t>(i) != device_id) {
         continue;
       }
@@ -902,9 +986,7 @@ absl::StatusOr<KVCacheHostSpan> KVCacheManagerBase::HostSpan(
       .shard_idx = shard_idx};
 }
 
-size_t KVCacheManagerBase::bytes_per_block() const {
-  return slice_byte_size_;
-}
+size_t KVCacheManagerBase::bytes_per_block() const { return slice_byte_size_; }
 
 absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>
 KVCacheManagerBase::DispatchH2dWork(
@@ -915,9 +997,26 @@ KVCacheManagerBase::DispatchH2dWork(
   VLOG(1) << "KVCacheManagerBase::DispatchH2dWork started. Works count: "
           << works.size() << ", Thread: " << std::this_thread::get_id();
   std::vector<xla::Future<raiden::BufferHolder>> local_futures;
+  if (is_partial) {
+    if (src_offsets_major_dim.size() != dst_offsets_major_dim.size() ||
+        src_offsets_major_dim.size() != copy_sizes_major_dim.size()) {
+      return absl::InvalidArgumentError("Vector sizes mismatch");
+    }
+  }
   for (const auto& work : works) {
+    if (work.layer_idx >= layers_.size()) {
+      return absl::InvalidArgumentError("Invalid layer_idx");
+    }
     const auto& layer_info = layers_[work.layer_idx];
+    if (work.layer_idx >= buffer_holds_.size() ||
+        work.shard_idx >= buffer_holds_[work.layer_idx].size()) {
+      return absl::InvalidArgumentError(
+          "Invalid layer_idx or shard_idx in buffer_holds_");
+    }
     const auto& shard_hold = buffer_holds_[work.layer_idx][work.shard_idx];
+    if (work.shard_idx >= layer_info.shards.size()) {
+      return absl::InvalidArgumentError("Invalid shard_idx");
+    }
     const auto& shard_info = layer_info.shards[work.shard_idx];
 
     const uint8_t* base_host_ptr = nullptr;
@@ -1002,9 +1101,26 @@ KVCacheManagerBase::DispatchD2hWork(const std::vector<CopyWork>& works,
   VLOG(1) << "KVCacheManagerBase::DispatchD2hWork started. Works count: "
           << works.size() << ", Thread: " << std::this_thread::get_id();
   std::vector<xla::Future<raiden::BufferHolder>> local_futures;
+  if (is_partial) {
+    if (src_offsets.size() != dst_offsets.size() ||
+        src_offsets.size() != copy_sizes.size()) {
+      return absl::InvalidArgumentError("Vector sizes mismatch");
+    }
+  }
   for (const auto& work : works) {
+    if (work.layer_idx >= layers_.size()) {
+      return absl::InvalidArgumentError("Invalid layer_idx");
+    }
     const auto& layer_info = layers_[work.layer_idx];
+    if (work.layer_idx >= buffer_holds_.size() ||
+        work.shard_idx >= buffer_holds_[work.layer_idx].size()) {
+      return absl::InvalidArgumentError(
+          "Invalid layer_idx or shard_idx in buffer_holds_");
+    }
     const auto& shard_hold = buffer_holds_[work.layer_idx][work.shard_idx];
+    if (work.shard_idx >= layer_info.shards.size()) {
+      return absl::InvalidArgumentError("Invalid shard_idx");
+    }
     const auto& shard_info = layer_info.shards[work.shard_idx];
 
     uint8_t* dst_host_ptr = nullptr;

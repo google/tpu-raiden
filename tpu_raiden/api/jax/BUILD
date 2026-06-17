@@ -23,7 +23,10 @@ py_library(
         "kv_cache_manager.pyi",
     ],
     visibility = ["//visibility:public"],
-    deps = ["//tpu_raiden/frameworks/jax:_tpu_raiden_jax"],
+    deps = [
+        "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
+        "@jax//jax",
+    ],
 )
 
 py_library(

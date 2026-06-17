@@ -15,14 +15,20 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_RAIDEN_LIB_RAW_TRANSFER_RAW_TRANSFER_CORE_H_
 #define THIRD_PARTY_TPU_RAIDEN_RAIDEN_LIB_RAW_TRANSFER_RAW_TRANSFER_CORE_H_
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
@@ -248,58 +254,118 @@ inline xla::Future<BufferHolders> FlattenPjRtFutures(
   });
 }
 
+struct FutureState {
+  std::mutex mu;
+  std::condition_variable cv;
+  bool ready = false;
+  absl::Status status;
+  std::vector<std::function<void(absl::Status)>> callbacks;
+};
+
 struct PjRtCopyFuture {
-  xla::Future<> future;
+  std::shared_ptr<FutureState> state;
   BufferHolders holds;
   std::shared_ptr<void> keep_alive;
 
   PjRtCopyFuture() = default;
-  PjRtCopyFuture(xla::Future<> f, BufferHolders h,
+  PjRtCopyFuture(std::shared_ptr<FutureState> s, BufferHolders h,
                  std::shared_ptr<void> k = nullptr)
-      : future(std::move(f)), holds(std::move(h)), keep_alive(std::move(k)) {}
+      : state(std::move(s)), holds(std::move(h)), keep_alive(std::move(k)) {}
 
   explicit PjRtCopyFuture(BufferHolders h)
-      : future(xla::Future<>()), holds(std::move(h)) {}
+      : state(nullptr), holds(std::move(h)) {}
+
+  PjRtCopyFuture(xla::Future<> f, BufferHolders h,
+                 std::shared_ptr<void> k = nullptr) {
+    *this = FromFuture(std::move(f));
+    holds = std::move(h);
+    AddKeepAlive(
+        std::move(k));  // Use AddKeepAlive to aggregate instead of overwriting!
+  }
 
   template <typename T>
   static PjRtCopyFuture FromFuture(xla::Future<T> f) {
-    auto ready_future = f.GetReadyFuture();
+    auto state = std::make_shared<FutureState>();
+    auto* av = f.async_value();
+    DCHECK(av != nullptr);
+    av->AndThen([state, av]() mutable {
+      std::vector<std::function<void(absl::Status)>> local_callbacks;
+      absl::Status status;
+      if (av->IsError()) {
+        status = av->GetError();
+      } else {
+        if constexpr (std::is_same_v<T, void>) {
+          // Bypass tsl::AsyncValue type ID check to avoid DSO boundary crash in
+          // debug builds. AsyncValue::kDataOffset is protected but guaranteed
+          // to be exactly 64 by static assertions.
+          uintptr_t base = reinterpret_cast<uintptr_t>(av);
+          status = *reinterpret_cast<const absl::Status*>(base + 64);
+        } else {
+          status = absl::OkStatus();
+        }
+      }
+      {
+        std::lock_guard<std::mutex> lock(state->mu);
+        state->status = std::move(status);
+        state->ready = true;
+        local_callbacks = std::move(state->callbacks);
+        state->cv.notify_all();
+      }
+      for (auto& cb : local_callbacks) {
+        cb(state->status);
+      }
+    });
     auto keep_alive = std::make_shared<xla::Future<T>>(std::move(f));
-    return PjRtCopyFuture(std::move(ready_future), {}, std::move(keep_alive));
+    return PjRtCopyFuture(std::move(state), {}, std::move(keep_alive));
   }
 
-  bool IsValid() const { return future.IsValid(); }
+  bool IsValid() const { return state != nullptr; }
 
   bool IsReady() const {
-    if (!future.IsValid()) return true;
-    return future.IsReady();
+    if (!state) return true;
+    std::lock_guard<std::mutex> lock(state->mu);
+    return state->ready;
   }
 
   template <typename F>
-  void OnReady(F&& f) {
-    if (!future.IsValid()) {
+  void OnReady(F&& f) const {
+    if (!state) {
       std::forward<F>(f)(absl::StatusOr<BufferHolders>(holds));
       return;
     }
-    future.OnReady([holds = holds, keep_alive = keep_alive,
-                    f = std::forward<F>(f)](absl::Status status) mutable {
+    bool run_now = false;
+    absl::Status status;
+    {
+      std::lock_guard<std::mutex> lock(state->mu);
+      if (state->ready) {
+        run_now = true;
+        status = state->status;
+      } else {
+        state->callbacks.push_back(
+            [holds = holds, keep_alive = keep_alive,
+             f = std::forward<F>(f)](absl::Status status) mutable {
+              if (status.ok()) {
+                std::forward<F>(f)(absl::StatusOr<BufferHolders>(holds));
+              } else {
+                std::forward<F>(f)(absl::StatusOr<BufferHolders>(status));
+              }
+            });
+      }
+    }
+    if (run_now) {
       if (status.ok()) {
         std::forward<F>(f)(absl::StatusOr<BufferHolders>(holds));
       } else {
         std::forward<F>(f)(absl::StatusOr<BufferHolders>(status));
       }
-    });
+    }
   }
 
   absl::Status Await() {
-    if (!future.IsValid()) return absl::OkStatus();
-    future.BlockUntilReady(
-        static_cast<void (*)(tsl::AsyncValue*)>(tsl::BlockUntilReady));
-    tsl::AsyncValue* av = future.async_value();
-    if (av->IsError()) {
-      return av->GetError();
-    }
-    return absl::OkStatus();
+    if (!state) return absl::OkStatus();
+    std::unique_lock<std::mutex> lock(state->mu);
+    state->cv.wait(lock, [this] { return state->ready; });
+    return state->status;
   }
 
   void AddKeepAlive(std::shared_ptr<void> k) {
@@ -319,13 +385,14 @@ struct PjRtCopyFuture {
 
 inline PjRtCopyFuture JoinPjRtCopyFutures(
     absl::Span<const PjRtCopyFuture> futures) {
-  std::vector<xla::Future<>> sub_futures;
+  auto joined_state = std::make_shared<FutureState>();
+  auto remaining = std::make_shared<std::atomic<size_t>>(futures.size());
+  auto joined_status = std::make_shared<std::mutex>();
+  auto final_status = std::make_shared<absl::Status>(absl::OkStatus());
   BufferHolders combined_holds;
-  PjRtCopyFuture joined;
+  PjRtCopyFuture joined(joined_state, {});
+
   for (const auto& f : futures) {
-    if (f.future.IsValid()) {
-      sub_futures.push_back(f.future);
-    }
     for (const auto& h : f.holds) {
       combined_holds.push_back(h);
     }
@@ -333,8 +400,37 @@ inline PjRtCopyFuture JoinPjRtCopyFutures(
       joined.AddKeepAlive(f.keep_alive);
     }
   }
-  joined.future = xla::JoinFutures(sub_futures);
   joined.holds = std::move(combined_holds);
+
+  if (futures.empty()) {
+    joined_state->ready = true;
+    return joined;
+  }
+
+  for (const auto& f : futures) {
+    f.OnReady([joined_state, remaining, joined_status,
+               final_status](absl::StatusOr<BufferHolders> res) {
+      if (!res.ok()) {
+        std::lock_guard<std::mutex> lock(*joined_status);
+        if (final_status->ok()) {
+          *final_status = res.status();
+        }
+      }
+      if (remaining->fetch_sub(1) == 1) {
+        std::vector<std::function<void(absl::Status)>> local_callbacks;
+        {
+          std::lock_guard<std::mutex> lock(joined_state->mu);
+          joined_state->status = *final_status;
+          joined_state->ready = true;
+          local_callbacks = std::move(joined_state->callbacks);
+          joined_state->cv.notify_all();
+        }
+        for (auto& cb : local_callbacks) {
+          cb(joined_state->status);
+        }
+      }
+    });
+  }
   return joined;
 }
 

@@ -29,7 +29,8 @@ class WeightSynchronizer : public weight_sync::WeightSynchronizerBase {
   // PyTorch sharded constructor E2E
   WeightSynchronizer(const std::vector<std::vector<at::Tensor>>& device_tensors,
                      std::optional<int> local_port = std::nullopt,
-                     int parallelism = 1);
+                     int parallelism = 1,
+                     std::optional<std::string> local_ip = std::nullopt);
 
   ~WeightSynchronizer() override;
 };
