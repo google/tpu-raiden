@@ -28,6 +28,7 @@
 #include "absl/status/statusor.h"
 #include "core/raiden_future.h"
 #include "core/raw_transfer_core.h"
+#include "tpu_raiden/frameworks/jax/nb_statusor.h"
 #include "tpu_raiden/frameworks/torch/kv_cache_manager.h"
 #include "tpu_raiden/frameworks/torch/torch_nanobind_utils.h"
 #include "tpu_raiden/frameworks/torch/weight_synchronizer.h"
@@ -69,8 +70,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
   nb::class_<KVCacheManager>(m, "KVCacheManager")
       .def(nb::init<const std::vector<std::vector<at::Tensor>>&,
                     std::optional<int>, std::optional<int>, bool, int>(),
-           nb::arg("device_tensors"),
-           nb::arg("local_port") = nb::none(),
+           nb::arg("device_tensors"), nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
            nb::arg("parallelism") = 1)
@@ -171,17 +171,32 @@ NB_MODULE(_tpu_raiden_torch, m) {
           nb::arg("peer"), nb::arg("src_block_ids"),
           nb::call_guard<nb::gil_scoped_release>())
       .def_prop_ro("local_port", &KVCacheManager::local_port)
+      .def_prop_ro("local_ip", &KVCacheManager::local_ip)
       .def_prop_ro("num_layers", &KVCacheManager::num_layers)
       .def_prop_ro("num_shards", &KVCacheManager::num_shards)
       .def_prop_ro("slice_byte_size", &KVCacheManager::slice_byte_size)
       .def_prop_ro("local_control_port", &KVCacheManager::local_control_port)
       .def("notify_for_read", &KVCacheManager::NotifyForRead, nb::arg("req_id"),
            nb::arg("uuid"), nb::arg("block_ids"))
-      .def("start_read", &KVCacheManager::StartRead, nb::arg("req_id"),
-           nb::arg("uuid"), nb::arg("remote_endpoint"),
-           nb::arg("remote_block_ids"), nb::arg("local_block_ids"),
-           nb::arg("parallelism") = 1,
-           nb::arg("local_host_block_ids") = nb::none())
+      .def(
+          "start_read",
+          [](KVCacheManager& self, const std::string& req_id, uint64_t uuid,
+             const std::string& remote_endpoint,
+             const std::vector<int64_t>& remote_block_ids,
+             const std::vector<int64_t>& local_block_ids, int parallelism,
+             std::optional<std::vector<int64_t>> local_host_block_ids)
+              -> absl::StatusOr<tpu_raiden::RaidenFuture> {
+            auto res = self.StartRead(req_id, uuid, remote_endpoint,
+                                      remote_block_ids, local_block_ids,
+                                      parallelism, local_host_block_ids);
+            if (!res.ok()) return res.status();
+            return tpu_raiden::RaidenFuture{std::move(res.value())};
+          },
+          nb::arg("req_id"), nb::arg("uuid"), nb::arg("remote_endpoint"),
+          nb::arg("remote_block_ids"), nb::arg("local_block_ids"),
+          nb::arg("parallelism") = 1,
+          nb::arg("local_host_block_ids") = nb::none(),
+          nb::call_guard<nb::gil_scoped_release>())
       .def("complete_read", [](KVCacheManager& self) {
         auto [done_sending, done_recving, failed_recving] =
             self.CompleteReadRaw();

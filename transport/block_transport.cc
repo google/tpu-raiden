@@ -19,9 +19,11 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <string>
 #include <thread>  // NOLINT
@@ -34,6 +36,8 @@
 #include "absl/strings/str_cat.h"
 #include "xla/tsl/platform/statusor.h"
 #include "core/status_macros.h"
+#include "core/tpu_utils.h"
+#include "transport/raw_buffer_transport.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -120,9 +124,10 @@ absl::Status ForEachPayload(MajorOrder major_order, size_t num_layers,
 
 }  // namespace
 
-BlockTransport::BlockTransport(BlockTransportDelegate* delegate, int local_port,
+BlockTransport::BlockTransport(BlockTransportDelegate* delegate,
+                               const std::string& local_ip, int& local_port,
                                bool enable_conn_pool)
-    : RawBufferTransport(delegate, local_port, enable_conn_pool),
+    : RawBufferTransport(delegate, local_ip, local_port, enable_conn_pool),
       block_delegate_(delegate) {}
 
 BlockTransport::~BlockTransport() = default;
@@ -165,6 +170,10 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
     uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
 
+    // Notify delegate that a multi-block push has started.
+    RETURN_IF_ERROR(
+        block_delegate_->OnPushStarted(header.uuid, header.count_or_size));
+
     RETURN_IF_ERROR(ForEachPayload(
         major_order, block_delegate_->num_layers(),
         block_delegate_->num_shards(), header.count_or_size,
@@ -175,13 +184,17 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
                                              bytes_per_block));
           uint8_t* dest_ptr =
               block_delegate_->GetBlockHostPointer(l, sh, dst_id);
-          return ReadExact(client_fd, dest_ptr, bytes_per_block);
+          RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, bytes_per_block));
+          // Notify delegate immediately as each block payload is received.
+          return block_delegate_->OnBlockPayloadReceived(
+              l, sh, dst_id, bytes_per_block, header.uuid);
         }));
 
     RETURN_IF_ERROR(
         block_delegate_->OnBlocksReceived(allocated_ids, header.uuid));
     ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
+    block_delegate_->SignalTransferComplete(header.uuid);
   } else if (header.op == 2) {  // Pull request
     TF_ASSIGN_OR_RETURN(MajorOrder major_order, ParseMajorOrder(header.flags));
     if (block_delegate_->shard_factor() == 0) {
@@ -209,6 +222,17 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
                            static_cast<size_t>(header.remote_id)) {
       return absl::OutOfRangeError("Requested block range exceeds int range");
     }
+    constexpr int kMaxIovElements = 512;
+    struct iovec iov[kMaxIovElements];
+    int iov_cnt = 0;
+
+    auto flush_batch = [&]() -> absl::Status {
+      if (iov_cnt == 0) return absl::OkStatus();
+      RETURN_IF_ERROR(WritevExact(client_fd, iov, iov_cnt));
+      iov_cnt = 0;
+      return absl::OkStatus();
+    };
+
     RETURN_IF_ERROR(ForEachPayload(
         major_order, block_delegate_->num_layers(),
         block_delegate_->num_shards(), local_blocks,
@@ -219,8 +243,17 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
           RETURN_IF_ERROR(block_delegate_->WaitForBlockRead(l, sh, read_id));
           const uint8_t* src_ptr =
               block_delegate_->GetBlockHostPointer(l, sh, read_id);
-          return WriteExact(client_fd, src_ptr, bytes_per_block);
+
+          struct iovec& entry = iov[iov_cnt++];
+          entry.iov_base = const_cast<void*>(static_cast<const void*>(src_ptr));
+          entry.iov_len = bytes_per_block;
+
+          if (iov_cnt == kMaxIovElements) {
+            return flush_batch();
+          }
+          return absl::OkStatus();
         }));
+    RETURN_IF_ERROR(flush_batch());
   } else if (header.op == 4) {  // Single Block Push (Direct)
     int dst_id = static_cast<int>(header.remote_id);
     size_t size_bytes = header.count_or_size;
@@ -395,7 +428,6 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
                     remote_block_count, std::ref(src_block_ids),
                     std::ref(allocated_ids), std::ref(explicit_dst_ptrs),
                     std::ref(statuses), major_order, on_block_received));
-
     local_block_offset += local_block_count;
     remote_block_offset += remote_block_count;
   }
@@ -418,6 +450,10 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
                                     std::vector<int>& allocated_ids,
                                     std::vector<absl::Status>& statuses,
                                     MajorOrder major_order, uint64_t uuid) {
+  if (tpu_raiden::PinCurrentThreadToNumaNode(numa_node_) != 0) {
+    LOG(WARNING) << "Failed to pin H2hWriteWorker thread to NUMA node "
+                 << numa_node_;
+  }
   auto status_or_fd = AcquireConnection(peer);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
@@ -454,7 +490,12 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
   }
 
   if (header.op == 6) {
-    ABSL_DCHECK_LE(block_offset + block_count, dst_block_ids.size());
+    if (block_offset + block_count > dst_block_ids.size() ||
+        block_offset + block_count > allocated_ids.size()) {
+      statuses[stream_idx] =
+          absl::InvalidArgumentError("Vector sizes mismatch for explicit push");
+      return;
+    }
     s = WriteExact(fd, &dst_block_ids[block_offset], block_count * sizeof(int));
     if (!s.ok()) {
       statuses[stream_idx] = s;
@@ -471,6 +512,11 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
       allocated_ids[block_offset + k] = dst_block_ids[block_offset + k];
     }
   } else {
+    if (block_offset + block_count > allocated_ids.size()) {
+      statuses[stream_idx] =
+          absl::InvalidArgumentError("allocated_ids size mismatch for pull");
+      return;
+    }
     std::vector<int> stream_allocated_ids(block_count, 0);
     s = ReadExact(fd, stream_allocated_ids.data(), block_count * sizeof(int));
     if (!s.ok()) {
@@ -487,6 +533,17 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
 
   size_t bytes_per_block = block_delegate_->bytes_per_block();
 
+  constexpr int kMaxIovElements = 512;
+  struct iovec iov[kMaxIovElements];
+  int iov_cnt = 0;
+
+  auto flush_batch = [&]() -> absl::Status {
+    if (iov_cnt == 0) return absl::OkStatus();
+    RETURN_IF_ERROR(WritevExact(fd, iov, iov_cnt));
+    iov_cnt = 0;
+    return absl::OkStatus();
+  };
+
   s = ForEachPayload(
       major_order, block_delegate_->num_layers(), block_delegate_->num_shards(),
       block_count, [&](size_t l, size_t sh, size_t k) -> absl::Status {
@@ -495,9 +552,28 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
         const int src_id = src_block_ids[block_offset + k];
         RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, src_id, 1,
                                            bytes_per_block));
+        // Block until the local D2H copy has finished writing to this host
+        // buffer block!
+        RETURN_IF_ERROR(block_delegate_->WaitForBlockRead(l, sh, src_id));
+        std::atomic_thread_fence(std::memory_order_acquire);
+
         const uint8_t* src_ptr = base_host_ptr + src_id * bytes_per_block;
-        return WriteExact(fd, src_ptr, bytes_per_block);
+
+        struct iovec& entry = iov[iov_cnt++];
+        entry.iov_base = const_cast<void*>(static_cast<const void*>(src_ptr));
+        entry.iov_len = bytes_per_block;
+
+        if (iov_cnt == kMaxIovElements) {
+          return flush_batch();
+        }
+        return absl::OkStatus();
       });
+  if (!s.ok()) {
+    statuses[stream_idx] = s;
+    return;
+  }
+
+  s = flush_batch();
   if (!s.ok()) {
     statuses[stream_idx] = s;
     return;
@@ -521,6 +597,10 @@ void BlockTransport::H2hReadWorker(
     const std::vector<uint8_t*>& explicit_dst_ptrs,
     std::vector<absl::Status>& statuses, MajorOrder major_order,
     BlockReceivedCallback on_block_received) {
+  if (tpu_raiden::PinCurrentThreadToNumaNode(numa_node_) != 0) {
+    VLOG(1) << "[RAIDEN_DIAG] Failed to pin H2hReadWorker thread to NUMA node "
+            << numa_node_;
+  }
   auto status_or_fd = AcquireConnection(peer);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();

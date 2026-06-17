@@ -112,9 +112,12 @@ class CoordinationClient:
   def __init__(self, server_address: str):
     self._server_address = server_address
 
+  def _get_channel(self) -> grpc.Channel:
+    return grpc.insecure_channel(self._server_address)
+
   def get_metadata(self) -> Tuple[int, List[int], str]:
     """Queries peer server and returns (port, block_ids, host_ip) tuple."""
-      with grpc.insecure_channel(self._server_address) as channel:
+    with self._get_channel() as channel:
       stub = coordination_pb2_grpc.CoordinationServiceStub(channel)
       request = coordination_pb2.MetadataRequest(client_id='receiver')
       # Call RPC blocking until server is ready and replies.
@@ -134,7 +137,7 @@ class CoordinationClient:
     Returns:
       A list of tuples containing (device_id, info) from all devices.
     """
-      with grpc.insecure_channel(self._server_address) as channel:
+    with self._get_channel() as channel:
       stub = coordination_pb2_grpc.CoordinationServiceStub(channel)
       request = coordination_pb2.CollectReplicaInfoRequest(
           device_id=device_id, expected_count=expected_count, info=info
@@ -144,7 +147,7 @@ class CoordinationClient:
 
   def shutdown(self):
     """Signals peer CoordinationServer to shut down and exit."""
-      with grpc.insecure_channel(self._server_address) as channel:
+    with self._get_channel() as channel:
       stub = coordination_pb2_grpc.CoordinationServiceStub(channel)
       request = coordination_pb2.ShutdownRequest(client_id='receiver')
       stub.Shutdown(request)

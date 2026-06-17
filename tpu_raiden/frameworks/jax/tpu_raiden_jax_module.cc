@@ -48,7 +48,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
              nb::gil_scoped_release release;
              absl::Status status = self.Await();
              if (!status.ok()) {
-               throw std::runtime_error("Async copy failed: " +
+               throw std::runtime_error("Async copy failed (v2): " +
                                         std::string(status.message()));
              }
            })
@@ -57,7 +57,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
              nb::gil_scoped_release release;
              absl::Status status = self.Await();
              if (!status.ok()) {
-               throw std::runtime_error("Async copy failed: " +
+               throw std::runtime_error("Async copy failed (v2): " +
                                         std::string(status.message()));
              }
            })
@@ -67,8 +67,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
   nb::class_<tpu_raiden::kv_cache::jax::KVCacheManager>(m, "KVCacheManager")
       .def(nb::init<nb::list, std::optional<int>, std::optional<int>, bool,
                     int>(),
-           nb::arg("device_arrays"),
-           nb::arg("local_port") = nb::none(),
+           nb::arg("device_arrays"), nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
            nb::arg("parallelism") = 1)
@@ -94,7 +93,8 @@ NB_MODULE(_tpu_raiden_jax, m) {
           },
           nb::arg("src_offsets_major_dim") = nb::list(),
           nb::arg("dst_offsets_major_dim") = nb::list(),
-          nb::arg("copy_sizes_major_dim") = nb::list())
+          nb::arg("copy_sizes_major_dim") = nb::list(),
+          nb::call_guard<nb::gil_scoped_release>())
 
       .def(
           "d2h",
@@ -109,7 +109,8 @@ NB_MODULE(_tpu_raiden_jax, m) {
           },
           nb::arg("src_offsets_major_dim") = nb::list(),
           nb::arg("dst_offsets_major_dim") = nb::list(),
-          nb::arg("copy_sizes_major_dim") = nb::list())
+          nb::arg("copy_sizes_major_dim") = nb::list(),
+          nb::call_guard<nb::gil_scoped_release>())
 
       .def(
           "d2h_auto_allocate",
@@ -155,30 +156,46 @@ NB_MODULE(_tpu_raiden_jax, m) {
           },
           nb::arg("peer"), nb::arg("src_block_ids"))
 
-      .def("local_port", &tpu_raiden::kv_cache::KVCacheManagerBase::local_port)
+      .def("local_ips", &tpu_raiden::kv_cache::jax::KVCacheManager::local_ips)
+      .def("local_ports",
+           &tpu_raiden::kv_cache::jax::KVCacheManager::local_ports)
+      .def("local_control_ports",
+           &tpu_raiden::kv_cache::jax::KVCacheManager::local_control_ports)
       .def("get_host_pointer",
-           static_cast<const uint8_t* (
-               tpu_raiden::kv_cache::KVCacheManagerBase::*)(size_t, size_t)
-                           const>(
-               &tpu_raiden::kv_cache::KVCacheManagerBase::GetHostPointer),
+           &tpu_raiden::kv_cache::jax::KVCacheManager::GetHostPointer,
            nb::arg("layer_idx"), nb::arg("shard_idx"))
       .def_prop_ro("num_layers",
-                   &tpu_raiden::kv_cache::KVCacheManagerBase::num_layers)
+                   &tpu_raiden::kv_cache::jax::KVCacheManager::num_layers)
       .def_prop_ro("num_shards",
-                   &tpu_raiden::kv_cache::KVCacheManagerBase::num_shards)
+                   &tpu_raiden::kv_cache::jax::KVCacheManager::num_shards)
       .def_prop_ro("slice_byte_size",
-                   &tpu_raiden::kv_cache::KVCacheManagerBase::slice_byte_size)
+                   &tpu_raiden::kv_cache::jax::KVCacheManager::slice_byte_size)
       .def_prop_ro(
           "local_control_port",
           &tpu_raiden::kv_cache::jax::KVCacheManager::local_control_port)
+      .def("close", &tpu_raiden::kv_cache::jax::KVCacheManager::Close)
       .def("notify_for_read",
            &tpu_raiden::kv_cache::jax::KVCacheManager::NotifyForRead,
            nb::arg("req_id"), nb::arg("uuid"), nb::arg("block_ids"))
-      .def("start_read", &tpu_raiden::kv_cache::jax::KVCacheManager::StartRead,
-           nb::arg("req_id"), nb::arg("uuid"), nb::arg("remote_endpoint"),
-           nb::arg("remote_block_ids"), nb::arg("local_block_ids"),
-           nb::arg("parallelism") = 1,
-           nb::arg("local_host_block_ids") = nb::none())
+      .def(
+          "start_read",
+          [](tpu_raiden::kv_cache::jax::KVCacheManager& self,
+             const std::string& req_id, uint64_t uuid,
+             const std::string& remote_endpoint,
+             const std::vector<int64_t>& remote_block_ids,
+             const std::vector<int64_t>& local_block_ids, int parallelism,
+             std::optional<std::vector<int64_t>> local_host_block_ids)
+              -> absl::StatusOr<tpu_raiden::RaidenFuture> {
+            auto res = self.StartRead(req_id, uuid, remote_endpoint,
+                                      remote_block_ids, local_block_ids,
+                                      parallelism, local_host_block_ids);
+            if (!res.ok()) return res.status();
+            return tpu_raiden::RaidenFuture{std::move(res.value())};
+          },
+          nb::arg("req_id"), nb::arg("uuid"), nb::arg("remote_endpoint"),
+          nb::arg("remote_block_ids"), nb::arg("local_block_ids"),
+          nb::arg("parallelism") = 1,
+          nb::arg("local_host_block_ids") = nb::none())
       .def("complete_read",
            [](tpu_raiden::kv_cache::jax::KVCacheManager& self) {
              auto [done_sending, done_recving, failed_recving] =
@@ -245,8 +262,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
              size_t host_offset_bytes, size_t device_offset_bytes,
              size_t size_bytes) {
             auto status_or_future = self.H2dChunk(
-                shard_idx, host_offset_bytes, device_offset_bytes, size_bytes
-            );
+                shard_idx, host_offset_bytes, device_offset_bytes, size_bytes);
             if (!status_or_future.ok()) {
               throw std::runtime_error(
                   "Weight sync H2DChunk failed: " +
@@ -268,13 +284,10 @@ NB_MODULE(_tpu_raiden_jax, m) {
              size_t dst_shard_idx, size_t dst_offset_bytes, size_t size_bytes) {
             absl::Status s = self.PullWeightsChunk(
                 source, src_shard_idx, src_offset_bytes, dst_shard_idx,
-                dst_offset_bytes, size_bytes
-            );
+                dst_offset_bytes, size_bytes);
             if (!s.ok()) {
-              throw std::runtime_error(
-                  "Weight sync PullWeightsChunk failed: " +
-                  std::string(s.message())
-              );
+              throw std::runtime_error("Weight sync PullWeightsChunk failed: " +
+                                       std::string(s.message()));
             }
           },
           nb::arg("source"), nb::arg("src_shard_idx"),

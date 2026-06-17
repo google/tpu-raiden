@@ -29,7 +29,6 @@
 """E2E unit tests for repurposed JAX KVCacheManager."""
 
 import os
-import time
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -47,6 +46,7 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
+    self._managers = []
     device_type = "tpu"
     try:
       self.devices = jax.devices(device_type)
@@ -60,6 +60,19 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     self.num_layers = 2
     self.block_size = 1
     self.skip_lock = True
+
+  def tearDown(self):
+    for mgr in self._managers:
+      try:
+        mgr.close()
+      except Exception:  # pylint: disable=broad-except
+        pass
+    self._managers.clear()
+    super().tearDown()
+
+  def manage(self, manager):
+    self._managers.append(manager)
+    return manager
 
   def create_mesh(self, axis_shapes, axis_names, devices=None):
     try:
@@ -101,17 +114,19 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     shape = (4, 128, 8, 8, 128)
     kv_caches = [jax.device_put(jnp.zeros(shape), tpu_sharding)]
 
-    engine = KVCacheManager(
-        kv_caches=kv_caches,
-        local_control_port=0,
-        max_blocks=4,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    engine = self.manage(
+        KVCacheManager(
+            kv_caches=kv_caches,
+            local_control_port=0,
+            max_blocks=4,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
     self.assertIsNotNone(engine)
 
   @parameterized.parameters(jnp.float32, jnp.bfloat16)
-  def test_e2e_transfer_polling(self, dtype):
+  def test_e2e_transfer(self, dtype):
     tpu_sharding = self.setup_shardings()
     num_blocks = 2
     shape = (num_blocks, 128, 8, 8, 128)
@@ -136,20 +151,24 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = KVCacheManager(
-        kv_caches=src_caches,
-        local_control_port=0,
-        max_blocks=2,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    producer = self.manage(
+        KVCacheManager(
+            kv_caches=src_caches,
+            local_control_port=0,
+            max_blocks=2,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
-    consumer = KVCacheManager(
-        kv_caches=dst_caches,
-        local_control_port=0,
-        max_blocks=2,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    consumer = self.manage(
+        KVCacheManager(
+            kv_caches=dst_caches,
+            local_control_port=0,
+            max_blocks=2,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
     port = getattr(producer, "local_control_port", 0)
@@ -159,42 +178,21 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     uuid = 12345
     producer.register_read(req_id, uuid, [0, 1])
 
-    remote_endpoint = f"127.0.0.1:{port}"
-    consumer.start_read(
+    remote_endpoint = ",".join(
+        f"{ip}:{p}" for ip, p in zip(producer.local_ips, producer.local_ports)
+    )
+    future = consumer.start_read(
         req_id=req_id,
         uuid=uuid,
         remote_endpoint=remote_endpoint,
         remote_block_ids=[0, 1],
         local_block_ids=[0, 1],
     )
-
-    # Poll until consumer is done receiving
-    done = False
-    for _ in range(50):
-      _, done_recving, failed_recving = consumer.poll_stats()
-      if req_id in failed_recving:
-        self.fail("Transfer failed")
-      if req_id in done_recving:
-        done = True
-        break
-      time.sleep(0.1)
-
-    self.assertTrue(done, "Consumer did not finish transfer in time")
+    future.Await()
 
     # Check that consumer correctly loaded the values
     for idx, t in enumerate(dst_caches):
       self._verify_cache_equal(t, src_refs[idx])
-
-    # Poll producer until it's done sending
-    done_prod = False
-    for _ in range(50):
-      done_sending, _, _ = producer.poll_stats()
-      if req_id in done_sending:
-        done_prod = True
-        break
-      time.sleep(0.1)
-
-    self.assertTrue(done_prod, "Producer did not finish sending in time")
 
   @parameterized.parameters(jnp.float32, jnp.bfloat16)
   def test_non_contiguous_blocks(self, dtype):
@@ -222,20 +220,24 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = KVCacheManager(
-        kv_caches=src_caches,
-        local_control_port=0,
-        max_blocks=3,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    producer = self.manage(
+        KVCacheManager(
+            kv_caches=src_caches,
+            local_control_port=0,
+            max_blocks=3,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
-    consumer = KVCacheManager(
-        kv_caches=dst_caches,
-        local_control_port=0,
-        max_blocks=3,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    consumer = self.manage(
+        KVCacheManager(
+            kv_caches=dst_caches,
+            local_control_port=0,
+            max_blocks=3,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
     port = getattr(producer, "local_control_port", 0)
@@ -245,26 +247,17 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     uuid = 54321
     producer.register_read(req_id, uuid, [0, 2])
 
-    remote_endpoint = f"127.0.0.1:{port}"
-    consumer.start_read(
+    remote_endpoint = ",".join(
+        f"{ip}:{p}" for ip, p in zip(producer.local_ips, producer.local_ports)
+    )
+    future = consumer.start_read(
         req_id=req_id,
         uuid=uuid,
         remote_endpoint=remote_endpoint,
         remote_block_ids=[0, 2],
         local_block_ids=[0, 1],
     )
-
-    done = False
-    for _ in range(50):
-      _, done_recving, failed_recving = consumer.poll_stats()
-      if req_id in failed_recving:
-        self.fail("Transfer failed")
-      if req_id in done_recving:
-        done = True
-        break
-      time.sleep(0.1)
-
-    self.assertTrue(done, "Consumer did not finish transfer in time")
+    future.Await()
 
     for idx, t in enumerate(dst_caches):
       # local block 0 <- remote block 0
@@ -273,16 +266,6 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
       self._verify_cache_equal(t[1], src_refs[idx][2])
       # local block 2 was not copied, should remain 0
       np.testing.assert_allclose(np.asarray(t)[2], 0.0, atol=1e-5)
-
-    done_prod = False
-    for _ in range(50):
-      done_sending, _, _ = producer.poll_stats()
-      if req_id in done_sending:
-        done_prod = True
-        break
-      time.sleep(0.1)
-
-    self.assertTrue(done_prod, "Producer did not finish sending in time")
 
   @parameterized.parameters(jnp.float32, jnp.bfloat16)
   def test_host_reordering(self, dtype):
@@ -310,20 +293,24 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = KVCacheManager(
-        kv_caches=src_caches,
-        local_control_port=0,
-        max_blocks=2,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    producer = self.manage(
+        KVCacheManager(
+            kv_caches=src_caches,
+            local_control_port=0,
+            max_blocks=2,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
-    consumer = KVCacheManager(
-        kv_caches=dst_caches,
-        local_control_port=0,
-        max_blocks=2,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    consumer = self.manage(
+        KVCacheManager(
+            kv_caches=dst_caches,
+            local_control_port=0,
+            max_blocks=2,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
     port = getattr(producer, "local_control_port", 0)
@@ -333,42 +320,23 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     uuid = 98765
     producer.register_read(req_id, uuid, [0, 1])
 
-    remote_endpoint = f"127.0.0.1:{port}"
-    consumer.start_read(
+    remote_endpoint = ",".join(
+        f"{ip}:{p}" for ip, p in zip(producer.local_ips, producer.local_ports)
+    )
+    future = consumer.start_read(
         req_id=req_id,
         uuid=uuid,
         remote_endpoint=remote_endpoint,
         remote_block_ids=[1, 0],
         local_block_ids=[0, 1],
     )
-
-    done = False
-    for _ in range(50):
-      _, done_recving, failed_recving = consumer.poll_stats()
-      if req_id in failed_recving:
-        self.fail("Transfer failed")
-      if req_id in done_recving:
-        done = True
-        break
-      time.sleep(0.1)
-
-    self.assertTrue(done, "Consumer did not finish transfer in time")
+    future.Await()
 
     for idx, t in enumerate(dst_caches):
       # local block 0 <- remote block 1
       self._verify_cache_equal(t[0], src_refs[idx][1])
       # local block 1 <- remote block 0
       self._verify_cache_equal(t[1], src_refs[idx][0])
-
-    done_prod = False
-    for _ in range(50):
-      done_sending, _, _ = producer.poll_stats()
-      if req_id in done_sending:
-        done_prod = True
-        break
-      time.sleep(0.1)
-
-    self.assertTrue(done_prod, "Producer did not finish sending in time")
 
   @parameterized.parameters(jnp.float32, jnp.bfloat16)
   def test_large_complex_non_contiguous_and_reorder(self, dtype):
@@ -396,20 +364,24 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = KVCacheManager(
-        kv_caches=src_caches,
-        local_control_port=0,
-        max_blocks=16,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    producer = self.manage(
+        KVCacheManager(
+            kv_caches=src_caches,
+            local_control_port=0,
+            max_blocks=16,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
-    consumer = KVCacheManager(
-        kv_caches=dst_caches,
-        local_control_port=0,
-        max_blocks=16,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    consumer = self.manage(
+        KVCacheManager(
+            kv_caches=dst_caches,
+            local_control_port=0,
+            max_blocks=16,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
     port = getattr(producer, "local_control_port", 0)
@@ -424,26 +396,17 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
 
     producer.register_read(req_id, uuid, remote_blocks)
 
-    remote_endpoint = f"127.0.0.1:{port}"
-    consumer.start_read(
+    remote_endpoint = ",".join(
+        f"{ip}:{p}" for ip, p in zip(producer.local_ips, producer.local_ports)
+    )
+    future = consumer.start_read(
         req_id=req_id,
         uuid=uuid,
         remote_endpoint=remote_endpoint,
         remote_block_ids=requested_remote,
         local_block_ids=local_blocks,
     )
-
-    done = False
-    for _ in range(100):
-      _, done_recving, failed_recving = consumer.poll_stats()
-      if req_id in failed_recving:
-        self.fail("Transfer failed")
-      if req_id in done_recving:
-        done = True
-        break
-      time.sleep(0.1)
-
-    self.assertTrue(done, "Consumer did not finish transfer in time")
+    future.Await()
 
     for idx, t in enumerate(dst_caches):
       for local_idx, local_block in enumerate(local_blocks):
@@ -452,16 +415,6 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
 
       for local_block in range(len(local_blocks), num_blocks):
         np.testing.assert_allclose(np.asarray(t)[local_block], 0.0, atol=1e-5)
-
-    done_prod = False
-    for _ in range(50):
-      done_sending, _, _ = producer.poll_stats()
-      if req_id in done_sending:
-        done_prod = True
-        break
-      time.sleep(0.1)
-
-    self.assertTrue(done_prod, "Producer did not finish sending in time")
 
   @parameterized.parameters(jnp.float32, jnp.bfloat16)
   def test_parallel_pull(self, dtype):
@@ -489,20 +442,24 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     jax.block_until_ready(src_caches)
     jax.block_until_ready(dst_caches)
 
-    producer = KVCacheManager(
-        kv_caches=src_caches,
-        local_control_port=0,
-        max_blocks=2,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    producer = self.manage(
+        KVCacheManager(
+            kv_caches=src_caches,
+            local_control_port=0,
+            max_blocks=2,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
-    consumer = KVCacheManager(
-        kv_caches=dst_caches,
-        local_control_port=0,
-        max_blocks=2,
-        num_slots=2,
-        unsafe_skip_buffer_lock=self.skip_lock,
+    consumer = self.manage(
+        KVCacheManager(
+            kv_caches=dst_caches,
+            local_control_port=0,
+            max_blocks=2,
+            num_slots=2,
+            unsafe_skip_buffer_lock=self.skip_lock,
+        )
     )
 
     port = getattr(producer, "local_control_port", 0)
@@ -512,8 +469,10 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     uuid = 77777
     producer.register_read(req_id, uuid, [0, 1])
 
-    remote_endpoint = f"127.0.0.1:{port}"
-    consumer.start_read(
+    remote_endpoint = ",".join(
+        f"{ip}:{p}" for ip, p in zip(producer.local_ips, producer.local_ports)
+    )
+    future = consumer.start_read(
         req_id=req_id,
         uuid=uuid,
         remote_endpoint=remote_endpoint,
@@ -521,31 +480,10 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
         local_block_ids=[0, 1],
         parallelism=2,
     )
-
-    done = False
-    for _ in range(50):
-      _, done_recving, failed_recving = consumer.poll_stats()
-      if req_id in failed_recving:
-        self.fail("Transfer failed")
-      if req_id in done_recving:
-        done = True
-        break
-      time.sleep(0.1)
-
-    self.assertTrue(done, "Consumer did not finish transfer in time")
+    future.Await()
 
     for idx, t in enumerate(dst_caches):
       self._verify_cache_equal(t, src_refs[idx])
-
-    done_prod = False
-    for _ in range(50):
-      done_sending, _, _ = producer.poll_stats()
-      if req_id in done_sending:
-        done_prod = True
-        break
-      time.sleep(0.1)
-
-    self.assertTrue(done_prod, "Producer did not finish sending in time")
 
 
 if __name__ == "__main__":

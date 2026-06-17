@@ -34,7 +34,6 @@ import pathlib
 from typing import Any, List, Tuple
 
 import torch
-
 import torch_tpu  # noqa: F401  # Load torch shared libraries before the extension.
 from torch_tpu import _loader as _torch_tpu_loader
 
@@ -128,7 +127,7 @@ class KVCacheManager:
       remote_block_ids: List[int],
       local_block_ids: List[int],
       parallelism: int = 1,
-  ) -> int:
+  ) -> _impl.RaidenFuture:
     """Consumer node initiates an asynchronous pull of blocks from a remote peer."""
     return self._impl.start_read(
         req_id,
@@ -140,10 +139,5 @@ class KVCacheManager:
     )
 
   def poll_stats(self) -> Tuple[List[str], List[str], List[str]]:
-    """Polls the status of all active background transfer operations.
-
-    Returns:
-      A tuple of (done_sending, done_recving, failed_recving) lists of request
-      IDs.
-    """
+    """Polls the status of all active background transfer operations."""
     return self._impl.complete_read()

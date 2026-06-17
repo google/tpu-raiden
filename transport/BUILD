@@ -30,6 +30,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//core:status_macros",
+        "//core:tpu_utils",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/container:flat_hash_map",
@@ -55,6 +56,7 @@ cc_library(
     deps = [
         ":raw_buffer_transport",
         "//core:status_macros",
+        "//core:tpu_utils",
         "//core:tsl_platform_headers",
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/log",
@@ -62,6 +64,7 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
     ],
 )
 

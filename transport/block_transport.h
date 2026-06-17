@@ -15,18 +15,64 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_TRANSPORT_BLOCK_TRANSPORT_H_
 #define THIRD_PARTY_TPU_RAIDEN_TRANSPORT_BLOCK_TRANSPORT_H_
 
+#include <sys/uio.h>
+
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/synchronization/mutex.h"
 #include "transport/raw_buffer_transport.h"
 
 namespace tpu_raiden {
 namespace transport {
+
+// Robust helper to write all data in iovec array, handling partial writes and
+// EINTR. Implemented as a template to allow zero-overhead inlining in
+// production while supporting mock dependency injection in unit tests.
+template <typename WritevFn = ssize_t (*)(int, const struct iovec*, int)>
+absl::Status WritevExact(int fd, struct iovec* iov, int iovcnt,
+                         WritevFn writev_fn = ::writev) {
+  if (iovcnt < 0) {
+    return absl::InvalidArgumentError("iovcnt cannot be negative");
+  }
+  int iov_index = 0;
+  while (iov_index < iovcnt) {
+    ssize_t written = writev_fn(fd, iov + iov_index, iovcnt - iov_index);
+    if (written < 0) {
+      if (errno == EINTR) continue;
+      return absl::InternalError(
+          absl::StrCat("Socket writev failed: ", std::strerror(errno)));
+    }
+    if (written == 0) {
+      return absl::InternalError("Socket closed unexpectedly during writev");
+    }
+
+    size_t remaining_bytes = written;
+    while (remaining_bytes > 0 && iov_index < iovcnt) {
+      struct iovec& cur_iov = iov[iov_index];
+      if (remaining_bytes >= cur_iov.iov_len) {
+        remaining_bytes -= cur_iov.iov_len;
+        iov_index++;
+      } else {
+        // Partial write within this iovec: adjust base pointer and length
+        // in-place
+        cur_iov.iov_base =
+            static_cast<char*>(cur_iov.iov_base) + remaining_bytes;
+        cur_iov.iov_len -= remaining_bytes;
+        remaining_bytes = 0;
+      }
+    }
+  }
+  return absl::OkStatus();
+}
 
 enum class MajorOrder : uint8_t {
   kLayerMajor = 0,
@@ -50,8 +96,21 @@ class BlockTransportDelegate : public RawBufferTransportDelegate {
     return OnDataReceived();
   }
 
+  virtual void SignalTransferComplete(uint64_t uuid) {}
+
   virtual absl::Status OnSingleBlockReceived(int block_id, size_t size_bytes) {
     return OnDataReceived();
+  }
+
+  virtual absl::Status OnPushStarted(uint64_t uuid, size_t num_blocks) {
+    return absl::OkStatus();
+  }
+
+  virtual absl::Status OnBlockPayloadReceived(size_t layer_idx,
+                                              size_t shard_idx, int block_id,
+                                              size_t size_bytes,
+                                              uint64_t uuid = 0) {
+    return absl::OkStatus();
   }
 
   virtual absl::Status WaitForBlockRead(size_t layer_idx, size_t shard_idx,
@@ -79,8 +138,8 @@ class BlockTransport : public RawBufferTransport {
  public:
   using BlockPacketHeader = RawBufferTransport::PacketHeader;
 
-  BlockTransport(BlockTransportDelegate* delegate, int local_port,
-                 bool enable_conn_pool = true);
+  BlockTransport(BlockTransportDelegate* delegate, const std::string& local_ip,
+                 int& local_port, bool enable_conn_pool = true);
   ~BlockTransport() override;
 
   // Standard Scatter-Gather Push (op = 1 / op = 6)

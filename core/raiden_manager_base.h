@@ -45,16 +45,16 @@ struct BlockMetadata {
 
 using RecvCallback =
     std::function<absl::Status(int block_id, size_t size_bytes)>;
-using BlockReadinessCallback =
-    std::function<absl::Status(size_t layer_idx, size_t shard_idx,
-                               int block_id)>;
+using BlockReadinessCallback = std::function<absl::Status(
+    size_t layer_idx, size_t shard_idx, int block_id)>;
 
 class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
  public:
   RaidenManagerBase(size_t num_layers, size_t num_shards,
                     size_t slice_byte_size,
                     std::optional<int> local_port = std::nullopt,
-                    int parallelism = 1, size_t max_staging_blocks = 4);
+                    int parallelism = 1, size_t max_staging_blocks = 4,
+                    std::optional<std::string> local_ip = std::nullopt);
 
   xla::Future<> RemoteD2DBlockWrite(const BlockMetadata& src,
                                     const BlockMetadata& dst,
@@ -69,7 +69,8 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   // Direct C++ H2H network write (Push)
   absl::StatusOr<std::vector<int>> H2hWriteDirect(
       const std::string& peer, const std::vector<int>& src_block_ids,
-      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0);
+      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
+      std::optional<int> parallelism = std::nullopt);
 
   // Direct C++ H2H network read (Pull)
   absl::StatusOr<std::vector<int>> H2hReadDirect(
@@ -84,6 +85,7 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
                                 const uint8_t* data_ptr, size_t size_bytes);
 
   std::optional<int> local_port() const;
+  std::string local_ip() const;
 
   uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) override;
   size_t GetHostSize(size_t layer_idx, size_t shard_idx) override;
@@ -156,6 +158,8 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   absl::Mutex block_readiness_mu_;
   BlockReadinessCallback block_readiness_callback_
       ABSL_GUARDED_BY(block_readiness_mu_);
+
+  std::string local_ip_;
 };
 
 }  // namespace tpu_raiden

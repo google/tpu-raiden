@@ -31,9 +31,9 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "third_party/grpc/include/grpcpp/security/credentials.h"
-#include "xla/future.h"
 #include "core/raw_transfer_core.h"
 #include "core/status_macros.h"
+#include "core/tpu_utils.h"
 #include "kv_cache/global_registry/global_registry_client.h"
 #include "kv_cache/kv_cache_manager_base.h"
 #include "kv_cache/logical_block_manager.h"
@@ -42,24 +42,10 @@
 namespace tpu_raiden {
 namespace kv_cache {
 
-namespace {
-int ParsePort(const std::string& addr) {
-  size_t idx = addr.rfind(':');
-  if (idx != std::string::npos && idx + 1 < addr.size()) {
-    try {
-      return std::stoi(addr.substr(idx + 1));
-    } catch (...) {
-    }
-  }
-  return 0;
-}
-}  // namespace
-
 KVCacheStoreInternal::KVCacheStoreInternal(int capacity,
                                            std::string global_registry_address,
                                            std::string local_address)
-    : capacity_(capacity),
-      local_address_(local_address) {
+    : capacity_(capacity), local_address_(local_address) {
   if (!global_registry_address.empty()) {
     auto channel = grpc::CreateChannel(global_registry_address,
                                        grpc::InsecureChannelCredentials());
@@ -70,9 +56,15 @@ KVCacheStoreInternal::KVCacheStoreInternal(int capacity,
   block_manager_ = std::make_unique<LogicalBlockManager>(capacity);
 
   if (!local_address.empty()) {
-    int port = ParsePort(local_address);
+    std::string ip;
+    int port = 0;
+    absl::Status status = tpu_raiden::SplitHostPort(local_address, ip, port);
+    if (!status.ok()) {
+      LOG(FATAL) << "Failed to parse local_address: " << local_address
+                 << ", error: " << status.message();
+    }
     server_ =
-        std::make_unique<tpu_raiden::transport::BlockTransport>(this, port);
+        std::make_unique<tpu_raiden::transport::BlockTransport>(this, ip, port);
 
     int actual_port = server_->local_port();
     size_t idx = local_address.rfind(':');
@@ -199,7 +191,7 @@ KVCacheStoreInternal::LookupAndFetch(
       std::vector<const uint8_t*> host_ptrs;
       host_ptrs.reserve(host_buffers->size());
       for (const auto& buf : *host_buffers) {
-        host_ptrs.push_back(buf.data());
+        host_ptrs.push_back(buf.empty() ? nullptr : &buf[0]);
       }
       std::vector<size_t> host_sizes;
       host_sizes.reserve(host_buffers->size());
@@ -305,8 +297,8 @@ absl::Status KVCacheStoreInternal::Insert(
 
     {
       absl::MutexLock lock(mutex_);
-      for (int k = 0; k < needed; ++k) {
-        int store_block_id = chunk_block_ids[k];
+      int k = 0;
+      for (int store_block_id : chunk_block_ids) {
         block_to_ptrs_[store_block_id].resize(num_layers_ * num_shards_);
         for (size_t l = 0; l < num_layers_; ++l) {
           for (size_t sh = 0; sh < num_shards_; ++sh) {
@@ -315,6 +307,7 @@ absl::Status KVCacheStoreInternal::Insert(
             block_to_ptrs_[store_block_id][l * num_shards_ + sh] = ptr;
           }
         }
+        k++;
       }
 
       auto map_it = cache_map_.find(hash);
@@ -382,6 +375,9 @@ absl::Status KVCacheStoreInternal::LookupAndFetchRemote(
     const auto& meta = lookup_results[idx];
     std::string peer = meta.host_address();
     int start_remote_id = meta.block_id();
+    if (idx >= copy_sizes_major_dim.size()) {
+      return absl::InternalError("copy_sizes_major_dim size mismatch");
+    }
     int needed = copy_sizes_major_dim[idx];
 
     auto& task = fetch_tasks[peer];
@@ -415,7 +411,7 @@ absl::Status KVCacheStoreInternal::LookupAndFetchRemote(
     std::vector<uint8_t*> staging_ptrs;
     staging_ptrs.reserve(num_layers_ * num_shards_);
     for (auto& buf : *staging_buffers) {
-      staging_ptrs.push_back(buf.data());
+      staging_ptrs.push_back(buf.empty() ? nullptr : &buf[0]);
     }
 
     std::vector<int> dummy_local_ids(total_blocks);
@@ -452,6 +448,10 @@ absl::Status KVCacheStoreInternal::LookupAndFetchRemote(
 
       KVCacheCopySpec copy_spec;
       copy_spec.src_offsets = {0};
+      if (chunk_idx >= dst_offsets_major_dim.size()) {
+        return absl::InternalError(
+            "chunk_idx out of bounds for dst_offsets_major_dim");
+      }
       copy_spec.dst_offsets = {
           static_cast<int64_t>(dst_offsets_major_dim[chunk_idx])};
       copy_spec.sizes = {static_cast<int64_t>(needed)};
@@ -474,6 +474,9 @@ absl::Status KVCacheStoreInternal::LookupAndFetchRemote(
       chunk_insert_future.AddKeepAlive(host_buffers);
 
       futures_to_join.push_back(chunk_insert_future);
+      if (chunk_idx >= hits.size()) {
+        return absl::InternalError("chunk_idx out of bounds for hits");
+      }
       hits[chunk_idx] = true;
       chunk_block_offset_in_task += needed;
     }
@@ -486,6 +489,10 @@ absl::Status KVCacheStoreInternal::RegisterBlocksInGlobalRegistry(
     const std::vector<uint64_t>& block_hashes,
     const std::vector<int>& copy_sizes_major_dim,
     const std::vector<int>& allocated_block_ids) {
+  if (block_hashes.size() != copy_sizes_major_dim.size()) {
+    return absl::InvalidArgumentError(
+        "block_hashes and copy_sizes_major_dim size mismatch");
+  }
   if (!registry_client_ || local_address_.empty()) {
     return absl::OkStatus();
   }
@@ -498,6 +505,10 @@ absl::Status KVCacheStoreInternal::RegisterBlocksInGlobalRegistry(
     global_registry::Registration meta;
     meta.prefix_hash = std::to_string(block_hashes[i]);
     meta.host_address = local_address_;
+    if (block_idx >= allocated_block_ids.size()) {
+      return absl::InternalError(
+          "block_idx out of bounds for allocated_block_ids");
+    }
     meta.block_id = allocated_block_ids[block_idx];
     metadata_list.push_back(std::move(meta));
 

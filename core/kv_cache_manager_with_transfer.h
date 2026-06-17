@@ -40,6 +40,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -49,6 +50,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "core/host_memory_allocator.h"
 #include "core/raw_transfer_core.h"
@@ -136,29 +138,27 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
  public:
   KVCacheManagerWithTransfer(
       const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
-      std::optional<int> local_port,
-      std::optional<int> host_blocks_to_allocate,
+      std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
       bool unsafe_skip_buffer_lock, int parallelism,
       HostBufferAllocator host_allocator, int64_t node_id = 0,
       int64_t local_control_port = -1, int64_t max_blocks = 0,
-      int64_t num_slots = 0, double timeout_s = 120.0);
+      int64_t num_slots = 0, double timeout_s = 120.0,
+      std::optional<std::string> local_ip = std::nullopt);
 
   // Metadata-based constructor for FFI / CPU-only testing
-  KVCacheManagerWithTransfer(size_t num_layers, size_t num_shards,
-                             size_t slice_byte_size,
-                             std::optional<int> local_port,
-                             std::optional<int> host_blocks_to_allocate,
-                             int parallelism = 1, int64_t node_id = 0,
-                             int64_t local_control_port = -1,
-                             int64_t max_blocks = 0, int64_t num_slots = 0,
-                             double timeout_s = 120.0);
+  KVCacheManagerWithTransfer(
+      size_t num_layers, size_t num_shards, size_t slice_byte_size,
+      std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
+      int parallelism = 1, int64_t node_id = 0, int64_t local_control_port = -1,
+      int64_t max_blocks = 0, int64_t num_slots = 0, double timeout_s = 120.0,
+      std::optional<std::string> local_ip = std::nullopt);
 
   virtual ~KVCacheManagerWithTransfer();
 
   int64_t NotifyForRead(const std::string& req_id, uint64_t uuid,
                         const std::vector<int64_t>& block_ids);
 
-  void StartRead(
+  absl::StatusOr<raiden::PjRtCopyFuture> StartRead(
       const std::string& req_id, uint64_t uuid,
       const std::string& remote_endpoint,
       const std::vector<int64_t>& remote_block_ids,
@@ -171,6 +171,10 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
 
   int local_control_port() const { return local_control_port_; }
   int64_t node_id() const { return node_id_; }
+
+  void RegisterFfiD2h(uint64_t uuid);
+  void SignalD2hComplete(uint64_t uuid);
+  void BlockUntilFfiD2hDone();
 
  protected:
   struct SendEntry {
@@ -220,6 +224,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     uint64_t uuid = 0;
     uint64_t num_blocks = 0;
     uint32_t consumer_data_port = 0;
+    uint32_t parallelism = 1;
   };
 
   struct alignas(8) ControlResponseHeader {
@@ -265,21 +270,48 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
       size_t shard_idx, absl::Status status);
   void RemoveStagingReadinessLocked(int64_t slot_idx);
 
+  absl::Status OnPushStarted(uint64_t uuid, size_t num_blocks) override;
+  absl::Status OnBlockPayloadReceived(size_t layer_idx, size_t shard_idx,
+                                      int block_id, size_t size_bytes,
+                                      uint64_t uuid = 0) override;
   absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
                                 uint64_t uuid = 0) override;
+  void SignalTransferComplete(uint64_t uuid) override;
 
   struct RecvEntry {
     std::string req_id;
     std::vector<int64_t> chip_block_ids;
-  };
-  absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
+    std::vector<int64_t> h2d_src_offsets;
+    std::vector<int64_t> h2d_dst_offsets;
+    std::vector<int64_t> h2d_sizes;
+    size_t num_blocks = 0;
+    size_t total_blocks_received = 0;
+    bool overlap_h2d = false;
+    std::optional<int64_t> slot_idx;
+    std::vector<size_t> host_dst_to_src;
+    std::shared_ptr<xla::Promise<void>> promise;
 
-  void StartPushInternal(
-      uint64_t uuid,
-      const std::string& remote_data_endpoint,
-      const std::vector<int64_t>& src_block_ids,
-      const std::vector<int64_t>& dst_block_ids
-  );
+    std::mutex h2d_mu;
+    // Track received block count per [layer][shard]
+    std::vector<std::vector<std::atomic<size_t>>> h2d_received_counts;
+    // Track if H2D has been issued per [layer][shard]
+    std::vector<std::vector<bool>> h2d_issued;
+    // Store H2D futures to await them at the end
+    std::vector<raiden::PjRtCopyFuture> h2d_futures;
+
+    bool h2d_started = false;
+    std::chrono::steady_clock::time_point h2d_started_at;
+    std::atomic<int> active_streams{0};
+    bool completed_signaled{false};
+    std::chrono::steady_clock::time_point submit_start;
+  };
+  absl::flat_hash_map<uint64_t, std::shared_ptr<RecvEntry>>
+      active_recv_entries_;
+
+  void StartPushInternal(uint64_t uuid, const std::string& remote_data_endpoint,
+                         const std::vector<int64_t>& src_block_ids,
+                         const std::vector<int64_t>& dst_block_ids,
+                         int parallelism);
 
   std::chrono::steady_clock::time_point DeadlineFromNow() const;
 
@@ -312,8 +344,8 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   std::map<int64_t, std::shared_ptr<StagingReadinessState>> staging_readiness_;
   std::map<int64_t, std::shared_ptr<StagingReadinessState>>
       active_producer_blocks_;
-  std::mutex mu_;
-  std::condition_variable cv_;
+  std::shared_mutex mu_;
+  std::condition_variable_any cv_;
   int control_fd_ = -1;
   std::atomic<bool> stopping_{false};
   std::thread control_thread_;
@@ -326,6 +358,10 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
 
   std::vector<kv_cache::KVCacheHostSpan> LayerSpans(int64_t slot_idx,
                                                     int64_t num_blocks);
+
+  std::set<uint64_t> active_ffi_d2h_uuids_;
+  std::mutex ffi_d2h_mu_;
+  std::condition_variable ffi_d2h_cv_;
 };
 
 }  // namespace tpu_raiden

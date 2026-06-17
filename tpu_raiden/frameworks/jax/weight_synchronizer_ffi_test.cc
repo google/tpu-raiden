@@ -73,19 +73,23 @@ class WeightSynchronizerFfiTest : public ::testing::Test {
 
 enum class FfiType { kInit, kInitAndD2h };
 
-class WeightSynchronizerFfiParamTest : public WeightSynchronizerFfiTest,
-                                       public ::testing::WithParamInterface<FfiType> {
+class WeightSynchronizerFfiParamTest
+    : public WeightSynchronizerFfiTest,
+      public ::testing::WithParamInterface<FfiType> {
  protected:
-  xla::ffi::Error CallInit(xla::ffi::AnyBuffer x, xla::ffi::AnyBuffer shard_idx_buf,
-                            int64_t slice_byte_size, int32_t local_port,
-                            int32_t parallelism, int32_t num_layers,
-                            xla::ffi::Result<xla::ffi::AnyBuffer> out) {
+  xla::ffi::Error CallInit(xla::ffi::AnyBuffer x,
+                           xla::ffi::AnyBuffer shard_idx_buf,
+                           int64_t slice_byte_size, int32_t local_port,
+                           int32_t parallelism, int32_t num_layers,
+                           xla::ffi::Result<xla::ffi::AnyBuffer> out) {
     if (GetParam() == FfiType::kInit) {
-      return TriggerWeightSynchronizerInitImpl(x, shard_idx_buf, slice_byte_size,
-                                                local_port, parallelism, num_layers, out);
+      return TriggerWeightSynchronizerInitImpl(x, shard_idx_buf,
+                                               slice_byte_size, local_port,
+                                               parallelism, num_layers, out);
     } else {
-      return TriggerWeightSynchronizerInitAndD2hImpl(x, shard_idx_buf, slice_byte_size,
-                                                      local_port, parallelism, num_layers, out);
+      return TriggerWeightSynchronizerInitAndD2hImpl(
+          x, shard_idx_buf, slice_byte_size, local_port, parallelism,
+          num_layers, out);
     }
   }
 };
@@ -110,9 +114,8 @@ TEST_P(WeightSynchronizerFfiParamTest, TriggerWSInitSucceeds) {
   FfiBufferFixture out_fixture(XLA_FFI_DataType_S32, out_data.data(), {5});
   xla::ffi::Result<xla::ffi::AnyBuffer> out = out_fixture.AsAnyBuffer();
 
-  xla::ffi::Error err = CallInit(
-      x, shard_idx_buf, slice_byte_size, local_port, parallelism, num_layers,
-      out);
+  xla::ffi::Error err = CallInit(x, shard_idx_buf, slice_byte_size, local_port,
+                                 parallelism, num_layers, out);
 
   EXPECT_TRUE(err.success()) << "WS Init failed: " << err.message();
   EXPECT_NE(g_weight_synchronizers[0], nullptr);
@@ -125,7 +128,8 @@ TEST_P(WeightSynchronizerFfiParamTest, TriggerWSInitSucceeds) {
   VLOG(1) << "Assigned port: " << port;
 }
 
-TEST_P(WeightSynchronizerFfiParamTest, TriggerExecuteReshardingDMAOrchestration) {
+TEST_P(WeightSynchronizerFfiParamTest,
+       TriggerExecuteReshardingDMAOrchestration) {
   int64_t slice_byte_size = 1024;
   int32_t parallelism = 1;
   int32_t num_layers = 1;
@@ -229,7 +233,8 @@ TEST_P(WeightSynchronizerFfiParamTest, TriggerExecuteReshardingDMAOrchestration)
 }
 
 INSTANTIATE_TEST_SUITE_P(FfiTypeTests, WeightSynchronizerFfiParamTest,
-                         ::testing::Values(FfiType::kInit, FfiType::kInitAndD2h));
+                         ::testing::Values(FfiType::kInit,
+                                           FfiType::kInitAndD2h));
 
 }  // namespace
 }  // namespace weight_sync

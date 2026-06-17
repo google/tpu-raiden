@@ -26,16 +26,17 @@
 #include "absl/log/log.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
-#include "xla/future.h"
-#include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/status_casters.h"
-#include "xla/shape.h"
-#include "xla/tsl/platform/statusor.h"
 #include "core/raw_transfer_core.h"
 #include "core/raw_transfer_impl.h"
 #include "core/status_macros.h"
 #include "tpu_raiden/frameworks/jax/jax_utils.h"
+#ifndef WITHOUT_PYTHON
+#include <nanobind/nanobind.h>
+#else
+#include "tpu_raiden/frameworks/jax/mock_nanobind.h"
+#endif
 #include "tpu_raiden/frameworks/jax/raw_transfer_internal.h"
 
 namespace raiden {

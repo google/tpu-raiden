@@ -22,6 +22,13 @@ import torch
 from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _kv_cache_manager
 
 
+def format_endpoint(ip: str, port: int) -> str:
+  # If it contains ':' and is not already wrapped in brackets, wrap it
+  if ":" in ip and not (ip.startswith("[") and ip.endswith("]")):
+    return f"[{ip}]:{port}"
+  return f"{ip}:{port}"
+
+
 class KVCacheManagerTorchTest(parameterized.TestCase):
 
   def setUp(self):
@@ -30,7 +37,7 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
     self.device = torch.device("tpu")
     self.num_layers = 2
     self.num_shards = 1
-    self.block_size = 2
+    self.block_size = 1
     self.slice_byte_size = 16384 // 4  # float32 capacity
 
   @parameterized.named_parameters(
@@ -79,8 +86,8 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
     self.assertIsNotNone(ws_source.local_port)
     self.assertIsNotNone(ws_dest.local_port)
 
-    peer_source = f"localhost:{ws_source.local_port}"
-    peer_dest = f"localhost:{ws_dest.local_port}"
+    peer_source = format_endpoint(ws_source.local_ip, ws_source.local_port)
+    peer_dest = format_endpoint(ws_dest.local_ip, ws_dest.local_port)
 
     # Validate baseline state (destination tensors on TPU are zeroed)
     for l in range(self.num_layers):
@@ -125,10 +132,11 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
     )
     h2d_future_push.Await()
 
-    # Copy pulled data (host block 1, offset 2) to device block 1 (offset 2)
+    # Copy pulled data (host block 1, offset self.block_size)
+    # to device block 1 (offset self.block_size)
     h2d_future_pull = ws_dest.H2d(
-        src_offsets_major_dim=[2],
-        dst_offsets_major_dim=[2],
+        src_offsets_major_dim=[self.block_size],
+        dst_offsets_major_dim=[self.block_size],
         copy_sizes_major_dim=[self.block_size],
     )
     h2d_future_pull.Await()
@@ -140,9 +148,8 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
       for sh in range(self.num_shards):
         expected_val = float(l + 1.0)
         actual_data = dst_tensors[l][sh].cpu().numpy()
-        # Verify both blocks have the expected values
-        np.testing.assert_allclose(actual_data[0:2], expected_val, atol=1e-5)
-        np.testing.assert_allclose(actual_data[2:4], expected_val, atol=1e-5)
+        np.testing.assert_allclose(actual_data[0:1], expected_val, atol=1e-5)
+        np.testing.assert_allclose(actual_data[1:2], expected_val, atol=1e-5)
 
 
 if __name__ == "__main__":

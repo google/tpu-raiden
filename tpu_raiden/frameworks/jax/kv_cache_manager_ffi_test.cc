@@ -17,8 +17,11 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <set>
 #include <vector>
 
+#include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/api/ffi.h"
 #include "xla/stream_executor/platform_manager.h"
@@ -59,13 +62,21 @@ class KVCacheManagerFfiTest : public ::testing::Test {
   }
 
   void TearDown() override {
-    // Clean up global registry between tests
+    // Clean up global registry between tests safely to avoid double-free
+    std::set<KVCacheManagerWithTransfer*> unique_managers;
     for (int i = 0; i < 32; ++i) {
       if (g_kv_cache_managers[i] != nullptr) {
-        delete g_kv_cache_managers[i];
+        unique_managers.insert(g_kv_cache_managers[i]);
         g_kv_cache_managers[i] = nullptr;
       }
       g_streams[i].reset();
+    }
+    for (auto* mgr : unique_managers) {
+      delete mgr;
+    }
+    {
+      absl::MutexLock lock(g_manager_mutex);
+      g_kv_cache_managers_map.clear();
     }
   }
 };
@@ -147,12 +158,17 @@ TEST_F(KVCacheManagerFfiTest, TriggerRaidenH2dAndD2hDMAOrchestration) {
   FfiBufferFixture copy_sizes_fixture(XLA_FFI_DataType_S32, copy_sizes.data(),
                                       {1});
 
+  // Extract JAX stream pointer (we use the mocked g_streams[0] for the test)
+  int64_t stream_ptr_val = reinterpret_cast<int64_t>(g_streams[0].get());
+  FfiBufferFixture stream_ptr_fixture(XLA_FFI_DataType_S64, &stream_ptr_val,
+                                      {1});
+
   // 3. Execute H2D Transfer custom call FFI
   xla::ffi::Error h2d_err = TriggerRaidenH2dImpl(
       src_offsets_fixture.AsAnyBuffer(), dst_offsets_fixture.AsAnyBuffer(),
       copy_sizes_fixture.AsAnyBuffer(), shard_idx_fixture.AsAnyBuffer(),
-      cache_slice_fixture.AsAnyBuffer(), /*layer_idx=*/0,
-      anchor_fixture.AsAnyBuffer());
+      stream_ptr_fixture.AsAnyBuffer(), cache_slice_fixture.AsAnyBuffer(),
+      /*layer_idx=*/0, anchor_fixture.AsAnyBuffer());
 
   EXPECT_TRUE(h2d_err.success())
       << "H2D transfer failed: " << h2d_err.message();
@@ -181,16 +197,23 @@ TEST_F(KVCacheManagerFfiTest, TriggerRaidenH2dAndD2hDMAOrchestration) {
   uint8_t* h_block5 = h_base_layer0 + 5 * 4096;
   std::memset(h_block5, 0, 4096);
 
+  uint64_t uuid_val = 0;
+  FfiBufferFixture uuid_fixture(XLA_FFI_DataType_U64, &uuid_val, {1});
+
   // Execute D2H Transfer custom call FFI
   xla::ffi::Error d2h_err = TriggerRaidenD2hImpl(
       d2h_src_offsets_fixture.AsAnyBuffer(),
       d2h_dst_offsets_fixture.AsAnyBuffer(),
       d2h_copy_sizes_fixture.AsAnyBuffer(), shard_idx_fixture.AsAnyBuffer(),
+      stream_ptr_fixture.AsAnyBuffer(), uuid_fixture.AsAnyBuffer(),
       cache_slice_fixture.AsAnyBuffer(), /*layer_idx=*/0,
       anchor_fixture.AsAnyBuffer());
 
   EXPECT_TRUE(d2h_err.success())
       << "D2H transfer failed: " << d2h_err.message();
+
+  // Await async D2H completion via SyncCopies
+  SyncCopies();
 
   // Verify host block 5 contains the sequence successfully pulled back from
   // device block 2
@@ -198,6 +221,42 @@ TEST_F(KVCacheManagerFfiTest, TriggerRaidenH2dAndD2hDMAOrchestration) {
     ASSERT_EQ(h_block5[j], static_cast<uint8_t>(j % 256))
         << "Mismatch at index " << j << " on host block 5 after D2H";
   }
+}
+
+TEST_F(KVCacheManagerFfiTest, TriggerRaidenInitSharesManagerForSameIP) {
+  int32_t shard_idx_0 = 0;
+  FfiBufferFixture shard_idx_0_fixture(XLA_FFI_DataType_S32, &shard_idx_0, {1});
+  int32_t shard_idx_1 = 1;
+  FfiBufferFixture shard_idx_1_fixture(XLA_FFI_DataType_S32, &shard_idx_1, {1});
+
+  int32_t anchor = 0;
+  FfiBufferFixture anchor_fixture(XLA_FFI_DataType_S32, &anchor, {1});
+
+  xla::ffi::AnyBuffer x = anchor_fixture.AsAnyBuffer();
+  xla::ffi::Result<xla::ffi::AnyBuffer> out = anchor_fixture.AsAnyBuffer();
+
+  int64_t slice_byte_size = 1024;
+  int32_t local_port = -1;
+  int32_t parallelism = 2;
+  int32_t host_blocks_to_allocate = 8;
+  int32_t num_layers = 2;
+
+  // Initialize shard 0
+  xla::ffi::Error err0 = TriggerRaidenInitImpl(
+      x, shard_idx_0_fixture.AsAnyBuffer(), slice_byte_size, local_port,
+      parallelism, host_blocks_to_allocate, num_layers, out);
+  ASSERT_TRUE(err0.success()) << err0.message();
+
+  // Initialize shard 1
+  xla::ffi::Error err1 = TriggerRaidenInitImpl(
+      x, shard_idx_1_fixture.AsAnyBuffer(), slice_byte_size, local_port,
+      parallelism, host_blocks_to_allocate, num_layers, out);
+  ASSERT_TRUE(err1.success()) << err1.message();
+
+  // Verify that both shards share the same manager instance
+  EXPECT_NE(g_kv_cache_managers[0], nullptr);
+  EXPECT_NE(g_kv_cache_managers[1], nullptr);
+  EXPECT_EQ(g_kv_cache_managers[0], g_kv_cache_managers[1]);
 }
 
 }  // namespace

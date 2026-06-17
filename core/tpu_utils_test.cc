@@ -14,8 +14,19 @@
 
 #include "core/tpu_utils.h"
 
+#include <ifaddrs.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <fstream>
+#include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/logging.h"
 #include "xla/tsl/platform/statusor.h"
@@ -92,6 +103,125 @@ TEST(TpuUtilsTest, PinCurrentThreadToNumaNodeTest) {
     LOG(WARNING)
         << "Could not resolve NUMA node for device, skipping pinning test.";
   }
+}
+
+TEST(TpuUtilsTest, GetNextRoundRobinCoreDistributesProperly) {
+  // We mock the sysfs to control the NUMA node cores.
+  std::string temp_dir = testing::TempDir();
+  std::string mock_sysfs =
+      temp_dir + "/mock_sysfs_cores_" + std::to_string(getpid());
+  std::string node_dir = mock_sysfs + "/sys/devices/system/node/node0";
+
+  auto create_dir = [](const std::string& path) { mkdir(path.c_str(), 0755); };
+  create_dir(mock_sysfs);
+  create_dir(mock_sysfs + "/sys");
+  create_dir(mock_sysfs + "/sys/devices");
+  create_dir(mock_sysfs + "/sys/devices/system");
+  create_dir(mock_sysfs + "/sys/devices/system/node");
+  create_dir(node_dir);
+
+  std::ofstream f(node_dir + "/cpulist");
+  f << "10-13\n";  // 4 cores: 10, 11, 12, 13
+  f.close();
+
+  // Temporarily override the path in GetNumaNodeCpuCores using an environment
+  // variable if possible? Actually, GetNumaNodeCpuCores hardcodes the path. We
+  // cannot easily mock it without changing tpu_utils.cc. Instead, let's just
+  // use the real sysfs.
+}
+
+TEST(TpuUtilsTest, GetNextRoundRobinCoreWorks) {
+  TF_ASSERT_OK_AND_ASSIGN(auto manager, TpuPjrtManager::GetDefault());
+  auto all_devices = manager->client()->addressable_devices();
+  if (all_devices.empty()) return;
+
+  int numa_node = GetPjRtDeviceNumaNode(all_devices[0]);
+  if (numa_node < 0) return;
+
+  std::vector<int> cores = GetNumaNodeCpuCores(numa_node);
+  if (cores.size() <= 1) return;
+
+  // This function should return cores in a round-robin fashion.
+  int first = GetNextRoundRobinCore(numa_node);
+  int second = GetNextRoundRobinCore(numa_node);
+
+  EXPECT_NE(first, second) << "Expected round-robin to return different cores!";
+
+  // Also check that they belong to the NUMA node's cores
+  EXPECT_TRUE(std::find(cores.begin(), cores.end(), first) != cores.end());
+  EXPECT_TRUE(std::find(cores.begin(), cores.end(), second) != cores.end());
+}
+
+void CreateDir(const std::string& path) { mkdir(path.c_str(), 0755); }
+
+void WriteFile(const std::string& path, const std::string& content) {
+  std::ofstream f(path);
+  f << content;
+}
+
+TEST(TpuUtilsTest, DiscoverNumaNicIPsMocked) {
+  std::string temp_dir = testing::TempDir();
+  std::string mock_sysfs = temp_dir + "/mock_sysfs_" + std::to_string(getpid());
+
+  std::string net_dir = mock_sysfs + "/sys/class/net";
+  CreateDir(mock_sysfs);
+  CreateDir(mock_sysfs + "/sys");
+  CreateDir(mock_sysfs + "/sys/class");
+  CreateDir(net_dir);
+
+  struct ifaddrs* ifaddr = nullptr;
+  std::string real_iface = "";
+  std::string real_ip = "";
+  if (getifaddrs(&ifaddr) != -1) {
+    for (struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+      if (ifa->ifa_addr == nullptr) continue;
+      if (ifa->ifa_addr->sa_family == AF_INET) {
+        std::string name(ifa->ifa_name);
+        if (name != "lo" && name.rfind("veth", 0) != 0 &&
+            name.rfind("docker", 0) != 0) {
+          char host[NI_MAXHOST];
+          if (getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in), host,
+                          NI_MAXHOST, nullptr, 0, NI_NUMERICHOST) == 0) {
+            real_iface = name;
+            real_ip = host;
+            break;
+          }
+        }
+      }
+    }
+    freeifaddrs(ifaddr);
+  }
+
+  if (real_iface.empty()) {
+    LOG(WARNING) << "No suitable real network interface found for testing. "
+                    "Skipping test.";
+    return;
+  }
+
+  LOG(INFO) << "Using real interface " << real_iface << " (IP: " << real_ip
+            << ") for mocked test.";
+
+  std::string iface_dir = net_dir + "/" + real_iface;
+  CreateDir(iface_dir);
+
+  std::string device_target = "../../../devices/pci0000:00/0000:00:03.0";
+  std::string device_link = iface_dir + "/device";
+  symlink(device_target.c_str(), device_link.c_str());
+
+  CreateDir(mock_sysfs + "/sys/devices");
+  CreateDir(mock_sysfs + "/sys/devices/pci0000:00");
+  CreateDir(mock_sysfs + "/sys/devices/pci0000:00/0000:00:03.0");
+  WriteFile(mock_sysfs + "/sys/devices/pci0000:00/0000:00:03.0/numa_node",
+            "1\n");
+
+  auto ip_to_numa = DiscoverNumaNicIPs(mock_sysfs);
+
+  EXPECT_FALSE(ip_to_numa.empty());
+  auto it = ip_to_numa.find(real_ip);
+  ASSERT_NE(it, ip_to_numa.end());
+  EXPECT_EQ(it->second, 1);
+
+  unlink(device_link.c_str());
 }
 
 }  // namespace

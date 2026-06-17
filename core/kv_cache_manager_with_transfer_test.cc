@@ -14,6 +14,13 @@
 
 #include "core/kv_cache_manager_with_transfer.h"
 
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -87,27 +94,11 @@ TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransfer) {
   std::string remote_endpoint = "127.0.0.1:" + std::to_string(port);
 
   // Start read: pull Block 0 (remote) and store it in Block 1 (local)
-  engine->StartRead(req_id, uuid, remote_endpoint,
-                    /*remote_block_ids=*/{0},
-                    /*local_block_ids=*/{1});
-
-  // Wait for transfer to complete by polling CompleteReadRaw
-  bool done = false;
-  for (int i = 0; i < 100; ++i) {
-    auto [done_sending, done_recving, failed_recving] =
-        engine->CompleteReadRaw();
-    if (std::find(failed_recving.begin(), failed_recving.end(), req_id) !=
-        failed_recving.end()) {
-      FAIL() << "Transfer failed";
-    }
-    if (std::find(done_recving.begin(), done_recving.end(), req_id) !=
-        done_recving.end()) {
-      done = true;
-      break;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  }
-  ASSERT_TRUE(done) << "Transfer timed out";
+  auto future_or = engine->StartRead(req_id, uuid, remote_endpoint,
+                                     /*remote_block_ids=*/{0},
+                                     /*local_block_ids=*/{1});
+  ASSERT_THAT(future_or, IsOk());
+  ASSERT_THAT(future_or->Await(), IsOk());
 
   // Verify device buffer: Block 1 should now contain Block 0's original data.
   // i.e. elements 1024..2047 should be equal to 0..1023.
@@ -152,10 +143,15 @@ TEST(KVCacheManagerWithTransferTest, StartReadAcceptsParallelism) {
 
   // Calling StartRead with a non-existent port throws or returns an op that
   // fails
-  engine->StartRead("req_parallel", 99999, "127.0.0.1:8888", {0}, {0},
-                    /*parallelism=*/2);
+  auto future_or =
+      engine->StartRead("req_parallel", 99999, "127.0.0.1:8888", {0}, {0},
+                        /*parallelism=*/2);
+  if (future_or.ok()) {
+    EXPECT_FALSE(future_or->Await().ok());
+  }
 }
-TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransferToCustomHostBlock) {
+TEST(KVCacheManagerWithTransferTest,
+     LocalOrchestratedTransferToCustomHostBlock) {
   TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
                           TpuPjrtManager::GetDefault());
 
@@ -209,29 +205,14 @@ TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransferToCustomHostBlock)
 
   // Start read: pull Remote Block 0 -> Local Device Block 1,
   // but target Local Host Block 0 as the staging/host block.
-  engine->StartRead(req_id, uuid, remote_endpoint,
-                    /*remote_block_ids=*/{0},
-                    /*local_block_ids=*/{1},
-                    /*parallelism=*/1,
-                    /*local_host_block_ids=*/std::vector<int64_t>{0});
-
-  // Wait for transfer to complete
-  bool done = false;
-  for (int i = 0; i < 100; ++i) {
-    auto [done_sending, done_recving, failed_recving] =
-        engine->CompleteReadRaw();
-    if (std::find(failed_recving.begin(), failed_recving.end(), req_id) !=
-        failed_recving.end()) {
-      FAIL() << "Transfer failed";
-    }
-    if (std::find(done_recving.begin(), done_recving.end(), req_id) !=
-        done_recving.end()) {
-      done = true;
-      break;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-  }
-  ASSERT_TRUE(done) << "Transfer timed out";
+  auto future_or =
+      engine->StartRead(req_id, uuid, remote_endpoint,
+                        /*remote_block_ids=*/{0},
+                        /*local_block_ids=*/{1},
+                        /*parallelism=*/1,
+                        /*local_host_block_ids=*/std::vector<int64_t>{0});
+  ASSERT_THAT(future_or, IsOk());
+  ASSERT_THAT(future_or->Await(), IsOk());
 
   // Verify device buffer: Block 1 should now contain Block 0's original data.
   TF_ASSERT_OK_AND_ASSIGN(auto literal, buffer->ToLiteral().Await());
@@ -249,12 +230,6 @@ TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransferToCustomHostBlock)
 
   float* host_block_0_float = reinterpret_cast<float*>(host_block_0);
   float* host_block_1_float = reinterpret_cast<float*>(host_block_1);
-
-
-
-
-
-
 
   // Host Block 0 should contain the transferred data in tiled layout.
   // Tile width is 128 floats (512 bytes) due to TPU alignment.
@@ -274,5 +249,127 @@ TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransferToCustomHostBlock)
   }
 }
 
+TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransferWithParallelism) {
+  TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
+                          TpuPjrtManager::GetDefault());
+
+  std::vector<int64_t> shape_dims = {2, 32, 32};
+  int64_t elements_per_slice = 32 * 32;
+  int64_t total_elements = 2 * elements_per_slice;
+
+  std::vector<float> host_data(total_elements);
+  for (int i = 0; i < total_elements; ++i) {
+    host_data[i] = static_cast<float>(i);
+  }
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<xla::PjRtBuffer> buffer,
+      pjrt_manager->BufferFromHost(host_data.data(), xla::F32, shape_dims));
+
+  ASSERT_THAT(buffer->GetReadyFuture().Await(), IsOk());
+
+  std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers = {{buffer.get()}};
+  auto engine = std::make_unique<KVCacheManagerWithTransfer>(
+      layer_buffers,
+      /*local_port=*/std::nullopt,
+      /*host_blocks_to_allocate=*/std::nullopt,
+      /*unsafe_skip_buffer_lock=*/true,
+      /*parallelism=*/1,
+      /*host_allocator=*/nullptr,
+      /*node_id=*/0,
+      /*local_control_port=*/0,
+      /*max_blocks=*/2,
+      /*num_slots=*/2,
+      /*timeout_s=*/10.0);
+
+  ASSERT_THAT(engine->ConfigureHostStagingSlots(2, 2), IsOk());
+
+  uint64_t uuid = 54321;
+  std::string req_id = "local_test_parallel_req";
+  engine->NotifyForRead(req_id, uuid, /*block_ids=*/{0});
+
+  int port = engine->local_control_port();
+  ASSERT_GT(port, 0);
+  std::string remote_endpoint = "127.0.0.1:" + std::to_string(port);
+
+  // Start read with parallelism = 4
+  auto future_or = engine->StartRead(req_id, uuid, remote_endpoint,
+                                     /*remote_block_ids=*/{0},
+                                     /*local_block_ids=*/{1},
+                                     /*parallelism=*/4);
+  ASSERT_THAT(future_or, IsOk());
+  ASSERT_THAT(future_or->Await(), IsOk());
+
+  TF_ASSERT_OK_AND_ASSIGN(auto literal, buffer->ToLiteral().Await());
+  auto read_back = literal->data<float>();
+  ASSERT_EQ(read_back.size(), total_elements);
+
+  // Block 1 (overwritten with Block 0's data)
+  for (int i = 0; i < elements_per_slice; ++i) {
+    EXPECT_EQ(read_back[elements_per_slice + i], static_cast<float>(i));
+  }
+}
+
+TEST(KVCacheManagerWithTransferTest,
+     LocalOrchestratedTransferFallbackParallelism) {
+  TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
+                          TpuPjrtManager::GetDefault());
+
+  std::vector<int64_t> shape_dims = {2, 32, 32};
+  int64_t elements_per_slice = 32 * 32;
+  int64_t total_elements = 2 * elements_per_slice;
+
+  std::vector<float> host_data(total_elements);
+  for (int i = 0; i < total_elements; ++i) {
+    host_data[i] = static_cast<float>(i);
+  }
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<xla::PjRtBuffer> buffer,
+      pjrt_manager->BufferFromHost(host_data.data(), xla::F32, shape_dims));
+
+  ASSERT_THAT(buffer->GetReadyFuture().Await(), IsOk());
+
+  std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers = {{buffer.get()}};
+  auto engine = std::make_unique<KVCacheManagerWithTransfer>(
+      layer_buffers,
+      /*local_port=*/std::nullopt,
+      /*host_blocks_to_allocate=*/std::nullopt,
+      /*unsafe_skip_buffer_lock=*/true,
+      /*parallelism=*/1,
+      /*host_allocator=*/nullptr,
+      /*node_id=*/0,
+      /*local_control_port=*/0,
+      /*max_blocks=*/2,
+      /*num_slots=*/2,
+      /*timeout_s=*/10.0);
+
+  ASSERT_THAT(engine->ConfigureHostStagingSlots(2, 2), IsOk());
+
+  uint64_t uuid = 54322;
+  std::string req_id = "local_test_fallback_req";
+  engine->NotifyForRead(req_id, uuid, /*block_ids=*/{0});
+
+  int port = engine->local_control_port();
+  ASSERT_GT(port, 0);
+  std::string remote_endpoint = "127.0.0.1:" + std::to_string(port);
+
+  // Start read with parallelism = 0 (should fallback to 1)
+  auto future_or = engine->StartRead(req_id, uuid, remote_endpoint,
+                                     /*remote_block_ids=*/{0},
+                                     /*local_block_ids=*/{1},
+                                     /*parallelism=*/0);
+  ASSERT_THAT(future_or, IsOk());
+  ASSERT_THAT(future_or->Await(), IsOk());
+
+  TF_ASSERT_OK_AND_ASSIGN(auto literal, buffer->ToLiteral().Await());
+  auto read_back = literal->data<float>();
+  ASSERT_EQ(read_back.size(), total_elements);
+
+  // Block 1 (overwritten with Block 0's data)
+  for (int i = 0; i < elements_per_slice; ++i) {
+    EXPECT_EQ(read_back[elements_per_slice + i], static_cast<float>(i));
+  }
+}
 }  // namespace
 }  // namespace tpu_raiden

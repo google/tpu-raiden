@@ -38,7 +38,11 @@ cc_library(
     deps = [
         ":utils",
         "//core:kv_cache_manager_with_transfer",
+        "//core:raw_transfer_core",
         "//core:utils",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "@nanobind",
     ],
 )
@@ -124,6 +128,7 @@ nanobind_extension(
         ":raw_transfer_jax",
         ":weight_synchronizer_jax",
         "//core:raw_transfer_core",
+        "//core:tpu_utils",
         "//weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -169,9 +174,14 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//core:kv_cache_manager_with_transfer",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/synchronization",
         "@xla//xla/ffi/api:ffi",
+        "@xla//xla/stream_executor:device_address",
         "@xla//xla/stream_executor:platform",
         "@xla//xla/stream_executor:platform_manager",
         "@xla//xla/stream_executor:stream",
@@ -200,6 +210,10 @@ nanobind_extension(
     deps = [
         ":kv_cache_manager_ffi",
         ":kv_cache_manager_jax",
+        "@com_google_absl//absl/synchronization",
+        "@xla//xla/stream_executor:platform",
+        "@xla//xla/stream_executor:platform_manager",
+        "@xla//xla/stream_executor:stream_executor_h",
     ],
 )
 
@@ -221,6 +235,7 @@ cc_library(
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
+        "//core:tpu_utils",
         "//weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
@@ -322,12 +337,8 @@ nanobind_extension(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
         "@nanobind",
-        "@xla//xla:future",
-        "@xla//xla:shape_util",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:status_casters",
-        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
-        "@xla//xla/tsl/platform:statusor",
     ],
 )
 
@@ -342,9 +353,14 @@ cc_library(
     features = ["-use_header_modules"],
     deps = [
         "//core:kv_cache_manager_with_transfer",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/synchronization",
         "@xla//xla/ffi/api:ffi",
+        "@xla//xla/stream_executor:device_address",
         "@xla//xla/stream_executor:platform",
         "@xla//xla/stream_executor:platform_manager",
         "@xla//xla/stream_executor:stream",
@@ -360,6 +376,8 @@ cc_test(
     deps = [
         ":kv_cache_manager_ffi_mock",
         "//core:kv_cache_manager_with_transfer",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/synchronization",
         "@xla//xla/ffi/api:c_api",
         "@xla//xla/ffi/api:ffi",
         "@xla//xla/stream_executor:platform_manager",
@@ -383,6 +401,7 @@ cc_library(
     ],
     features = ["-use_header_modules"],
     deps = [
+        "//core:tpu_utils",
         "//weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
@@ -438,15 +457,11 @@ cc_library(
         "@jax//jaxlib:py_client",
         "@nanobind",
         "@rules_python//python/cc:current_py_cc_headers",
-        "@xla//xla:future",
-        "@xla//xla:shape_util",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:status_casters",
         "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",  # buildcleaner: keep
-        "@xla//xla/pjrt/c_api_client:pjrt_c_api_client",
         "@xla//xla/python/ifrt",
         "@xla//xla/python/pjrt_ifrt",
-        "@xla//xla/tsl/platform:statusor",
     ],
 )
 
@@ -464,6 +479,11 @@ cc_library(
     ],
     defines = ["WITHOUT_PYTHON"],
     features = ["-use_header_modules"],
+    tags = [
+        "ignore_for_dep=Python.h",
+        "ignore_for_dep=third_party/nanobind/include/nanobind/nanobind.h",
+        "ignore_for_dep=third_party/py/jax/jaxlib/py_array.h",
+    ],
     deps = [
         "//core:raw_transfer_core",
         "//core:raw_transfer_impl",
@@ -471,8 +491,6 @@ cc_library(
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
-        "@xla//xla:future",
-        "@xla//xla:shape_util",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt:status_casters",
         "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",  # buildcleaner: keep
@@ -487,6 +505,7 @@ cc_test(
     name = "raw_transfer_test",
     srcs = ["raw_transfer_test.cc"],
     copts = ["-fexceptions"],
+    defines = ["WITHOUT_PYTHON"],
     features = ["-use_header_modules"],
     deps = [
         ":raw_transfer_jax_mock",

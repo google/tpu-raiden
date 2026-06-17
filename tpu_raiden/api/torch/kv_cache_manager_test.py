@@ -63,7 +63,7 @@ class KVCacheManagerTest(parameterized.TestCase):
     )
     self.assertIsNotNone(manager)
 
-  def test_e2e_transfer_polling(self):
+  def test_e2e_transfer(self):
     num_blocks = 2
     shape = (num_blocks, 128, 8)
 
@@ -105,41 +105,18 @@ class KVCacheManagerTest(parameterized.TestCase):
     producer.register_read(req_id, uuid, [0, 1])
 
     remote_endpoint = f"127.0.0.1:{port}"
-    consumer.start_read(
+    future = consumer.start_read(
         req_id=req_id,
         uuid=uuid,
         remote_endpoint=remote_endpoint,
         remote_block_ids=[0, 1],
         local_block_ids=[0, 1],
     )
-
-    # Poll until consumer is done receiving
-    done = False
-    for _ in range(50):
-      _, done_recving, failed_recving = consumer.poll_stats()
-      if req_id in failed_recving:
-        self.fail("Transfer failed")
-      if req_id in done_recving:
-        done = True
-        break
-      time.sleep(0.1)
-
-    self.assertTrue(done, "Consumer did not finish transfer in time")
+    future.Await()
 
     # Check that consumer correctly loaded the values
     for t in dst_caches:
       np.testing.assert_allclose(t.cpu().numpy(), 1.0, atol=1e-5)
-
-    # Poll producer until it's done sending
-    done_prod = False
-    for _ in range(50):
-      done_sending, _, _ = producer.poll_stats()
-      if req_id in done_sending:
-        done_prod = True
-        break
-      time.sleep(0.1)
-
-    self.assertTrue(done_prod, "Producer did not finish sending in time")
 
   def test_parallel_pull(self):
     num_blocks = 2
@@ -183,7 +160,7 @@ class KVCacheManagerTest(parameterized.TestCase):
     producer.register_read(req_id, uuid, [0, 1])
 
     remote_endpoint = f"127.0.0.1:{port}"
-    consumer.start_read(
+    future = consumer.start_read(
         req_id=req_id,
         uuid=uuid,
         remote_endpoint=remote_endpoint,
@@ -191,31 +168,10 @@ class KVCacheManagerTest(parameterized.TestCase):
         local_block_ids=[0, 1],
         parallelism=2,
     )
-
-    done = False
-    for _ in range(50):
-      _, done_recving, failed_recving = consumer.poll_stats()
-      if req_id in failed_recving:
-        self.fail("Transfer failed")
-      if req_id in done_recving:
-        done = True
-        break
-      time.sleep(0.1)
-
-    self.assertTrue(done, "Consumer did not finish transfer in time")
+    future.Await()
 
     for t in dst_caches:
       np.testing.assert_allclose(t.cpu().numpy(), 2.0, atol=1e-5)
-
-    done_prod = False
-    for _ in range(50):
-      done_sending, _, _ = producer.poll_stats()
-      if req_id in done_sending:
-        done_prod = True
-        break
-      time.sleep(0.1)
-
-    self.assertTrue(done_prod, "Producer did not finish sending in time")
 
 
 if __name__ == "__main__":
