@@ -298,7 +298,7 @@ class KVCacheManagerTest(parameterized.TestCase):
         src_offsets_major_dim=src_offsets,
         copy_sizes_major_dim=sizes,
     )
-    self.assertLen(block_ids, 1)
+    self.assertLen(block_ids, sizes[0])
     self.assertEqual(block_ids[0], 0)
 
     future.Await()
@@ -485,7 +485,6 @@ class KVCacheManagerTest(parameterized.TestCase):
 
     manager = _kv_cache_manager.KVCacheManager(
         device_arrays=tpu_arrs,
-        block_size=1,
         host_blocks_to_allocate=8,
         unsafe_skip_buffer_lock=True,
     )
@@ -572,7 +571,6 @@ class KVCacheManagerTest(parameterized.TestCase):
 
     remote_manager = _kv_cache_manager.KVCacheManager(
         device_arrays=tpu_src_arrs,
-        block_size=block_size,
         local_port=0,
         host_blocks_to_allocate=8,
         unsafe_skip_buffer_lock=self.skip_lock,
@@ -585,7 +583,6 @@ class KVCacheManagerTest(parameterized.TestCase):
 
     local_manager = _kv_cache_manager.KVCacheManager(
         device_arrays=tpu_dst_arrs,
-        block_size=block_size,
         host_blocks_to_allocate=8,
         unsafe_skip_buffer_lock=self.skip_lock,
         parallelism=2,

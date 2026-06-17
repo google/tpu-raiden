@@ -19,8 +19,8 @@
 
 #include "xla/literal.h"
 #include "xla/pjrt/pjrt_client.h"
-#include "xla/tsl/platform/test.h"
 #include "xla/tsl/platform/statusor.h"
+#include "xla/tsl/platform/test.h"
 
 namespace tpu_raiden {
 namespace {

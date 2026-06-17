@@ -15,6 +15,12 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_JAX_KV_CACHE_MANAGER_FFI_H_
 #define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_JAX_KV_CACHE_MANAGER_FFI_H_
 
+#include <string>
+
+#include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/synchronization/mutex.h"
+
 namespace tpu_raiden {
 
 class KVCacheManagerWithTransfer;
@@ -23,6 +29,10 @@ namespace kv_cache {
 
 // Global registry map for distributed JAX meshes multi-device support
 extern KVCacheManagerWithTransfer* g_kv_cache_managers[32];
+
+extern absl::Mutex g_manager_mutex;
+extern absl::flat_hash_map<std::string, KVCacheManagerWithTransfer*>
+    g_kv_cache_managers_map;
 
 void SyncCopies();
 

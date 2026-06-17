@@ -65,8 +65,6 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/types/span.h"
-#include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "core/host_memory_allocator.h"
 #include "core/raw_transfer_core.h"
@@ -393,12 +391,12 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     bool unsafe_skip_buffer_lock, int parallelism,
     HostBufferAllocator host_allocator, int64_t node_id,
     int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
-    double timeout_s)
-    : KVCacheManagerBase(layer_buffers, local_port,
-                         host_blocks_to_allocate.has_value()
-                             ? *host_blocks_to_allocate
-                             : num_slots * max_blocks,
-                         unsafe_skip_buffer_lock, parallelism, host_allocator),
+    double timeout_s, std::optional<std::string> local_ip)
+    : KVCacheManagerBase(
+          layer_buffers, local_port,
+          host_blocks_to_allocate.has_value() ? *host_blocks_to_allocate
+                                              : num_slots * max_blocks,
+          unsafe_skip_buffer_lock, parallelism, host_allocator, local_ip),
       node_id_(node_id),
       local_control_port_(static_cast<int>(local_control_port)),
       local_data_port_(0),
@@ -430,12 +428,13 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     int parallelism, int64_t node_id, int64_t local_control_port,
-    int64_t max_blocks, int64_t num_slots, double timeout_s)
+    int64_t max_blocks, int64_t num_slots, double timeout_s,
+    std::optional<std::string> local_ip)
     : KVCacheManagerBase(num_layers, num_shards, slice_byte_size, local_port,
                          host_blocks_to_allocate.has_value()
                              ? *host_blocks_to_allocate
                              : num_slots * max_blocks,
-                         parallelism),
+                         parallelism, /*host_allocator=*/nullptr, local_ip),
       node_id_(node_id),
       local_control_port_(static_cast<int>(local_control_port)),
       local_data_port_(0),
@@ -550,31 +549,233 @@ void KVCacheManagerWithTransfer::StartRead(
   std::optional<int> target_node = GetLocalTpuNumaNode(representative_buf);
 
   push_pool_->Schedule(target_node, [this, req_id, uuid, remote_endpoint,
+                                     parallelism,
                                      load_plan = std::move(load_plan)]() {
     try {
-      int control_fd = ConnectTcp(remote_endpoint);
-      auto control_cleanup =
-          std::unique_ptr<int, void (*)(int*)>(&control_fd, [](int* p) {
-            if (p && *p >= 0) close(*p);
-          });
+      int slot_idx = -1;
+      bool report_recv_done = true;
+      bool release_only = false;
+      double slot_ms = 0.0;
+      double control_setup_ms = 0.0;
+      double descriptor_ms = 0.0;
+      double h2h_ms = 0.0;
+      double host_reorder_ms = 0.0;
+      double h2d_issue_ms = 0.0;
+      double h2d_wait_ms = 0.0;
+      double h2d_total_ms = 0.0;
+      double ack_ms = 0.0;
+      int64_t h2h_layers = 0;
+      int64_t h2h_bytes = 0;
+      int64_t h2d_bytes = 0;
+      int64_t h2d_segments = 0;
 
-      ControlRequestHeader stream_request;
-      stream_request.magic = kControlMagic;
-      stream_request.op = kOpPullStream;
-      stream_request.uuid = uuid;
-      stream_request.num_blocks = static_cast<uint64_t>(load_plan.num_blocks);
-      stream_request.consumer_data_port =
-          static_cast<uint32_t>(local_data_port_);
-      CheckStatus(
-          "control pull stream write",
-          WriteExact(control_fd, &stream_request, sizeof(stream_request)));
-      WriteBlockIds(control_fd, load_plan.producer_remote_block_ids);
-      WriteBlockIds(control_fd, load_plan.transport_host_block_ids);
+      if (load_plan.num_blocks == 0) {
+        report_recv_done = false;
+        release_only = true;
+        const auto ack_start = std::chrono::steady_clock::now();
+        AckRemote(remote_endpoint, uuid);
+        ack_ms = DurationMs(ack_start, std::chrono::steady_clock::now());
+      } else {
+        const auto slot_start = std::chrono::steady_clock::now();
+        slot_idx = AcquireSlot();
+        slot_ms = DurationMs(slot_start, std::chrono::steady_clock::now());
 
-      ControlResponseHeader response = ReadControlResponseHeader(control_fd);
-      if (response.status != 0) {
-        throw std::runtime_error(
-            "Remote producer rejected Hybrid Bridge read request");
+        const auto control_start = std::chrono::steady_clock::now();
+        int control_fd = ConnectTcp(remote_endpoint);
+        auto control_cleanup =
+            std::unique_ptr<int, void (*)(int*)>(&control_fd, [](int* p) {
+              if (p && *p >= 0) close(*p);
+            });
+        ControlRequestHeader stream_request;
+        stream_request.magic = kControlMagic;
+        stream_request.op = kOpPullStream;
+        stream_request.uuid = uuid;
+        stream_request.num_blocks = static_cast<uint64_t>(load_plan.num_blocks);
+        stream_request.consumer_data_port =
+            static_cast<uint32_t>(local_data_port_);
+        CheckStatus(
+            "control pull stream write",
+            WriteExact(control_fd, &stream_request, sizeof(stream_request)));
+        WriteBlockIds(control_fd, load_plan.producer_remote_block_ids);
+        WriteBlockIds(control_fd, load_plan.transport_host_block_ids);
+
+        ControlResponseHeader response = ReadControlResponseHeader(control_fd);
+        if (response.status != 0) {
+          throw std::runtime_error(
+              "Remote producer rejected Hybrid Bridge read request");
+        }
+        control_setup_ms =
+            DurationMs(control_start, std::chrono::steady_clock::now());
+
+        std::vector<kv_cache::KVCacheHostSpan> local_spans =
+            LayerSpans(slot_idx, static_cast<int64_t>(load_plan.num_blocks));
+        if (response.num_layers != local_spans.size()) {
+          throw std::runtime_error("remote layer descriptor count mismatch");
+        }
+        PullBlockDescriptor block_descriptor;
+        const auto descriptor_start = std::chrono::steady_clock::now();
+        CheckStatus(
+            "control stream block descriptor read",
+            ReadExact(control_fd, &block_descriptor, sizeof(block_descriptor)));
+        descriptor_ms +=
+            DurationMs(descriptor_start, std::chrono::steady_clock::now());
+        if (block_descriptor.num_blocks !=
+            static_cast<uint64_t>(load_plan.num_blocks)) {
+          throw std::runtime_error("remote block descriptor size mismatch");
+        }
+
+        std::vector<uint8_t*> explicit_dst_ptrs;
+        explicit_dst_ptrs.reserve(local_spans.size());
+        for (const kv_cache::KVCacheHostSpan& span : local_spans) {
+          explicit_dst_ptrs.push_back(span.ptr);
+          ++h2h_layers;
+          h2h_bytes += static_cast<int64_t>(span.nbytes);
+        }
+
+        std::vector<int> remote_staging_block_ids = ContiguousBlockIds(
+            block_descriptor.remote_block_base, block_descriptor.num_blocks);
+        std::vector<int> local_compact_block_ids =
+            ContiguousBlockIds(/*base=*/0, block_descriptor.num_blocks);
+        const bool overlap_h2d = !load_plan.RequiresHostReorder();
+        kv_cache::KVCacheCopySpec h2d_transfer_spec =
+            ToKVCacheCopySpec(load_plan.h2d_copy);
+        auto h2d_future = std::make_shared<TransferFuture>();
+        std::mutex h2d_mu;
+        std::vector<size_t> h2d_received_counts(local_spans.size(), 0);
+        std::vector<bool> h2d_issued(local_spans.size(), false);
+        bool h2d_started = false;
+        std::chrono::steady_clock::time_point h2d_started_at;
+        transport::BlockReceivedCallback on_block_received;
+        if (overlap_h2d) {
+          h2d_segments = static_cast<int64_t>(load_plan.h2d_copy.sizes.size());
+          on_block_received = [&](size_t layer_idx, size_t shard_idx,
+                                  int /*block_id*/,
+                                  size_t /*size_bytes*/) -> absl::Status {
+            const size_t span_idx = layer_idx * num_shards() + shard_idx;
+            if (span_idx >= local_spans.size()) {
+              return absl::OutOfRangeError(
+                  "received block layer or shard out of range");
+            }
+            std::lock_guard<std::mutex> lock(h2d_mu);
+            size_t received = ++h2d_received_counts[span_idx];
+            VLOG(1) << "on_block_received: Layer: " << layer_idx
+                    << ", Shard: " << shard_idx
+                    << ", Received blocks for this shard: " << received << "/"
+                    << load_plan.num_blocks
+                    << ", Thread: " << std::this_thread::get_id();
+            if (received < static_cast<size_t>(load_plan.num_blocks)) {
+              return absl::OkStatus();
+            }
+            if (received > static_cast<size_t>(load_plan.num_blocks)) {
+              return absl::FailedPreconditionError(
+                  "received too many blocks for H2D layer");
+            }
+            if (h2d_issued[span_idx]) {
+              return absl::OkStatus();
+            }
+            const auto issue_one_start = std::chrono::steady_clock::now();
+            if (!h2d_started) {
+              h2d_started = true;
+              h2d_started_at = issue_one_start;
+            }
+            VLOG(1) << "on_block_received: Triggering H2d for Layer: "
+                    << layer_idx << ", Shard: " << shard_idx
+                    << ", Thread: " << std::this_thread::get_id();
+            auto future_or =
+                H2d(h2d_transfer_spec.src_offsets,
+                    h2d_transfer_spec.dst_offsets, h2d_transfer_spec.sizes,
+                    /*slot_idx=*/std::nullopt, layer_idx, shard_idx);
+            if (!future_or.ok()) {
+              VLOG(1) << "on_block_received: H2d failed: "
+                      << future_or.status().ToString();
+              return future_or.status();
+            }
+            VLOG(1) << "on_block_received: H2d triggered successfully. Adding "
+                       "to h2d_future. Thread: "
+                    << std::this_thread::get_id();
+            h2d_future->Add(std::move(future_or.value()));
+            h2d_issued[span_idx] = true;
+            h2d_bytes += static_cast<int64_t>(local_spans[span_idx].nbytes);
+            h2d_issue_ms +=
+                DurationMs(issue_one_start, std::chrono::steady_clock::now());
+            return absl::OkStatus();
+          };
+        }
+        const auto h2h_start = std::chrono::steady_clock::now();
+        std::vector<int> remote_block_ids_int(
+            load_plan.producer_remote_block_ids.begin(),
+            load_plan.producer_remote_block_ids.end());
+        std::vector<int> local_host_block_ids_int(
+            load_plan.transport_host_block_ids.begin(),
+            load_plan.transport_host_block_ids.end());
+        auto h2h_future_or = H2hReadExplicit(
+            EndpointWithPort(remote_endpoint, response.data_port),
+            remote_block_ids_int, local_host_block_ids_int,
+            /*explicit_dst_ptrs=*/{}, parallelism,
+            transport::MajorOrder::kLayerMajor, on_block_received);
+        if (!h2h_future_or.ok()) {
+          ThrowStatus("BlockTransport pull failed", h2h_future_or.status());
+        }
+        absl::Status h2h_status = h2h_future_or.value().Await();
+        if (!h2h_status.ok()) {
+          ThrowStatus("BlockTransport pull failed", h2h_status);
+        }
+        h2h_ms += DurationMs(h2h_start, std::chrono::steady_clock::now());
+
+        if (load_plan.RequiresHostReorder()) {
+          const auto reorder_start = std::chrono::steady_clock::now();
+          for (const kv_cache::KVCacheHostSpan& span : local_spans) {
+            ReorderCompactBlocks(span, load_plan.host_dst_to_src);
+          }
+          host_reorder_ms +=
+              DurationMs(reorder_start, std::chrono::steady_clock::now());
+          const auto h2d_start = std::chrono::steady_clock::now();
+          VLOG(1) << "StartRead (Sequential): Issuing H2D. Thread: "
+                  << std::this_thread::get_id();
+          StageResult h2d =
+              IssueH2D(slot_idx, static_cast<int64_t>(load_plan.num_blocks),
+                       load_plan.h2d_local_block_ids);
+          const auto h2d_issued_time = std::chrono::steady_clock::now();
+          VLOG(1) << "StartRead (Sequential): Awaiting H2D future... Thread: "
+                  << std::this_thread::get_id();
+          h2d.future->Await();
+          VLOG(1) << "StartRead (Sequential): H2D future completed. Thread: "
+                  << std::this_thread::get_id();
+          const auto h2d_done = std::chrono::steady_clock::now();
+
+          h2d_bytes = h2d.total_bytes;
+          h2d_segments = h2d.copy_segments;
+          h2d_issue_ms = DurationMs(h2d_start, h2d_issued_time);
+          h2d_wait_ms = DurationMs(h2d_issued_time, h2d_done);
+          h2d_total_ms = DurationMs(h2d_start, h2d_done);
+        } else {
+          for (size_t i = 0; i < h2d_issued.size(); ++i) {
+            if (!h2d_issued[i]) {
+              throw std::runtime_error("H2D layer was not issued");
+            }
+          }
+          const auto h2d_wait_start = std::chrono::steady_clock::now();
+          VLOG(1) << "StartRead (Overlapped): Awaiting h2d_future... Thread: "
+                  << std::this_thread::get_id();
+          h2d_future->Await();
+          VLOG(1) << "StartRead (Overlapped): h2d_future completed. Thread: "
+                  << std::this_thread::get_id();
+          const auto h2d_done = std::chrono::steady_clock::now();
+          h2d_wait_ms = DurationMs(h2d_wait_start, h2d_done);
+          h2d_total_ms =
+              h2d_started ? DurationMs(h2d_started_at, h2d_done) : 0.0;
+        }
+
+        const auto ack_start = std::chrono::steady_clock::now();
+        ControlRequestHeader ack_request;
+        ack_request.magic = kControlMagic;
+        ack_request.op = kOpAck;
+        ack_request.uuid = uuid;
+        VLOG(1) << "StartRead: Sending ACK to remote. Thread: "
+                << std::this_thread::get_id();
+        CheckStatus("control ack write",
+                    WriteExact(control_fd, &ack_request, sizeof(ack_request)));
+        ack_ms = DurationMs(ack_start, std::chrono::steady_clock::now());
       }
       VLOG(1) << "StartRead (Hybrid Bridge) successfully registered pull "
                  "request with Producer. req_id: "
@@ -812,7 +1013,16 @@ void KVCacheManagerWithTransfer::StartControlServer() {
   sockaddr_in addr;
   std::memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = INADDR_ANY;
+  std::string ip = local_ip();
+  if (ip.empty() || ip == "127.0.0.1" || ip == "localhost") {
+    addr.sin_addr.s_addr = INADDR_ANY;
+  } else {
+    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) <= 0) {
+      LOG(WARNING) << "Invalid local_ip \"" << ip
+                   << "\", falling back to INADDR_ANY";
+      addr.sin_addr.s_addr = INADDR_ANY;
+    }
+  }
   addr.sin_port = htons(local_control_port_);
 
   if (bind(control_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
@@ -1008,6 +1218,12 @@ void KVCacheManagerWithTransfer::StartPushInternal(
 
 absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
     const std::vector<int>& block_ids, uint64_t uuid) {
+  if (uuid == 0) {
+    VLOG(1) << "OnBlocksReceived (Hybrid Bridge) received manual/simple push "
+               "(uuid=0). "
+               "No-op, accepting into host buffer.";
+    return absl::OkStatus();
+  }
   std::vector<int64_t> chip_dst_blocks;
   std::string target_req_id;
   {

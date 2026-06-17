@@ -36,7 +36,6 @@
 #include "core/host_memory_allocator.h"
 #include "core/raw_transfer_core.h"
 #include "core/tpu_pjrt_manager.h"
-#include "transport/block_transport.h"
 
 namespace tpu_raiden {
 namespace {
@@ -48,8 +47,8 @@ class TestRaidenManager : public RaidenManagerBase {
                     size_t slice_byte_size,
                     std::optional<int> local_port = std::nullopt,
                     int parallelism = 1)
-      : RaidenManagerBase(num_layers, num_shards, slice_byte_size,
-                          local_port, parallelism) {
+      : RaidenManagerBase(num_layers, num_shards, slice_byte_size, local_port,
+                          parallelism) {
     layers_.resize(num_layers);
     for (size_t l = 0; l < num_layers; ++l) {
       layers_[l].shards.resize(num_shards);

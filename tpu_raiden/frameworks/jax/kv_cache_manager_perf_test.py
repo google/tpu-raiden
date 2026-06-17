@@ -311,7 +311,6 @@ class KVCacheManagerPerfTest(parameterized.TestCase):
     # Initialize KVCacheManager
     manager = _kv_cache_manager.KVCacheManager(
         device_arrays=self.src_arrs,
-        block_size=1,
         host_blocks_to_allocate=num_blocks,
         unsafe_skip_buffer_lock=False,
     )
@@ -574,7 +573,6 @@ class KVCacheManagerPerfTest(parameterized.TestCase):
     num_blocks = shape[0]
     manager = _kv_cache_manager.KVCacheManager(
         device_arrays=self.src_arrs,
-        block_size=1,
         host_blocks_to_allocate=num_blocks,
         unsafe_skip_buffer_lock=False,
     )

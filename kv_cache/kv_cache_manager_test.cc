@@ -39,9 +39,7 @@ class TestKVCacheManager : public KVCacheManagerBase {
   }
 };
 
-TEST(KVCacheManagerTest, CompilesAndLinksSuccessfully) {
-  EXPECT_TRUE(true);
-}
+TEST(KVCacheManagerTest, CompilesAndLinksSuccessfully) { EXPECT_TRUE(true); }
 
 TEST(KVCacheManagerTest, D2hFailsWithMismatchedCopySpecLengths) {
   TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,

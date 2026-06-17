@@ -49,12 +49,14 @@ cc_library(
     copts = [
         "-fno-strict-aliasing",
         "-fexceptions",
+        "-frtti",
     ],
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
         ":raw_buffer_transport",
         "//core:status_macros",
+        "//core:tpu_utils",
         "//core:tsl_platform_headers",
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/log",

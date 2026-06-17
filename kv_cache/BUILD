@@ -51,6 +51,7 @@ cc_library(
     copts = [
         "-fno-strict-aliasing",
         "-fexceptions",
+        "-frtti",
     ],
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
@@ -93,6 +94,7 @@ cc_library(
         ":logical_block_manager",
         "//core:raw_transfer_core",
         "//core:status_macros",
+        "//core:tpu_utils",
         "//kv_cache/global_registry:global_registry_client_cc",
         "//net/grpc:grpc++",
         "//third_party/grpc:grpc++",

@@ -26,16 +26,17 @@
 #include "absl/log/log.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
-#include "xla/future.h"
-#include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/status_casters.h"
-#include "xla/shape.h"
-#include "xla/tsl/platform/statusor.h"
 #include "core/raw_transfer_core.h"
 #include "core/raw_transfer_impl.h"
 #include "core/status_macros.h"
 #include "tpu_raiden/frameworks/jax/jax_utils.h"
+#ifndef WITHOUT_PYTHON
+#include <nanobind/nanobind.h>
+#else
+#include "tpu_raiden/frameworks/jax/mock_nanobind.h"
+#endif
 #include "tpu_raiden/frameworks/jax/raw_transfer_internal.h"
 
 namespace raiden {
@@ -145,9 +146,9 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_batch_async_impl(
 
   for (size_t i = 0; i < n; ++i) {
     ASSIGN_OR_RETURN(PjRtCopyFuture f,
-                          transfer_d2h_async_internal(
-                              src_arrs[i], dst_arrs[i], s_offsets, d_offsets,
-                              c_sizes, unsafe_skip_buffer_lock));
+                     transfer_d2h_async_internal(src_arrs[i], dst_arrs[i],
+                                                 s_offsets, d_offsets, c_sizes,
+                                                 unsafe_skip_buffer_lock));
     futures.push_back(std::move(f));
   }
   return JoinPjRtCopyFutures(absl::MakeSpan(futures));
@@ -176,9 +177,9 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_batch_async_impl(
 
   for (size_t i = 0; i < n; ++i) {
     ASSIGN_OR_RETURN(PjRtCopyFuture f,
-                          transfer_h2d_async_internal(
-                              src_arrs[i], dst_arrs[i], s_offsets, d_offsets,
-                              c_sizes, unsafe_skip_buffer_lock));
+                     transfer_h2d_async_internal(src_arrs[i], dst_arrs[i],
+                                                 s_offsets, d_offsets, c_sizes,
+                                                 unsafe_skip_buffer_lock));
     futures.push_back(std::move(f));
   }
   return JoinPjRtCopyFutures(absl::MakeSpan(futures));

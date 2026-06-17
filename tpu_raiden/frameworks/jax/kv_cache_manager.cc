@@ -34,10 +34,10 @@ UnpackedCache UnpackAndMove(nanobind::list device_arrays) {
 }
 }  // namespace
 
-KVCacheManager::KVCacheManager(
-    nb::list device_arrays, std::optional<int> local_port,
-    std::optional<int> host_blocks_to_allocate,
-    bool unsafe_skip_buffer_lock, int parallelism)
+KVCacheManager::KVCacheManager(nb::list device_arrays,
+                               std::optional<int> local_port,
+                               std::optional<int> host_blocks_to_allocate,
+                               bool unsafe_skip_buffer_lock, int parallelism)
     // NOTE: To achieve zero-copy initialization while remaining robust against
     // unspecified C++ function/constructor argument evaluation order (Clang
     // typically evaluates left-to-right, GCC evaluates right-to-left), we
@@ -45,9 +45,9 @@ KVCacheManager::KVCacheManager(
     // function call boundary acts as a strict sequencing barrier, guaranteeing
     // that `UnpackJaxArrays` is fully evaluated before the Python list handle
     // is moved into ownership, preventing use-after-move segfaults.
-    : KVCacheManager(UnpackAndMove(std::move(device_arrays)),
-                     local_port, host_blocks_to_allocate,
-                     unsafe_skip_buffer_lock, parallelism) {}
+    : KVCacheManager(UnpackAndMove(std::move(device_arrays)), local_port,
+                     host_blocks_to_allocate, unsafe_skip_buffer_lock,
+                     parallelism) {}
 
 KVCacheManager::KVCacheManager(
     UnpackedCache&& cache, std::optional<int> local_port,
@@ -70,26 +70,28 @@ KVCacheManager::KVCacheManager(
 KVCacheManager::KVCacheManager(nanobind::list kv_caches, int64_t node_id,
                                int64_t local_control_port, int64_t max_blocks,
                                int64_t num_slots, double timeout_s,
-                               bool unsafe_skip_buffer_lock)
+                               bool unsafe_skip_buffer_lock,
+                               std::optional<std::string> local_ip)
     : KVCacheManager(UnpackAndMove(std::move(kv_caches)), node_id,
                      local_control_port, max_blocks, num_slots, timeout_s,
-                     unsafe_skip_buffer_lock) {}
+                     unsafe_skip_buffer_lock, local_ip) {}
 
 KVCacheManager::KVCacheManager(UnpackedCache&& cache, int64_t node_id,
                                int64_t local_control_port, int64_t max_blocks,
                                int64_t num_slots, double timeout_s,
-                               bool unsafe_skip_buffer_lock)
+                               bool unsafe_skip_buffer_lock,
+                               std::optional<std::string> local_ip)
     : KVCacheManagerWithTransfer(
           cache.layer_buffers,
           /*local_port=*/std::nullopt,
-          /*host_blocks_to_allocate=*/std::nullopt,
-          unsafe_skip_buffer_lock,
+          /*host_blocks_to_allocate=*/std::nullopt, unsafe_skip_buffer_lock,
           /*parallelism=*/1,
           tpu_raiden::CreateHostMemoryAllocator(
               cache.layer_buffers.empty() || cache.layer_buffers[0].empty()
                   ? nullptr
                   : cache.layer_buffers[0][0]->device()->client()),
-          node_id, local_control_port, max_blocks, num_slots, timeout_s),
+          node_id, local_control_port, max_blocks, num_slots, timeout_s,
+          local_ip),
       device_arrays_(std::move(cache.device_arrays)) {}
 
 KVCacheManager::KVCacheManager(size_t num_layers, size_t num_shards,
@@ -98,11 +100,13 @@ KVCacheManager::KVCacheManager(size_t num_layers, size_t num_shards,
                                std::optional<int> host_blocks_to_allocate,
                                int parallelism)
     : KVCacheManagerWithTransfer(num_layers, num_shards, slice_byte_size,
-                                 local_port,
-                                 host_blocks_to_allocate, parallelism) {}
+                                 local_port, host_blocks_to_allocate,
+                                 parallelism) {}
 
 KVCacheManager::~KVCacheManager() = default;
 
 }  // namespace jax
 }  // namespace kv_cache
 }  // namespace tpu_raiden
+// Dummy comment to force rebuild 2
+// Dummy comment

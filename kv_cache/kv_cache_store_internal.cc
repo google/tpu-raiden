@@ -31,9 +31,9 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "third_party/grpc/include/grpcpp/security/credentials.h"
-#include "xla/future.h"
 #include "core/raw_transfer_core.h"
 #include "core/status_macros.h"
+#include "core/tpu_utils.h"
 #include "kv_cache/global_registry/global_registry_client.h"
 #include "kv_cache/kv_cache_manager_base.h"
 #include "kv_cache/logical_block_manager.h"
@@ -42,24 +42,10 @@
 namespace tpu_raiden {
 namespace kv_cache {
 
-namespace {
-int ParsePort(const std::string& addr) {
-  size_t idx = addr.rfind(':');
-  if (idx != std::string::npos && idx + 1 < addr.size()) {
-    try {
-      return std::stoi(addr.substr(idx + 1));
-    } catch (...) {
-    }
-  }
-  return 0;
-}
-}  // namespace
-
 KVCacheStoreInternal::KVCacheStoreInternal(int capacity,
                                            std::string global_registry_address,
                                            std::string local_address)
-    : capacity_(capacity),
-      local_address_(local_address) {
+    : capacity_(capacity), local_address_(local_address) {
   if (!global_registry_address.empty()) {
     auto channel = grpc::CreateChannel(global_registry_address,
                                        grpc::InsecureChannelCredentials());
@@ -70,9 +56,15 @@ KVCacheStoreInternal::KVCacheStoreInternal(int capacity,
   block_manager_ = std::make_unique<LogicalBlockManager>(capacity);
 
   if (!local_address.empty()) {
-    int port = ParsePort(local_address);
+    std::string ip;
+    int port = 0;
+    absl::Status status = tpu_raiden::SplitHostPort(local_address, ip, port);
+    if (!status.ok()) {
+      LOG(FATAL) << "Failed to parse local_address: " << local_address
+                 << ", error: " << status.message();
+    }
     server_ =
-        std::make_unique<tpu_raiden::transport::BlockTransport>(this, port);
+        std::make_unique<tpu_raiden::transport::BlockTransport>(this, ip, port);
 
     int actual_port = server_->local_port();
     size_t idx = local_address.rfind(':');

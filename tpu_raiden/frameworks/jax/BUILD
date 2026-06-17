@@ -169,9 +169,14 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//core:kv_cache_manager_with_transfer",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/synchronization",
         "@xla//xla/ffi/api:ffi",
+        "@xla//xla/stream_executor:device_address",
         "@xla//xla/stream_executor:platform",
         "@xla//xla/stream_executor:platform_manager",
         "@xla//xla/stream_executor:stream",
@@ -200,6 +205,7 @@ nanobind_extension(
     deps = [
         ":kv_cache_manager_ffi",
         ":kv_cache_manager_jax",
+        "@com_google_absl//absl/synchronization",
     ],
 )
 
@@ -221,6 +227,7 @@ cc_library(
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
+        "//core:tpu_utils",
         "//weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
@@ -342,9 +349,14 @@ cc_library(
     features = ["-use_header_modules"],
     deps = [
         "//core:kv_cache_manager_with_transfer",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/synchronization",
         "@xla//xla/ffi/api:ffi",
+        "@xla//xla/stream_executor:device_address",
         "@xla//xla/stream_executor:platform",
         "@xla//xla/stream_executor:platform_manager",
         "@xla//xla/stream_executor:stream",
@@ -360,6 +372,8 @@ cc_test(
     deps = [
         ":kv_cache_manager_ffi_mock",
         "//core:kv_cache_manager_with_transfer",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/synchronization",
         "@xla//xla/ffi/api:c_api",
         "@xla//xla/ffi/api:ffi",
         "@xla//xla/stream_executor:platform_manager",
@@ -383,6 +397,7 @@ cc_library(
     ],
     features = ["-use_header_modules"],
     deps = [
+        "//core:tpu_utils",
         "//weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
@@ -464,6 +479,11 @@ cc_library(
     ],
     defines = ["WITHOUT_PYTHON"],
     features = ["-use_header_modules"],
+    tags = [
+        "ignore_for_dep=Python.h",
+        "ignore_for_dep=third_party/nanobind/include/nanobind/nanobind.h",
+        "ignore_for_dep=third_party/py/jax/jaxlib/py_array.h",
+    ],
     deps = [
         "//core:raw_transfer_core",
         "//core:raw_transfer_impl",
@@ -487,6 +507,7 @@ cc_test(
     name = "raw_transfer_test",
     srcs = ["raw_transfer_test.cc"],
     copts = ["-fexceptions"],
+    defines = ["WITHOUT_PYTHON"],
     features = ["-use_header_modules"],
     deps = [
         ":raw_transfer_jax_mock",

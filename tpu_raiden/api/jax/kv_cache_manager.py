@@ -28,7 +28,7 @@
 
 """High-performance JAX KV Cache Manager (repurposed as TransferEngine)."""
 
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 from tpu_raiden.frameworks.jax import _tpu_raiden_jax as _impl
 
 
@@ -47,6 +47,7 @@ class KVCacheManager:
       num_slots: int,
       timeout_s: float = 120.0,
       unsafe_skip_buffer_lock: bool = True,
+      local_ip: Optional[str] = None,
   ):
     """Instantiates the TransferEngine-based KVCacheManager.
 
@@ -58,6 +59,7 @@ class KVCacheManager:
       num_slots: Number of transfer slots to allocate.
       timeout_s: Timeout in seconds for transfer operations.
       unsafe_skip_buffer_lock: Skip dynamic safety locking.
+      local_ip: NUMA-aligned IP to bind to.
     """
     self._impl = _impl.KVCacheManager(
         kv_caches=kv_caches,
@@ -66,6 +68,7 @@ class KVCacheManager:
         num_slots=num_slots,
         timeout_s=timeout_s,
         unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
+        local_ip=local_ip,
     )
 
   @property

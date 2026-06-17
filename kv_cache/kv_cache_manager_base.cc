@@ -77,16 +77,16 @@ absl::Status ValidateOffsetsAndSizes(const std::vector<int64_t>& src_offsets,
 
 KVCacheManagerBase::KVCacheManagerBase(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
-    std::optional<int> local_port,
-    std::optional<int> host_blocks_to_allocate,
+    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     bool unsafe_skip_buffer_lock, int parallelism,
-    HostBufferAllocator host_allocator)
-    : RaidenManagerBase(layer_buffers.size(),
-                        layer_buffers.empty() ? 0 : layer_buffers[0].size(),
-                        layer_buffers.empty() ? 0
-                                              : raiden::GetMajorSliceByteSize(
-                                                    layer_buffers[0][0]),
-                        local_port, parallelism) {
+    HostBufferAllocator host_allocator, std::optional<std::string> local_ip)
+    : RaidenManagerBase(
+          layer_buffers.size(),
+          layer_buffers.empty() ? 0 : layer_buffers[0].size(),
+          layer_buffers.empty()
+              ? 0
+              : raiden::GetMajorSliceByteSize(layer_buffers[0][0]),
+          local_port, parallelism, /*max_staging_blocks=*/4, local_ip) {
   if (num_layers_ == 0 || num_shards_ == 0) {
     return;
   }
@@ -172,8 +172,8 @@ KVCacheManagerBase::KVCacheManagerBase(
         shard_info.host_size = alloc_size;
         VLOG(1) << "KVCacheManagerBase: allocated host buffer for layer "
                 << layer_idx << ", shard " << i << " at "
-                << (void*)shard_info.host_ptr
-                << ", size " << shard_info.host_size;
+                << (void*)shard_info.host_ptr << ", size "
+                << shard_info.host_size;
       }
 
       auto status_or_hold = raiden::BufferHoldAndAlias::Acquire(
@@ -220,11 +220,11 @@ KVCacheManagerBase::KVCacheManagerBase(
 
 KVCacheManagerBase::KVCacheManagerBase(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
-    std::optional<int> local_port,
-    std::optional<int> host_blocks_to_allocate, int parallelism,
-    HostBufferAllocator host_allocator)
-    : RaidenManagerBase(num_layers, num_shards, slice_byte_size,
-                        local_port, parallelism) {
+    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
+    int parallelism, HostBufferAllocator host_allocator,
+    std::optional<std::string> local_ip)
+    : RaidenManagerBase(num_layers, num_shards, slice_byte_size, local_port,
+                        parallelism, /*max_staging_blocks=*/4, local_ip) {
   int total_blocks = host_blocks_to_allocate.value_or(0);
   block_manager_ = std::make_unique<LogicalBlockManager>(total_blocks);
 
@@ -387,7 +387,9 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
     // Safe to parallelize via the dedicated dma_pool_.
     VLOG(1) << "H2d: Parallelizing dispatches on dma_pool_. Thread: "
             << std::this_thread::get_id();
-    for (const auto& [node, works] : grouped_work) {
+    for (const auto& pair : grouped_work) {
+      int node = pair.first;
+      const auto& works = pair.second;
       VLOG(1) << "H2d: Scheduling dispatch for NUMA node " << node
               << ", works count: " << works.size();
       auto future = dma_pool_->Schedule(
@@ -525,7 +527,9 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
     VLOG(1)
         << "DispatchD2hChunks: Parallelizing dispatches on dma_pool_. Thread: "
         << std::this_thread::get_id();
-    for (const auto& [node, works] : grouped_work) {
+    for (const auto& pair : grouped_work) {
+      int node = pair.first;
+      const auto& works = pair.second;
       VLOG(1) << "DispatchD2hChunks: Scheduling dispatch for NUMA node " << node
               << ", works count: " << works.size();
       auto future = dma_pool_->Schedule(
@@ -902,9 +906,7 @@ absl::StatusOr<KVCacheHostSpan> KVCacheManagerBase::HostSpan(
       .shard_idx = shard_idx};
 }
 
-size_t KVCacheManagerBase::bytes_per_block() const {
-  return slice_byte_size_;
-}
+size_t KVCacheManagerBase::bytes_per_block() const { return slice_byte_size_; }
 
 absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>
 KVCacheManagerBase::DispatchH2dWork(

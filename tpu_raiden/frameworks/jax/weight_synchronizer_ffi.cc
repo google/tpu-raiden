@@ -28,6 +28,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -38,6 +39,7 @@
 #include "xla/stream_executor/platform_manager.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
+#include "core/tpu_utils.h"
 #include "weight_sync/weight_synchronizer_base.h"
 
 namespace tpu_raiden {
@@ -45,6 +47,30 @@ namespace weight_sync {
 
 WeightSynchronizerBase* g_weight_synchronizers[32] = {nullptr};
 std::unique_ptr<stream_executor::Stream> g_streams[32] = {nullptr};
+
+// Helper to resolve local IP, falling back to loopback if no external interface
+// is found.
+bool GetLocalIpBytes(uint8_t* ipv6) {
+  std::string ip_str = tpu_raiden::GetLocalIp();
+
+  // Try to parse as IPv6 first
+  if (inet_pton(AF_INET6, ip_str.c_str(), ipv6) == 1) {
+    return true;
+  }
+
+  // Try to parse as IPv4
+  struct in_addr ipv4_addr;
+  if (inet_pton(AF_INET, ip_str.c_str(), &ipv4_addr) == 1) {
+    // Map to IPv6: ::ffff:a.b.c.d
+    std::memset(ipv6, 0, 10);
+    ipv6[10] = 0xff;
+    ipv6[11] = 0xff;
+    std::memcpy(ipv6 + 12, &ipv4_addr.s_addr, 4);
+    return true;
+  }
+
+  return false;
+}
 
 // FFI Init custom call implementation for WeightSynchronizer (Host CPU
 // Executed)
@@ -125,40 +151,7 @@ xla::ffi::Error TriggerWeightSynchronizerInitImpl(
 
   // Get IP
   uint8_t ipv6[16] = {0};
-
-  struct ifaddrs *ifaddr, *ifa;
-  bool found = false;
-  if (getifaddrs(&ifaddr) == 0) {
-    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-      if (ifa->ifa_addr == nullptr) continue;
-      if (ifa->ifa_addr->sa_family == AF_INET6) {
-        struct sockaddr_in6* ipv6_addr =
-            reinterpret_cast<struct sockaddr_in6*>(ifa->ifa_addr);
-        if (std::strcmp(ifa->ifa_name, "lo") != 0) {
-          std::memcpy(ipv6, &ipv6_addr->sin6_addr, 16);
-          found = true;
-          break;
-        }
-      }
-    }
-    if (!found) {
-      for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-        if (ifa->ifa_addr == nullptr) continue;
-        if (ifa->ifa_addr->sa_family == AF_INET) {
-          struct sockaddr_in* ipv4 =
-              reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
-          if (std::strcmp(ifa->ifa_name, "lo") != 0) {
-            ipv6[10] = 0xff;
-            ipv6[11] = 0xff;
-            std::memcpy(ipv6 + 12, &ipv4->sin_addr.s_addr, 4);
-            found = true;
-            break;
-          }
-        }
-      }
-    }
-    freeifaddrs(ifaddr);
-  }
+  GetLocalIpBytes(ipv6);
 
   if (out->element_count() < 5) {
     return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
@@ -245,39 +238,7 @@ xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
   int32_t port = port_opt.value();
 
   uint8_t ipv6[16] = {0};
-  struct ifaddrs *ifaddr, *ifa;
-  bool found = false;
-  if (getifaddrs(&ifaddr) == 0) {
-    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-      if (ifa->ifa_addr == nullptr) continue;
-      if (ifa->ifa_addr->sa_family == AF_INET6) {
-        struct sockaddr_in6* ipv6_addr =
-            reinterpret_cast<struct sockaddr_in6*>(ifa->ifa_addr);
-        if (std::strcmp(ifa->ifa_name, "lo") != 0) {
-          std::memcpy(ipv6, &ipv6_addr->sin6_addr, 16);
-          found = true;
-          break;
-        }
-      }
-    }
-    if (!found) {
-      for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-        if (ifa->ifa_addr == nullptr) continue;
-        if (ifa->ifa_addr->sa_family == AF_INET) {
-          struct sockaddr_in* ipv4 =
-              reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
-          if (std::strcmp(ifa->ifa_name, "lo") != 0) {
-            ipv6[10] = 0xff;
-            ipv6[11] = 0xff;
-            std::memcpy(ipv6 + 12, &ipv4->sin_addr.s_addr, 4);
-            found = true;
-            break;
-          }
-        }
-      }
-    }
-    freeifaddrs(ifaddr);
-  }
+  GetLocalIpBytes(ipv6);
 
   if (out->element_count() < 5) {
     return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
@@ -416,11 +377,6 @@ xla::ffi::Error TriggerExecuteReshardingImpl(
     // Execute H2D using stream memcpy directly!
     uint8_t* d_base = reinterpret_cast<uint8_t*>(out->untyped_data());
     stream_executor::DeviceAddressBase device_dst(d_base + dst_offset, size);
-
-    if (g_streams[dst_device_id] == nullptr) {
-      std::memcpy(d_base + dst_offset, src_host_ptr, size);
-      continue;
-    }
 
     stream_executor::Stream* stream = g_streams[dst_device_id].get();
 

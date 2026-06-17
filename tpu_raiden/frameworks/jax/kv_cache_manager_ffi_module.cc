@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <set>
+
+#include "absl/synchronization/mutex.h"
 #include "tpu_raiden/frameworks/jax/kv_cache_manager.h"
 #include "tpu_raiden/frameworks/jax/kv_cache_manager_ffi.h"
 
@@ -19,11 +22,19 @@ namespace nb = nanobind;
 
 NB_MODULE(_kv_cache_manager_ffi, m) {
   m.def("destroy_kv_cache", []() {
+    std::set<tpu_raiden::KVCacheManagerWithTransfer*> unique_managers;
     for (int i = 0; i < 32; ++i) {
       if (tpu_raiden::kv_cache::g_kv_cache_managers[i] != nullptr) {
-        delete tpu_raiden::kv_cache::g_kv_cache_managers[i];
+        unique_managers.insert(tpu_raiden::kv_cache::g_kv_cache_managers[i]);
         tpu_raiden::kv_cache::g_kv_cache_managers[i] = nullptr;
       }
+    }
+    for (auto* mgr : unique_managers) {
+      delete mgr;
+    }
+    {
+      absl::MutexLock lock(&tpu_raiden::kv_cache::g_manager_mutex);
+      tpu_raiden::kv_cache::g_kv_cache_managers_map.clear();
     }
   });
 

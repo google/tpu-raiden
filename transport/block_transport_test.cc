@@ -145,8 +145,10 @@ TEST(BlockTransportTest, PushAndPullCorrectness) {
   std::memset(delegate1.data(), 0xAB, size);
   std::memset(delegate2.data(), 0x00, size);
 
-  BlockTransport transport1(&delegate1, 0);
-  BlockTransport transport2(&delegate2, 0);
+  int port1 = 0;
+  int port2 = 0;
+  BlockTransport transport1(&delegate1, "127.0.0.1", port1);
+  BlockTransport transport2(&delegate2, "127.0.0.1", port2);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
@@ -183,8 +185,12 @@ TEST(BlockTransportTest, PushAndPullWithoutConnectionPool) {
   std::memset(delegate2.data(), 0x00, size);
 
   // Disable connection pooling
-  BlockTransport transport1(&delegate1, 0, /*enable_conn_pool=*/false);
-  BlockTransport transport2(&delegate2, 0, /*enable_conn_pool=*/false);
+  int port1 = 0;
+  int port2 = 0;
+  BlockTransport transport1(&delegate1, "127.0.0.1", port1,
+                            /*enable_conn_pool=*/false);
+  BlockTransport transport2(&delegate2, "127.0.0.1", port2,
+                            /*enable_conn_pool=*/false);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
@@ -211,6 +217,36 @@ TEST(BlockTransportTest, PushAndPullWithoutConnectionPool) {
   EXPECT_EQ(delegate2.data()[size - 1], 0xAB);
 }
 
+TEST(BlockTransportTest, PullBuffer) {
+  size_t size = 4096;
+  MockDelegate delegate1(size);
+  MockDelegate delegate2(size);
+
+  std::memset(delegate1.data(), 0xEF, size);
+  std::memset(delegate2.data(), 0x00, size);
+
+  int port1 = 0;
+  int port2 = 0;
+  BlockTransport transport1(&delegate1, "127.0.0.1", port1);
+  BlockTransport transport2(&delegate2, "127.0.0.1", port2);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::string peer1 = "localhost:" + std::to_string(transport1.local_port());
+
+  // Pull 1024 bytes starting from offset 512 in remote buffer, into offset 1024
+  // in local buffer!
+  auto pull_res = transport2.PullBuffer(
+      peer1, /*buffer_id=*/0, /*src_shard_idx=*/0, /*src_offset_bytes=*/512,
+      /*dst_shard_idx=*/0, /*dst_offset_bytes=*/1024, /*size_bytes=*/1024);
+  ASSERT_TRUE(pull_res.ok()) << pull_res.message();
+
+  // Verify correct byte-range copy
+  EXPECT_EQ(delegate2.data()[1023], 0x00);
+  EXPECT_EQ(delegate2.data()[1024], 0xEF);
+  EXPECT_EQ(delegate2.data()[2047], 0xEF);
+  EXPECT_EQ(delegate2.data()[2048], 0x00);
+}
 TEST(BlockTransportTest, PullNonContiguous) {
   size_t size = 1024;
   // Delegate 1 has 3 blocks capacity
@@ -226,8 +262,10 @@ TEST(BlockTransportTest, PullNonContiguous) {
   std::memset(delegate2.block_data(0), 0x00, size);
   std::memset(delegate2.block_data(1), 0x00, size);
 
-  BlockTransport transport1(&delegate1, 0);
-  BlockTransport transport2(&delegate2, 0);
+  int port1 = 0;
+  int port2 = 0;
+  BlockTransport transport1(&delegate1, "127.0.0.1", port1);
+  BlockTransport transport2(&delegate2, "127.0.0.1", port2);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
@@ -266,8 +304,10 @@ TEST(BlockTransportTest, PullExplicitDestPtrsMultiLayerUnevenParallelism) {
   std::vector<uint8_t> layer1(kSliceSize * kNumBlocks, 0);
   std::vector<uint8_t*> explicit_dst_ptrs = {layer0.data(), layer1.data()};
 
-  BlockTransport source_transport(&source, 0);
-  BlockTransport receiver_transport(&receiver, 0);
+  int sport = 0;
+  int rport = 0;
+  BlockTransport source_transport(&source, "127.0.0.1", sport);
+  BlockTransport receiver_transport(&receiver, "127.0.0.1", rport);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
@@ -293,8 +333,10 @@ TEST(BlockTransportTest, PullRejectsOutOfBoundsRemoteBlock) {
   MockDelegate source(kSliceSize, kNumBlocks);
   MockDelegate receiver(kSliceSize, kNumBlocks);
 
-  BlockTransport source_transport(&source, 0);
-  BlockTransport receiver_transport(&receiver, 0);
+  int sport = 0;
+  int rport = 0;
+  BlockTransport source_transport(&source, "127.0.0.1", sport);
+  BlockTransport receiver_transport(&receiver, "127.0.0.1", rport);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
@@ -318,16 +360,18 @@ TEST(BlockTransportTest, PullSupportsBlockMajorOrder) {
     }
   }
 
-  BlockTransport source_transport(&source, 0);
-  BlockTransport receiver_transport(&receiver, 0);
+  int sport = 0;
+  int rport = 0;
+  BlockTransport source_transport(&source, "127.0.0.1", sport);
+  BlockTransport receiver_transport(&receiver, "127.0.0.1", rport);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   std::string source_peer =
       "localhost:" + std::to_string(source_transport.local_port());
-  auto pull_res = receiver_transport.Pull(
-      source_peer, {0, 1}, {0, 1}, {}, /*parallelism=*/1,
-      MajorOrder::kBlockMajor);
+  auto pull_res =
+      receiver_transport.Pull(source_peer, {0, 1}, {0, 1}, {},
+                              /*parallelism=*/1, MajorOrder::kBlockMajor);
   ASSERT_TRUE(pull_res.ok()) << pull_res.status().message();
 
   for (int block = 0; block < kNumBlocks; ++block) {
@@ -335,13 +379,12 @@ TEST(BlockTransportTest, PullSupportsBlockMajorOrder) {
     EXPECT_EQ(receiver.block_data(block, 1)[0], 0x20 + block);
   }
 
-  EXPECT_EQ(source.wait_events(),
-            (std::vector<std::tuple<size_t, size_t, int>>{
-                std::make_tuple(0, 0, 0),
-                std::make_tuple(1, 0, 0),
-                std::make_tuple(0, 0, 1),
-                std::make_tuple(1, 0, 1),
-            }));
+  EXPECT_EQ(source.wait_events(), (std::vector<std::tuple<size_t, size_t, int>>{
+                                      std::make_tuple(0, 0, 0),
+                                      std::make_tuple(1, 0, 0),
+                                      std::make_tuple(0, 0, 1),
+                                      std::make_tuple(1, 0, 1),
+                                  }));
 }
 
 TEST(BlockTransportTest, WriteBlockDirectCorrectness) {
@@ -355,8 +398,10 @@ TEST(BlockTransportTest, WriteBlockDirectCorrectness) {
   }
   std::memset(delegate2.data(), 0x00, size);
 
-  BlockTransport transport1(&delegate1, 0);
-  BlockTransport transport2(&delegate2, 0);
+  int port1 = 0;
+  int port2 = 0;
+  BlockTransport transport1(&delegate1, "127.0.0.1", port1);
+  BlockTransport transport2(&delegate2, "127.0.0.1", port2);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
@@ -379,6 +424,58 @@ TEST(BlockTransportTest, WriteBlockDirectCorrectness) {
   EXPECT_TRUE(delegate2.on_single_block_received_called());
   EXPECT_EQ(delegate2.received_block_id(), 0);
   EXPECT_EQ(delegate2.received_size_bytes(), size);
+}
+
+TEST(BlockTransportTest, PortHuntingTest) {
+  MockDelegate delegate1(1024);
+  MockDelegate delegate2(1024);
+
+  int port1 = 15000;
+  BlockTransport transport1(&delegate1, "127.0.0.1", port1);
+  EXPECT_EQ(port1, 15000);
+  EXPECT_EQ(transport1.local_port(), 15000);
+
+  int port2 = 15000;  // Same target port!
+  BlockTransport transport2(&delegate2, "127.0.0.1", port2);
+  // It should have hunted to 15001
+  EXPECT_EQ(port2, 15001);
+  EXPECT_EQ(transport2.local_port(), 15001);
+
+  // Verify communication works on the hunted port
+  std::memset(delegate1.data(), 0xAB, 1024);
+  std::string peer2 = "127.0.0.1:" + std::to_string(transport2.local_port());
+  auto push_res = transport1.Push(peer2, {0});
+  ASSERT_TRUE(push_res.ok()) << push_res.status().message();
+  EXPECT_EQ(delegate2.data()[0], 0xAB);
+}
+TEST(BlockTransportTest, EphemeralPortTest) {
+  MockDelegate delegate(1024);
+  int port = 0;
+  BlockTransport transport(&delegate, "127.0.0.1", port);
+  EXPECT_GT(port, 0);
+  EXPECT_EQ(transport.local_port(), port);
+  EXPECT_GE(port, 1024);
+}
+
+TEST(BlockTransportTest, PortWrappingTest) {
+  MockDelegate delegate1(1024);
+  MockDelegate delegate2(1024);
+
+  int port1 = 65535;
+  BlockTransport transport1(&delegate1, "127.0.0.1", port1);
+  EXPECT_EQ(port1, 65535);
+
+  int port2 = 65535;
+  BlockTransport transport2(&delegate2, "127.0.0.1", port2);
+
+  // Under the new wrapping logic, 65536 should wrap to 2048.
+  // We expect it to bind to 2048 (if free) or hunt further.
+  // The old code would truncate to 0 and get an OS ephemeral port (typically >=
+  // 32768). So asserting < 30000 will fail on the old code and pass on the new
+  // code.
+  EXPECT_GE(port2, 1024);
+  EXPECT_LT(port2, 30000);
+  EXPECT_NE(port2, 65535);
 }
 
 }  // namespace

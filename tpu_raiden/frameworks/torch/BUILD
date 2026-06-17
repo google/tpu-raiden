@@ -41,8 +41,8 @@ cc_library(
     linkopts = ["-Wl,--allow-shlib-undefined"],
     visibility = ["//visibility:public"],
     deps = [
+        ":torch_utils",
         "//core:xla_raw_transfer_headers",
-        "//tpu_raiden/frameworks/torch:torch_utils",
         "//weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
         "@torch_tpu//shims/torch:aten_headers",
