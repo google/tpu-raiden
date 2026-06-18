@@ -17,10 +17,12 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "torch_tpu/eager/tensor_to_buffer.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 
 namespace raiden {
@@ -62,6 +64,9 @@ class PreparedTorchRawTransfer
  private:
   std::shared_ptr<RawHostBuffer> host_buffer_;
   xla::PjRtBuffer* pjrt_buffer_ = nullptr;
+  // Owns the materialized buffer behind pjrt_buffer_ for this object's lifetime
+  // (required when tpu_tensor is a view -> separate materialized buffer).
+  std::optional<torch_tpu::DeviceBufferRef> buffer_ref_;
   size_t physical_size_ = 0;
   BufferHoldAndAlias hold_;
 };

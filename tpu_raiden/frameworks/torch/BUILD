@@ -41,6 +41,7 @@ cc_library(
     linkopts = ["-Wl,--allow-shlib-undefined"],
     visibility = ["//visibility:public"],
     deps = [
+        ":torch_tpu_tensor_to_buffer_headers",
         "//tpu_raiden/core:xla_raw_transfer_headers",
         "//tpu_raiden/frameworks/torch:torch_utils",
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
@@ -89,6 +90,7 @@ cc_library(
         "-use_header_modules",
     ],
     deps = [
+        ":torch_tpu_tensor_to_buffer_headers",
         ":torch_tpu_utils",
         "//tpu_raiden/core:xla_raw_transfer_headers",
         "@torch_tpu//shims/torch:aten_headers",
@@ -128,6 +130,7 @@ cc_library(
     linkopts = ["-Wl,--allow-shlib-undefined"],
     visibility = ["//visibility:public"],
     deps = [
+        ":torch_tpu_tensor_to_buffer_headers",
         ":torch_tpu_utils",
         ":torch_utils",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
@@ -141,6 +144,14 @@ cc_library(
 nanobind_extension(
     name = "_tpu_raiden_torch",
     srcs = ["tpu_raiden_torch_module.cc"],
+    copts = [
+        # Required for the torch_tpu headers this module pulls in (e.g.
+        # macro_utils.h uses `consteval`); the OSS clang toolchain otherwise
+        # defaults to C++17. Matches the sibling cc_library torch targets.
+        "-std=c++20",
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
     features = [
         "-use_header_modules",
     ],
@@ -173,6 +184,7 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":torch_tpu_tensor_to_buffer_headers",
         ":torch_tpu_utils",
         "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:raw_transfer_core",

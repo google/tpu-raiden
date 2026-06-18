@@ -35,13 +35,14 @@ void RegisterMockTensor(const at::Tensor& tensor, xla::PjRtBuffer* buffer) {
   GetMockMap()[tensor.unsafeGetTensorImpl()] = buffer;
 }
 
-xla::PjRtBuffer* UnpackTorchTensor(const at::Tensor& tensor) {
+UnpackedTensor UnpackTorchTensor(const at::Tensor& tensor) {
   auto it = GetMockMap().find(tensor.unsafeGetTensorImpl());
   if (it == GetMockMap().end()) {
     throw std::runtime_error(
         "Mock tensor not registered. Call RegisterMockTensor first.");
   }
-  return it->second;
+  // Mock has no real materialization, hence no DeviceBufferRef to hand back.
+  return UnpackedTensor{it->second, std::nullopt};
 }
 
 }  // namespace torch
