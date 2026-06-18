@@ -4,15 +4,17 @@ GitHub Actions CI for tpu-raiden, modeled on
 [`torch_tpu`](https://github.com/google-pytorch/torch_tpu)'s setup. The existing
 Kokoro jobs under [`kokoro/`](../kokoro) are kept and run alongside these.
 
-## Runner
+## Runners
 
-All build/test jobs run on the **v5e TPU runner `linux-x86-ct5lp-224-8tpu`**.
-This is the scale-set currently granted to `google/tpu-raiden`: jobs targeting
-`linux-x86-n2-32` (CPU) and `linux-x86-tpu7x-224-4tpu` (v7) stayed queued and
-unassigned, so they are not available here yet. v5e is a full host, so it runs
-the JAX build, the CPU unit tests, and TPU device tests. To add other runners
-later, grant the repo the scale-set, add the label to
-[`actionlint.yaml`](actionlint.yaml), and point a job's `runs-on:` at it.
+- **CPU** — `linux-x86-n2-32` runs the presubmit + nightly build/unit-test jobs.
+- **TPU v5e** — `linux-x86-ct5lp-224-8tpu` runs the device tests (`device_test.yml`).
+  v5e is used because the v7 (`linux-x86-tpu7x-224-4tpu`) scale-set is not
+  available to this repo.
+
+Both are self-hosted scale-sets and can take several minutes to cold-start a
+runner, so a freshly triggered job may sit `queued` for a while before a runner
+picks it up — that is normal, not a failure. CPU and TPU jobs are split across
+separate workflows so a slow TPU runner never blocks the CPU gate.
 
 ## Workflows
 
@@ -20,8 +22,9 @@ later, grant the repo the scale-set, add the label to
 | --- | --- | --- |
 | [`lint.yml`](workflows/lint.yml) | PR | Apache license headers (`addlicense`) + commit-message check. GitHub-hosted. |
 | [`clang_format.yml`](workflows/clang_format.yml) | PR | Google C++ style on changed `.cc/.h` via pinned `clang-format==18`. GitHub-hosted. |
-| [`presubmit.yml`](workflows/presubmit.yml) | PR | Build JAX extension, verify TPU visible, run OSS-safe unit tests + one device test + import smoke, on v5e. |
-| [`nightly.yml`](workflows/nightly.yml) | push to `main` / daily cron 09:00 UTC / dispatch | Build + unit tests + device test, build the `tpu_raiden_jax` wheel (twine-checked, uploaded as an artifact), file a tracking issue on failure. |
+| [`presubmit.yml`](workflows/presubmit.yml) | PR | Build JAX extension + OSS-safe CPU unit tests + import smoke, on `n2-32`. |
+| [`nightly.yml`](workflows/nightly.yml) | push to `main` / daily cron 09:00 UTC / dispatch | CPU build + unit tests + `tpu_raiden_jax` wheel (twine-checked, uploaded as an artifact), file a tracking issue on failure, on `n2-32`. |
+| [`device_test.yml`](workflows/device_test.yml) | PR / daily cron / dispatch | Build JAX extension, verify TPU visible, run device tests on v5e (`ct5lp`). |
 
 Shared logic lives in [`ci/tools/`](../ci/tools): `install_clang18.sh` (the
 clang-18 the build needs) and `bazel_test.sh` (bazel binary + dummy torch_tpu

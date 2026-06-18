@@ -13,8 +13,9 @@
 # limitations under the License.
 
 # Declares the self-hosted runner labels used by the workflows so actionlint
-# does not flag them as unknown. Only the v5e scale-set is currently available to
-# this repo; n2-32 and tpu7x stayed queued/unassigned.
+# does not flag them as unknown. CPU jobs run on n2-32; TPU device tests on the
+# v5e scale-set (the v7/tpu7x scale-set is not available to this repo).
 self-hosted-runner:
   labels:
+    - linux-x86-n2-32              # CPU
     - linux-x86-ct5lp-224-8tpu     # TPU v5e, 8 chips
