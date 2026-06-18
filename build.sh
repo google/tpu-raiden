@@ -32,6 +32,22 @@ download_file() {
   fi
 }
 
+check_disk_space() {
+  local dir="$1"
+  local desc="$2"
+  # Warn if free disk space is under 20 GB (20971520 KB)
+  local min_kb=20971520
+  mkdir -p "$dir" 2>/dev/null || true
+  if command -v df > /dev/null && command -v awk > /dev/null; then
+    local free_kb
+    free_kb="$(df -P "$dir" 2>/dev/null | awk 'NR==2 {print $4}')"
+    if [[ "$free_kb" =~ ^[0-9]+$ ]] && (( free_kb < min_kb )); then
+      local free_gb=$((free_kb / 1048576))
+      echo "WARNING: Low disk space on ${desc} (${dir}). Only ~${free_gb} GB free (< 20 GB recommended for Bazel)." >&2
+    fi
+  fi
+}
+
 # Define directories
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 DEFAULT_WORKSPACE_DIR="$SCRIPT_DIR"
@@ -51,6 +67,11 @@ BAZEL_CACHE_BASE="${BAZEL_CACHE_DIR:-${DEFAULT_BAZEL_CACHE_BASE}}"
 BAZEL_DISK_CACHE="${BAZEL_CACHE_BASE}/disk_cache"
 BAZEL_REPO_CACHE="${BAZEL_CACHE_BASE}/repo_cache"
 BAZEL_OUTPUT_BASE="${BAZEL_OUTPUT_BASE:-${DEFAULT_BAZEL_OUTPUT_BASE}}"
+
+check_disk_space "${WORKSPACE_DIR}" "Workspace Directory"
+check_disk_space "${BAZEL_CACHE_BASE}" "Bazel Cache Base"
+check_disk_space "${BAZEL_OUTPUT_BASE}" "Bazel Output Base"
+check_disk_space "/tmp" "Temporary Directory (/tmp)"
 
 echo "=== Navigating to workspace directory ==="
 cd "${WORKSPACE_DIR}"
@@ -72,13 +93,6 @@ if [[ ! -f "${BAZEL_BIN}" ]]; then
 fi
 
 "${BAZEL_BIN}" --version
-
-if [[ -z "${CC:-}" ]] && command -v clang > /dev/null; then
-  export CC="$(command -v clang)"
-fi
-if [[ -z "${CXX:-}" ]] && command -v clang++ > /dev/null; then
-  export CXX="$(command -v clang++)"
-fi
 
 # Default behavior based on auto-detection
 BUILD_JAX=true
@@ -117,7 +131,32 @@ if [ "$#" -gt 0 ]; then
   esac
 fi
 
-BAZEL_TARGETS=()
+if [ "${BUILD_TORCH}" = true ]; then
+  # Ensure clang-18 is installed on the host (required for PyTorch C++ extensions)
+  if ! command -v clang-18 > /dev/null || ! command -v clang++-18 > /dev/null; then
+    echo "clang-18 / clang++-18 not found on host. Attempting automatic installation..."
+    if command -v apt-get > /dev/null && command -v sudo > /dev/null; then
+      sudo apt-get update && sudo apt-get install -y clang-18
+    else
+      echo "Error: clang-18 / clang++-18 is required to build Torch extensions." >&2
+      echo "Please install clang-18 manually on your system." >&2
+      exit 1
+    fi
+  fi
+
+  if [[ -z "${CC:-}" ]]; then
+    export CC="$(command -v clang-18)"
+  fi
+  if [[ -z "${CXX:-}" ]]; then
+    export CXX="$(command -v clang++-18)"
+  fi
+fi
+
+BAZEL_TARGETS=(
+  "//weight_sync:weight_synchronizer_service_py_pb2"
+  "//rpc:coordination_py_pb2"
+  "//rpc:coordination_py_pb2_grpc"
+)
 DEFINE_FLAGS=""
 BAZEL_MODULE_FLAGS=()
 TORCH_REPO_ENV_FLAGS=()
@@ -191,6 +230,11 @@ echo "=== Building targets with Bazel ==="
   --repository_cache=${BAZEL_REPO_CACHE} \
   "$@"
 
+
+echo "=== Copying generated protobuf Python modules ==="
+cp -f "${WORKSPACE_DIR}/bazel-bin/weight_sync/weight_synchronizer_service_pb2.py" "${WORKSPACE_DIR}/weight_sync/" 2>/dev/null || true
+cp -f "${WORKSPACE_DIR}/bazel-bin/rpc/coordination_pb2.py" "${WORKSPACE_DIR}/rpc/" 2>/dev/null || true
+cp -f "${WORKSPACE_DIR}/bazel-bin/rpc/coordination_pb2_grpc.py" "${WORKSPACE_DIR}/rpc/" 2>/dev/null || true
 
 echo "=== Copying compiled shared libraries to source directory ==="
 if [ "$BUILD_JAX" = true ]; then

@@ -107,6 +107,7 @@ struct CopyPlan {
   std::vector<int64_t> requested_local_block_ids;
   std::vector<int64_t> producer_remote_block_ids;
   std::vector<int64_t> h2d_local_block_ids;
+  std::vector<int64_t> h2d_host_block_ids;
   std::vector<int64_t> transport_host_block_ids;
   std::vector<size_t> host_dst_to_src;
   CopySpec d2h_copy;
@@ -266,7 +267,9 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
 
   struct RecvEntry {
     std::string req_id;
-    std::vector<int64_t> chip_block_ids;
+    int64_t total_blocks = 0;
+    int64_t num_completed_blocks = 0;
+    absl::flat_hash_map<int64_t, int64_t> host_to_chip;
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
 

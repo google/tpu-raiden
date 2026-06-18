@@ -66,13 +66,13 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
     ws_source = _kv_cache_manager.KVCacheManager(
         src_tensors,
         local_port=0,
-        host_blocks_to_allocate=num_blocks,
+        host_blocks_to_allocate=num_blocks * self.block_size,
         parallelism=1,
     )
     ws_dest = _kv_cache_manager.KVCacheManager(
         dst_tensors,
         local_port=0,
-        host_blocks_to_allocate=num_blocks,
+        host_blocks_to_allocate=num_blocks * self.block_size,
         parallelism=1,
     )
 
@@ -104,15 +104,17 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
     # ==========================================================================
     # Source pushes block page 0 to destination peer server!
     # This will allocate block 0 on ws_dest.
-    write_ids, write_future = ws_source.H2hWrite(peer_dest, src_block_ids=[0])
+    write_ids, write_future = ws_source.H2hWrite(
+        peer_dest, src_block_ids=[0, 1]
+    )
     write_future.Await()
-    self.assertEqual(write_ids, [0])
+    self.assertEqual(write_ids, [0, 1])
 
     # Destination pulls block page 0 from source peer!
     # This will allocate block 1 on ws_dest (since block 0 is locked).
-    read_ids, read_future = ws_dest.H2hRead(peer_source, src_block_ids=[0])
+    read_ids, read_future = ws_dest.H2hRead(peer_source, src_block_ids=[0, 1])
     read_future.Await()
-    self.assertEqual(read_ids, [1])
+    self.assertEqual(read_ids, [2, 3])
 
     # ==========================================================================
     # Step 3 (Destination): Stage received weights from Host onto Device TPU HBM E2E!

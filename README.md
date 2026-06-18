@@ -48,15 +48,14 @@ We provide a script to handle the build process and install the required Python 
 3. Installs the necessary Python dependencies listed in `requirements.txt`.
 4. Artifacts will be available in the `bazel-bin/raw_transfer/` directory.
 
-## Testing `raw_transfer`
+## Testing `tpu_raiden`
 
-Once the build is complete, you can run the tests to verify the installation and check performance:
+Once the build is complete, you can run the test suite across JAX and PyTorch:
 
 ```bash
-./run_test.sh
+./run_tests.sh [jax|torch|both]
 ```
 
 **What this script does:**
-1. Sets up the `PYTHONPATH` so Python can locate the compiled `bazel-bin` artifacts.
-2. Executes `test_import.py` to ensure the C++ extensions load correctly, saving the output to `import.log`.
-3. Executes `test_raw_transfer_perf.py` to benchmark performance, saving the output to `perf_test.log`.
+1. Sets up `PYTHONPATH` so Python can locate the compiled `bazel-bin` and framework wrapper modules.
+2. Executes the selected unit test suites across JAX and/or PyTorch directly via `python`.

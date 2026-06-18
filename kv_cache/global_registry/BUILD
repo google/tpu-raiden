@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@com_github_grpc_grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
 load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("//net/grpc:cc_grpc_library.bzl", "cc_grpc_library")
 load("//third_party/bazel_rules/rules_cc/cc:cc_binary.bzl", "cc_binary")
 
 package(default_visibility = ["//visibility:public"])
@@ -44,8 +44,7 @@ cc_library(
     deps = [
         ":global_registry_cc_grpc",
         ":global_registry_cc_proto",
-        "//net/grpc:grpc++",
-        "//third_party/grpc:grpc++",
+        "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/synchronization",
@@ -59,8 +58,7 @@ cc_binary(
     deps = [
         ":global_registry_server_lib",
         "//base",
-        "//net/grpc:grpc++",
-        "//third_party/grpc:grpc++",
+        "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/time",
@@ -74,9 +72,8 @@ cc_library(
     deps = [
         ":global_registry_cc_grpc",
         ":global_registry_cc_proto",
-        "//net/grpc:grpc++",
-        "//third_party/grpc:grpc++",
         "//third_party/openssl:crypto",
+        "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
@@ -90,8 +87,7 @@ cc_test(
     deps = [
         ":global_registry_client_cc",
         ":global_registry_server_lib",
-        "//net/grpc:grpc++",
-        "//third_party/grpc:grpc++",
+        "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest_main",
     ],

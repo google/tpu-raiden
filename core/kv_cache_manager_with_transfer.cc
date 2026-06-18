@@ -312,16 +312,15 @@ static CopyPlan BuildLoadCopyPlan(
                    });
 
   plan.h2d_local_block_ids.reserve(local_order.size());
-  std::vector<int64_t> h2d_host_block_ids;
-  h2d_host_block_ids.reserve(local_order.size());
+  plan.h2d_host_block_ids.reserve(local_order.size());
   for (size_t i = 0; i < local_order.size(); ++i) {
     const size_t original_idx = local_order[i];
     plan.h2d_local_block_ids.push_back(local_block_ids[original_idx]);
-    h2d_host_block_ids.push_back(local_host_block_ids[original_idx]);
+    plan.h2d_host_block_ids.push_back(local_host_block_ids[original_idx]);
   }
 
   plan.h2d_copy =
-      BuildH2dCopySpec(h2d_host_block_ids, plan.h2d_local_block_ids);
+      BuildH2dCopySpec(plan.h2d_host_block_ids, plan.h2d_local_block_ids);
   plan.host_dst_to_src.clear();  // No host reordering needed!
   return plan;
 }
@@ -532,8 +531,15 @@ void KVCacheManagerWithTransfer::StartRead(
 
   {
     std::lock_guard<std::mutex> lock(mu_);
-    active_recv_entries_[uuid] =
-        RecvEntry{req_id, load_plan.h2d_local_block_ids};
+    RecvEntry entry;
+    entry.req_id = req_id;
+    entry.total_blocks =
+        static_cast<int64_t>(load_plan.h2d_host_block_ids.size());
+    for (size_t k = 0; k < load_plan.h2d_host_block_ids.size(); ++k) {
+      entry.host_to_chip[load_plan.h2d_host_block_ids[k]] =
+          load_plan.h2d_local_block_ids[k];
+    }
+    active_recv_entries_[uuid] = std::move(entry);
   }
 
   if (load_plan.num_blocks == 0) {
@@ -1000,34 +1006,37 @@ void KVCacheManagerWithTransfer::StartPushInternal(
 
 absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
     const std::vector<int>& block_ids, uint64_t uuid) {
+  std::vector<int64_t> host_src_blocks;
   std::vector<int64_t> chip_dst_blocks;
   std::string target_req_id;
+  int64_t chunk_size = block_ids.size();
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = active_recv_entries_.find(uuid);
     if (it == active_recv_entries_.end()) {
       return absl::OkStatus();
     }
-    chip_dst_blocks = it->second.chip_block_ids;
     target_req_id = it->second.req_id;
+    host_src_blocks.reserve(chunk_size);
+    chip_dst_blocks.reserve(chunk_size);
+    for (int h_id : block_ids) {
+      auto map_it = it->second.host_to_chip.find(h_id);
+      if (map_it == it->second.host_to_chip.end()) {
+        failed_recving_.insert(target_req_id);
+        active_recv_entries_.erase(uuid);
+        return absl::FailedPreconditionError(
+            "Received unexpected host block ID");
+      }
+      host_src_blocks.push_back(h_id);
+      chip_dst_blocks.push_back(map_it->second);
+    }
   }
 
   VLOG(1) << "OnBlocksReceived (Hybrid Bridge) triggered for UUID " << uuid
-          << " with " << block_ids.size()
-          << " blocks. Launching decoupled autonomous H2D copy for req_id "
+          << " with " << chunk_size << " blocks. Launching H2D copy for req_id "
           << target_req_id;
 
-  std::vector<int64_t> host_src_blocks(block_ids.begin(), block_ids.end());
-  std::vector<int64_t> copy_sizes(host_src_blocks.size(), 1);
-
-  if (host_src_blocks.size() != chip_dst_blocks.size()) {
-    std::lock_guard<std::mutex> lock(mu_);
-    failed_recving_.insert(target_req_id);
-    active_recv_entries_.erase(uuid);
-    return absl::FailedPreconditionError(
-        "Received block count does not match requested chip destination block "
-        "count");
-  }
+  std::vector<int64_t> copy_sizes(chunk_size, 1);
 
   auto future_or = H2d(host_src_blocks, chip_dst_blocks, copy_sizes,
                        /*slot_idx=*/std::nullopt);
@@ -1039,15 +1048,21 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
   }
 
   auto future = std::move(future_or.value());
-  future.OnReady([this, uuid, target_req_id](
-                     const absl::StatusOr<raiden::BufferHolders>& s) {
+  future.OnReady([this, uuid, target_req_id,
+                  chunk_size](const absl::StatusOr<raiden::BufferHolders>& s) {
     std::lock_guard<std::mutex> lock(mu_);
+    auto it = active_recv_entries_.find(uuid);
+    if (it == active_recv_entries_.end()) return;
     if (s.ok()) {
-      done_recving_.insert(target_req_id);
+      it->second.num_completed_blocks += chunk_size;
+      if (it->second.num_completed_blocks == it->second.total_blocks) {
+        done_recving_.insert(target_req_id);
+        active_recv_entries_.erase(uuid);
+      }
     } else {
       failed_recving_.insert(target_req_id);
+      active_recv_entries_.erase(uuid);
     }
-    active_recv_entries_.erase(uuid);
   });
   return absl::OkStatus();
 }

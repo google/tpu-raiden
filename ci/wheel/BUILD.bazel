@@ -71,20 +71,18 @@ TORCH_REQUIRES = COMMON_REQUIRES + TORCH_REQ
 
 # Framework-agnostic python deps for the py_library aggregator.
 #
-# NOTE: //rpc and //tpu_raiden/frameworks/jax:resharding_engine (which imports
-# rpc) are intentionally excluded — rpc/BUILD loads Google-internal grpc rules
-# (//net/grpc, //third_party/grpc) and is not OSS-loadable. Re-add once rpc has
-# an OSS-compatible BUILD.
-COMMON_DEPS = []
+COMMON_DEPS = [
+    "//rpc:coordination_helper",
+]
 
 # JAX native extensions + wrappers + public API. (TransferEngine was merged into
 # KVCacheManager upstream, so there is no _transfer_engine target.)
 JAX_DEPS = [
-    "//tpu_raiden/frameworks/jax:_raw_transfer",
     "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
     "//tpu_raiden/frameworks/jax:_kv_cache_manager_ffi",
     "//tpu_raiden/frameworks/jax:_weight_synchronizer_ffi",
     "//tpu_raiden/frameworks/jax:weight_synchronizer_ffi_py",
+    "//tpu_raiden/frameworks/jax:resharding_engine",
     "//tpu_raiden/frameworks/jax:resharding_planner",
     "//tpu_raiden/frameworks/jax:jax_test_utils",
     "//tpu_raiden/api/jax:kv_cache_manager_jax_py",
@@ -96,7 +94,6 @@ JAX_DEPS = [
 
 # Torch native extensions + public API (require the torch_tpu module at build).
 TORCH_DEPS = [
-    "//tpu_raiden/frameworks/torch:_torch_raw_transfer",
     "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",
     "//tpu_raiden/api/torch:kv_cache_manager_torch_py",
     "//tpu_raiden/api/torch:weight_synchronizer_torch_py",

@@ -203,6 +203,7 @@ class KVCacheManagerTest(parameterized.TestCase):
       time.sleep(0.1)
 
     self.assertTrue(done, "Consumer did not finish transfer in time")
+    time.sleep(0.5)
 
     for t in dst_caches:
       np.testing.assert_allclose(t.cpu().numpy(), 2.0, atol=1e-5)

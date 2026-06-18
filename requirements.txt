@@ -7,3 +7,5 @@ numpy
 jax==0.10.0
 jaxlib==0.10.0
 libtpu==0.0.40
+grpcio-tools
+protobuf
