@@ -28,7 +28,7 @@
 #include "xla/stream_executor/platform_manager.h"
 #include "xla/stream_executor/stream.h"
 #include "xla/stream_executor/stream_executor.h"
-#include "core/kv_cache_manager_with_transfer.h"
+#include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 
 namespace tpu_raiden {
 namespace kv_cache {

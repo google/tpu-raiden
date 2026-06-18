@@ -32,9 +32,9 @@ import jax
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
 import numpy as np
-from rpc import coordination_helper
 from tpu_raiden.frameworks.jax import resharding_planner
 from tpu_raiden.frameworks.jax import weight_synchronizer_ffi as raiden_ffi
+from tpu_raiden.rpc import coordination_helper
 
 _COORDINATION_SERVER: Optional[coordination_helper.CoordinationServer] = None
 

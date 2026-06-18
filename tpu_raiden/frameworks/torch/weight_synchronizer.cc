@@ -22,7 +22,7 @@
 #include "absl/status/status.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "tpu_raiden/frameworks/torch/torch_utils.h"
-#include "weight_sync/weight_synchronizer_base.h"
+#include "tpu_raiden/weight_sync/weight_synchronizer_base.h"
 
 namespace tpu_raiden {
 namespace torch {

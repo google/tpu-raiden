@@ -18,7 +18,7 @@
 #include <utility>
 #include <vector>
 
-#include "core/utils.h"
+#include "tpu_raiden/core/utils.h"
 #include "tpu_raiden/frameworks/jax/utils.h"
 
 namespace nb = nanobind;

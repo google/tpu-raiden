@@ -19,7 +19,7 @@
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
-#include "weight_sync/weight_synchronizer_base.h"
+#include "tpu_raiden/weight_sync/weight_synchronizer_base.h"
 
 namespace tpu_raiden {
 namespace torch {

@@ -25,7 +25,7 @@
 #include "xla/stream_executor/platform_manager.h"
 #include "xla/tsl/platform/test.h"
 #include "tpu_raiden/frameworks/jax/weight_synchronizer_ffi_internal.h"
-#include "weight_sync/weight_synchronizer_base.h"
+#include "tpu_raiden/weight_sync/weight_synchronizer_base.h"
 
 namespace tpu_raiden {
 namespace weight_sync {

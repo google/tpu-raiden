@@ -20,8 +20,8 @@
 
 #include "ATen/core/TensorBody.h"
 #include "xla/pjrt/pjrt_client.h"
-#include "core/kv_cache_manager_with_transfer.h"
-#include "core/utils.h"
+#include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
+#include "tpu_raiden/core/utils.h"
 #include "tpu_raiden/frameworks/torch/torch_tpu_utils.h"
 #include "tpu_raiden/frameworks/torch/torch_utils.h"
 

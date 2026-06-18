@@ -31,7 +31,7 @@ from dataclasses import dataclass
 import itertools
 from typing import List, Tuple
 import jax
-from weight_sync import weight_synchronizer_service_pb2
+from tpu_raiden.weight_sync import weight_synchronizer_service_pb2
 
 
 @dataclass

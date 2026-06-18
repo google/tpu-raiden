@@ -26,9 +26,9 @@
 #include "absl/types/span.h"
 #include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
-#include "core/host_memory_allocator.h"
-#include "core/raw_transfer_core.h"
-#include "core/utils.h"
+#include "tpu_raiden/core/host_memory_allocator.h"
+#include "tpu_raiden/core/raw_transfer_core.h"
+#include "tpu_raiden/core/utils.h"
 #include "tpu_raiden/frameworks/torch/torch_tpu_utils.h"
 
 namespace raiden {

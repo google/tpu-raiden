@@ -37,8 +37,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":utils",
-        "//core:kv_cache_manager_with_transfer",
-        "//core:utils",
+        "//tpu_raiden/core:kv_cache_manager_with_transfer",
+        "//tpu_raiden/core:utils",
         "@nanobind",
     ],
 )
@@ -123,8 +123,8 @@ nanobind_extension(
         ":nb_statusor",
         ":raw_transfer_jax",
         ":weight_synchronizer_jax",
-        "//core:raw_transfer_core",
-        "//weight_sync:weight_synchronizer_base",
+        "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@nanobind",
@@ -145,7 +145,7 @@ nanobind_extension(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
-        "//kv_cache:kv_cache_store",
+        "//tpu_raiden/kv_cache:kv_cache_store",
         "@nanobind",
         "@xla//xla/pjrt:status_casters",
     ],
@@ -168,7 +168,7 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//core:kv_cache_manager_with_transfer",
+        "//tpu_raiden/core:kv_cache_manager_with_transfer",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@xla//xla/ffi/api:ffi",
@@ -221,7 +221,7 @@ cc_library(
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
-        "//weight_sync:weight_synchronizer_base",
+        "//tpu_raiden/weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
@@ -277,7 +277,7 @@ cc_library(
     deps = [
         ":jax_utils",
         ":utils",
-        "//weight_sync:weight_synchronizer_base",
+        "//tpu_raiden/weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@nanobind",
@@ -315,9 +315,9 @@ nanobind_extension(
     visibility = ["//visibility:public"],
     deps = [
         ":jax_utils",
-        "//core:raw_transfer_core",
-        "//core:raw_transfer_impl",
-        "//core:status_macros",
+        "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/core:raw_transfer_impl",
+        "//tpu_raiden/core:status_macros",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
@@ -341,7 +341,7 @@ cc_library(
     copts = ["-fexceptions"],
     features = ["-use_header_modules"],
     deps = [
-        "//core:kv_cache_manager_with_transfer",
+        "//tpu_raiden/core:kv_cache_manager_with_transfer",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@xla//xla/ffi/api:ffi",
@@ -359,7 +359,7 @@ cc_test(
     features = ["-use_header_modules"],
     deps = [
         ":kv_cache_manager_ffi_mock",
-        "//core:kv_cache_manager_with_transfer",
+        "//tpu_raiden/core:kv_cache_manager_with_transfer",
         "@xla//xla/ffi/api:c_api",
         "@xla//xla/ffi/api:ffi",
         "@xla//xla/stream_executor:platform_manager",
@@ -383,7 +383,7 @@ cc_library(
     ],
     features = ["-use_header_modules"],
     deps = [
-        "//weight_sync:weight_synchronizer_base",
+        "//tpu_raiden/weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
@@ -403,7 +403,7 @@ cc_test(
     features = ["-use_header_modules"],
     deps = [
         ":weight_synchronizer_ffi_mock",
-        "//weight_sync:weight_synchronizer_base",
+        "//tpu_raiden/weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/log",
         "@xla//xla/ffi/api:c_api",
         "@xla//xla/ffi/api:ffi",
@@ -429,9 +429,9 @@ cc_library(
     features = ["-use_header_modules"],
     deps = [
         ":mock_nanobind",
-        "//core:raw_transfer_core",
-        "//core:raw_transfer_impl",
-        "//core:status_macros",
+        "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/core:raw_transfer_impl",
+        "//tpu_raiden/core:status_macros",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
@@ -465,9 +465,9 @@ cc_library(
     defines = ["WITHOUT_PYTHON"],
     features = ["-use_header_modules"],
     deps = [
-        "//core:raw_transfer_core",
-        "//core:raw_transfer_impl",
-        "//core:status_macros",
+        "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/core:raw_transfer_impl",
+        "//tpu_raiden/core:status_macros",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
@@ -490,7 +490,7 @@ cc_test(
     features = ["-use_header_modules"],
     deps = [
         ":raw_transfer_jax_mock",
-        "//core:raw_transfer_core",
+        "//tpu_raiden/core:raw_transfer_core",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/pjrt/plugin/xla_cpu:xla_cpu_pjrt_client",
         "@xla//xla/stream_executor/host:host_platform",
@@ -537,7 +537,7 @@ py_library(
     srcs = ["resharding_planner.py"],
     visibility = ["//visibility:public"],
     deps = [
-        "//weight_sync:weight_synchronizer_service_py_pb2",
+        "//tpu_raiden/weight_sync:weight_synchronizer_service_py_pb2",
         "@jax//jax",
     ],
 )
@@ -549,7 +549,7 @@ py_library(
     deps = [
         ":resharding_planner",
         ":weight_synchronizer_ffi_py",
-        "//rpc:coordination_helper",
+        "//tpu_raiden/rpc:coordination_helper",
         "@jax//jax",
         "@pypi//numpy",
     ],

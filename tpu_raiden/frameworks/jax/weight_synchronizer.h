@@ -20,7 +20,7 @@
 #ifndef WITHOUT_PYTHON
 #include <nanobind/nanobind.h>
 #endif
-#include "weight_sync/weight_synchronizer_base.h"
+#include "tpu_raiden/weight_sync/weight_synchronizer_base.h"
 
 #ifndef WITHOUT_PYTHON
 namespace nb = nanobind;

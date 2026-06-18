@@ -153,9 +153,9 @@ if [ "${BUILD_TORCH}" = true ]; then
 fi
 
 BAZEL_TARGETS=(
-  "//weight_sync:weight_synchronizer_service_py_pb2"
-  "//rpc:coordination_py_pb2"
-  "//rpc:coordination_py_pb2_grpc"
+  "//tpu_raiden/weight_sync:weight_synchronizer_service_py_pb2"
+  "//tpu_raiden/rpc:coordination_py_pb2"
+  "//tpu_raiden/rpc:coordination_py_pb2_grpc"
 )
 DEFINE_FLAGS=""
 BAZEL_MODULE_FLAGS=()

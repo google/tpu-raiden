@@ -20,7 +20,7 @@
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
-#include "core/kv_cache_manager_with_transfer.h"
+#include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 
 namespace tpu_raiden {
 namespace torch {

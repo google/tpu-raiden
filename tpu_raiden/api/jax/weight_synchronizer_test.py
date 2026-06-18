@@ -25,7 +25,7 @@ import socket
 import numpy as np
 
 from tpu_raiden.api.jax import weight_synchronizer
-from weight_sync import weight_synchronizer_service_pb2
+from tpu_raiden.weight_sync import weight_synchronizer_service_pb2
 
 WeightSynchronizer = weight_synchronizer.WeightSynchronizer
 

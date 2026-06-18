@@ -32,9 +32,9 @@
 #include "xla/pjrt/status_casters.h"
 #include "xla/shape.h"
 #include "xla/tsl/platform/statusor.h"
-#include "core/raw_transfer_core.h"
-#include "core/raw_transfer_impl.h"
-#include "core/status_macros.h"
+#include "tpu_raiden/core/raw_transfer_core.h"
+#include "tpu_raiden/core/raw_transfer_impl.h"
+#include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/frameworks/jax/jax_utils.h"
 #include "tpu_raiden/frameworks/jax/raw_transfer_internal.h"
 

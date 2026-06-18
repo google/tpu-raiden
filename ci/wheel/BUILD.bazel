@@ -72,7 +72,7 @@ TORCH_REQUIRES = COMMON_REQUIRES + TORCH_REQ
 # Framework-agnostic python deps for the py_library aggregator.
 #
 COMMON_DEPS = [
-    "//rpc:coordination_helper",
+    "//tpu_raiden/rpc:coordination_helper",
 ]
 
 # JAX native extensions + wrappers + public API. (TransferEngine was merged into
@@ -90,7 +90,7 @@ JAX_DEPS = [
 ]
 # Excluded (non-OSS internal grpc / global registry):
 # //tpu_raiden/frameworks/jax:kv_cache_store and //tpu_raiden/api/jax:kv_cache_store
-# depend on //kv_cache:kv_cache_store -> //kv_cache/global_registry.
+# depend on //tpu_raiden/kv_cache:kv_cache_store -> //kv_cache/global_registry.
 
 # Torch native extensions + public API (require the torch_tpu module at build).
 TORCH_DEPS = [

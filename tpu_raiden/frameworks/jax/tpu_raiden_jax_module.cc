@@ -24,8 +24,8 @@
 #include <nanobind/stl/pair.h>  // IWYU pragma: keep
 #include <nanobind/stl/string.h>  // IWYU pragma: keep
 #include <nanobind/stl/vector.h>  // IWYU pragma: keep
-#include "core/raiden_future.h"
-#include "core/raw_transfer_core.h"
+#include "tpu_raiden/core/raiden_future.h"
+#include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/frameworks/jax/kv_cache_manager.h"
 #include "tpu_raiden/frameworks/jax/nb_statusor.h"  // IWYU pragma: keep
 #include "tpu_raiden/frameworks/jax/raw_transfer_internal.h"

@@ -105,7 +105,7 @@ export BAZEL_BIN
 echo "=== 5. Running CPU-bound standard unit tests ==="
 "${BAZEL_BIN}" "${BAZEL_STARTUP_FLAGS[@]}" test -c opt --check_visibility=false --verbose_failures \
   "${BAZEL_COMMAND_FLAGS[@]}" \
-  //kv_cache:logical_block_manager_test
+  //tpu_raiden/kv_cache:logical_block_manager_test
 
 # Find Bazel's hermetic Python 3.12 interpreter to avoid ABI mismatches with host Python 3.10
 HERMETIC_PYTHON_BIN=$(find "${BAZEL_OUTPUT_BASE}/external" -path "*python_3_12*/bin/python3" | head -n 1)

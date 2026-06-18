@@ -23,7 +23,7 @@
 #ifndef WITHOUT_PYTHON
 #include <nanobind/nanobind.h>
 #endif
-#include "core/kv_cache_manager_with_transfer.h"
+#include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 
 namespace xla {
 class PjRtBuffer;

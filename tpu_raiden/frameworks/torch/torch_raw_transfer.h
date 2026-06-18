@@ -21,7 +21,7 @@
 
 #include "ATen/core/TensorBody.h"
 #include "xla/pjrt/pjrt_client.h"
-#include "core/raw_transfer_core.h"
+#include "tpu_raiden/core/raw_transfer_core.h"
 
 namespace raiden {
 
