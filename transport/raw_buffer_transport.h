@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <thread>  // NOLINT
 #include <vector>
@@ -26,6 +27,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 
 namespace tpu_raiden {
@@ -47,6 +49,26 @@ class RawBufferTransportDelegate {
 
   // Notification triggered upon verified data chunk arrival.
   virtual absl::Status OnDataReceived() { return absl::OkStatus(); }
+};
+
+struct BufferSendSlice {
+  const uint8_t* data_ptr;
+  size_t size_bytes;
+};
+
+struct SendSpec {
+  std::vector<BufferSendSlice> slices;
+  int fd;  // Required. Active socket connection FD.
+};
+
+struct BufferReceiveSlice {
+  uint8_t* data_ptr;
+  size_t size_bytes;
+};
+
+struct ReceiveSpec {
+  std::vector<BufferReceiveSlice> slices;
+  int fd;  // Required. Active socket connection FD.
 };
 
 // Standalone raw buffer POSIX TCP socket transport engine.
@@ -80,6 +102,28 @@ class RawBufferTransport {
                           size_t dst_shard_idx, size_t dst_offset_bytes,
                           size_t size_bytes);
 
+  // Sends a batch of buffer slices to a peer.
+  absl::Status Send(const SendSpec& spec);
+
+  // Receives a batch of buffer slices from a source peer.
+  absl::Status Receive(const ReceiveSpec& spec);
+
+  struct ConnectionCloser {
+    int fd;
+    std::function<void(bool ok_to_pool)> close_fn;
+  };
+
+  using CommandCallback = std::function<absl::Status(
+      ConnectionCloser closer, const std::string& command_meta)>;
+
+  // Registers a callback to handle a command ID when received.
+  absl::Status RegisterCommand(uint32_t command_id, CommandCallback callback);
+
+  // Issues a command to a remote peer.
+  absl::StatusOr<ConnectionCloser> IssueCommand(absl::string_view peer,
+                                                uint32_t command_id,
+                                                absl::string_view command_meta);
+
   int local_port() const { return local_port_; }
 
   // Shared socket IO helpers.
@@ -95,6 +139,7 @@ class RawBufferTransport {
   virtual absl::Status ProcessSingleRequest(int client_fd);
   virtual absl::Status HandleCustomRequest(int client_fd,
                                            const PacketHeader& header);
+  absl::Status ProcessCommandRequest(int client_fd, const PacketHeader& header);
 
   void ConnectionWorker(int client_fd);
   void ListenerLoop();
@@ -112,11 +157,16 @@ class RawBufferTransport {
       ABSL_GUARDED_BY(pool_mu_);
   bool pooling_enabled_ = true;
 
+  absl::Mutex cmd_mu_;
+  absl::flat_hash_map<uint32_t, CommandCallback> registered_commands_
+      ABSL_GUARDED_BY(cmd_mu_);
+
   std::thread listener_thread_;
   std::vector<std::thread> worker_threads_;
 };
 
 }  // namespace transport
+
 }  // namespace tpu_raiden
 
 #endif  // THIRD_PARTY_TPU_RAIDEN_TRANSPORT_RAW_BUFFER_TRANSPORT_H_
