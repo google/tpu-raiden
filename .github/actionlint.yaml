@@ -17,4 +17,5 @@
 # (e.g. linux-x86-tpu7x-224-4tpu) once google/tpu-raiden is granted them.
 self-hosted-runner:
   labels:
-    - linux-x86-n2-32   # CPU
+    - linux-x86-n2-32              # CPU
+    - linux-x86-tpu7x-224-4tpu     # TPU v7 (probe, see tpu7x_smoke.yml)
