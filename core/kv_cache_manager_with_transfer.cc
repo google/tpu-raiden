@@ -62,6 +62,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -144,31 +145,7 @@ std::pair<std::string, int> SplitEndpoint(const std::string& endpoint) {
   return {endpoint.substr(0, colon), std::stoi(endpoint.substr(colon + 1))};
 }
 
-int ConnectTcp(const std::string& endpoint) {
-  auto [host, port] = SplitEndpoint(endpoint);
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) {
-    throw std::runtime_error("socket() failed: " +
-                             std::string(std::strerror(errno)));
-  }
-  int opt = 1;
-  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
 
-  sockaddr_in addr;
-  std::memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(port);
-  if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
-    close(fd);
-    throw std::runtime_error("invalid IPv4 endpoint host: " + host);
-  }
-  if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-    std::string err = std::strerror(errno);
-    close(fd);
-    throw std::runtime_error("connect(" + endpoint + ") failed: " + err);
-  }
-  return fd;
-}
 
 static std::string GetPeerIp(int fd) {
   sockaddr_in addr;
@@ -353,6 +330,8 @@ static double DurationMs(std::chrono::steady_clock::time_point start,
                          std::chrono::steady_clock::time_point end) {
   return std::chrono::duration<double, std::milli>(end - start).count();
 }
+
+
 
 }  // namespace
 
@@ -554,12 +533,9 @@ void KVCacheManagerWithTransfer::StartRead(
   push_pool_->Schedule(target_node, [this, req_id, uuid, remote_endpoint,
                                      load_plan = std::move(load_plan)]() {
     try {
-      int control_fd = ConnectTcp(remote_endpoint);
-      auto control_cleanup =
-          std::unique_ptr<int, void (*)(int*)>(&control_fd, [](int* p) {
-            if (p && *p >= 0) close(*p);
-          });
-
+      if (!server_) {
+        throw std::runtime_error("Transport server is not running");
+      }
       ControlRequestHeader stream_request;
       stream_request.magic = kControlMagic;
       stream_request.op = kOpPullStream;
@@ -567,16 +543,32 @@ void KVCacheManagerWithTransfer::StartRead(
       stream_request.num_blocks = static_cast<uint64_t>(load_plan.num_blocks);
       stream_request.consumer_data_port =
           static_cast<uint32_t>(local_data_port_);
-      CheckStatus(
-          "control pull stream write",
-          WriteExact(control_fd, &stream_request, sizeof(stream_request)));
-      WriteBlockIds(control_fd, load_plan.producer_remote_block_ids);
-      WriteBlockIds(control_fd, load_plan.transport_host_block_ids);
 
-      ControlResponseHeader response = ReadControlResponseHeader(control_fd);
-      if (response.status != 0) {
+      std::string command_meta(reinterpret_cast<const char*>(&stream_request),
+                               sizeof(stream_request));
+
+      auto closer_or =
+          server_->IssueCommand(remote_endpoint, kOpPullStream, command_meta);
+      if (!closer_or.ok()) {
+        throw std::runtime_error("Failed to issue PullStream command: " +
+                                 std::string(closer_or.status().message()));
+      }
+      auto closer = std::move(closer_or.value());
+      auto closer_cleanup = absl::MakeCleanup([&] {
+        closer.close_fn(true);  // Release to pool
+      });
+
+      // Write block IDs directly to the socket!
+      WriteBlockIds(closer.fd, load_plan.producer_remote_block_ids);
+      WriteBlockIds(closer.fd, load_plan.transport_host_block_ids);
+
+      PullStreamResponse response;
+      CheckStatus("Read PullStream response",
+                  ReadExact(closer.fd, &response, sizeof(response)));
+      if (response.status_code != 0) {
         throw std::runtime_error(
-            "Remote producer rejected Hybrid Bridge read request");
+            absl::StrCat("Remote producer rejected PullStream request: ",
+                         response.error_message));
       }
       VLOG(1) << "StartRead (Hybrid Bridge) successfully registered pull "
                  "request with Producer. req_id: "
@@ -802,45 +794,17 @@ absl::Status KVCacheManagerWithTransfer::WaitForStagingBlockRead(
 }
 
 void KVCacheManagerWithTransfer::StartControlServer() {
-  control_fd_ = socket(AF_INET, SOCK_STREAM, 0);
-  if (control_fd_ < 0) {
-    throw std::runtime_error("control socket() failed: " +
-                             std::string(std::strerror(errno)));
-  }
-  int opt = 1;
-  setsockopt(control_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-  setsockopt(control_fd_, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
-
-  sockaddr_in addr;
-  std::memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = INADDR_ANY;
-  addr.sin_port = htons(local_control_port_);
-
-  if (bind(control_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-    std::string err = std::strerror(errno);
-    close(control_fd_);
-    control_fd_ = -1;
-    throw std::runtime_error("control bind(" +
-                             std::to_string(local_control_port_) +
-                             ") failed: " + err);
-  }
-  socklen_t len = sizeof(addr);
-  if (getsockname(control_fd_, reinterpret_cast<sockaddr*>(&addr), &len) < 0) {
-    close(control_fd_);
-    control_fd_ = -1;
-    throw std::runtime_error("getsockname() failed: " +
-                             std::string(std::strerror(errno)));
-  }
-  local_control_port_ = ntohs(addr.sin_port);
-  if (listen(control_fd_, 128) < 0) {
-    close(control_fd_);
-    control_fd_ = -1;
-    throw std::runtime_error("listen() failed: " +
-                             std::string(std::strerror(errno)));
+  if (server_) {
+    local_control_port_ = server_->local_port();
+    auto status = server_->RegisterCommand(
+        kOpPullStream,
+        [this](transport::RawBufferTransport::ConnectionCloser closer,
+               const std::string& command_meta) -> absl::Status {
+          return ProcessPullStreamCommand(std::move(closer), command_meta);
+        });
+    CheckStatus("Register PullStream command", status);
   }
   stopping_ = false;
-  control_thread_ = std::thread([this]() { ControlServerLoop(); });
 }
 
 void KVCacheManagerWithTransfer::StopControlServer() {
@@ -851,114 +815,85 @@ void KVCacheManagerWithTransfer::StopControlServer() {
       RemoveStagingReadinessLocked(staging_readiness_.begin()->first);
     }
   }
-  if (control_fd_ >= 0) {
-    shutdown(control_fd_, SHUT_RDWR);
-    close(control_fd_);
-  }
-  if (control_thread_.joinable()) {
-    control_thread_.join();
-  }
-  control_fd_ = -1;
 }
 
-void KVCacheManagerWithTransfer::ControlServerLoop() {
-  while (!stopping_) {
-    pollfd pfd;
-    pfd.fd = control_fd_;
-    pfd.events = POLLIN;
-    int r = poll(&pfd, 1, 200);
-    if (r < 0) {
-      if (errno == EINTR) continue;
-      break;
-    }
-    if (r == 0) continue;
-    int client_fd = accept(control_fd_, nullptr, nullptr);
-    if (client_fd < 0) {
-      if (errno == EINTR) continue;
-      break;
-    }
-    std::optional<int> source_node = assigned_numa_node();
+absl::Status KVCacheManagerWithTransfer::ProcessPullStreamCommand(
+    transport::RawBufferTransport::ConnectionCloser closer,
+    const std::string& command_meta) {
+  auto closer_cleanup = absl::MakeCleanup([&] {
+    closer.close_fn(true);  // Release/close socket
+  });
 
-    pull_pool_->Schedule(source_node, [this, client_fd]() {
-      HandleControlConnection(client_fd);
-      close(client_fd);
-    });
-  }
-}
-
-void KVCacheManagerWithTransfer::HandleControlConnection(int fd) {
   try {
-    ControlRequestHeader req;
-    CheckStatus("control request header read",
-                ReadExact(fd, &req, sizeof(req)));
+    if (command_meta.size() < sizeof(ControlRequestHeader)) {
+      return absl::InvalidArgumentError("Invalid command metadata size");
+    }
+    const auto& req =
+        *reinterpret_cast<const ControlRequestHeader*>(command_meta.data());
+
     if (req.magic != kControlMagic) {
-      throw std::runtime_error("bad control request magic");
+      return absl::InvalidArgumentError("Bad control request magic");
     }
-    if (req.op == kOpPullStream) {
-      ProcessPullStream(fd, req);
-    } else {
-      throw std::runtime_error("unknown control op code: " +
-                               std::to_string(req.op));
+
+    std::shared_ptr<SendEntry> entry;
+    {
+      std::unique_lock<std::mutex> lock(mu_);
+      cv_.wait(lock, [this, &entry, uuid = req.uuid]() {
+        auto it = send_entries_.find(uuid);
+        if (it != send_entries_.end()) {
+          entry = it->second;
+          return true;
+        }
+        return stopping_.load();
+      });
     }
+    if (stopping_) return absl::CancelledError("Stopping");
+    if (!entry) {
+      return absl::InternalError(
+          "KVCacheManagerWithTransfer is stopping during wait for send entry");
+    }
+
+    if (req.num_blocks == 0) {
+      // This is an AckRemote command
+      AckSend(req.uuid);
+      PullStreamResponse response = {0, ""};
+      RETURN_IF_ERROR(WriteExact(closer.fd, &response, sizeof(response)));
+      return absl::OkStatus();
+    }
+
+    std::vector<int64_t> src_block_ids =
+        ReadBlockIds(closer.fd, req.num_blocks);
+    std::vector<int64_t> dst_block_ids =
+        ReadBlockIds(closer.fd, req.num_blocks);
+
+    ValidateRequestedBlocks(*entry, src_block_ids);
+
+    // Acknowledge acceptance to consumer immediately
+    PullStreamResponse response = {0, ""};
+    RETURN_IF_ERROR(WriteExact(closer.fd, &response, sizeof(response)));
+
+    std::string peer_ip = GetPeerIp(closer.fd);
+    std::string remote_data_endpoint =
+        peer_ip + ":" + std::to_string(req.consumer_data_port);
+
+    VLOG(1) << "ProcessPullStream (Hybrid Bridge) successfully acknowledged "
+               "consumer. Intercepting and launching StartPushInternal to "
+            << remote_data_endpoint;
+
+    // Intercept and Execute Hybrid Push on behalf of remote consumer!
+    StartPushInternal(req.uuid, remote_data_endpoint, src_block_ids,
+                      dst_block_ids);
   } catch (const std::exception& e) {
-    LOG(ERROR) << "Raiden producer error in control connection handler: "
+    LOG(ERROR) << "Raiden producer error in control command handler: "
                << e.what();
-    ControlResponseHeader response;
-    response.magic = kResponseMagic;
-    response.status = -1;
-    std::string message = e.what();
-    response.message_len = message.size();
-    (void)WriteExact(fd, &response, sizeof(response));
-    if (response.message_len > 0) {
-      (void)WriteExact(fd, message.data(), message.size());
-    }
+    PullStreamResponse response;
+    response.status_code = static_cast<int32_t>(absl::StatusCode::kInternal);
+    std::strncpy(response.error_message, e.what(),
+                 sizeof(response.error_message) - 1);
+    (void)WriteExact(closer.fd, &response, sizeof(response));
+    return absl::InternalError(e.what());
   }
-}
-
-void KVCacheManagerWithTransfer::ProcessPullStream(
-    int fd, const ControlRequestHeader& req) {
-  std::shared_ptr<SendEntry> entry;
-  {
-    std::unique_lock<std::mutex> lock(mu_);
-    cv_.wait(lock, [this, &entry, &req]() {
-      auto it = send_entries_.find(req.uuid);
-      if (it != send_entries_.end()) {
-        entry = it->second;
-        return true;
-      }
-      return stopping_.load();
-    });
-  }
-  if (stopping_) return;
-  if (!entry) {
-    throw std::runtime_error(
-        "KVCacheManagerWithTransfer is stopping during wait for send entry");
-  }
-
-  std::vector<int64_t> src_block_ids = ReadBlockIds(fd, req.num_blocks);
-  std::vector<int64_t> dst_block_ids = ReadBlockIds(fd, req.num_blocks);
-  ValidateRequestedBlocks(*entry, src_block_ids);
-
-  // Acknowledge acceptance to consumer immediately
-  ControlResponseHeader response;
-  response.magic = kResponseMagic;
-  response.status = 0;
-  response.num_layers = static_cast<uint32_t>(num_layers() * num_shards());
-  response.data_port = static_cast<uint32_t>(local_data_port_);
-  CheckStatus("control stream response header write",
-              WriteExact(fd, &response, sizeof(response)));
-
-  std::string peer_ip = GetPeerIp(fd);
-  std::string remote_data_endpoint =
-      peer_ip + ":" + std::to_string(req.consumer_data_port);
-
-  VLOG(1) << "ProcessPullStream (Hybrid Bridge) successfully acknowledged "
-             "consumer. Intercepting and launching StartPushInternal to "
-          << remote_data_endpoint;
-
-  // Intercept and Execute Hybrid Push on behalf of remote consumer!
-  StartPushInternal(req.uuid, remote_data_endpoint, src_block_ids,
-                    dst_block_ids);
+  return absl::OkStatus();
 }
 
 void KVCacheManagerWithTransfer::StartPushInternal(
@@ -1076,38 +1011,37 @@ std::string KVCacheManagerWithTransfer::EndpointWithPort(
 
 void KVCacheManagerWithTransfer::AckRemote(const std::string& remote_endpoint,
                                            uint64_t uuid) {
-  int control_fd = ConnectTcp(remote_endpoint);
-  auto control_cleanup =
-      std::unique_ptr<int, void (*)(int*)>(&control_fd, [](int* p) {
-        if (p && *p >= 0) close(*p);
-      });
+  if (!server_) {
+    LOG(ERROR) << "Transport server is not running for AckRemote";
+    return;
+  }
   ControlRequestHeader stream_request;
   stream_request.magic = kControlMagic;
   stream_request.op = kOpPullStream;
   stream_request.uuid = uuid;
   stream_request.num_blocks = 0;
-  CheckStatus("control pull stream write (empty)",
-              WriteExact(control_fd, &stream_request, sizeof(stream_request)));
-  (void)ReadControlResponseHeader(control_fd);
-}
+  stream_request.consumer_data_port = 0;
 
-KVCacheManagerWithTransfer::ControlResponseHeader
-KVCacheManagerWithTransfer::ReadControlResponseHeader(int fd) {
-  ControlResponseHeader response;
-  CheckStatus("control response read",
-              ReadExact(fd, &response, sizeof(response)));
-  if (response.magic != kResponseMagic) {
-    throw std::runtime_error("bad control response magic");
+  std::string command_meta(reinterpret_cast<const char*>(&stream_request),
+                           sizeof(stream_request));
+
+  auto closer_or =
+      server_->IssueCommand(remote_endpoint, kOpPullStream, command_meta);
+  if (!closer_or.ok()) {
+    LOG(ERROR) << "Failed to issue AckRemote command: "
+               << closer_or.status().message();
+    return;
   }
-  if (response.status != 0) {
-    std::string message(response.message_len, '\0');
-    if (response.message_len > 0) {
-      CheckStatus("control error body read",
-                  ReadExact(fd, message.data(), message.size()));
-    }
-    throw std::runtime_error("remote Raiden control error: " + message);
+  auto closer = std::move(closer_or.value());
+  auto closer_cleanup = absl::MakeCleanup([&] {
+    closer.close_fn(true);  // Release to pool
+  });
+
+  PullStreamResponse response;
+  auto status = ReadExact(closer.fd, &response, sizeof(response));
+  if (!status.ok()) {
+    LOG(ERROR) << "Failed to read AckRemote response: " << status.message();
   }
-  return response;
 }
 
 void KVCacheManagerWithTransfer::AckSend(uint64_t uuid) {
