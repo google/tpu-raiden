@@ -221,19 +221,17 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
     size_t shard_idx;
   };
 
-  absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>
-  DispatchH2dWork(const std::vector<CopyWork>& works,
-                  std::optional<int64_t> slot_idx, bool is_partial,
-                  const std::vector<int64_t>& src_offsets_major_dim,
-                  const std::vector<int64_t>& dst_offsets_major_dim,
-                  const std::vector<int64_t>& copy_sizes_major_dim);
+  absl::StatusOr<std::vector<raiden::PjRtCopyFuture>> DispatchH2dWork(
+      const std::vector<CopyWork>& works, std::optional<int64_t> slot_idx,
+      bool is_partial, const std::vector<int64_t>& src_offsets_major_dim,
+      const std::vector<int64_t>& dst_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim);
 
-  absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>
-  DispatchD2hWork(const std::vector<CopyWork>& works,
-                  std::optional<int64_t> slot_idx, bool is_partial,
-                  const std::vector<int64_t>& src_offsets,
-                  const std::vector<int64_t>& dst_offsets,
-                  const std::vector<int64_t>& copy_sizes);
+  absl::StatusOr<std::vector<raiden::PjRtCopyFuture>> DispatchD2hWork(
+      const std::vector<CopyWork>& works, std::optional<int64_t> slot_idx,
+      bool is_partial, const std::vector<int64_t>& src_offsets,
+      const std::vector<int64_t>& dst_offsets,
+      const std::vector<int64_t>& copy_sizes);
 
   // Override parent AllocateBlocks using our dynamic block manager!
   absl::StatusOr<std::vector<int>> AllocateBlocks(
@@ -241,14 +239,13 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
     return block_manager_->Allocate(num_blocks, /*lock=*/true);
   }
 
-  absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>
-  DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
-                    const std::vector<int64_t>& dst_offsets,
-                    const std::vector<int64_t>& copy_sizes,
-                    std::optional<int64_t> slot_idx = std::nullopt,
-                    std::optional<size_t> layer_idx = std::nullopt,
-                    std::optional<size_t> shard_idx = std::nullopt,
-                    int64_t device_id = -1);
+  absl::StatusOr<std::vector<raiden::PjRtCopyFuture>> DispatchD2hChunks(
+      const std::vector<int64_t>& src_offsets,
+      const std::vector<int64_t>& dst_offsets,
+      const std::vector<int64_t>& copy_sizes,
+      std::optional<int64_t> slot_idx = std::nullopt,
+      std::optional<size_t> layer_idx = std::nullopt,
+      std::optional<size_t> shard_idx = std::nullopt, int64_t device_id = -1);
 
  private:
   xla::Future<> DoD2DTransfer(const BlockMetadata& src,

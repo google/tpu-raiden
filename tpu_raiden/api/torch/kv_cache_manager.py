@@ -28,31 +28,37 @@
 
 """High-performance PyTorch KV Cache Manager (repurposed as TransferEngine)."""
 
-import ctypes
 import os
-import pathlib
+import sys
 from typing import Any, List, Tuple
 
 import torch
-
 import torch_tpu  # noqa: F401  # Load torch shared libraries before the extension.
 from torch_tpu import _loader as _torch_tpu_loader
 
 
-Path = pathlib.Path
-
-
 def _load_torch_tpu_common() -> None:
+  # Load torch_tpu's shared libraries so libpywrap_torch_tpu_common.so is in
+  # the process. Deliberately do NOT `ctypes.CDLL(..., RTLD_GLOBAL)` it: the
+  # extension statically links its own XLA, and globalizing libpywrap's XLA
+  # makes raiden's allocator-factory registry interpose onto libpywrap's,
+  # aborting with a duplicate `DefaultCPUAllocator` registration. The
+  # extension NEEDED-links libpywrap (see build.sh patchelf step), so its
+  # torch_tpu symbols resolve through that dependency in local scope.
   _torch_tpu_loader.load()
-  common = Path(torch_tpu.__file__).resolve().parent / "common"
-  lib = common / "libpywrap_torch_tpu_common.so"
-  if lib.exists():
-    ctypes.CDLL(str(lib), mode=os.RTLD_GLOBAL | os.RTLD_NOW)
 
 
 _load_torch_tpu_common()
 
-from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _impl
+# Import the extension in private (RTLD_LOCAL) scope so its embedded XLA stays
+# separate from libpywrap's (mirrors how jax extensions load). A global-scope
+# load would merge the two XLA copies' allocator registries and abort.
+_prev_dlopen_flags = sys.getdlopenflags()
+sys.setdlopenflags(os.RTLD_LOCAL | os.RTLD_NOW)
+try:
+  from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _impl
+finally:
+  sys.setdlopenflags(_prev_dlopen_flags)
 
 
 class KVCacheManager:

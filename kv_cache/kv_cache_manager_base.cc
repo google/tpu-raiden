@@ -324,8 +324,8 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
   }
   bool is_partial = !src_offsets_major_dim.empty();
 
-  std::vector<xla::Future<raiden::BufferHolder>> logical_futures(num_layers_ *
-                                                                 num_shards_);
+  std::vector<raiden::PjRtCopyFuture> logical_futures(num_layers_ *
+                                                      num_shards_);
 
   // Group work by NUMA node
   std::map<int, std::vector<CopyWork>> grouped_work;
@@ -358,8 +358,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
           << " NUMA groups. Total works: " << total_works;
 
   struct PendingFuture {
-    std::future<absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>>
-        future;
+    std::future<absl::StatusOr<std::vector<raiden::PjRtCopyFuture>>> future;
     std::vector<CopyWork> works;
   };
   std::vector<PendingFuture> pending_futures;
@@ -423,11 +422,10 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
   }
 
   VLOG(1) << "KVCacheManagerBase::H2d completed. Returning logical futures.";
-  auto joined_future = xla::JoinFutures(absl::MakeSpan(logical_futures));
-  return raiden::PjRtCopyFuture::FromFuture(std::move(joined_future));
+  return raiden::JoinPjRtCopyFutures(absl::MakeSpan(logical_futures));
 }
 
-absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>
+absl::StatusOr<std::vector<raiden::PjRtCopyFuture>>
 KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
                                       const std::vector<int64_t>& dst_offsets,
                                       const std::vector<int64_t>& copy_sizes,
@@ -460,8 +458,8 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
   }
   bool is_partial = !src_offsets.empty();
 
-  std::vector<xla::Future<raiden::BufferHolder>> logical_futures(num_layers_ *
-                                                                 num_shards_);
+  std::vector<raiden::PjRtCopyFuture> logical_futures(num_layers_ *
+                                                      num_shards_);
 
   std::map<int, std::vector<CopyWork>> grouped_work;
   for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
@@ -496,8 +494,7 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
           << " NUMA groups. Total works: " << total_works;
 
   struct PendingFuture {
-    std::future<absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>>
-        future;
+    std::future<absl::StatusOr<std::vector<raiden::PjRtCopyFuture>>> future;
     std::vector<CopyWork> works;
   };
   std::vector<PendingFuture> pending_futures;
@@ -574,8 +571,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2h(
       auto logical_futures,
       DispatchD2hChunks(src_offsets_major_dim, dst_offsets_major_dim,
                         copy_sizes_major_dim, slot_idx, layer_idx, shard_idx));
-  auto joined_future = xla::JoinFutures(absl::MakeSpan(logical_futures));
-  return raiden::PjRtCopyFuture::FromFuture(std::move(joined_future));
+  return raiden::JoinPjRtCopyFutures(absl::MakeSpan(logical_futures));
 }
 
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
@@ -625,9 +621,8 @@ KVCacheManagerBase::D2hAutoAllocate(
   ASSIGN_OR_RETURN(
       auto futures,
       DispatchD2hChunks(flat_src_offsets, flat_dst_offsets, flat_copy_sizes));
-  auto future = xla::JoinFutures(absl::MakeSpan(futures));
   return std::make_pair(allocated_block_ids,
-                        raiden::PjRtCopyFuture::FromFuture(std::move(future)));
+                        raiden::JoinPjRtCopyFutures(absl::MakeSpan(futures)));
 }
 
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
@@ -789,7 +784,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dDirect(
     }
   }
 
-  std::vector<xla::Future<raiden::BufferHolder>> shard_futures_to_join;
+  std::vector<raiden::PjRtCopyFuture> shard_futures_to_join;
   for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
     const auto& layer_info = layers_[layer_idx];
     const auto& layer_holds = buffer_holds_[layer_idx];
@@ -800,7 +795,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dDirect(
       const auto& shard_info = layer_info.shards[i];
       const auto& shard_hold = layer_holds[i];
 
-      std::vector<xla::Future<>> shard_futures;
+      std::vector<raiden::H2dCopy> copies;
       if (!is_partial) {
         if (shard_info.host_ptr == nullptr) {
           return absl::FailedPreconditionError("Source host pointer is null");
@@ -809,9 +804,8 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dDirect(
           return absl::OutOfRangeError(
               "Copy range exceeds source host buffer size");
         }
-        xla::Future<> future = shard_hold.CopyRawHostToDevice(
-            shard_info.host_ptr, 0, physical_size_);
-        shard_futures.push_back(std::move(future));
+        copies.push_back(
+            {shard_info.host_ptr, 0, static_cast<int64_t>(physical_size_)});
       } else {
         for (size_t j = 0; j < src_offsets.size(); ++j) {
           int64_t src_major_dim_offset = src_offsets[j];
@@ -830,19 +824,16 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dDirect(
             return absl::InvalidArgumentError(
                 "Copy range exceeds destination device buffer size");
           }
-
-          const uint8_t* src_ptr = shard_info.host_ptr + src_offset;
-          xla::Future<> future =
-              shard_hold.CopyRawHostToDevice(src_ptr, dst_offset, size_to_copy);
-          shard_futures.push_back(std::move(future));
+          copies.push_back(
+              {shard_info.host_ptr + src_offset, dst_offset, size_to_copy});
         }
       }
-      shard_futures_to_join.push_back(raiden::CreateBufferFuture(
-          std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
+      TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture cf,
+                          raiden::IssueH2dShard(shard_hold, copies));
+      shard_futures_to_join.push_back(std::move(cf));
     }
   }
-  return raiden::PjRtCopyFuture::FromFuture(
-      xla::JoinFutures(absl::MakeSpan(shard_futures_to_join)));
+  return raiden::JoinPjRtCopyFutures(absl::MakeSpan(shard_futures_to_join));
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hDirect(
@@ -854,8 +845,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hDirect(
       DispatchD2hChunks(src_offsets, dst_offsets, copy_sizes,
                         /*slot_idx=*/std::nullopt, /*layer_idx=*/std::nullopt,
                         /*shard_idx=*/std::nullopt, device_id));
-  return raiden::PjRtCopyFuture::FromFuture(
-      xla::JoinFutures(absl::MakeSpan(futures)));
+  return raiden::JoinPjRtCopyFutures(absl::MakeSpan(futures));
 }
 
 absl::Status KVCacheManagerBase::ConfigureHostStagingSlots(
@@ -908,7 +898,7 @@ size_t KVCacheManagerBase::bytes_per_block() const {
   return slice_byte_size_;
 }
 
-absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>
+absl::StatusOr<std::vector<raiden::PjRtCopyFuture>>
 KVCacheManagerBase::DispatchH2dWork(
     const std::vector<CopyWork>& works, std::optional<int64_t> slot_idx,
     bool is_partial, const std::vector<int64_t>& src_offsets_major_dim,
@@ -916,7 +906,7 @@ KVCacheManagerBase::DispatchH2dWork(
     const std::vector<int64_t>& copy_sizes_major_dim) {
   VLOG(1) << "KVCacheManagerBase::DispatchH2dWork started. Works count: "
           << works.size() << ", Thread: " << std::this_thread::get_id();
-  std::vector<xla::Future<raiden::BufferHolder>> local_futures;
+  std::vector<raiden::PjRtCopyFuture> local_futures;
   for (const auto& work : works) {
     const auto& layer_info = layers_[work.layer_idx];
     const auto& shard_hold = buffer_holds_[work.layer_idx][work.shard_idx];
@@ -939,7 +929,7 @@ KVCacheManagerBase::DispatchH2dWork(
             << ", base_host_ptr: " << (void*)base_host_ptr
             << ", host_size: " << host_size;
 
-    std::vector<xla::Future<>> shard_futures;
+    std::vector<raiden::H2dCopy> copies;
     if (!is_partial) {
       if (base_host_ptr == nullptr) {
         return absl::FailedPreconditionError("Source host pointer is null");
@@ -951,9 +941,8 @@ KVCacheManagerBase::DispatchH2dWork(
               << work.layer_idx << ", Shard: " << work.shard_idx
               << ", Size: " << physical_size_
               << ", Thread: " << std::this_thread::get_id();
-      xla::Future<> future =
-          shard_hold.CopyRawHostToDevice(base_host_ptr, 0, physical_size_);
-      shard_futures.push_back(std::move(future));
+      copies.push_back(
+          {base_host_ptr, 0, static_cast<int64_t>(physical_size_)});
     } else {
       for (size_t j = 0; j < src_offsets_major_dim.size(); ++j) {
         int64_t src_major_dim_offset = src_offsets_major_dim[j];
@@ -972,21 +961,19 @@ KVCacheManagerBase::DispatchH2dWork(
           return absl::InvalidArgumentError(
               "Copy range exceeds destination device buffer size");
         }
-
-        const uint8_t* src_ptr = base_host_ptr + src_offset;
         VLOG(1)
             << "DispatchH2dWork: calling CopyRawHostToDevice (Partial). Layer: "
             << work.layer_idx << ", Shard: " << work.shard_idx
             << ", SrcOffset: " << src_offset << ", DstOffset: " << dst_offset
             << ", Size: " << size_to_copy
             << ", Thread: " << std::this_thread::get_id();
-        xla::Future<> future =
-            shard_hold.CopyRawHostToDevice(src_ptr, dst_offset, size_to_copy);
-        shard_futures.push_back(std::move(future));
+        copies.push_back(
+            {base_host_ptr + src_offset, dst_offset, size_to_copy});
       }
     }
-    local_futures.push_back(raiden::CreateBufferFuture(
-        std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
+    TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture cf,
+                        raiden::IssueH2dShard(shard_hold, copies));
+    local_futures.push_back(std::move(cf));
   }
   VLOG(1) << "KVCacheManagerBase::DispatchH2dWork completed. Dispatched "
           << local_futures.size()
@@ -994,7 +981,7 @@ KVCacheManagerBase::DispatchH2dWork(
   return local_futures;
 }
 
-absl::StatusOr<std::vector<xla::Future<raiden::BufferHolder>>>
+absl::StatusOr<std::vector<raiden::PjRtCopyFuture>>
 KVCacheManagerBase::DispatchD2hWork(const std::vector<CopyWork>& works,
                                     std::optional<int64_t> slot_idx,
                                     bool is_partial,
@@ -1003,7 +990,7 @@ KVCacheManagerBase::DispatchD2hWork(const std::vector<CopyWork>& works,
                                     const std::vector<int64_t>& copy_sizes) {
   VLOG(1) << "KVCacheManagerBase::DispatchD2hWork started. Works count: "
           << works.size() << ", Thread: " << std::this_thread::get_id();
-  std::vector<xla::Future<raiden::BufferHolder>> local_futures;
+  std::vector<raiden::PjRtCopyFuture> local_futures;
   for (const auto& work : works) {
     const auto& layer_info = layers_[work.layer_idx];
     const auto& shard_hold = buffer_holds_[work.layer_idx][work.shard_idx];
@@ -1026,7 +1013,7 @@ KVCacheManagerBase::DispatchD2hWork(const std::vector<CopyWork>& works,
             << ", dst_host_ptr: " << (void*)dst_host_ptr
             << ", host_size: " << host_size;
 
-    std::vector<xla::Future<>> shard_futures;
+    std::vector<raiden::D2hCopy> copies;
     if (!is_partial) {
       if (dst_host_ptr == nullptr) {
         return absl::FailedPreconditionError(
@@ -1040,11 +1027,9 @@ KVCacheManagerBase::DispatchD2hWork(const std::vector<CopyWork>& works,
               << work.layer_idx << ", Shard: " << work.shard_idx
               << ", Size: " << physical_size_
               << ", Thread: " << std::this_thread::get_id();
-      xla::Future<> future =
-          shard_hold.CopyRawDeviceToHost(dst_host_ptr, 0, physical_size_);
-      shard_futures.push_back(std::move(future));
+      copies.push_back({dst_host_ptr, 0, static_cast<int64_t>(physical_size_)});
     } else {
-      shard_futures.reserve(src_offsets.size());
+      copies.reserve(src_offsets.size());
       for (size_t j = 0; j < src_offsets.size(); ++j) {
         int64_t src_offset = src_offsets[j] * slice_byte_size_;
         int64_t dst_offset = dst_offsets[j] * slice_byte_size_;
@@ -1058,21 +1043,18 @@ KVCacheManagerBase::DispatchD2hWork(const std::vector<CopyWork>& works,
           return absl::InvalidArgumentError(
               "Copy range exceeds destination host buffer size");
         }
-
-        uint8_t* dst_ptr = dst_host_ptr + dst_offset;
         VLOG(1)
             << "DispatchD2hWork: calling CopyRawDeviceToHost (Partial). Layer: "
             << work.layer_idx << ", Shard: " << work.shard_idx
             << ", SrcOffset: " << src_offset << ", DstOffset: " << dst_offset
             << ", Size: " << size_to_copy
             << ", Thread: " << std::this_thread::get_id();
-        xla::Future<> future =
-            shard_hold.CopyRawDeviceToHost(dst_ptr, src_offset, size_to_copy);
-        shard_futures.push_back(std::move(future));
+        copies.push_back({dst_host_ptr + dst_offset, src_offset, size_to_copy});
       }
     }
-    local_futures.push_back(raiden::CreateBufferFuture(
-        std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
+    TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture cf,
+                        raiden::IssueD2hShard(shard_hold, copies));
+    local_futures.push_back(std::move(cf));
   }
   VLOG(1) << "KVCacheManagerBase::DispatchD2hWork completed. Dispatched "
           << local_futures.size()

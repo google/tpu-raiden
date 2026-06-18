@@ -200,7 +200,25 @@ fi
 
 if [ "$BUILD_TORCH" = true ]; then
   echo "Copying Torch artifacts..."
-  cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/frameworks/torch/_tpu_raiden_torch.so" "${WORKSPACE_DIR}/tpu_raiden/frameworks/torch/"
+  TORCH_SO="${WORKSPACE_DIR}/tpu_raiden/frameworks/torch/_tpu_raiden_torch.so"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/frameworks/torch/_tpu_raiden_torch.so" "${TORCH_SO}"
+  chmod u+w "${TORCH_SO}"
+  # The torch extension statically links its own XLA and references a few
+  # torch_tpu symbols (MaterializeAndReturn, AwaitBuffer). Add a NEEDED
+  # dependency on libpywrap so those resolve in *local* scope at import time
+  # (the loader imports the extension RTLD_LOCAL, see api/torch/
+  # kv_cache_manager.py). This keeps raiden's XLA private and avoids the
+  # duplicate AllocatorFactory registration that a global libpywrap preload
+  # would trigger. torch_tpu must already be imported (libpywrap loaded) when
+  # the extension imports, so no RUNPATH is required.
+  if command -v patchelf > /dev/null; then
+    patchelf --add-needed libpywrap_torch_tpu_common.so "${TORCH_SO}"
+    echo "patchelf: added NEEDED libpywrap_torch_tpu_common.so to torch extension"
+  else
+    echo "WARNING: patchelf not found; torch extension will NOT resolve" \
+         "torch_tpu symbols without a global libpywrap preload (which aborts" \
+         "on duplicate XLA allocator registration). Install patchelf." >&2
+  fi
 fi
 
 

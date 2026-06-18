@@ -104,12 +104,22 @@ fi
 export BAZEL_CACHE_DIR=/cache
 export BAZEL_OUTPUT_BASE=/cache/output_base
 
+# Separate per-framework wheels: tpu_raiden_torch (no jax deps) vs
+# tpu_raiden_jax. Pick by WITH_TORCH.
+if [[ "${WITH_TORCH}" == "1" ]]; then
+  WHEEL_TARGET="//ci/wheel:raiden_torch_wheel"
+  WHEEL_GLOB="tpu_raiden_torch-*.whl"
+else
+  WHEEL_TARGET="//ci/wheel:raiden_jax_wheel"
+  WHEEL_GLOB="tpu_raiden_jax-*.whl"
+fi
+
 cd /workspace
-./build.sh "${BUILD_MODE}" //ci/wheel:raiden_wheel \
+./build.sh "${BUILD_MODE}" "${WHEEL_TARGET}" \
   --repo_env=WHEEL_VERSION_EXTRAS="${WHEEL_VERSION_EXTRAS}"
 
 mkdir -p /workspace/dist
-cp /cache/output_base/execroot/_main/bazel-out/k8-opt/bin/ci/wheel/tpu_raiden-*.whl /workspace/dist/
+cp /cache/output_base/execroot/_main/bazel-out/k8-opt/bin/ci/wheel/${WHEEL_GLOB} /workspace/dist/
 INNER_EOF
 
 echo "===> Building ${BUILD_MODE} wheel in ${CONTAINER_IMAGE}..."
