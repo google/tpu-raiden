@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Nightly CPU build + unit tests. CPU-only (no TPU runners): builds the JAX
-# extension, runs the OSS-safe non-device unit tests, and builds the
+# Nightly build + tests on the v5e TPU runner (linux-x86-ct5lp-224-8tpu): builds
+# the JAX extension, runs the OSS-safe unit tests + a device test, and builds the
 # tpu_raiden_jax wheel (twine-checked) as a packaging smoke test. Also runs on
-# push to main and on demand. Files a tracking issue on failure. Device tests and
-# the torch wheel are intentionally out of scope until TPU runners are available;
-# see .github/README.md.
+# push to main and on demand. Files a tracking issue on failure. The torch wheel
+# is out of scope (needs a torch_tpu checkout); see .github/README.md.
 
-name: CI - Nightly (CPU)
+name: CI - Nightly
 
 on:
   workflow_dispatch:
@@ -42,13 +41,16 @@ env:
     //kv_cache:logical_block_manager_test
     //kv_cache:lru_cache_test
     //tpu_raiden/frameworks/jax:resharding_planner_test
+  DEVICE_TEST_TARGETS: >-
+    //tpu_raiden/frameworks/jax:raw_transfer_test_gl
 
 jobs:
   build_and_test:
-    name: "Nightly build + unit tests (CPU)"
-    runs-on: linux-x86-n2-32
+    name: "Nightly build + tests (v5e)"
+    runs-on: linux-x86-ct5lp-224-8tpu
     container:
       image: "us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest"
+      options: --privileged
     steps:
       - uses: actions/checkout@v5
       - name: Fix Git workspace ownership
@@ -60,11 +62,15 @@ jobs:
       - name: Build JAX extension
         run: ./build.sh jax
 
-      - name: Run CPU unit tests
+      - name: Verify TPU is visible
+        run: |
+          python3 -c "import jax; d=jax.devices(); print('JAX devices:', d); assert any('TPU' in str(x).upper() for x in d), 'no TPU visible'; print('TPU visible OK')"
+
+      - name: Run unit tests + device test
         env:
           RAIDEN_REMOTE_CACHE: "https://storage.googleapis.com/tpu-raiden-bazel-cache"
           RAIDEN_REMOTE_UPLOAD: "true"
-        run: ./ci/tools/bazel_test.sh jax -- ${CPU_TEST_TARGETS}
+        run: ./ci/tools/bazel_test.sh jax -- ${CPU_TEST_TARGETS} ${DEVICE_TEST_TARGETS}
 
       - name: Build tpu_raiden_jax wheel (packaging smoke)
         run: |

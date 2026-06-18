@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Per-PR gate. CPU-only: builds the JAX extension and runs the OSS-safe,
-# non-device unit tests + an import smoke check on a CPU runner. There are no TPU
-# lanes here on purpose -- this repo is not (yet) granted the self-hosted TPU
-# runner scale-sets, so all CI is kept on CPU. Device tests stay in Kokoro / on
-# a developer TPU VM until TPU runners are available. See .github/README.md.
+# Per-PR gate, running on the v5e TPU runner (linux-x86-ct5lp-224-8tpu): builds
+# the JAX extension, confirms the TPU is visible, runs the OSS-safe unit tests
+# plus one device test, and an import smoke check. The n2-32 / tpu7x runners were
+# not available to this repo (jobs stayed queued unassigned), so v5e is used for
+# everything for now. See .github/README.md.
 
-name: CI - Presubmit (CPU)
+name: CI - Presubmit
 
 on:
   workflow_dispatch:
@@ -35,23 +35,24 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: ${{ github.ref != 'main' }}
 
-# Curated OSS-safe, CPU-only unit tests (no TPU device, no Google-internal grpc).
-# //rpc/... and //kv_cache/global_registry/... are excluded by design -- see
-# ci/wheel/BUILD.bazel. Expand as more packages become CPU-runnable.
+# Curated OSS-safe tests. CPU_TEST_TARGETS run without a device; the device test
+# exercises the v5e. //rpc/... and //kv_cache/global_registry/... are excluded by
+# design (Google-internal grpc) -- see ci/wheel/BUILD.bazel.
 env:
   CPU_TEST_TARGETS: >-
     //kv_cache:logical_block_manager_test
     //kv_cache:lru_cache_test
     //tpu_raiden/frameworks/jax:resharding_planner_test
+  DEVICE_TEST_TARGETS: >-
+    //tpu_raiden/frameworks/jax:raw_transfer_test_gl
 
 jobs:
   build_and_test:
-    name: "Presubmit on CPU"
-    # Self-hosted CPU runner. NOTE: confirm this scale-set is granted to
-    # google/tpu-raiden; swap the label if your pool differs.
-    runs-on: linux-x86-n2-32
+    name: "Presubmit on v5e"
+    runs-on: linux-x86-ct5lp-224-8tpu
     container:
       image: "us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest"
+      options: --privileged
     steps:
       - uses: actions/checkout@v5
 
@@ -66,11 +67,21 @@ jobs:
       - name: Build JAX extension
         run: ./build.sh jax
 
-      - name: Run CPU unit tests
+      - name: Verify TPU is visible
+        run: |
+          python3 -c "import jax; d=jax.devices(); print('JAX devices:', d); assert any('TPU' in str(x).upper() for x in d), 'no TPU visible'; print('TPU visible OK')"
+
+      - name: Run unit tests
         env:
           RAIDEN_REMOTE_CACHE: "https://storage.googleapis.com/tpu-raiden-bazel-cache"
           RAIDEN_REMOTE_UPLOAD: "false"
         run: ./ci/tools/bazel_test.sh jax -- ${CPU_TEST_TARGETS}
+
+      - name: Run device test (v5e)
+        env:
+          RAIDEN_REMOTE_CACHE: "https://storage.googleapis.com/tpu-raiden-bazel-cache"
+          RAIDEN_REMOTE_UPLOAD: "false"
+        run: ./ci/tools/bazel_test.sh jax -- ${DEVICE_TEST_TARGETS}
 
       - name: Import smoke check (JAX mocked)
         run: |
