@@ -53,6 +53,7 @@
 #include "core/host_memory_allocator.h"
 #include "core/raw_transfer_core.h"
 #include "kv_cache/kv_cache_manager_base.h"
+#include "transport/raw_buffer_transport.h"
 
 namespace tpu_raiden {
 
@@ -211,29 +212,25 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     uint64_t num_blocks = 0;
   };
 
+  static constexpr uint32_t kControlMagic = 0x52414944;
+
   struct alignas(8) ControlRequestHeader {
-    uint32_t magic = 0x52414944;  // "RAID"
+    uint32_t magic = kControlMagic;
     uint32_t op = 0;
     uint64_t uuid = 0;
     uint64_t num_blocks = 0;
     uint32_t consumer_data_port = 0;
   };
 
-  struct alignas(8) ControlResponseHeader {
-    uint32_t magic = 0x44494152;  // "DIAR"
-    int32_t status = 0;
-    uint32_t num_layers = 0;
-    uint32_t data_port = 0;
-    uint64_t message_len = 0;
+  struct PullStreamResponse {
+    int32_t status_code;
+    char error_message[256];
   };
 
-  static constexpr uint32_t kControlMagic = 0x52414944;
-  static constexpr uint32_t kResponseMagic = 0x44494152;
-  static constexpr uint32_t kOpAck = 2;
   static constexpr uint32_t kOpPullStream = 3;
 
   std::string EndpointWithPort(const std::string& endpoint, int port) const;
-  ControlResponseHeader ReadControlResponseHeader(int fd);
+
   void AckSend(uint64_t uuid);
   void ConfigureDataPortFromKvTransfer();
   uint64_t StagingBlockBase(int64_t slot_idx) const;
@@ -249,9 +246,9 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
 
   void StartControlServer();
   void StopControlServer();
-  void ControlServerLoop();
-  void HandleControlConnection(int fd);
-  void ProcessPullStream(int fd, const ControlRequestHeader& req);
+  absl::Status ProcessPullStreamCommand(
+      transport::RawBufferTransport::ConnectionCloser closer,
+      const std::string& command_meta);
   void AckRemote(const std::string& remote_endpoint, uint64_t uuid);
   absl::Status WaitForStagingBlockRead(size_t layer_idx, size_t shard_idx,
                                        int block_id);
@@ -310,9 +307,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
       active_producer_blocks_;
   std::mutex mu_;
   std::condition_variable cv_;
-  int control_fd_ = -1;
   std::atomic<bool> stopping_{false};
-  std::thread control_thread_;
 
  private:
   std::optional<int> GetLocalTpuNumaNode(xla::PjRtBuffer* buf) const;

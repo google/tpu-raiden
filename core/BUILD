@@ -247,11 +247,12 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":host_memory_allocator",
-        ":numa_thread_pool",
         ":raw_transfer_core",
         ":tpu_utils",
         "//kv_cache:kv_cache_manager_base",
         "//transport:block_transport",
+        "//transport:raw_buffer_transport",
+        "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
