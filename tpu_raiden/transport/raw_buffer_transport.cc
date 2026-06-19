@@ -148,20 +148,20 @@ RawBufferTransport::~RawBufferTransport() {
   }
 }
 
-absl::StatusOr<int> RawBufferTransport::ConnectToPeer(const std::string& peer) {
+absl::StatusOr<int> RawBufferTransport::ConnectToPeer(absl::string_view peer) {
   std::string host;
   std::string port_str;
 
   if (!peer.empty() && peer.front() == '[') {
     size_t closing_bracket = peer.find(']');
-    if (closing_bracket == std::string::npos ||
+    if (closing_bracket == absl::string_view::npos ||
         closing_bracket + 1 >= peer.size() ||
         peer[closing_bracket + 1] != ':') {
       return absl::InvalidArgumentError(
           "Invalid IPv6 peer bracket string format");
     }
-    host = peer.substr(1, closing_bracket - 1);
-    port_str = peer.substr(closing_bracket + 2);
+    host = std::string(peer.substr(1, closing_bracket - 1));
+    port_str = std::string(peer.substr(closing_bracket + 2));
   } else {
     std::vector<std::string> parts = absl::StrSplit(peer, ':');
     if (parts.size() != 2) {
@@ -219,7 +219,7 @@ absl::StatusOr<int> RawBufferTransport::ConnectToPeer(const std::string& peer) {
 }
 
 absl::StatusOr<int> RawBufferTransport::AcquireConnection(
-    const std::string& peer) {
+    absl::string_view peer) {
   if (pooling_enabled_) {
     absl::MutexLock lock( pool_mu_ );
     auto it = conn_pool_.find(peer);
@@ -243,7 +243,7 @@ absl::StatusOr<int> RawBufferTransport::AcquireConnection(
   return ConnectToPeer(peer);
 }
 
-void RawBufferTransport::ReleaseConnection(const std::string& peer, int fd) {
+void RawBufferTransport::ReleaseConnection(absl::string_view peer, int fd) {
   if (fd < 0) return;
   absl::MutexLock lock( pool_mu_ );
   if (!pooling_enabled_ || stopping_) {
@@ -251,7 +251,11 @@ void RawBufferTransport::ReleaseConnection(const std::string& peer, int fd) {
     close(fd);
     return;
   }
-  conn_pool_[peer].push_back(fd);
+  auto it = conn_pool_.find(peer);
+  if (it == conn_pool_.end()) {
+    it = conn_pool_.emplace(std::string(peer), std::vector<int>{}).first;
+  }
+  it->second.push_back(fd);
 }
 
 void RawBufferTransport::ClosePooledConnections() {
@@ -376,7 +380,7 @@ void RawBufferTransport::ListenerLoop() {
 }
 
 absl::Status RawBufferTransport::PullBuffer(
-    const std::string& source, size_t buffer_id, size_t src_shard_idx,
+    absl::string_view source, size_t buffer_id, size_t src_shard_idx,
     size_t src_offset_bytes, size_t dst_shard_idx, size_t dst_offset_bytes,
     size_t size_bytes) {
   if (source.empty()) {
@@ -420,12 +424,9 @@ absl::Status RawBufferTransport::PullBuffer(
   return absl::OkStatus();
 }
 
-absl::Status RawBufferTransport::PushBuffer(const std::string& peer,
-                                            size_t buffer_id,
-                                            size_t dst_shard_idx,
-                                            size_t dst_offset_bytes,
-                                            const uint8_t* data_ptr,
-                                            size_t size_bytes) {
+absl::Status RawBufferTransport::PushBuffer(
+    absl::string_view peer, size_t buffer_id, size_t dst_shard_idx,
+    size_t dst_offset_bytes, const uint8_t* data_ptr, size_t size_bytes) {
   if (peer.empty()) {
     return absl::InvalidArgumentError(
         "Destination peer address cannot be empty");

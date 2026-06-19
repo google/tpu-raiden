@@ -25,9 +25,11 @@
 #include "nanobind/stl/pair.h"
 #include "nanobind/stl/shared_ptr.h"
 #include "nanobind/stl/string.h"
+#include "nanobind/stl/string_view.h"
 #include "nanobind/stl/vector.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "tpu_raiden/core/raiden_future.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/frameworks/torch/kv_cache_manager.h"
@@ -230,7 +232,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
           nb::arg("peers"), nb::call_guard<nb::gil_scoped_release>())
       .def(
           "PullWeights",
-          [](WeightSynchronizer& self, const std::string& source) {
+          [](WeightSynchronizer& self, absl::string_view source) {
             absl::Status s = self.PullWeights(source);
             if (!s.ok()) {
               throw std::runtime_error(
@@ -279,7 +281,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
           nb::call_guard<nb::gil_scoped_release>())
       .def(
           "PullWeightsChunk",
-          [](WeightSynchronizer& self, const std::string& source,
+          [](WeightSynchronizer& self, absl::string_view source,
              size_t src_shard_idx, size_t src_offset_bytes,
              size_t dst_shard_idx, size_t dst_offset_bytes, size_t size_bytes) {
             absl::Status s = self.PullWeightsChunk(

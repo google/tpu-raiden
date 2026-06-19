@@ -65,33 +65,33 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/types/span.h"
-#include "xla/future.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
-#include "tpu_raiden/transport/block_transport.h"
 
 namespace tpu_raiden {
 namespace {
 
-[[noreturn]] void ThrowStatus(const std::string& context,
+[[noreturn]] void ThrowStatus(absl::string_view context,
                               const absl::Status& status) {
-  throw std::runtime_error(context + ": " + std::string(status.message()));
+  throw std::runtime_error(absl::StrCat(context, ": ", status.message()));
 }
 
-void CheckStatus(const std::string& context, const absl::Status& status) {
+void CheckStatus(absl::string_view context, const absl::Status& status) {
   if (!status.ok()) {
     ThrowStatus(context, status);
   }
 }
 
-void EmitTimingLog(const std::string& message) { LOG(INFO) << message; }
+void EmitTimingLog(absl::string_view message) { LOG(INFO) << message; }
 
 template <typename T>
-T ValueOrThrow(const std::string& context, absl::StatusOr<T> value_or) {
+T ValueOrThrow(absl::string_view context, absl::StatusOr<T> value_or) {
   if (!value_or.ok()) {
     ThrowStatus(context, value_or.status());
   }
@@ -136,20 +136,24 @@ absl::Status ReadExact(int fd, void* buffer, size_t length) {
   return absl::OkStatus();
 }
 
-std::pair<std::string, int> SplitEndpoint(const std::string& endpoint) {
+std::pair<std::string, int> SplitEndpoint(absl::string_view endpoint) {
   const size_t colon = endpoint.rfind(':');
-  if (colon == std::string::npos) {
+  if (colon == absl::string_view::npos) {
     throw std::invalid_argument("endpoint must be host:port");
   }
-  return {endpoint.substr(0, colon), std::stoi(endpoint.substr(colon + 1))};
+  int port = 0;
+  if (!absl::SimpleAtoi(endpoint.substr(colon + 1), &port)) {
+    throw std::invalid_argument("invalid port in endpoint");
+  }
+  return {std::string(endpoint.substr(0, colon)), port};
 }
 
-int ConnectTcp(const std::string& endpoint) {
+int ConnectTcp(absl::string_view endpoint) {
   auto [host, port] = SplitEndpoint(endpoint);
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) {
-    throw std::runtime_error("socket() failed: " +
-                             std::string(std::strerror(errno)));
+    throw std::runtime_error(
+        absl::StrCat("socket() failed: ", std::strerror(errno)));
   }
   int opt = 1;
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
@@ -160,12 +164,14 @@ int ConnectTcp(const std::string& endpoint) {
   addr.sin_port = htons(port);
   if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
     close(fd);
-    throw std::runtime_error("invalid IPv4 endpoint host: " + host);
+    throw std::runtime_error(
+        absl::StrCat("invalid IPv4 endpoint host: ", host));
   }
   if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
     std::string err = std::strerror(errno);
     close(fd);
-    throw std::runtime_error("connect(" + endpoint + ") failed: " + err);
+    throw std::runtime_error(
+        absl::StrCat("connect(", endpoint, ") failed: ", err));
   }
   return fd;
 }
@@ -472,7 +478,7 @@ KVCacheManagerWithTransfer::~KVCacheManagerWithTransfer() {
 }
 
 int64_t KVCacheManagerWithTransfer::NotifyForRead(
-    const std::string& req_id, uint64_t uuid,
+    absl::string_view req_id, uint64_t uuid,
     const std::vector<int64_t>& block_ids) {
   const auto register_start = std::chrono::steady_clock::now();
   if (block_ids.empty()) {
@@ -482,7 +488,7 @@ int64_t KVCacheManagerWithTransfer::NotifyForRead(
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (pending_acks_.erase(uuid) > 0) {
-      done_sending_.insert(req_id);
+      done_sending_.insert(std::string(req_id));
       return 0;
     }
   }
@@ -515,8 +521,7 @@ int64_t KVCacheManagerWithTransfer::NotifyForRead(
 }
 
 void KVCacheManagerWithTransfer::StartRead(
-    const std::string& req_id, uint64_t uuid,
-    const std::string& remote_endpoint,
+    absl::string_view req_id, uint64_t uuid, absl::string_view remote_endpoint,
     const std::vector<int64_t>& remote_block_ids,
     const std::vector<int64_t>& local_block_ids, int parallelism,
     std::optional<std::vector<int64_t>> local_host_block_ids) {
@@ -544,14 +549,16 @@ void KVCacheManagerWithTransfer::StartRead(
 
   if (load_plan.num_blocks == 0) {
     std::lock_guard<std::mutex> lock(mu_);
-    done_recving_.insert(req_id);
+    done_recving_.insert(std::string(req_id));
     active_recv_entries_.erase(uuid);
     return;
   }
 
   std::optional<int> target_node = assigned_numa_node();
 
-  push_pool_->Schedule(target_node, [this, req_id, uuid, remote_endpoint,
+  push_pool_->Schedule(target_node, [this, req_id = std::string(req_id), uuid,
+                                     remote_endpoint =
+                                         std::string(remote_endpoint),
                                      load_plan = std::move(load_plan)]() {
     try {
       int control_fd = ConnectTcp(remote_endpoint);
@@ -962,7 +969,7 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
 }
 
 void KVCacheManagerWithTransfer::StartPushInternal(
-    uint64_t uuid, const std::string& remote_data_endpoint,
+    uint64_t uuid, absl::string_view remote_data_endpoint,
     const std::vector<int64_t>& src_block_ids,
     const std::vector<int64_t>& dst_block_ids) {
   std::vector<int64_t> sizes(src_block_ids.size(), 1);
@@ -980,7 +987,8 @@ void KVCacheManagerWithTransfer::StartPushInternal(
 
   auto future = std::move(future_or.value());
   future.OnReady(
-      [this, uuid, remote_data_endpoint, src_block_ids,
+      [this, uuid, remote_data_endpoint = std::string(remote_data_endpoint),
+       src_block_ids,
        dst_block_ids](const absl::StatusOr<raiden::BufferHolders>& s) {
         if (!s.ok()) {
           std::lock_guard<std::mutex> lock(mu_);
@@ -1068,13 +1076,13 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
 }
 
 std::string KVCacheManagerWithTransfer::EndpointWithPort(
-    const std::string& endpoint, int port) const {
+    absl::string_view endpoint, int port) const {
   auto [host, ignored_port] = SplitEndpoint(endpoint);
   (void)ignored_port;
-  return host + ":" + std::to_string(port);
+  return absl::StrCat(host, ":", port);
 }
 
-void KVCacheManagerWithTransfer::AckRemote(const std::string& remote_endpoint,
+void KVCacheManagerWithTransfer::AckRemote(absl::string_view remote_endpoint,
                                            uint64_t uuid) {
   int control_fd = ConnectTcp(remote_endpoint);
   auto control_cleanup =

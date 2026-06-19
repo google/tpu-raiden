@@ -40,7 +40,6 @@
 #include "xla/tsl/platform/statusor.h"
 #include "tpu_raiden/core/raiden_manager_base.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
-#include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/weight_sync/weight_synchronizer_control_service.h"
 #include "tpu_raiden/weight_sync/weight_synchronizer_service.pb.h"
 
@@ -561,7 +560,7 @@ absl::Status WeightSynchronizerBase::PushWeightsResharded(
   return absl::OkStatus();
 }
 
-absl::Status WeightSynchronizerBase::PullWeights(const std::string& source) {
+absl::Status WeightSynchronizerBase::PullWeights(absl::string_view source) {
   if (source.empty()) {
     return absl::InvalidArgumentError(
         "Source peer address cannot be empty for weight pull");

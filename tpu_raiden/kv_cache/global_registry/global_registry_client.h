@@ -24,6 +24,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "absl/time/time.h"
 #include "third_party/grpc/include/grpcpp/channel.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry.grpc.pb.h"
@@ -60,7 +61,7 @@ class GlobalRegistryClient {
 
   // Unregisters a batch of KV cache entries for a host.
   absl::Status Unregister(const std::vector<std::string>& prefix_hashes,
-                          const std::string& host_address);
+                          absl::string_view host_address);
 
  private:
   std::unique_ptr<GlobalRegistryService::Stub> stub_;
@@ -70,7 +71,7 @@ class GlobalRegistryClient {
 // Calculates SHA256 hash of (parent_hash_hex + tokens_binary).
 // Returns hex-encoded SHA256 string.
 std::string CalculatePrefixHash(const std::vector<int64_t>& tokens,
-                                const std::string& parent_hash = "");
+                                absl::string_view parent_hash = "");
 
 }  // namespace global_registry
 }  // namespace kv_cache

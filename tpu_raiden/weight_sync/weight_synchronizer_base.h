@@ -24,6 +24,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -83,7 +84,7 @@ class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
 
   // Inference server pulls current weights from the source peer E2E (network
   // pull + H2D)
-  absl::Status PullWeights(const std::string& source);
+  absl::Status PullWeights(absl::string_view source);
 
   void SetExternalHostBuffer(
       const std::vector<raiden::BufferHoldAndAlias>& buffer_holds);

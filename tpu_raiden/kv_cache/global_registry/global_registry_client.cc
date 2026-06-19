@@ -94,7 +94,7 @@ absl::StatusOr<std::vector<KVBlockMetadata>> GlobalRegistryClient::Lookup(
 
 absl::Status GlobalRegistryClient::Unregister(
     const std::vector<std::string>& prefix_hashes,
-    const std::string& host_address) {
+    absl::string_view host_address) {
   UnregisterRequest request;
   request.mutable_prefix_hashes()->Reserve(prefix_hashes.size());
   for (const auto& hash : prefix_hashes) {
@@ -116,7 +116,7 @@ absl::Status GlobalRegistryClient::Unregister(
 }
 
 std::string CalculatePrefixHash(const std::vector<int64_t>& tokens,
-                                const std::string& parent_hash) {
+                                absl::string_view parent_hash) {
   SHA256_CTX sha256;
   SHA256_Init(&sha256);
 

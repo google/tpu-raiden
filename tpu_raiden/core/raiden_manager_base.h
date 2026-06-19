@@ -27,6 +27,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -47,18 +48,18 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
 
   // Direct C++ H2H network write (Push)
   absl::StatusOr<std::vector<int>> H2hWriteDirect(
-      const std::string& peer, const std::vector<int>& src_block_ids,
+      absl::string_view peer, const std::vector<int>& src_block_ids,
       const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0);
 
   // Direct C++ H2H network read (Pull)
   absl::StatusOr<std::vector<int>> H2hReadDirect(
-      const std::string& peer, const std::vector<int>& src_block_ids);
+      absl::string_view peer, const std::vector<int>& src_block_ids);
 
-  absl::Status PullWeightsChunk(const std::string& source, size_t src_shard_idx,
+  absl::Status PullWeightsChunk(absl::string_view source, size_t src_shard_idx,
                                 size_t src_offset_bytes, size_t dst_shard_idx,
                                 size_t dst_offset_bytes, size_t size_bytes);
 
-  absl::Status PushWeightsChunk(const std::string& peer, size_t dst_shard_idx,
+  absl::Status PushWeightsChunk(absl::string_view peer, size_t dst_shard_idx,
                                 size_t dst_offset_bytes,
                                 const uint8_t* data_ptr, size_t size_bytes);
 

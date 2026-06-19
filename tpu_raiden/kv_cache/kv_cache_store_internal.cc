@@ -28,10 +28,11 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "third_party/grpc/include/grpcpp/security/credentials.h"
-#include "xla/future.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_client.h"
@@ -43,12 +44,12 @@ namespace tpu_raiden {
 namespace kv_cache {
 
 namespace {
-int ParsePort(const std::string& addr) {
+int ParsePort(absl::string_view addr) {
   size_t idx = addr.rfind(':');
-  if (idx != std::string::npos && idx + 1 < addr.size()) {
-    try {
-      return std::stoi(addr.substr(idx + 1));
-    } catch (...) {
+  if (idx != absl::string_view::npos && idx + 1 < addr.size()) {
+    int port = 0;
+    if (absl::SimpleAtoi(addr.substr(idx + 1), &port)) {
+      return port;
     }
   }
   return 0;

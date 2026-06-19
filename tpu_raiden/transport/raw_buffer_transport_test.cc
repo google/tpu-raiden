@@ -26,6 +26,7 @@
 #include <gtest/gtest.h>
 #include "absl/base/thread_annotations.h"
 #include "absl/status/status.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/synchronization/notification.h"
 
@@ -160,7 +161,7 @@ TEST(RawBufferTransportTest, IssueCommandCorrectness) {
   auto register_status = transport2.RegisterCommand(
       200,
       [&](RawBufferTransport::ConnectionCloser closer,
-          const std::string& command_meta) -> absl::Status {
+          absl::string_view command_meta) -> absl::Status {
         if (command_meta.size() != sizeof(TestCommandMetadata)) {
           return absl::InvalidArgumentError("Received invalid metadata size");
         }
@@ -216,7 +217,7 @@ TEST(RawBufferTransportTest, E2EPushCommandAndBufferTransfer) {
   auto register_status = transport2.RegisterCommand(
       100,
       [&](RawBufferTransport::ConnectionCloser closer,
-          const std::string& command_meta) -> absl::Status {
+          absl::string_view command_meta) -> absl::Status {
         if (command_meta.size() < sizeof(PushCommand)) {
           return absl::InvalidArgumentError("Invalid PushCommand size");
         }
@@ -317,7 +318,7 @@ TEST(RawBufferTransportTest, E2EPullCommandAndBufferTransfer) {
   auto register_status = transport2.RegisterCommand(
       101,
       [&](RawBufferTransport::ConnectionCloser closer,
-          const std::string& command_meta) -> absl::Status {
+          absl::string_view command_meta) -> absl::Status {
         if (command_meta.size() < sizeof(PullCommand)) {
           return absl::InvalidArgumentError("Invalid PullCommand size");
         }

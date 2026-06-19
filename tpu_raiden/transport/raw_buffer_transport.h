@@ -91,13 +91,13 @@ class RawBufferTransport {
 
   // Directly pushes an arbitrary continuous byte array into a specific offset
   // of a remote peer's buffer.
-  absl::Status PushBuffer(const std::string& peer, size_t buffer_id,
+  absl::Status PushBuffer(absl::string_view peer, size_t buffer_id,
                           size_t dst_shard_idx, size_t dst_offset_bytes,
                           const uint8_t* data_ptr, size_t size_bytes);
 
   // Synchronously requests an arbitrary continuous byte slice from a remote
   // peer's staging memory.
-  absl::Status PullBuffer(const std::string& source, size_t buffer_id,
+  absl::Status PullBuffer(absl::string_view source, size_t buffer_id,
                           size_t src_shard_idx, size_t src_offset_bytes,
                           size_t dst_shard_idx, size_t dst_offset_bytes,
                           size_t size_bytes);
@@ -114,7 +114,7 @@ class RawBufferTransport {
   };
 
   using CommandCallback = std::function<absl::Status(
-      ConnectionCloser closer, const std::string& command_meta)>;
+      ConnectionCloser closer, absl::string_view command_meta)>;
 
   // Registers a callback to handle a command ID when received.
   absl::Status RegisterCommand(uint32_t command_id, CommandCallback callback);
@@ -131,9 +131,9 @@ class RawBufferTransport {
   static absl::Status ReadExact(int fd, void* buffer, size_t length);
 
  protected:
-  absl::StatusOr<int> ConnectToPeer(const std::string& peer);
-  absl::StatusOr<int> AcquireConnection(const std::string& peer);
-  void ReleaseConnection(const std::string& peer, int fd);
+  absl::StatusOr<int> ConnectToPeer(absl::string_view peer);
+  absl::StatusOr<int> AcquireConnection(absl::string_view peer);
+  void ReleaseConnection(absl::string_view peer, int fd);
   void ClosePooledConnections();
 
   virtual absl::Status ProcessSingleRequest(int client_fd);

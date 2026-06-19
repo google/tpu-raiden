@@ -23,6 +23,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "tpu_raiden/transport/raw_buffer_transport.h"
 
 namespace tpu_raiden {
@@ -85,20 +86,20 @@ class BlockTransport : public RawBufferTransport {
 
   // Standard Scatter-Gather Push (op = 1 / op = 6)
   absl::StatusOr<std::vector<int>> Push(
-      const std::string& peer, const std::vector<int>& src_block_ids,
+      absl::string_view peer, const std::vector<int>& src_block_ids,
       const std::vector<int>& dst_block_ids = {}, int parallelism = 1,
       MajorOrder major_order = MajorOrder::kLayerMajor, uint64_t uuid = 0);
 
   // Synchronous Scatter-Gather Pull (op = 2)
   absl::StatusOr<std::vector<int>> Pull(
-      const std::string& peer, const std::vector<int>& src_block_ids,
+      absl::string_view peer, const std::vector<int>& src_block_ids,
       const std::vector<int>& local_block_ids = {},
       const std::vector<uint8_t*>& explicit_dst_ptrs = {}, int parallelism = 1,
       MajorOrder major_order = MajorOrder::kLayerMajor,
       BlockReceivedCallback on_block_received = {});
 
   // Write a single block of data directly from a host pointer to a remote block ID.
-  absl::Status WriteBlockDirect(const std::string& peer, int remote_block_id,
+  absl::Status WriteBlockDirect(absl::string_view peer, int remote_block_id,
                                 const uint8_t* data_ptr, size_t size_bytes);
 
  protected:
@@ -106,7 +107,7 @@ class BlockTransport : public RawBufferTransport {
                                    const PacketHeader& header) override;
 
  private:
-  void H2hWriteWorker(int stream_idx, const std::string& peer,
+  void H2hWriteWorker(int stream_idx, absl::string_view peer,
                       size_t block_offset, size_t block_count,
                       const std::vector<int>& src_block_ids,
                       const std::vector<int>& dst_block_ids,
@@ -114,7 +115,7 @@ class BlockTransport : public RawBufferTransport {
                       std::vector<absl::Status>& statuses,
                       MajorOrder major_order, uint64_t uuid = 0);
 
-  void H2hReadWorker(int stream_idx, const std::string& peer,
+  void H2hReadWorker(int stream_idx, absl::string_view peer,
                      size_t local_block_offset, size_t local_block_count,
                      size_t remote_block_offset, size_t remote_block_count,
                      const std::vector<int>& src_block_ids,

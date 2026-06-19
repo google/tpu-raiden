@@ -14,18 +14,24 @@
 
 #include "tpu_raiden/frameworks/torch/torch_raw_transfer.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "third_party/py/torch/c10/core/Device.h"
 #include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/utils.h"
@@ -126,13 +132,13 @@ void RawHostBuffer::EnsureBoundToDevice(xla::PjRtDevice* device) {
 }
 
 namespace {
-[[noreturn]] void ThrowStatus(const std::string& context,
+[[noreturn]] void ThrowStatus(absl::string_view context,
                               const absl::Status& status) {
-  throw std::runtime_error(context + ": " + std::string(status.message()));
+  throw std::runtime_error(absl::StrCat(context, ": ", status.message()));
 }
 
 template <typename T>
-T ValueOrThrow(const std::string& context, absl::StatusOr<T> value_or) {
+T ValueOrThrow(absl::string_view context, absl::StatusOr<T> value_or) {
   if (!value_or.ok()) {
     ThrowStatus(context, value_or.status());
   }

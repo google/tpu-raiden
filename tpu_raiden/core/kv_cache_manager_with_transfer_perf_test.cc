@@ -32,6 +32,8 @@
 #include "absl/flags/flag.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
@@ -62,7 +64,7 @@ absl::Status AwaitAll(absl::StatusOr<raiden::PjRtCopyFuture>& future_or) {
 bool InitializeLibtpuOnce() { return true; }
 
 // Helper to compute and print the distribution of bandwidth numbers
-void PrintDistribution(const std::string& label,
+void PrintDistribution(absl::string_view label,
                        std::vector<double> bandwidths) {
   if (bandwidths.empty()) return;
 
@@ -102,7 +104,7 @@ template <typename T>
 void RunSlotBenchmark(TpuPjrtManager* manager,
                       const std::vector<xla::PjRtDevice*>& devices,
                       xla::PrimitiveType primitive_type,
-                      const std::string& type_label, int num_layers,
+                      absl::string_view type_label, int num_layers,
                       int64_t num_blocks) {
   const int kNumLayers = num_layers;
   const int64_t kNumBlocks = num_blocks;
@@ -233,7 +235,7 @@ void RunSlotBenchmark(TpuPjrtManager* manager,
     d2h_bandwidths.push_back(bandwidth);
   }
 
-  PrintDistribution("Slot-based D2H Bandwidth [" + type_label + "]",
+  PrintDistribution(absl::StrCat("Slot-based D2H Bandwidth [", type_label, "]"),
                     d2h_bandwidths);
 
   // 6. Timed Benchmark Loop (H2D from Slot)
@@ -253,7 +255,7 @@ void RunSlotBenchmark(TpuPjrtManager* manager,
     h2d_bandwidths.push_back(bandwidth);
   }
 
-  PrintDistribution("Slot-based H2D Bandwidth [" + type_label + "]",
+  PrintDistribution(absl::StrCat("Slot-based H2D Bandwidth [", type_label, "]"),
                     h2d_bandwidths);
 
   // 7. Verify Correctness

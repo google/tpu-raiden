@@ -19,23 +19,15 @@
 #include <cstring>
 #include <memory>
 #include <optional>
-#include <string>
 #include <thread>  // NOLINT
-#include <utility>
 #include <vector>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/str_cat.h"
-#include "absl/synchronization/mutex.h"
+#include "absl/strings/string_view.h"
 #include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
-#include "xla/pjrt/semaphore.h"
-#include "tpu_raiden/core/host_memory_allocator.h"
-#include "tpu_raiden/core/raw_transfer_core.h"
-#include "tpu_raiden/core/raw_transfer_impl.h"
-#include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/transport/block_transport.h"
 
@@ -143,7 +135,7 @@ void RaidenManagerBase::SetExternalHostPointers(
 }
 
 absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hWriteDirect(
-    const std::string& peer, const std::vector<int>& src_block_ids,
+    absl::string_view peer, const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, uint64_t uuid) {
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
@@ -153,7 +145,7 @@ absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hWriteDirect(
 }
 
 absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hReadDirect(
-    const std::string& peer, const std::vector<int>& src_block_ids) {
+    absl::string_view peer, const std::vector<int>& src_block_ids) {
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
@@ -161,7 +153,7 @@ absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hReadDirect(
 }
 
 absl::Status RaidenManagerBase::PullWeightsChunk(
-    const std::string& source, size_t src_shard_idx, size_t src_offset_bytes,
+    absl::string_view source, size_t src_shard_idx, size_t src_offset_bytes,
     size_t dst_shard_idx, size_t dst_offset_bytes, size_t size_bytes) {
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
@@ -171,7 +163,7 @@ absl::Status RaidenManagerBase::PullWeightsChunk(
                              size_bytes);
 }
 
-absl::Status RaidenManagerBase::PushWeightsChunk(const std::string& peer,
+absl::Status RaidenManagerBase::PushWeightsChunk(absl::string_view peer,
                                                  size_t dst_shard_idx,
                                                  size_t dst_offset_bytes,
                                                  const uint8_t* data_ptr,

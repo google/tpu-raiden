@@ -44,6 +44,8 @@
 #include "absl/flags/flag.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
@@ -106,7 +108,7 @@ bool InitializeLibtpuOnce() {
 }
 
 // Helper to compute and print the distribution of bandwidth numbers
-void PrintDistribution(const std::string& label,
+void PrintDistribution(absl::string_view label,
                        std::vector<double> bandwidths) {
   if (bandwidths.empty()) return;
 
@@ -146,7 +148,7 @@ template <typename T>
 void RunBenchmarkScenarioA(TpuPjrtManager* manager,
                            const std::vector<xla::PjRtDevice*>& devices,
                            xla::PrimitiveType primitive_type,
-                           const std::string& type_label, int num_layers,
+                           absl::string_view type_label, int num_layers,
                            int64_t num_blocks) {
   const int kNumLayers = num_layers;
   const int64_t kNumBlocks = num_blocks;
@@ -281,7 +283,7 @@ void RunBenchmarkScenarioA(TpuPjrtManager* manager,
   }
 
   PrintDistribution(
-      "Scenario A D2H Bandwidth (Odd Blocks) [" + type_label + "]",
+      absl::StrCat("Scenario A D2H Bandwidth (Odd Blocks) [", type_label, "]"),
       d2h_bandwidths);
 
   // 6. Timed Benchmark Loop (H2D)
@@ -301,7 +303,7 @@ void RunBenchmarkScenarioA(TpuPjrtManager* manager,
   }
 
   PrintDistribution(
-      "Scenario A H2D Bandwidth (Odd Blocks) [" + type_label + "]",
+      absl::StrCat("Scenario A H2D Bandwidth (Odd Blocks) [", type_label, "]"),
       h2d_bandwidths);
 
   // 7. Verify Correctness
@@ -330,7 +332,7 @@ template <typename T>
 void RunBenchmarkScenarioB(TpuPjrtManager* manager,
                            const std::vector<xla::PjRtDevice*>& devices,
                            xla::PrimitiveType primitive_type,
-                           const std::string& type_label, int num_layers,
+                           absl::string_view type_label, int num_layers,
                            int64_t num_blocks) {
   int num_devices = devices.size();
   const int kNumLayers = std::max(1, num_layers / num_devices);
@@ -460,7 +462,7 @@ void RunBenchmarkScenarioB(TpuPjrtManager* manager,
   }
 
   PrintDistribution(
-      "Scenario B D2H Bandwidth (Odd Blocks) [" + type_label + "]",
+      absl::StrCat("Scenario B D2H Bandwidth (Odd Blocks) [", type_label, "]"),
       d2h_bandwidths);
 
   // 6. Timed Benchmark Loop (H2D)
@@ -480,7 +482,7 @@ void RunBenchmarkScenarioB(TpuPjrtManager* manager,
   }
 
   PrintDistribution(
-      "Scenario B H2D Bandwidth (Odd Blocks) [" + type_label + "]",
+      absl::StrCat("Scenario B H2D Bandwidth (Odd Blocks) [", type_label, "]"),
       h2d_bandwidths);
 
   // 7. Verify Correctness

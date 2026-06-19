@@ -22,8 +22,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <limits>
-#include <string>
 #include <thread>  // NOLINT
 #include <vector>
 
@@ -34,6 +34,7 @@
 #include "absl/strings/str_cat.h"
 #include "xla/tsl/platform/statusor.h"
 #include "tpu_raiden/core/status_macros.h"
+#include "tpu_raiden/transport/raw_buffer_transport.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -247,7 +248,7 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
 }
 
 absl::StatusOr<std::vector<int>> BlockTransport::Push(
-    const std::string& peer, const std::vector<int>& src_block_ids,
+    absl::string_view peer, const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, int parallelism,
     MajorOrder major_order, uint64_t uuid) {
   size_t num_blocks = src_block_ids.size();
@@ -290,7 +291,7 @@ absl::StatusOr<std::vector<int>> BlockTransport::Push(
   return allocated_ids;
 }
 
-absl::Status BlockTransport::WriteBlockDirect(const std::string& peer,
+absl::Status BlockTransport::WriteBlockDirect(absl::string_view peer,
                                               int remote_block_id,
                                               const uint8_t* data_ptr,
                                               size_t size_bytes) {
@@ -331,7 +332,7 @@ absl::Status BlockTransport::WriteBlockDirect(const std::string& peer,
 }
 
 absl::StatusOr<std::vector<int>> BlockTransport::Pull(
-    const std::string& peer, const std::vector<int>& src_block_ids,
+    absl::string_view peer, const std::vector<int>& src_block_ids,
     const std::vector<int>& local_block_ids,
     const std::vector<uint8_t*>& explicit_dst_ptrs, int parallelism,
     MajorOrder major_order, BlockReceivedCallback on_block_received) {
@@ -411,7 +412,7 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
   return allocated_ids;
 }
 
-void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
+void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
                                     size_t block_offset, size_t block_count,
                                     const std::vector<int>& src_block_ids,
                                     const std::vector<int>& dst_block_ids,
@@ -514,7 +515,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, const std::string& peer,
 }
 
 void BlockTransport::H2hReadWorker(
-    int stream_idx, const std::string& peer, size_t local_block_offset,
+    int stream_idx, absl::string_view peer, size_t local_block_offset,
     size_t local_block_count, size_t remote_block_offset,
     size_t remote_block_count, const std::vector<int>& src_block_ids,
     const std::vector<int>& allocated_ids,

@@ -20,12 +20,14 @@
 #include <vector>
 
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/optional.h>  // IWYU pragma: keep
 #include <nanobind/stl/pair.h>  // IWYU pragma: keep
 #include <nanobind/stl/shared_ptr.h>  // IWYU pragma: keep
 #include <nanobind/stl/string.h>  // IWYU pragma: keep
+#include <nanobind/stl/string_view.h>  // IWYU pragma: keep
 #include <nanobind/stl/vector.h>  // IWYU pragma: keep
 #include "tpu_raiden/core/raiden_future.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
@@ -220,7 +222,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
            nb::arg("control_port") = nb::none())
       .def(
           "PullWeights",
-          [](WeightSynchronizer& self, const std::string& source) {
+          [](WeightSynchronizer& self, absl::string_view source) {
             absl::Status s = self.PullWeights(source);
             if (!s.ok()) {
               throw std::runtime_error("Weight sync PullWeights failed: " +
@@ -285,7 +287,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
           nb::call_guard<nb::gil_scoped_release>())
       .def(
           "PullWeightsChunk",
-          [](WeightSynchronizer& self, const std::string& source,
+          [](WeightSynchronizer& self, absl::string_view source,
              size_t src_shard_idx, size_t src_offset_bytes,
              size_t dst_shard_idx, size_t dst_offset_bytes, size_t size_bytes) {
             absl::Status s = self.PullWeightsChunk(

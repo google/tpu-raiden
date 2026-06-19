@@ -156,6 +156,7 @@ nanobind_extension(
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:string_view",
         "@torch_tpu//shims/torch:aten_headers",
     ],
 )
@@ -177,8 +178,12 @@ cc_library(
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core:utils",
         "//tpu_raiden/core:xla_raw_transfer_headers",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:span",
         "@torch_tpu//shims/torch:aten_headers",
+        "@torch_tpu//shims/torch/c10/core:base_headers",
     ],
     alwayslink = 1,
 )
@@ -219,8 +224,12 @@ cc_library(
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core:utils",
         "//tpu_raiden/core:xla_raw_transfer_headers",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:span",
         "@torch_tpu//shims/torch:aten_headers",
+        "@torch_tpu//shims/torch/c10/core:base_headers",
     ],
 )
 

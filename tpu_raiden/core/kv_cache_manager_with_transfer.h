@@ -49,6 +49,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
@@ -152,12 +153,12 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
 
   virtual ~KVCacheManagerWithTransfer();
 
-  int64_t NotifyForRead(const std::string& req_id, uint64_t uuid,
+  int64_t NotifyForRead(absl::string_view req_id, uint64_t uuid,
                         const std::vector<int64_t>& block_ids);
 
   void StartRead(
-      const std::string& req_id, uint64_t uuid,
-      const std::string& remote_endpoint,
+      absl::string_view req_id, uint64_t uuid,
+      absl::string_view remote_endpoint,
       const std::vector<int64_t>& remote_block_ids,
       const std::vector<int64_t>& local_block_ids, int parallelism = 1,
       std::optional<std::vector<int64_t>> local_host_block_ids = std::nullopt);
@@ -232,7 +233,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   static constexpr uint32_t kOpAck = 2;
   static constexpr uint32_t kOpPullStream = 3;
 
-  std::string EndpointWithPort(const std::string& endpoint, int port) const;
+  std::string EndpointWithPort(absl::string_view endpoint, int port) const;
   ControlResponseHeader ReadControlResponseHeader(int fd);
   void AckSend(uint64_t uuid);
   void ConfigureDataPortFromKvTransfer();
@@ -252,7 +253,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   void ControlServerLoop();
   void HandleControlConnection(int fd);
   void ProcessPullStream(int fd, const ControlRequestHeader& req);
-  void AckRemote(const std::string& remote_endpoint, uint64_t uuid);
+  void AckRemote(absl::string_view remote_endpoint, uint64_t uuid);
   absl::Status WaitForStagingBlockRead(size_t layer_idx, size_t shard_idx,
                                        int block_id);
   std::shared_ptr<StagingReadinessState> CreateStagingReadiness(
@@ -273,7 +274,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
 
-  void StartPushInternal(uint64_t uuid, const std::string& remote_data_endpoint,
+  void StartPushInternal(uint64_t uuid, absl::string_view remote_data_endpoint,
                          const std::vector<int64_t>& src_block_ids,
                          const std::vector<int64_t>& dst_block_ids);
 
