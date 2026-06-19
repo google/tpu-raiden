@@ -76,7 +76,7 @@ cc_library(
     features = ["-use_header_modules"],
     deps = [
         "//third_party/peregrine/src/api:transport",
-        "//third_party/peregrine/src/api:types",
+        "//third_party/peregrine/src/api:transport_types",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
@@ -99,7 +99,7 @@ cc_test(
     deps = [
         ":socket_transport",
         "//third_party/peregrine/src/api:transport",
-        "//third_party/peregrine/src/api:types",
+        "//third_party/peregrine/src/api:transport_types",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_googletest//:gtest",

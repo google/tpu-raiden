@@ -26,7 +26,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "third_party/peregrine/src/api/transport.h"
-#include "third_party/peregrine/src/api/types.h"
+#include "third_party/peregrine/src/api/transport_types.h"
 
 namespace tpu_raiden {
 namespace transport {

@@ -30,7 +30,7 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "third_party/peregrine/src/api/transport.h"
-#include "third_party/peregrine/src/api/types.h"
+#include "third_party/peregrine/src/api/transport_types.h"
 
 namespace tpu_raiden {
 namespace transport {
