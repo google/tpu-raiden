@@ -62,7 +62,8 @@ class LRUCache {
   // Clears all elements from the cache.
   void Clear() {
     map_.clear();
-    list_.clear();
+    lru_list_.clear();
+    pinned_list_.clear();
   }
 
   // Inserts or updates a key-value pair.
@@ -76,7 +77,11 @@ class LRUCache {
     if (it != map_.end()) {
       // Update existing item and promote to MRU
       it->second->value = std::move(value);
-      list_.splice(list_.begin(), list_, it->second);
+      if (it->second->pin_count > 0) {
+        pinned_list_.splice(pinned_list_.begin(), pinned_list_, it->second);
+      } else {
+        lru_list_.splice(lru_list_.begin(), lru_list_, it->second);
+      }
       return std::nullopt;
     }
 
@@ -86,9 +91,9 @@ class LRUCache {
       if (!evicted.has_value()) return std::nullopt;
     }
 
-    // Insert new item at the front of the list (MRU)
-    list_.push_front(CacheNode{std::move(key), std::move(value), 0});
-    map_[list_.front().key] = list_.begin();
+    // Insert new item at the front of the lru_list_ (MRU)
+    lru_list_.push_front(CacheNode{std::move(key), std::move(value), 0});
+    map_[lru_list_.front().key] = lru_list_.begin();
     return evicted;
   }
 
@@ -100,7 +105,11 @@ class LRUCache {
       return nullptr;
     }
     // Promote to MRU
-    list_.splice(list_.begin(), list_, it->second);
+    if (it->second->pin_count > 0) {
+      pinned_list_.splice(pinned_list_.begin(), pinned_list_, it->second);
+    } else {
+      lru_list_.splice(lru_list_.begin(), lru_list_, it->second);
+    }
     return &(it->second->value);
   }
 
@@ -132,6 +141,10 @@ class LRUCache {
     if (it == map_.end()) {
       return false;
     }
+    if (it->second->pin_count == 0) {
+      // Move from lru_list_ to pinned_list_
+      pinned_list_.splice(pinned_list_.begin(), lru_list_, it->second);
+    }
     it->second->pin_count++;
     return true;
   }
@@ -146,6 +159,10 @@ class LRUCache {
     }
     if (it->second->pin_count > 0) {
       it->second->pin_count--;
+      if (it->second->pin_count == 0) {
+        // Move from pinned_list_ to lru_list_ (promote to MRU)
+        lru_list_.splice(lru_list_.begin(), pinned_list_, it->second);
+      }
     }
     return true;
   }
@@ -166,28 +183,26 @@ class LRUCache {
     if (it == map_.end()) {
       return false;
     }
-    list_.erase(it->second);
+    if (it->second->pin_count > 0) {
+      pinned_list_.erase(it->second);
+    } else {
+      lru_list_.erase(it->second);
+    }
     map_.erase(it);
     return true;
   }
 
   // Evicts and returns the least recently used, unpinned key-value pair.
-  // Scans from the back of the LRU list to find the first candidate whose
-  // pin count is exactly 0. Returns std::nullopt if all items are pinned or
-  // empty.
+  // Returns std::nullopt if all items are pinned or empty.
   std::optional<std::pair<Key, Value>> Evict() {
-    for (auto it = list_.rbegin(); it != list_.rend(); ++it) {
-      if (it->pin_count == 0) {
-        // We must convert reverse_iterator to normal iterator to erase
-        auto normal_it = std::prev(it.base());
-        std::pair<Key, Value> evicted{std::move(normal_it->key),
-                                      std::move(normal_it->value)};
-        map_.erase(evicted.first);
-        list_.erase(normal_it);
-        return evicted;
-      }
+    if (lru_list_.empty()) {
+      return std::nullopt;
     }
-    return std::nullopt;
+    auto it = std::prev(lru_list_.end());
+    std::pair<Key, Value> evicted{std::move(it->key), std::move(it->value)};
+    map_.erase(evicted.first);
+    lru_list_.erase(it);
+    return evicted;
   }
 
  private:
@@ -198,7 +213,8 @@ class LRUCache {
   };
 
   size_t capacity_;
-  std::list<CacheNode> list_;
+  std::list<CacheNode> lru_list_;
+  std::list<CacheNode> pinned_list_;
   absl::flat_hash_map<Key, typename std::list<CacheNode>::iterator> map_;
 };
 

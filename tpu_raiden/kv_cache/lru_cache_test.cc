@@ -88,13 +88,15 @@ TEST(LRUCacheTest, PinningProtectsAgainstEviction) {
   EXPECT_TRUE(cache.Contains(2));
   EXPECT_TRUE(cache.Contains(3));
 
-  // Unpin 2 and evict it
+  // Unpin 2. Since it is now unpinned, it is promoted to MRU.
+  // 3 (inserted earlier) now becomes the LRU.
   EXPECT_TRUE(cache.Unpin(2));
   EXPECT_EQ(cache.GetPinCount(2), 0);
 
   auto evicted_unpinned = cache.Put(4, "four");
   ASSERT_TRUE(evicted_unpinned.has_value());
-  EXPECT_EQ(evicted_unpinned->first, 2);  // 3 was inserted after 2, so 2 is LRU
+  EXPECT_EQ(evicted_unpinned->first,
+            3);  // 3 is now LRU because 2 was promoted on unpin
 }
 
 TEST(LRUCacheTest, InsertionRejectedWhenAllPinned) {
