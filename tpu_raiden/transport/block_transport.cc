@@ -19,6 +19,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <chrono>  // NOLINT
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -32,6 +33,8 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "xla/tsl/platform/statusor.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
@@ -293,10 +296,10 @@ absl::StatusOr<std::vector<int>> BlockTransport::Push(
   return allocated_ids;
 }
 
-absl::Status BlockTransport::WriteBlockDirect(absl::string_view peer,
-                                              int remote_block_id,
-                                              const uint8_t* data_ptr,
-                                              size_t size_bytes) {
+absl::Status BlockTransport::WriteBlockDirectInternal(absl::string_view peer,
+                                                      int remote_block_id,
+                                                      const uint8_t* data_ptr,
+                                                      size_t size_bytes) {
   auto status_or_fd = AcquireConnection(peer);
   if (!status_or_fd.ok()) return status_or_fd.status();
   int fd = status_or_fd.value();
@@ -332,6 +335,28 @@ absl::Status BlockTransport::WriteBlockDirect(absl::string_view peer,
 
   ok_to_pool = true;
   return absl::OkStatus();
+}
+
+absl::Status BlockTransport::WriteBlockDirect(absl::string_view peer,
+                                              int remote_block_id,
+                                              const uint8_t* data_ptr,
+                                              size_t size_bytes) {
+  // A pooled connection can go stale between the acquire-time health check and
+  // the write: the peer may close an idle connection, surfacing as an EPIPE
+  // "Broken pipe". A dropped block transfer is unrecoverable for the caller, so
+  // retry on a fresh connection. Each failed attempt closes its fd (ok_to_pool
+  // stays false), so the next AcquireConnection avoids the poisoned one.
+  constexpr int kMaxAttempts = 5;
+  absl::Status last = absl::OkStatus();
+  for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+    if (attempt > 0) {
+      absl::SleepFor(absl::Milliseconds(2 * attempt));
+    }
+    last =
+        WriteBlockDirectInternal(peer, remote_block_id, data_ptr, size_bytes);
+    if (last.ok()) return absl::OkStatus();
+  }
+  return last;
 }
 
 absl::StatusOr<std::vector<int>> BlockTransport::Pull(

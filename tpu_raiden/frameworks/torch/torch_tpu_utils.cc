@@ -18,13 +18,16 @@
 #include <string>
 #include <utility>
 
+#include "third_party/py/torch/aten/src/ATen/core/TensorBody.h"
+#include "third_party/py/torch/torch/headeronly/core/DeviceType.h"
 
+#include "torch_tpu/eager/structured_log_buffer.h"
 #include "torch_tpu/eager/tensor_to_buffer.h"
 
 namespace tpu_raiden {
 namespace torch {
 
-xla::PjRtBuffer* UnpackTorchTensor(const at::Tensor& tensor) {
+UnpackedTensor UnpackTorchTensor(const at::Tensor& tensor) {
   if (tensor.device().type() != at::DeviceType::PrivateUse1) {
     throw std::invalid_argument(
         "Tensor must reside on TPU device private use space");
@@ -46,7 +49,12 @@ xla::PjRtBuffer* UnpackTorchTensor(const at::Tensor& tensor) {
     throw std::runtime_error("Failed to fetch PjRtBuffer from TPU reference: " +
                              std::string(status_or_buf.status().message()));
   }
-  return status_or_buf.value();
+  // Return the buffer AND the owning ref. For a view tensor whose layout
+  // differs from its base, the materialized buffer above is a fresh allocation
+  // owned only by `buffer_ref`; dropping the ref here would free it and leave a
+  // dangling pointer (the cause of the D2h/H2d segfault when the manager later
+  // dispatches a copy). Move the ref out so the caller can keep it alive.
+  return UnpackedTensor{status_or_buf.value(), std::move(buffer_ref)};
 }
 
 }  // namespace torch
