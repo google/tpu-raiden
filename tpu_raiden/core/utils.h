@@ -25,6 +25,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/shape.h"
@@ -64,7 +65,7 @@ struct RawCopyChunk {
   int64_t size_bytes;
 };
 
-inline void ValidatePartialSpec(
+inline absl::Status ValidatePartialSpec(
     const std::vector<int64_t>& src_offsets_major_dim,
     const std::vector<int64_t>& dst_offsets_major_dim,
     const std::vector<int64_t>& copy_sizes_major_dim) {
@@ -74,17 +75,18 @@ inline void ValidatePartialSpec(
   if (present &&
       (src_offsets_major_dim.size() != dst_offsets_major_dim.size() ||
        src_offsets_major_dim.size() != copy_sizes_major_dim.size())) {
-    throw std::invalid_argument(
+    return absl::InvalidArgumentError(
         "src_offsets_major_dim, dst_offsets_major_dim, and "
         "copy_sizes_major_dim must have the same length");
   }
   for (size_t i = 0; i < src_offsets_major_dim.size(); ++i) {
     if (src_offsets_major_dim[i] < 0 || dst_offsets_major_dim[i] < 0 ||
         copy_sizes_major_dim[i] < 0) {
-      throw std::invalid_argument(
+      return absl::InvalidArgumentError(
           "raw copy offsets and sizes must be non-negative");
     }
   }
+  return absl::OkStatus();
 }
 
 inline bool IsPartialCopy(const xla::Shape& shape,
@@ -103,20 +105,21 @@ inline bool IsPartialCopy(const xla::Shape& shape,
   return false;
 }
 
-inline void ValidatePartialAlignment(const xla::Shape& shape,
-                                     int64_t slice_byte_size) {
+inline absl::Status ValidatePartialAlignment(const xla::Shape& shape,
+                                             int64_t slice_byte_size) {
   if (shape.dimensions().size() < 3) {
-    throw std::invalid_argument(
+    return absl::InvalidArgumentError(
         "Only rank >= 3 TPU tensors support partial raw copies");
   }
   if (slice_byte_size % 4096 != 0) {
-    throw std::invalid_argument(
+    return absl::InvalidArgumentError(
         "Partial raw copies require a major-dimension slice size aligned to "
         "4096 bytes");
   }
+  return absl::OkStatus();
 }
 
-inline std::vector<RawCopyChunk> ComputeAndValidateChunks(
+inline absl::StatusOr<std::vector<RawCopyChunk>> ComputeAndValidateChunks(
     int64_t slice_byte_size, int64_t physical_size, int64_t max_cpu_size,
     bool is_partial, const std::vector<int64_t>& src_offsets_major_dim,
     const std::vector<int64_t>& dst_offsets_major_dim,
@@ -125,11 +128,12 @@ inline std::vector<RawCopyChunk> ComputeAndValidateChunks(
   if (!is_partial) {
     if (is_d2h) {
       if (max_cpu_size < physical_size) {
-        throw std::invalid_argument("Destination CPU tensor is too small");
+        return absl::InvalidArgumentError(
+            "Destination CPU tensor is too small");
       }
     } else {
       if (max_cpu_size < physical_size) {
-        throw std::invalid_argument("Source CPU tensor is too small");
+        return absl::InvalidArgumentError("Source CPU tensor is too small");
       }
     }
     chunks.push_back({0, 0, physical_size});
@@ -141,18 +145,20 @@ inline std::vector<RawCopyChunk> ComputeAndValidateChunks(
       const int64_t size_to_copy = copy_sizes_major_dim[i] * slice_byte_size;
       if (is_d2h) {
         if (src_offset + size_to_copy > physical_size) {
-          throw std::invalid_argument("Copy range exceeds source TPU buffer");
+          return absl::InvalidArgumentError(
+              "Copy range exceeds source TPU buffer");
         }
         if (dst_offset + size_to_copy > max_cpu_size) {
-          throw std::invalid_argument(
+          return absl::InvalidArgumentError(
               "Copy range exceeds destination CPU tensor");
         }
       } else {
         if (src_offset + size_to_copy > max_cpu_size) {
-          throw std::invalid_argument("Copy range exceeds source CPU tensor");
+          return absl::InvalidArgumentError(
+              "Copy range exceeds source CPU tensor");
         }
         if (dst_offset + size_to_copy > physical_size) {
-          throw std::invalid_argument(
+          return absl::InvalidArgumentError(
               "Copy range exceeds destination TPU buffer");
         }
       }

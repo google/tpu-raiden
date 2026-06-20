@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
@@ -49,8 +50,7 @@ KVCacheManager::KVCacheManager(
     bool unsafe_skip_buffer_lock, int parallelism)
     : KVCacheManagerWithTransfer(
           UnpackTorchTensors(device_tensors), local_port,
-          host_blocks_to_allocate,
-          unsafe_skip_buffer_lock, parallelism,
+          host_blocks_to_allocate, unsafe_skip_buffer_lock, parallelism,
           tpu_raiden::CreateHostMemoryAllocator(
               device_tensors.empty() || device_tensors[0].empty()
                   ? nullptr
@@ -61,7 +61,12 @@ KVCacheManager::KVCacheManager(
           /*local_control_port=*/-1,
           /*max_blocks=*/0,
           /*num_slots=*/0,
-          /*timeout_s=*/120.0) {}
+          /*timeout_s=*/120.0) {
+  if (!status().ok()) {
+    throw std::runtime_error("Initialization failed: " +
+                             std::string(status().message()));
+  }
+}
 
 KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
                                int64_t node_id, int64_t local_control_port,
@@ -70,15 +75,19 @@ KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
     : KVCacheManagerWithTransfer(
           UnpackTorchTensors(SingleShardLayers(kv_caches)),
           /*local_port=*/std::nullopt,
-          /*host_blocks_to_allocate=*/std::nullopt,
-          unsafe_skip_buffer_lock,
+          /*host_blocks_to_allocate=*/std::nullopt, unsafe_skip_buffer_lock,
           /*parallelism=*/1,
           tpu_raiden::CreateHostMemoryAllocator(
               kv_caches.empty()
                   ? nullptr
                   : UnpackTorchTensor(kv_caches[0])->device()->client()),
           node_id, local_control_port, max_blocks, num_slots, timeout_s),
-      kv_caches_(kv_caches) {}
+      kv_caches_(kv_caches) {
+  if (!status().ok()) {
+    throw std::runtime_error("Initialization failed: " +
+                             std::string(status().message()));
+  }
+}
 
 KVCacheManager::~KVCacheManager() = default;
 

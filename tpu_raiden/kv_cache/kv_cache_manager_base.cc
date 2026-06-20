@@ -78,20 +78,33 @@ absl::Status ValidateOffsetsAndSizes(const std::vector<int64_t>& src_offsets,
   return absl::OkStatus();
 }
 
+int64_t GetMajorSliceByteSizeOrZero(const xla::PjRtBuffer* buffer) {
+  if (!buffer) return 0;
+  auto status_or = raiden::GetMajorSliceByteSize(buffer);
+  if (!status_or.ok()) return 0;
+  return *status_or;
+}
+
 }  // namespace
 
 KVCacheManagerBase::KVCacheManagerBase(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
-    std::optional<int> local_port,
-    std::optional<int> host_blocks_to_allocate,
+    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     bool unsafe_skip_buffer_lock, int parallelism,
     HostBufferAllocator host_allocator)
     : RaidenManagerBase(layer_buffers.size(),
                         layer_buffers.empty() ? 0 : layer_buffers[0].size(),
-                        layer_buffers.empty() ? 0
-                                              : raiden::GetMajorSliceByteSize(
-                                                    layer_buffers[0][0]),
+                        layer_buffers.empty()
+                            ? 0
+                            : GetMajorSliceByteSizeOrZero(layer_buffers[0][0]),
                         local_port, parallelism) {
+  if (!layer_buffers.empty() && !layer_buffers[0].empty()) {
+    auto status_or = raiden::GetMajorSliceByteSize(layer_buffers[0][0]);
+    if (!status_or.ok()) {
+      status_ = status_or.status();
+      return;
+    }
+  }
   if (num_layers_ == 0 || num_shards_ == 0) {
     return;
   }
@@ -392,14 +405,16 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
     for (const auto& [node, works] : grouped_work) {
       VLOG(1) << "H2d: Scheduling dispatch for NUMA node " << node
               << ", works count: " << works.size();
-      auto future = dma_pool_->Schedule(
-          assigned_numa_node(),
-          [this, works, is_partial, src_offsets_major_dim,
-           dst_offsets_major_dim, copy_sizes_major_dim, slot_idx]() {
-            return DispatchH2dWork(works, slot_idx, is_partial,
-                                   src_offsets_major_dim, dst_offsets_major_dim,
-                                   copy_sizes_major_dim);
-          });
+      ASSIGN_OR_RETURN(
+          auto future,
+          dma_pool_->Schedule(
+              assigned_numa_node(),
+              [this, works, is_partial, src_offsets_major_dim,
+               dst_offsets_major_dim, copy_sizes_major_dim, slot_idx]() {
+                return DispatchH2dWork(
+                    works, slot_idx, is_partial, src_offsets_major_dim,
+                    dst_offsets_major_dim, copy_sizes_major_dim);
+              }));
       pending_futures.push_back({std::move(future), works});
     }
 
@@ -528,12 +543,14 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
     for (const auto& [node, works] : grouped_work) {
       VLOG(1) << "DispatchD2hChunks: Scheduling dispatch for NUMA node " << node
               << ", works count: " << works.size();
-      auto future = dma_pool_->Schedule(
-          assigned_numa_node(), [this, works, is_partial, src_offsets,
-                                 dst_offsets, copy_sizes, slot_idx]() {
-            return DispatchD2hWork(works, slot_idx, is_partial, src_offsets,
-                                   dst_offsets, copy_sizes);
-          });
+      ASSIGN_OR_RETURN(
+          auto future,
+          dma_pool_->Schedule(
+              assigned_numa_node(), [this, works, is_partial, src_offsets,
+                                     dst_offsets, copy_sizes, slot_idx]() {
+                return DispatchD2hWork(works, slot_idx, is_partial, src_offsets,
+                                       dst_offsets, copy_sizes);
+              }));
       pending_futures.push_back({std::move(future), works});
     }
 

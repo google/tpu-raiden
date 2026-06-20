@@ -88,23 +88,9 @@ cc_library(
     ],
 )
 
-cc_library(
-    name = "nb_statusor",
-    hdrs = ["nb_statusor.h"],
-    copts = ["-fexceptions"],
-    features = ["-use_header_modules"],
-    deps = [
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@nanobind",
-        "@rules_python//python/cc:current_py_cc_headers",
-    ],
-)
-
 nanobind_extension(
     name = "_tpu_raiden_jax",
     srcs = [
-        "nb_statusor.h",
         "tpu_raiden_jax_module.cc",
     ],
     copts = [
@@ -120,10 +106,10 @@ nanobind_extension(
     visibility = ["//visibility:public"],
     deps = [
         ":kv_cache_manager_jax",
-        ":nb_statusor",
         ":raw_transfer_jax",
         ":weight_synchronizer_jax",
         "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/frameworks:nb_statusor",
         "//tpu_raiden/kv_cache:kv_cache_store",
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",

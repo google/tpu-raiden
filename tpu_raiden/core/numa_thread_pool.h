@@ -28,6 +28,8 @@
 #include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "xla/tsl/platform/logging.h"
 #include "tpu_raiden/core/tpu_utils.h"
 
@@ -43,7 +45,8 @@ class NumaThreadPool {
   // before executing the task.
   template <class F, class... Args>
   auto Schedule(std::optional<int> numa_node, F&& f, Args&&... args)
-      -> std::future<typename std::invoke_result<F, Args...>::type> {
+      -> absl::StatusOr<
+          std::future<typename std::invoke_result<F, Args...>::type>> {
     using return_type = typename std::invoke_result<F, Args...>::type;
 
     VLOG(1) << "NumaThreadPool::Schedule: scheduling task. Target NUMA: "
@@ -67,7 +70,8 @@ class NumaThreadPool {
     {
       std::unique_lock<std::mutex> lock(queue_mutex);
       if (stop) {
-        throw std::runtime_error("Schedule on stopped NumaThreadPool");
+        return absl::FailedPreconditionError(
+            "Schedule on stopped NumaThreadPool");
       }
       tasks.emplace([task]() { (*task)(); });
     }
@@ -77,8 +81,8 @@ class NumaThreadPool {
 
   // Overload for scheduling without a specific NUMA node.
   template <class F, class... Args>
-  auto Schedule(F&& f, Args&&... args)
-      -> std::future<typename std::invoke_result<F, Args...>::type> {
+  auto Schedule(F&& f, Args&&... args) -> absl::StatusOr<
+      std::future<typename std::invoke_result<F, Args...>::type>> {
     return Schedule(std::nullopt, std::forward<F>(f),
                     std::forward<Args>(args)...);
   }
