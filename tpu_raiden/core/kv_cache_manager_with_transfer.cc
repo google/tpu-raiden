@@ -563,6 +563,7 @@ void KVCacheManagerWithTransfer::StartRead(
     RecvEntry entry;
     entry.req_id = req_id;
     entry.slot_idx = recv_slot;
+    entry.deadline = DeadlineFromNow();
     entry.total_blocks =
         static_cast<int64_t>(load_plan.h2d_host_block_ids.size());
     for (size_t k = 0; k < load_plan.h2d_host_block_ids.size(); ++k) {
@@ -644,6 +645,20 @@ KVCacheManagerWithTransfer::CompleteReadRaw() {
         done_sending_.insert(entry->req_id);
         ReleaseEntrySlotLocked(entry);
         it = send_entries_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    // Reclaim recv entries whose transfer never completed (e.g. the producer
+    // died or never finished pushing). Without this the entry and its host
+    // staging slot leak forever, eventually exhausting the slot pool. Surface
+    // the timeout as a recv failure so the connector can recompute the blocks.
+    for (auto it = active_recv_entries_.begin();
+         it != active_recv_entries_.end();) {
+      if (it->second.deadline <= now) {
+        failed_recving_.insert(it->second.req_id);
+        ReleaseSlotLocked(it->second.slot_idx);
+        active_recv_entries_.erase(it++);
       } else {
         ++it;
       }

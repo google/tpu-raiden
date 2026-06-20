@@ -272,6 +272,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     int64_t total_blocks = 0;
     int64_t num_completed_blocks = 0;
     absl::flat_hash_map<int64_t, int64_t> host_to_chip;
+    std::chrono::steady_clock::time_point deadline;
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
 
