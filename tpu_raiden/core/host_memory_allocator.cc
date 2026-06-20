@@ -26,7 +26,6 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "xla/pjrt/host_memory_allocator.h"
@@ -104,32 +103,37 @@ absl::StatusOr<HostBufferAllocation> XlaHostMemoryAllocator::Allocate(
     return alloc;
   }
 
-  bool is_tpuv7 = false;
-  if (client_ != nullptr) {
-    absl::string_view version = client_->platform_version();
-    if (absl::StrContains(version, "7") || absl::StrContains(version, "v7")) {
-      is_tpuv7 = true;
+  // Primary Path: Attempt anonymous mmap directly pinned into PJRT DMA space.
+  // This yields optimal transfer throughput (~175 GB/s H2D). If DmaMap() fails
+  // (e.g., restricted cloud permissions, non-TPU backends, or unpatched legacy
+  // drivers), unmap scratch pages and fall back to PJRT client host memory.
+  size_t aligned_size = (size_bytes + 4095) & ~4095;
+  void* ptr = mmap(nullptr, aligned_size, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (ptr != MAP_FAILED) {
+    auto status = client_->DmaMap(ptr, aligned_size);
+    if (status.ok()) {
+      HostBufferAllocation alloc;
+      alloc.ptr = static_cast<uint8_t*>(ptr);
+      alloc.size = size_bytes;
+      xla::PjRtClient* client = client_;
+      alloc.owner = std::shared_ptr<void>(ptr, [client, aligned_size](void* p) {
+        (void)client->DmaUnmap(p);
+        munmap(p, aligned_size);
+      });
+      return alloc;
     }
-    if (!client_->devices().empty() && client_->devices()[0] != nullptr) {
-      absl::string_view kind = client_->devices()[0]->device_kind();
-      if (absl::StrContains(kind, "7") || absl::StrContains(kind, "v7")) {
-        is_tpuv7 = true;
-      }
-    }
+    LOG(WARNING)
+        << "DmaMap failed: " << status.message()
+        << ". Falling back to GetHostMemoryAllocator().";
+    munmap(ptr, aligned_size);
   }
 
-  const bool is_multi_process =
-      (std::getenv("PJRT_LOCAL_PROCESS_RANK") != nullptr ||
-       std::getenv("RANK") != nullptr || std::getenv("LOCAL_RANK") != nullptr);
-
-  const bool skip_dma_map = (is_tpuv7 && is_multi_process);
-
-  // HYBRID PATH: When skipping DmaMap on multi-process TPUv7 pods, delegate
-  // directly to libtpu's internal host memory allocator pool. This yields
-  // pre-mapped VFIO staged DMA memory (~175 GB/s H2D / ~128 GB/s D2H) rather
-  // than raw unpinned OS memory (~106 GB/s), saving ~70 GB/s on MPMD workloads.
-  if (skip_dma_map && client_ != nullptr &&
-      client_->GetHostMemoryAllocator() != nullptr) {
+  // FALLBACK PATH: Delegate to libtpu's internal host memory allocator pool.
+  if (client_ != nullptr && client_->GetHostMemoryAllocator() != nullptr) {
+    LOG(WARNING)
+        << "HostMemoryAllocator: Falling back to "
+           "client_->GetHostMemoryAllocator()->Allocate().";
     xla::HostMemoryAllocator::AllocateOptions alloc_opts;
     if (g_current_device != nullptr) {
       alloc_opts.numa_node = GetPjRtDeviceNumaNode(g_current_device);
@@ -148,41 +152,22 @@ absl::StatusOr<HostBufferAllocation> XlaHostMemoryAllocator::Allocate(
     }
   }
 
-  size_t aligned_size = (size_bytes + 4095) & ~4095;
-
-  void* ptr = mmap(nullptr, aligned_size, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  // FINAL FALLBACK: Unpinned mmap.
+  LOG(WARNING) << "HostMemoryAllocator: Falling back to unpinned anonymous "
+                  "mmap OS memory.";
+  ptr = mmap(nullptr, aligned_size, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (ptr == MAP_FAILED) {
     return absl::ResourceExhaustedError(
         absl::StrCat("mmap failed for size: ", aligned_size));
   }
 
-  bool dma_mapped = false;
-
-  if (!skip_dma_map) {
-    auto status = client_->DmaMap(ptr, aligned_size);
-    if (status.ok()) {
-      dma_mapped = true;
-    } else {
-      munmap(ptr, aligned_size);
-      return absl::InternalError(
-          absl::StrCat("DmaMap failed: ", status.message()));
-    }
-  }
-
   HostBufferAllocation alloc;
   alloc.ptr = static_cast<uint8_t*>(ptr);
   alloc.size = size_bytes;
-
-  xla::PjRtClient* client = client_;
-  alloc.owner =
-      std::shared_ptr<void>(ptr, [client, aligned_size, dma_mapped](void* p) {
-        if (dma_mapped) {
-          (void)client->DmaUnmap(p);
-        }
-        munmap(p, aligned_size);
-      });
-
+  alloc.owner = std::shared_ptr<void>(ptr, [aligned_size](void* p) {
+    munmap(p, aligned_size);
+  });
   return alloc;
 }
 
