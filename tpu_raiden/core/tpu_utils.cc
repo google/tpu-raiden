@@ -19,6 +19,11 @@
 #include <sched.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -30,6 +35,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <optional>
 
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/logging.h"
@@ -301,6 +307,98 @@ void PrintTpuHardwareTopology() {
   if (devices.empty()) {
     LOG(INFO) << "  No Google TPU PCI devices found in sysfs.";
   }
+}
+
+int GetInterfaceNumaNode(const char* ifname) {
+  std::string path =
+      absl::StrCat("/sys/class/net/", ifname, "/device/numa_node");
+  std::ifstream f(path);
+  if (f.is_open()) {
+    int node = -1;
+    f >> node;
+    return node;
+  }
+  return -1;
+}
+
+std::vector<HostNicAddress> GetLocalHostNicAddresses() {
+  std::vector<HostNicAddress> nics;
+  struct ifaddrs *ifaddr, *ifa;
+  if (getifaddrs(&ifaddr) == 0) {
+    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+      if (ifa->ifa_addr == nullptr) continue;
+      if (ifa->ifa_addr->sa_family == AF_INET) {
+        if (std::strcmp(ifa->ifa_name, "lo") != 0) {
+          char host[INET_ADDRSTRLEN];
+          auto* s_in = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
+          inet_ntop(AF_INET, &s_in->sin_addr, host, INET_ADDRSTRLEN);
+          std::string ip_str(host);
+          auto it = std::find_if(
+              nics.begin(), nics.end(),
+              [&](const HostNicAddress& n) { return n.ip_address == ip_str; });
+          if (it == nics.end()) {
+            int node = GetInterfaceNumaNode(ifa->ifa_name);
+            nics.push_back({ifa->ifa_name, ip_str, node});
+          }
+        }
+      }
+    }
+    freeifaddrs(ifaddr);
+  }
+  if (nics.empty()) {
+    nics.push_back({"lo", "127.0.0.1", -1});
+  }
+  return nics;
+}
+
+std::vector<std::string> GetLocalHostIpAddresses() {
+  std::vector<std::string> ips;
+  for (const auto& nic : GetLocalHostNicAddresses()) {
+    ips.push_back(nic.ip_address);
+  }
+  return ips;
+}
+
+const std::vector<HostNicAddress>& GetCachedLocalHostNicAddresses() {
+  static const std::vector<HostNicAddress>* nics =
+      new std::vector<HostNicAddress>(GetLocalHostNicAddresses());
+  return *nics;
+}
+
+std::optional<HostNicAddress> GetSocketLocalNic(int fd) {
+  struct sockaddr_storage addr;
+  socklen_t len = sizeof(addr);
+  if (getsockname(fd, (struct sockaddr*)&addr, &len) == -1) {
+    LOG_EVERY_N_SEC(ERROR, 10)
+        << "getsockname failed: " << std::strerror(errno);
+    return std::nullopt;
+  }
+  if (addr.ss_family != AF_INET) {
+    return std::nullopt;
+  }
+  struct sockaddr_in* s_in = (struct sockaddr_in*)&addr;
+  char host[INET_ADDRSTRLEN];
+  if (inet_ntop(AF_INET, &s_in->sin_addr, host, INET_ADDRSTRLEN) == nullptr) {
+    return std::nullopt;
+  }
+  std::string ip_str(host);
+  for (const auto& nic : GetCachedLocalHostNicAddresses()) {
+    if (nic.ip_address == ip_str) {
+      return nic;
+    }
+  }
+  return std::nullopt;
+}
+
+int ApplySocketAffinityAndBinding(int fd, bool pin_thread) {
+  if (!pin_thread) {
+    return 0;
+  }
+  auto nic_opt = GetSocketLocalNic(fd);
+  if (nic_opt.has_value() && nic_opt->numa_node >= 0) {
+    PinCurrentThreadToNumaNode(nic_opt->numa_node);
+  }
+  return 0;
 }
 
 }  // namespace tpu_raiden

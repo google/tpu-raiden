@@ -55,6 +55,7 @@ cc_library(
     deps = [
         ":raw_buffer_transport",
         "//tpu_raiden/core:status_macros",
+        "//tpu_raiden/core:tpu_utils",
         "//tpu_raiden/core:tsl_platform_headers",
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/log",

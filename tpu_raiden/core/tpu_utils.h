@@ -16,6 +16,7 @@
 #define THIRD_PARTY_TPU_RAIDEN_CORE_TPU_UTILS_H_
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -55,6 +56,29 @@ int GetPjRtDeviceNumaNode(const xla::PjRtDevice* device);
 
 // Prints the detected TPU hardware topology to std::cout.
 void PrintTpuHardwareTopology();
+
+struct HostNicAddress {
+  std::string interface_name;  // e.g. "eth0"
+  std::string ip_address;      // e.g. "10.128.0.10"
+  int numa_node = -1;          // e.g. 0 from sysfs
+};
+
+// Returns non-loopback IPv4 network interfaces on this host enriched with NUMA
+// node.
+std::vector<HostNicAddress> GetLocalHostNicAddresses();
+
+// Returns non-loopback IPv4 addresses discovered on this host.
+// Falls back to {"127.0.0.1"} if none exist.
+std::vector<std::string> GetLocalHostIpAddresses();
+
+// Uses getsockname to look up the local IPv4 address and returns its
+// corresponding interface's host NIC address. Returns std::nullopt on failure
+// or if not found.
+std::optional<HostNicAddress> GetSocketLocalNic(int fd);
+
+// Pins the thread to the local NUMA node if pin_thread is true.
+// Returns 0 on success or -1 on error.
+int ApplySocketAffinityAndBinding(int fd, bool pin_thread = true);
 
 }  // namespace tpu_raiden
 

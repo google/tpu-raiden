@@ -34,6 +34,7 @@
 #include "absl/strings/str_cat.h"
 #include "xla/tsl/platform/statusor.h"
 #include "tpu_raiden/core/status_macros.h"
+#include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/transport/raw_buffer_transport.h"
 
 namespace tpu_raiden {
@@ -130,6 +131,7 @@ BlockTransport::~BlockTransport() = default;
 
 absl::Status BlockTransport::HandleCustomRequest(int client_fd,
                                                  const PacketHeader& header) {
+  ApplySocketAffinityAndBinding(client_fd);
   size_t bytes_per_block = block_delegate_->bytes_per_block();
 
   if (header.op == 1) {  // Push
@@ -298,6 +300,7 @@ absl::Status BlockTransport::WriteBlockDirect(absl::string_view peer,
   auto status_or_fd = AcquireConnection(peer);
   if (!status_or_fd.ok()) return status_or_fd.status();
   int fd = status_or_fd.value();
+  ApplySocketAffinityAndBinding(fd);
   bool ok_to_pool = false;
   auto fd_cleaner = absl::MakeCleanup([&] {
     if (ok_to_pool) {
@@ -425,6 +428,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
     return;
   }
   int fd = status_or_fd.value();
+  ApplySocketAffinityAndBinding(fd);
   bool ok_to_pool = false;
   auto fd_cleaner = absl::MakeCleanup([&] {
     if (ok_to_pool) {
@@ -528,6 +532,7 @@ void BlockTransport::H2hReadWorker(
     return;
   }
   int fd = status_or_fd.value();
+  ApplySocketAffinityAndBinding(fd);
   bool ok_to_pool = false;
   auto fd_cleaner = absl::MakeCleanup([&] {
     if (ok_to_pool) {
