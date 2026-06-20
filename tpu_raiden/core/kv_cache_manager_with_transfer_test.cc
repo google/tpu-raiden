@@ -92,9 +92,10 @@ TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransfer) {
   std::string remote_endpoint = "127.0.0.1:" + std::to_string(port);
 
   // Start read: pull Block 0 (remote) and store it in Block 1 (local)
-  engine->StartRead(req_id, uuid, remote_endpoint,
-                    /*remote_block_ids=*/{0},
-                    /*local_block_ids=*/{1});
+  ASSERT_THAT(engine->StartRead(req_id, uuid, remote_endpoint,
+                                /*remote_block_ids=*/{0},
+                                /*local_block_ids=*/{1}),
+              IsOk());
 
   // Wait for transfer to complete by polling CompleteReadRaw
   bool done = false;
@@ -157,8 +158,10 @@ TEST(KVCacheManagerWithTransferTest, StartReadAcceptsParallelism) {
 
   // Calling StartRead with a non-existent port throws or returns an op that
   // fails
-  engine->StartRead("req_parallel", 99999, "127.0.0.1:8888", {0}, {0},
-                    /*parallelism=*/2);
+  ASSERT_THAT(
+      engine->StartRead("req_parallel", 99999, "127.0.0.1:8888", {0}, {0},
+                        /*parallelism=*/2),
+      IsOk());
 }
 TEST(KVCacheManagerWithTransferTest,
      LocalOrchestratedTransferToCustomHostBlock) {
@@ -215,11 +218,13 @@ TEST(KVCacheManagerWithTransferTest,
 
   // Start read: pull Remote Block 0 -> Local Device Block 1,
   // but target Local Host Block 0 as the staging/host block.
-  engine->StartRead(req_id, uuid, remote_endpoint,
-                    /*remote_block_ids=*/{0},
-                    /*local_block_ids=*/{1},
-                    /*parallelism=*/1,
-                    /*local_host_block_ids=*/std::vector<int64_t>{0});
+  ASSERT_THAT(
+      engine->StartRead(req_id, uuid, remote_endpoint,
+                        /*remote_block_ids=*/{0},
+                        /*local_block_ids=*/{1},
+                        /*parallelism=*/1,
+                        /*local_host_block_ids=*/std::vector<int64_t>{0}),
+      IsOk());
 
   // Wait for transfer to complete
   bool done = false;

@@ -21,6 +21,8 @@
 #include "nanobind/stl/shared_ptr.h"
 #include "nanobind/stl/string.h"
 #include "nanobind/stl/vector.h"
+#include "absl/status/status.h"
+#include "tpu_raiden/frameworks/nb_statusor.h"  // IWYU pragma: keep
 #include "tpu_raiden/frameworks/torch/torch_nanobind_utils.h"
 #include "tpu_raiden/frameworks/torch/torch_raw_transfer.h"
 
@@ -31,26 +33,21 @@ namespace {
 
 using TensorList = std::vector<at::Tensor>;
 
-void AwaitAll(nb::object futures) {
+absl::Status AwaitAll(nb::object futures) {
   if (nb::isinstance<PjRtCopyFuture>(futures)) {
     PjRtCopyFuture& future = nb::cast<PjRtCopyFuture&>(futures);
     nb::gil_scoped_release release;
-    absl::Status status = future.Await();
-    if (!status.ok()) {
-      throw std::runtime_error(std::string("Async copy failed: ") +
-                               std::string(status.message()));
-    }
-    return;
+    return future.Await();
   }
   for (nb::handle item : futures) {
     PjRtCopyFuture& future = nb::cast<PjRtCopyFuture&>(item);
     nb::gil_scoped_release release;
     absl::Status status = future.Await();
     if (!status.ok()) {
-      throw std::runtime_error(std::string("Async copy failed: ") +
-                               std::string(status.message()));
+      return status;
     }
   }
+  return absl::OkStatus();
 }
 
 bool IsReady(nb::object futures) {
@@ -74,28 +71,19 @@ NB_MODULE(_torch_raw_transfer, m) {
       .def_prop_ro("data_ptr", &RawHostBuffer::DataPtr)
       .def_prop_ro("is_pjrt_backed", &RawHostBuffer::IsPjRtBacked);
 
-  auto future_cls =
-      nb::class_<PjRtCopyFuture>(m, "PjRtCopyFuture")
-          .def("Await",
-               [](PjRtCopyFuture& future) {
-                 nb::gil_scoped_release release;
-                 absl::Status status = future.Await();
-                 if (!status.ok()) {
-                   throw std::runtime_error(std::string("Async copy failed: ") +
-                                            std::string(status.message()));
-                 }
-               })
-          .def("wait",
-               [](PjRtCopyFuture& future) {
-                 nb::gil_scoped_release release;
-                 absl::Status status = future.Await();
-                 if (!status.ok()) {
-                   throw std::runtime_error(std::string("Async copy failed: ") +
-                                            std::string(status.message()));
-                 }
-               })
-          .def("IsReady", &PjRtCopyFuture::IsReady)
-          .def("is_ready", &PjRtCopyFuture::IsReady);
+  auto future_cls = nb::class_<PjRtCopyFuture>(m, "PjRtCopyFuture")
+                        .def("Await",
+                             [](PjRtCopyFuture& future) -> absl::Status {
+                               nb::gil_scoped_release release;
+                               return future.Await();
+                             })
+                        .def("wait",
+                             [](PjRtCopyFuture& future) -> absl::Status {
+                               nb::gil_scoped_release release;
+                               return future.Await();
+                             })
+                        .def("IsReady", &PjRtCopyFuture::IsReady)
+                        .def("is_ready", &PjRtCopyFuture::IsReady);
   m.attr("PjRtCopyFuture") = future_cls;
 
   nb::class_<PreparedTorchRawTransfer>(m, "PreparedTorchRawTransfer")
@@ -139,15 +127,11 @@ NB_MODULE(_torch_raw_transfer, m) {
       [](const at::Tensor& src_arr, const at::Tensor& dst_arr,
          const std::vector<int64_t>& src_offsets_major_dim,
          const std::vector<int64_t>& dst_offsets_major_dim,
-         const std::vector<int64_t>& copy_sizes_major_dim) {
+         const std::vector<int64_t>& copy_sizes_major_dim) -> absl::Status {
         auto future =
             TransferD2HAsync(src_arr, dst_arr, src_offsets_major_dim,
                              dst_offsets_major_dim, copy_sizes_major_dim);
-        absl::Status status = future.Await();
-        if (!status.ok()) {
-          throw std::runtime_error(std::string("Async copy failed: ") +
-                                   std::string(status.message()));
-        }
+        return future.Await();
       },
       nb::arg("src_arr"), nb::arg("dst_arr"), nb::kw_only(),
       nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
@@ -159,15 +143,11 @@ NB_MODULE(_torch_raw_transfer, m) {
       [](const at::Tensor& src_arr, const at::Tensor& dst_arr,
          const std::vector<int64_t>& src_offsets_major_dim,
          const std::vector<int64_t>& dst_offsets_major_dim,
-         const std::vector<int64_t>& copy_sizes_major_dim) {
+         const std::vector<int64_t>& copy_sizes_major_dim) -> absl::Status {
         auto future =
             TransferH2DAsync(src_arr, dst_arr, src_offsets_major_dim,
                              dst_offsets_major_dim, copy_sizes_major_dim);
-        absl::Status status = future.Await();
-        if (!status.ok()) {
-          throw std::runtime_error(std::string("Async copy failed: ") +
-                                   std::string(status.message()));
-        }
+        return future.Await();
       },
       nb::arg("src_arr"), nb::arg("dst_arr"), nb::kw_only(),
       nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
@@ -192,15 +172,11 @@ NB_MODULE(_torch_raw_transfer, m) {
       [](const TensorList& src_arrs, const TensorList& dst_arrs,
          const std::vector<int64_t>& src_offsets_major_dim,
          const std::vector<int64_t>& dst_offsets_major_dim,
-         const std::vector<int64_t>& copy_sizes_major_dim) {
+         const std::vector<int64_t>& copy_sizes_major_dim) -> absl::Status {
         auto future =
             TransferD2HBatchAsync(src_arrs, dst_arrs, src_offsets_major_dim,
                                   dst_offsets_major_dim, copy_sizes_major_dim);
-        absl::Status status = future.Await();
-        if (!status.ok()) {
-          throw std::runtime_error(std::string("Async copy failed: ") +
-                                   std::string(status.message()));
-        }
+        return future.Await();
       },
       nb::arg("src_arrs"), nb::arg("dst_arrs"), nb::kw_only(),
       nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
@@ -212,15 +188,11 @@ NB_MODULE(_torch_raw_transfer, m) {
       [](const TensorList& src_arrs, const TensorList& dst_arrs,
          const std::vector<int64_t>& src_offsets_major_dim,
          const std::vector<int64_t>& dst_offsets_major_dim,
-         const std::vector<int64_t>& copy_sizes_major_dim) {
+         const std::vector<int64_t>& copy_sizes_major_dim) -> absl::Status {
         auto future =
             TransferH2DBatchAsync(src_arrs, dst_arrs, src_offsets_major_dim,
                                   dst_offsets_major_dim, copy_sizes_major_dim);
-        absl::Status status = future.Await();
-        if (!status.ok()) {
-          throw std::runtime_error(std::string("Async copy failed: ") +
-                                   std::string(status.message()));
-        }
+        return future.Await();
       },
       nb::arg("src_arrs"), nb::arg("dst_arrs"), nb::kw_only(),
       nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},

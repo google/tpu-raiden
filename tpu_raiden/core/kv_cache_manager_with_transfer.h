@@ -70,17 +70,17 @@ class TransferFuture {
                     other->futures_.end());
   }
 
-  void Await() {
+  absl::Status Await() {
     for (auto& future : futures_) {
       if (future.IsValid()) {
         absl::Status status = future.Await();
         if (!status.ok()) {
-          throw std::runtime_error("Async transfer failed: " +
-                                   std::string(status.message()));
+          return status;
         }
       }
     }
     futures_.clear();
+    return absl::OkStatus();
   }
 
   bool IsReady() const {
@@ -156,7 +156,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   int64_t NotifyForRead(absl::string_view req_id, uint64_t uuid,
                         const std::vector<int64_t>& block_ids);
 
-  void StartRead(
+  absl::Status StartRead(
       absl::string_view req_id, uint64_t uuid,
       absl::string_view remote_endpoint,
       const std::vector<int64_t>& remote_block_ids,
@@ -233,27 +233,29 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   static constexpr uint32_t kOpAck = 2;
   static constexpr uint32_t kOpPullStream = 3;
 
-  std::string EndpointWithPort(absl::string_view endpoint, int port) const;
-  ControlResponseHeader ReadControlResponseHeader(int fd);
+  absl::StatusOr<std::string> EndpointWithPort(absl::string_view endpoint,
+                                               int port) const;
+  absl::StatusOr<ControlResponseHeader> ReadControlResponseHeader(int fd);
   void AckSend(uint64_t uuid);
-  void ConfigureDataPortFromKvTransfer();
-  uint64_t StagingBlockBase(int64_t slot_idx) const;
-  std::vector<int> ContiguousBlockIds(uint64_t base, uint64_t count) const;
-  static void ValidateRequestedBlocks(
+  absl::Status ConfigureDataPortFromKvTransfer();
+  absl::StatusOr<uint64_t> StagingBlockBase(int64_t slot_idx) const;
+  absl::StatusOr<std::vector<int>> ContiguousBlockIds(uint64_t base,
+                                                      uint64_t count) const;
+  static absl::Status ValidateRequestedBlocks(
       const SendEntry& entry, const std::vector<int64_t>& requested_block_ids);
 
   void InitializeSlotPool(int64_t num_slots);
-  int64_t AcquireSlot();
-  int64_t AcquireSlotLocked();
+  absl::StatusOr<int64_t> AcquireSlot();
+  absl::StatusOr<int64_t> AcquireSlotLocked();
   void ReleaseSlotLocked(int64_t slot_idx);
   void ReleaseEntrySlotLocked(const std::shared_ptr<SendEntry>& entry);
 
-  void StartControlServer();
+  absl::Status StartControlServer();
   void StopControlServer();
   void ControlServerLoop();
   void HandleControlConnection(int fd);
-  void ProcessPullStream(int fd, const ControlRequestHeader& req);
-  void AckRemote(absl::string_view remote_endpoint, uint64_t uuid);
+  absl::Status ProcessPullStream(int fd, const ControlRequestHeader& req);
+  absl::Status AckRemote(absl::string_view remote_endpoint, uint64_t uuid);
   absl::Status WaitForStagingBlockRead(size_t layer_idx, size_t shard_idx,
                                        int block_id);
   std::shared_ptr<StagingReadinessState> CreateStagingReadiness(
@@ -274,9 +276,10 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
 
-  void StartPushInternal(uint64_t uuid, absl::string_view remote_data_endpoint,
-                         const std::vector<int64_t>& src_block_ids,
-                         const std::vector<int64_t>& dst_block_ids);
+  absl::Status StartPushInternal(uint64_t uuid,
+                                 absl::string_view remote_data_endpoint,
+                                 const std::vector<int64_t>& src_block_ids,
+                                 const std::vector<int64_t>& dst_block_ids);
 
   std::chrono::steady_clock::time_point DeadlineFromNow() const;
 
@@ -318,11 +321,12 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
  private:
   std::optional<int> GetLocalTpuNumaNode(xla::PjRtBuffer* buf) const;
 
-  StageResult IssueH2D(int64_t slot_idx, int64_t num_blocks,
-                       const std::vector<int64_t>& local_block_ids);
+  absl::StatusOr<StageResult> IssueH2D(
+      int64_t slot_idx, int64_t num_blocks,
+      const std::vector<int64_t>& local_block_ids);
 
-  std::vector<kv_cache::KVCacheHostSpan> LayerSpans(int64_t slot_idx,
-                                                    int64_t num_blocks);
+  absl::StatusOr<std::vector<kv_cache::KVCacheHostSpan>> LayerSpans(
+      int64_t slot_idx, int64_t num_blocks);
 };
 
 }  // namespace tpu_raiden

@@ -91,7 +91,8 @@ inline const PJRT_RawBuffer_Extension* GetRawBufferExtension(
       PJRT_Extension_Type::PJRT_Extension_Type_RawBuffer);
 }
 
-inline int64_t GetMajorSliceByteSize(const xla::PjRtBuffer* buffer) {
+inline absl::StatusOr<int64_t> GetMajorSliceByteSize(
+    const xla::PjRtBuffer* buffer) {
   const xla::Shape& shape = buffer->on_device_shape();
   if (shape.dimensions_size() == 0) return 0;
 
@@ -113,7 +114,7 @@ inline int64_t GetMajorSliceByteSize(const xla::PjRtBuffer* buffer) {
     const xla::Tile& tile = xla_layout->tiles()[0];
     auto tile_dims = tile.dimensions();
     if (tile_dims.size() != 2) {
-      throw std::runtime_error("Only 2D tiling supported for now");
+      return absl::UnimplementedError("Only 2D tiling supported for now");
     }
     int64_t tH = tile_dims[0];
     int64_t tW = tile_dims[1];

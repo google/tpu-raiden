@@ -97,6 +97,8 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   ~KVCacheManagerBase() override;
 
+  absl::Status status() const { return status_; }
+
   xla::Future<> RemoteD2DBlockWrite(const BlockMetadata& src,
                                     const BlockMetadata& dst,
                                     size_t size_bytes);
@@ -246,6 +248,9 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<int64_t> slot_idx = std::nullopt,
       std::optional<size_t> layer_idx = std::nullopt,
       std::optional<size_t> shard_idx = std::nullopt, int64_t device_id = -1);
+
+ protected:
+  absl::Status status_ = absl::OkStatus();
 
  private:
   xla::Future<> DoD2DTransfer(const BlockMetadata& src,

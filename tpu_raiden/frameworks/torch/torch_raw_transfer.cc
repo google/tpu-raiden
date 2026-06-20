@@ -171,18 +171,25 @@ PjRtCopyFuture IssueD2HCopy(xla::PjRtBuffer* src_buffer, uint8_t* dst_data,
   const int64_t physical_size =
       ValueOrThrow("Failed to get source physical buffer size",
                    src_buffer->GetOnDeviceSizeInBytes());
-  const int64_t slice_byte_size = GetMajorSliceByteSize(src_buffer);
+  const int64_t slice_byte_size = ValueOrThrow(
+      "Failed to get major slice byte size", GetMajorSliceByteSize(src_buffer));
 
   if (is_partial) {
-    tpu_raiden::ValidatePartialAlignment(src_buffer->on_device_shape(),
-                                         slice_byte_size);
+    auto status = tpu_raiden::ValidatePartialAlignment(
+        src_buffer->on_device_shape(), slice_byte_size);
+    if (!status.ok()) {
+      throw std::invalid_argument(std::string(status.message()));
+    }
   }
 
-  std::vector<tpu_raiden::RawCopyChunk> chunks =
-      tpu_raiden::ComputeAndValidateChunks(
-          slice_byte_size, physical_size, dst_size, is_partial,
-          src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim,
-          /*is_d2h=*/true);
+  auto chunks_or = tpu_raiden::ComputeAndValidateChunks(
+      slice_byte_size, physical_size, dst_size, is_partial,
+      src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim,
+      /*is_d2h=*/true);
+  if (!chunks_or.ok()) {
+    throw std::invalid_argument(std::string(chunks_or.status().message()));
+  }
+  std::vector<tpu_raiden::RawCopyChunk> chunks = std::move(chunks_or).value();
 
   BufferHoldAndAlias hold =
       ValueOrThrow("Failed to acquire source raw buffer",
@@ -211,18 +218,25 @@ PjRtCopyFuture IssueH2DCopy(const uint8_t* src_data, size_t src_size,
   const int64_t physical_size =
       ValueOrThrow("Failed to get destination physical buffer size",
                    dst_buffer->GetOnDeviceSizeInBytes());
-  const int64_t slice_byte_size = GetMajorSliceByteSize(dst_buffer);
+  const int64_t slice_byte_size = ValueOrThrow(
+      "Failed to get major slice byte size", GetMajorSliceByteSize(dst_buffer));
 
   if (is_partial) {
-    tpu_raiden::ValidatePartialAlignment(dst_buffer->on_device_shape(),
-                                         slice_byte_size);
+    auto status = tpu_raiden::ValidatePartialAlignment(
+        dst_buffer->on_device_shape(), slice_byte_size);
+    if (!status.ok()) {
+      throw std::invalid_argument(std::string(status.message()));
+    }
   }
 
-  std::vector<tpu_raiden::RawCopyChunk> chunks =
-      tpu_raiden::ComputeAndValidateChunks(
-          slice_byte_size, physical_size, src_size, is_partial,
-          src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim,
-          /*is_d2h=*/false);
+  auto chunks_or = tpu_raiden::ComputeAndValidateChunks(
+      slice_byte_size, physical_size, src_size, is_partial,
+      src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim,
+      /*is_d2h=*/false);
+  if (!chunks_or.ok()) {
+    throw std::invalid_argument(std::string(chunks_or.status().message()));
+  }
+  std::vector<tpu_raiden::RawCopyChunk> chunks = std::move(chunks_or).value();
 
   BufferHoldAndAlias hold =
       ValueOrThrow("Failed to acquire destination raw buffer",
@@ -248,8 +262,11 @@ PjRtCopyFuture TransferD2HBatchAsync(
   if (src_arrs.size() != dst_arrs.size()) {
     throw std::invalid_argument("Lengths of src_arrs and dst_arrs must match");
   }
-  tpu_raiden::ValidatePartialSpec(src_offsets_major_dim, dst_offsets_major_dim,
-                                  copy_sizes_major_dim);
+  auto status = tpu_raiden::ValidatePartialSpec(
+      src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim);
+  if (!status.ok()) {
+    throw std::invalid_argument(std::string(status.message()));
+  }
   std::vector<PjRtCopyFuture> futures;
   futures.reserve(src_arrs.size());
   for (size_t i = 0; i < src_arrs.size(); ++i) {
@@ -277,8 +294,11 @@ PjRtCopyFuture TransferH2DBatchAsync(
   if (src_arrs.size() != dst_arrs.size()) {
     throw std::invalid_argument("Lengths of src_arrs and dst_arrs must match");
   }
-  tpu_raiden::ValidatePartialSpec(src_offsets_major_dim, dst_offsets_major_dim,
-                                  copy_sizes_major_dim);
+  auto status = tpu_raiden::ValidatePartialSpec(
+      src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim);
+  if (!status.ok()) {
+    throw std::invalid_argument(std::string(status.message()));
+  }
   std::vector<PjRtCopyFuture> futures;
   futures.reserve(src_arrs.size());
   for (size_t i = 0; i < src_arrs.size(); ++i) {

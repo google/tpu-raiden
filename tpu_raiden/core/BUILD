@@ -162,6 +162,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":tpu_utils",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "@xla//xla/tsl/platform:logging",
     ],
 )
@@ -180,6 +182,7 @@ cc_library(
     deps = [
         ":host_memory_allocator",
         ":xla_raw_transfer_headers",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],
 )

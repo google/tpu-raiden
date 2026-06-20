@@ -103,7 +103,8 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_core(
         "RawBuffer extension not found in PjRtCApiClient");
   }
 
-  int64_t slice_byte_size = GetMajorSliceByteSize(first_buffer);
+  ASSIGN_OR_RETURN(int64_t slice_byte_size,
+                   GetMajorSliceByteSize(first_buffer));
 
   if (is_partial && slice_byte_size % 4096 != 0) {
     return absl::InvalidArgumentError(
@@ -231,7 +232,8 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_h2d_core(
         "RawBuffer extension not found in PjRtCApiClient");
   }
 
-  int64_t slice_byte_size = GetMajorSliceByteSize(first_buffer);
+  ASSIGN_OR_RETURN(int64_t slice_byte_size,
+                   GetMajorSliceByteSize(first_buffer));
 
   if (is_partial && slice_byte_size % 4096 != 0) {
     return absl::InvalidArgumentError(

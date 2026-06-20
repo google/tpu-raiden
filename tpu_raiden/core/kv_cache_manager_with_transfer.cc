@@ -77,27 +77,7 @@
 namespace tpu_raiden {
 namespace {
 
-[[noreturn]] void ThrowStatus(absl::string_view context,
-                              const absl::Status& status) {
-  throw std::runtime_error(absl::StrCat(context, ": ", status.message()));
-}
-
-void CheckStatus(absl::string_view context, const absl::Status& status) {
-  if (!status.ok()) {
-    ThrowStatus(context, status);
-  }
-}
-
 void EmitTimingLog(absl::string_view message) { LOG(INFO) << message; }
-
-template <typename T>
-T ValueOrThrow(absl::string_view context, absl::StatusOr<T> value_or) {
-  if (!value_or.ok()) {
-    ThrowStatus(context, value_or.status());
-  }
-  return std::move(value_or).value();
-}
-
 absl::Status WriteExact(int fd, const void* buffer, size_t length) {
   const uint8_t* ptr = static_cast<const uint8_t*>(buffer);
   size_t remaining = length;
@@ -136,23 +116,25 @@ absl::Status ReadExact(int fd, void* buffer, size_t length) {
   return absl::OkStatus();
 }
 
-std::pair<std::string, int> SplitEndpoint(absl::string_view endpoint) {
+static absl::StatusOr<std::pair<std::string, int>> SplitEndpoint(
+    absl::string_view endpoint) {
   const size_t colon = endpoint.rfind(':');
   if (colon == absl::string_view::npos) {
-    throw std::invalid_argument("endpoint must be host:port");
+    return absl::InvalidArgumentError("endpoint must be host:port");
   }
   int port = 0;
   if (!absl::SimpleAtoi(endpoint.substr(colon + 1), &port)) {
-    throw std::invalid_argument("invalid port in endpoint");
+    return absl::InvalidArgumentError("invalid port in endpoint");
   }
-  return {std::string(endpoint.substr(0, colon)), port};
+  return std::make_pair(std::string(endpoint.substr(0, colon)), port);
 }
 
-int ConnectTcp(absl::string_view endpoint) {
-  auto [host, port] = SplitEndpoint(endpoint);
+static absl::StatusOr<int> ConnectTcp(absl::string_view endpoint) {
+  ASSIGN_OR_RETURN(auto host_port, SplitEndpoint(endpoint));
+  auto [host, port] = host_port;
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) {
-    throw std::runtime_error(
+    return absl::InternalError(
         absl::StrCat("socket() failed: ", std::strerror(errno)));
   }
   int opt = 1;
@@ -164,47 +146,47 @@ int ConnectTcp(absl::string_view endpoint) {
   addr.sin_port = htons(port);
   if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
     close(fd);
-    throw std::runtime_error(
+    return absl::InvalidArgumentError(
         absl::StrCat("invalid IPv4 endpoint host: ", host));
   }
   if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
     std::string err = std::strerror(errno);
     close(fd);
-    throw std::runtime_error(
+    return absl::InternalError(
         absl::StrCat("connect(", endpoint, ") failed: ", err));
   }
   return fd;
 }
 
-static std::string GetPeerIp(int fd) {
+static absl::StatusOr<std::string> GetPeerIp(int fd) {
   sockaddr_in addr;
   socklen_t len = sizeof(addr);
   if (getpeername(fd, reinterpret_cast<sockaddr*>(&addr), &len) < 0) {
-    throw std::runtime_error("getpeername() failed: " +
-                             std::string(std::strerror(errno)));
+    return absl::InternalError(
+        absl::StrCat("getpeername() failed: ", std::strerror(errno)));
   }
   char ip_buf[INET_ADDRSTRLEN];
   if (inet_ntop(AF_INET, &addr.sin_addr, ip_buf, sizeof(ip_buf)) == nullptr) {
-    throw std::runtime_error("inet_ntop() failed: " +
-                             std::string(std::strerror(errno)));
+    return absl::InternalError(
+        absl::StrCat("inet_ntop() failed: ", std::strerror(errno)));
   }
   return std::string(ip_buf);
 }
-static void WriteBlockIds(int fd, const std::vector<int64_t>& block_ids) {
-  if (block_ids.empty()) return;
-  CheckStatus(
-      "control block ids write",
-      WriteExact(fd, block_ids.data(), block_ids.size() * sizeof(int64_t)));
+
+static absl::Status WriteBlockIds(int fd,
+                                  const std::vector<int64_t>& block_ids) {
+  if (block_ids.empty()) return absl::OkStatus();
+  return WriteExact(fd, block_ids.data(), block_ids.size() * sizeof(int64_t));
 }
 
-static std::vector<int64_t> ReadBlockIds(int fd, uint64_t num_blocks) {
-  if (num_blocks == 0) return {};
+static absl::StatusOr<std::vector<int64_t>> ReadBlockIds(int fd,
+                                                         uint64_t num_blocks) {
+  if (num_blocks == 0) return std::vector<int64_t>{};
   if (num_blocks > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-    throw std::invalid_argument("num_blocks is too large");
+    return absl::InvalidArgumentError("num_blocks is too large");
   }
   std::vector<int64_t> block_ids(static_cast<size_t>(num_blocks));
-  CheckStatus(
-      "control block ids read",
+  RETURN_IF_ERROR(
       ReadExact(fd, block_ids.data(), block_ids.size() * sizeof(int64_t)));
   return block_ids;
 }
@@ -241,10 +223,11 @@ static kv_cache::KVCacheCopySpec ToKVCacheCopySpecImpl(const CopySpec& spec) {
           .sizes = spec.sizes};
 }
 
-static CopySpec BuildH2dCopySpec(const std::vector<int64_t>& src_block_ids,
-                                 const std::vector<int64_t>& dst_block_ids) {
+static absl::StatusOr<CopySpec> BuildH2dCopySpec(
+    const std::vector<int64_t>& src_block_ids,
+    const std::vector<int64_t>& dst_block_ids) {
   if (src_block_ids.size() != dst_block_ids.size()) {
-    throw std::invalid_argument(
+    return absl::InvalidArgumentError(
         "src and dst block lists must have same length");
   }
   CopySpec spec;
@@ -271,13 +254,13 @@ static CopySpec BuildH2dCopySpec(const std::vector<int64_t>& src_block_ids,
   return spec;
 }
 
-static CopyPlan BuildLoadCopyPlan(
+static absl::StatusOr<CopyPlan> BuildLoadCopyPlan(
     const std::vector<int64_t>& remote_block_ids,
     const std::vector<int64_t>& local_block_ids,
     const std::vector<int64_t>& local_host_block_ids) {
   if (remote_block_ids.size() != local_block_ids.size() ||
       local_block_ids.size() != local_host_block_ids.size()) {
-    throw std::invalid_argument(
+    return absl::InvalidArgumentError(
         "remote_block_ids, local_block_ids, and local_host_block_ids must have "
         "same length");
   }
@@ -325,19 +308,20 @@ static CopyPlan BuildLoadCopyPlan(
     plan.h2d_host_block_ids.push_back(local_host_block_ids[original_idx]);
   }
 
-  plan.h2d_copy =
-      BuildH2dCopySpec(plan.h2d_host_block_ids, plan.h2d_local_block_ids);
+  ASSIGN_OR_RETURN(plan.h2d_copy, BuildH2dCopySpec(plan.h2d_host_block_ids,
+                                                   plan.h2d_local_block_ids));
   plan.host_dst_to_src.clear();  // No host reordering needed!
   return plan;
 }
 
-static void ReorderCompactBlocks(
+static absl::Status ReorderCompactBlocks(
     const kv_cache::KVCacheHostSpan& compact_blocks,
     const std::vector<size_t>& dst_to_src) {
-  if (dst_to_src.empty()) return;
+  if (dst_to_src.empty()) return absl::OkStatus();
   const size_t num_blocks = dst_to_src.size();
   if (num_blocks == 0 || compact_blocks.nbytes % num_blocks != 0) {
-    throw std::invalid_argument("host reorder view has invalid block layout");
+    return absl::InvalidArgumentError(
+        "host reorder view has invalid block layout");
   }
   const size_t block_bytes =
       static_cast<size_t>(compact_blocks.nbytes) / num_blocks;
@@ -347,12 +331,13 @@ static void ReorderCompactBlocks(
   for (size_t dst_idx = 0; dst_idx < num_blocks; ++dst_idx) {
     const size_t src_idx = dst_to_src[dst_idx];
     if (src_idx >= num_blocks) {
-      throw std::out_of_range("host reorder source index out of range");
+      return absl::OutOfRangeError("host reorder source index out of range");
     }
     std::memcpy(reordered.data() + dst_idx * block_bytes,
                 src + src_idx * block_bytes, block_bytes);
   }
   std::memcpy(compact_blocks.ptr, reordered.data(), total_bytes);
+  return absl::OkStatus();
 }
 
 static double DurationMs(std::chrono::steady_clock::time_point start,
@@ -372,24 +357,25 @@ kv_cache::KVCacheCopySpec KVCacheManagerWithTransfer::ToKVCacheCopySpec(
   return ToKVCacheCopySpecImpl(spec);
 }
 
-void KVCacheManagerWithTransfer::ValidateRequestedBlocks(
+absl::Status KVCacheManagerWithTransfer::ValidateRequestedBlocks(
     const SendEntry& entry, const std::vector<int64_t>& requested_block_ids) {
   if (requested_block_ids.empty()) {
-    throw std::invalid_argument(
+    return absl::InvalidArgumentError(
         "pull stream requested no blocks; use ack-only path");
   }
   std::set<int64_t> seen;
   for (int64_t block_id : requested_block_ids) {
     if (entry.registered_block_set.find(block_id) ==
         entry.registered_block_set.end()) {
-      throw std::invalid_argument(
+      return absl::InvalidArgumentError(
           "pull stream requested block not registered by producer");
     }
     if (!seen.insert(block_id).second) {
-      throw std::invalid_argument(
+      return absl::InvalidArgumentError(
           "pull stream requested duplicate producer block id");
     }
   }
+  return absl::OkStatus();
 }
 
 KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
@@ -411,23 +397,36 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
       num_slots_(num_slots),
       timeout_s_(timeout_s),
       unsafe_skip_buffer_lock_(unsafe_skip_buffer_lock) {
+  if (!status().ok()) {
+    return;
+  }
   if (local_control_port_ >= 0) {
     if (max_blocks_ <= 0) {
-      throw std::invalid_argument("max_blocks must be positive");
+      status_ = absl::InvalidArgumentError("max_blocks must be positive");
+      return;
     }
     if (num_slots_ <= 0) {
-      throw std::invalid_argument("num_slots must be positive");
+      status_ = absl::InvalidArgumentError("num_slots must be positive");
+      return;
     }
     auto status = ConfigureHostStagingSlots(num_slots_, max_blocks_);
     if (!status.ok()) {
-      throw std::runtime_error("Failed to configure host staging slots: " +
-                               std::string(status.message()));
+      status_ = status;
+      return;
     }
     if (num_layers() > 0) {
-      ConfigureDataPortFromKvTransfer();
+      status = ConfigureDataPortFromKvTransfer();
+      if (!status.ok()) {
+        status_ = status;
+        return;
+      }
     }
     InitializeSlotPool(num_slots_);
-    StartControlServer();
+    status = StartControlServer();
+    if (!status.ok()) {
+      status_ = status;
+      return;
+    }
   }
 }
 
@@ -448,23 +447,36 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
       num_slots_(num_slots),
       timeout_s_(timeout_s),
       unsafe_skip_buffer_lock_(false) {
+  if (!status().ok()) {
+    return;
+  }
   if (local_control_port_ >= 0) {
     if (max_blocks_ <= 0) {
-      throw std::invalid_argument("max_blocks must be positive");
+      status_ = absl::InvalidArgumentError("max_blocks must be positive");
+      return;
     }
     if (num_slots_ <= 0) {
-      throw std::invalid_argument("num_slots must be positive");
+      status_ = absl::InvalidArgumentError("num_slots must be positive");
+      return;
     }
     auto status = ConfigureHostStagingSlots(num_slots_, max_blocks_);
     if (!status.ok()) {
-      throw std::runtime_error("Failed to configure host staging slots: " +
-                               std::string(status.message()));
+      status_ = status;
+      return;
     }
     if (num_layers > 0) {
-      ConfigureDataPortFromKvTransfer();
+      status = ConfigureDataPortFromKvTransfer();
+      if (!status.ok()) {
+        status_ = status;
+        return;
+      }
     }
     InitializeSlotPool(num_slots_);
-    StartControlServer();
+    status = StartControlServer();
+    if (!status.ok()) {
+      status_ = status;
+      return;
+    }
   }
 }
 
@@ -520,7 +532,7 @@ int64_t KVCacheManagerWithTransfer::NotifyForRead(
   return static_cast<int64_t>(uuid);
 }
 
-void KVCacheManagerWithTransfer::StartRead(
+absl::Status KVCacheManagerWithTransfer::StartRead(
     absl::string_view req_id, uint64_t uuid, absl::string_view remote_endpoint,
     const std::vector<int64_t>& remote_block_ids,
     const std::vector<int64_t>& local_block_ids, int parallelism,
@@ -531,8 +543,9 @@ void KVCacheManagerWithTransfer::StartRead(
           << ", Thread: " << std::this_thread::get_id();
   std::vector<int64_t> host_block_ids =
       local_host_block_ids.value_or(local_block_ids);
-  CopyPlan load_plan =
-      BuildLoadCopyPlan(remote_block_ids, local_block_ids, host_block_ids);
+  ASSIGN_OR_RETURN(
+      CopyPlan load_plan,
+      BuildLoadCopyPlan(remote_block_ids, local_block_ids, host_block_ids));
 
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -551,52 +564,66 @@ void KVCacheManagerWithTransfer::StartRead(
     std::lock_guard<std::mutex> lock(mu_);
     done_recving_.insert(std::string(req_id));
     active_recv_entries_.erase(uuid);
-    return;
+    return absl::OkStatus();
   }
 
   std::optional<int> target_node = assigned_numa_node();
 
-  push_pool_->Schedule(target_node, [this, req_id = std::string(req_id), uuid,
-                                     remote_endpoint =
-                                         std::string(remote_endpoint),
-                                     load_plan = std::move(load_plan)]() {
-    try {
-      int control_fd = ConnectTcp(remote_endpoint);
-      auto control_cleanup =
-          std::unique_ptr<int, void (*)(int*)>(&control_fd, [](int* p) {
-            if (p && *p >= 0) close(*p);
-          });
+  auto sched_status = push_pool_->Schedule(
+      target_node,
+      [this, req_id = std::string(req_id), uuid,
+       remote_endpoint = std::string(remote_endpoint),
+       load_plan = std::move(load_plan)]() {
+        absl::Status status = [this, remote_endpoint, &load_plan,
+                               uuid]() -> absl::Status {
+          ASSIGN_OR_RETURN(int control_fd, ConnectTcp(remote_endpoint));
+          auto control_cleanup =
+              std::unique_ptr<int, void (*)(int*)>(&control_fd, [](int* p) {
+                if (p && *p >= 0) close(*p);
+              });
 
-      ControlRequestHeader stream_request;
-      stream_request.magic = kControlMagic;
-      stream_request.op = kOpPullStream;
-      stream_request.uuid = uuid;
-      stream_request.num_blocks = static_cast<uint64_t>(load_plan.num_blocks);
-      stream_request.consumer_data_port =
-          static_cast<uint32_t>(local_data_port_);
-      CheckStatus(
-          "control pull stream write",
-          WriteExact(control_fd, &stream_request, sizeof(stream_request)));
-      WriteBlockIds(control_fd, load_plan.producer_remote_block_ids);
-      WriteBlockIds(control_fd, load_plan.transport_host_block_ids);
+          ControlRequestHeader stream_request;
+          stream_request.magic = kControlMagic;
+          stream_request.op = kOpPullStream;
+          stream_request.uuid = uuid;
+          stream_request.num_blocks =
+              static_cast<uint64_t>(load_plan.num_blocks);
+          stream_request.consumer_data_port =
+              static_cast<uint32_t>(local_data_port_);
+          RETURN_IF_ERROR(
+              WriteExact(control_fd, &stream_request, sizeof(stream_request)));
+          RETURN_IF_ERROR(
+              WriteBlockIds(control_fd, load_plan.producer_remote_block_ids));
+          RETURN_IF_ERROR(
+              WriteBlockIds(control_fd, load_plan.transport_host_block_ids));
 
-      ControlResponseHeader response = ReadControlResponseHeader(control_fd);
-      if (response.status != 0) {
-        throw std::runtime_error(
-            "Remote producer rejected Hybrid Bridge read request");
-      }
-      VLOG(1) << "StartRead (Hybrid Bridge) successfully registered pull "
-                 "request with Producer. req_id: "
-              << req_id;
-    } catch (const std::exception& e) {
-      LOG(ERROR)
-          << "Raiden consumer error during Hybrid Bridge StartRead connect: "
-          << e.what();
-      std::lock_guard<std::mutex> lock(mu_);
-      failed_recving_.insert(req_id);
-      active_recv_entries_.erase(uuid);
-    }
-  });
+          ASSIGN_OR_RETURN(ControlResponseHeader response,
+                           ReadControlResponseHeader(control_fd));
+          if (response.status != 0) {
+            return absl::InternalError(
+                "Remote producer rejected Hybrid Bridge read request");
+          }
+          return absl::OkStatus();
+        }();
+
+        if (!status.ok()) {
+          LOG(ERROR) << "Raiden consumer error during Hybrid Bridge StartRead "
+                        "connect: "
+                     << status;
+          std::lock_guard<std::mutex> lock(mu_);
+          failed_recving_.insert(req_id);
+          active_recv_entries_.erase(uuid);
+        } else {
+          VLOG(1) << "StartRead (Hybrid Bridge) successfully registered pull "
+                     "request with Producer. req_id: "
+                  << req_id;
+        }
+      });
+  if (!sched_status.ok()) {
+    return sched_status.status();
+  }
+
+  return absl::OkStatus();
 }
 
 std::tuple<std::vector<std::string>, std::vector<std::string>,
@@ -628,16 +655,17 @@ KVCacheManagerWithTransfer::CompleteReadRaw() {
   return {done_sending, done_recving, failed_recving};
 }
 
-StageResult KVCacheManagerWithTransfer::IssueH2D(
+absl::StatusOr<StageResult> KVCacheManagerWithTransfer::IssueH2D(
     int64_t slot_idx, int64_t num_blocks,
     const std::vector<int64_t>& local_block_ids) {
   if (num_blocks != static_cast<int64_t>(local_block_ids.size())) {
-    throw std::invalid_argument("num_blocks must match len(local_block_ids)");
+    return absl::InvalidArgumentError(
+        "num_blocks must match len(local_block_ids)");
   }
   CopySpec copy_spec = Offsets(local_block_ids, /*source_is_compact=*/true);
   kv_cache::KVCacheCopySpec transfer_spec = ToKVCacheCopySpec(copy_spec);
-  std::vector<kv_cache::KVCacheHostSpan> host_spans =
-      LayerSpans(slot_idx, num_blocks);
+  ASSIGN_OR_RETURN(std::vector<kv_cache::KVCacheHostSpan> host_spans,
+                   LayerSpans(slot_idx, num_blocks));
   auto future = std::make_shared<TransferFuture>();
   int64_t total_bytes = 0;
   for (const kv_cache::KVCacheHostSpan& span : host_spans) {
@@ -646,31 +674,32 @@ StageResult KVCacheManagerWithTransfer::IssueH2D(
   auto fut_or = H2d(transfer_spec.src_offsets, transfer_spec.dst_offsets,
                     transfer_spec.sizes, slot_idx);
   if (!fut_or.ok()) {
-    throw std::runtime_error("Failed to issue H2D transfer: " +
-                             std::string(fut_or.status().message()));
+    return absl::InternalError(absl::StrCat("Failed to issue H2D transfer: ",
+                                            fut_or.status().message()));
   }
   future->Add(std::move(fut_or.value()));
-  return {.future = std::move(future),
-          .host_spans = std::move(host_spans),
-          .total_bytes = total_bytes,
-          .copy_segments = static_cast<int64_t>(copy_spec.sizes.size())};
+  return StageResult{
+      .future = std::move(future),
+      .host_spans = std::move(host_spans),
+      .total_bytes = total_bytes,
+      .copy_segments = static_cast<int64_t>(copy_spec.sizes.size())};
 }
 
-std::vector<kv_cache::KVCacheHostSpan> KVCacheManagerWithTransfer::LayerSpans(
-    int64_t slot_idx, int64_t num_blocks) {
+absl::StatusOr<std::vector<kv_cache::KVCacheHostSpan>>
+KVCacheManagerWithTransfer::LayerSpans(int64_t slot_idx, int64_t num_blocks) {
   if (num_layers() == 0) {
-    throw std::runtime_error("KV cache manager is not registered");
+    return absl::FailedPreconditionError("KV cache manager is not registered");
   }
   if (num_blocks < 0 || num_blocks > max_blocks_) {
-    throw std::out_of_range("num_blocks out of range");
+    return absl::OutOfRangeError("num_blocks out of range");
   }
   std::vector<kv_cache::KVCacheHostSpan> spans;
   spans.reserve(num_layers() * num_shards());
   for (size_t layer_idx = 0; layer_idx < num_layers(); ++layer_idx) {
     for (size_t shard_idx = 0; shard_idx < num_shards(); ++shard_idx) {
-      spans.push_back(
-          ValueOrThrow("Failed to get KVCacheManager host staging span",
-                       HostSpan(layer_idx, shard_idx, slot_idx, num_blocks)));
+      ASSIGN_OR_RETURN(auto span,
+                       HostSpan(layer_idx, shard_idx, slot_idx, num_blocks));
+      spans.push_back(span);
     }
   }
   return spans;
@@ -683,14 +712,14 @@ void KVCacheManagerWithTransfer::InitializeSlotPool(int64_t num_slots) {
   }
 }
 
-int64_t KVCacheManagerWithTransfer::AcquireSlot() {
+absl::StatusOr<int64_t> KVCacheManagerWithTransfer::AcquireSlot() {
   std::lock_guard<std::mutex> lock(mu_);
   return AcquireSlotLocked();
 }
 
-int64_t KVCacheManagerWithTransfer::AcquireSlotLocked() {
+absl::StatusOr<int64_t> KVCacheManagerWithTransfer::AcquireSlotLocked() {
   if (free_slots_.empty()) {
-    throw std::runtime_error("Raiden host slot pool exhausted");
+    return absl::ResourceExhaustedError("Raiden host slot pool exhausted");
   }
   int64_t slot = free_slots_.front();
   free_slots_.pop_front();
@@ -808,11 +837,11 @@ absl::Status KVCacheManagerWithTransfer::WaitForStagingBlockRead(
   return state->layers[layer_state_idx].status;
 }
 
-void KVCacheManagerWithTransfer::StartControlServer() {
+absl::Status KVCacheManagerWithTransfer::StartControlServer() {
   control_fd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (control_fd_ < 0) {
-    throw std::runtime_error("control socket() failed: " +
-                             std::string(std::strerror(errno)));
+    return absl::InternalError(
+        absl::StrCat("control socket() failed: ", std::strerror(errno)));
   }
   int opt = 1;
   setsockopt(control_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -828,26 +857,26 @@ void KVCacheManagerWithTransfer::StartControlServer() {
     std::string err = std::strerror(errno);
     close(control_fd_);
     control_fd_ = -1;
-    throw std::runtime_error("control bind(" +
-                             std::to_string(local_control_port_) +
-                             ") failed: " + err);
+    return absl::InternalError(
+        absl::StrCat("control bind(", local_control_port_, ") failed: ", err));
   }
   socklen_t len = sizeof(addr);
   if (getsockname(control_fd_, reinterpret_cast<sockaddr*>(&addr), &len) < 0) {
     close(control_fd_);
     control_fd_ = -1;
-    throw std::runtime_error("getsockname() failed: " +
-                             std::string(std::strerror(errno)));
+    return absl::InternalError(
+        absl::StrCat("getsockname() failed: ", std::strerror(errno)));
   }
   local_control_port_ = ntohs(addr.sin_port);
   if (listen(control_fd_, 128) < 0) {
     close(control_fd_);
     control_fd_ = -1;
-    throw std::runtime_error("listen() failed: " +
-                             std::string(std::strerror(errno)));
+    return absl::InternalError(
+        absl::StrCat("listen() failed: ", std::strerror(errno)));
   }
   stopping_ = false;
   control_thread_ = std::thread([this]() { ControlServerLoop(); });
+  return absl::OkStatus();
 }
 
 void KVCacheManagerWithTransfer::StopControlServer() {
@@ -886,34 +915,40 @@ void KVCacheManagerWithTransfer::ControlServerLoop() {
     }
     std::optional<int> source_node = assigned_numa_node();
 
-    pull_pool_->Schedule(source_node, [this, client_fd]() {
+    auto sched_status = pull_pool_->Schedule(source_node, [this, client_fd]() {
       HandleControlConnection(client_fd);
       close(client_fd);
     });
+    if (!sched_status.ok()) {
+      LOG(ERROR) << "Failed to schedule control connection handler: "
+                 << sched_status.status();
+      close(client_fd);
+    }
   }
 }
 
 void KVCacheManagerWithTransfer::HandleControlConnection(int fd) {
-  try {
+  absl::Status status = [this, fd]() -> absl::Status {
     ControlRequestHeader req;
-    CheckStatus("control request header read",
-                ReadExact(fd, &req, sizeof(req)));
+    RETURN_IF_ERROR(ReadExact(fd, &req, sizeof(req)));
     if (req.magic != kControlMagic) {
-      throw std::runtime_error("bad control request magic");
+      return absl::InvalidArgumentError("bad control request magic");
     }
     if (req.op == kOpPullStream) {
-      ProcessPullStream(fd, req);
+      return ProcessPullStream(fd, req);
     } else {
-      throw std::runtime_error("unknown control op code: " +
-                               std::to_string(req.op));
+      return absl::InvalidArgumentError(
+          absl::StrCat("unknown control op code: ", req.op));
     }
-  } catch (const std::exception& e) {
+  }();
+
+  if (!status.ok()) {
     LOG(ERROR) << "Raiden producer error in control connection handler: "
-               << e.what();
+               << status;
     ControlResponseHeader response;
     response.magic = kResponseMagic;
     response.status = -1;
-    std::string message = e.what();
+    std::string message = std::string(status.message());
     response.message_len = message.size();
     (void)WriteExact(fd, &response, sizeof(response));
     if (response.message_len > 0) {
@@ -922,7 +957,7 @@ void KVCacheManagerWithTransfer::HandleControlConnection(int fd) {
   }
 }
 
-void KVCacheManagerWithTransfer::ProcessPullStream(
+absl::Status KVCacheManagerWithTransfer::ProcessPullStream(
     int fd, const ControlRequestHeader& req) {
   std::shared_ptr<SendEntry> entry;
   {
@@ -936,15 +971,18 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
       return stopping_.load();
     });
   }
-  if (stopping_) return;
+  if (stopping_)
+    return absl::CancelledError("KVCacheManagerWithTransfer is stopping");
   if (!entry) {
-    throw std::runtime_error(
+    return absl::InternalError(
         "KVCacheManagerWithTransfer is stopping during wait for send entry");
   }
 
-  std::vector<int64_t> src_block_ids = ReadBlockIds(fd, req.num_blocks);
-  std::vector<int64_t> dst_block_ids = ReadBlockIds(fd, req.num_blocks);
-  ValidateRequestedBlocks(*entry, src_block_ids);
+  ASSIGN_OR_RETURN(std::vector<int64_t> src_block_ids,
+                   ReadBlockIds(fd, req.num_blocks));
+  ASSIGN_OR_RETURN(std::vector<int64_t> dst_block_ids,
+                   ReadBlockIds(fd, req.num_blocks));
+  RETURN_IF_ERROR(ValidateRequestedBlocks(*entry, src_block_ids));
 
   // Acknowledge acceptance to consumer immediately
   ControlResponseHeader response;
@@ -952,23 +990,22 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
   response.status = 0;
   response.num_layers = static_cast<uint32_t>(num_layers() * num_shards());
   response.data_port = static_cast<uint32_t>(local_data_port_);
-  CheckStatus("control stream response header write",
-              WriteExact(fd, &response, sizeof(response)));
+  RETURN_IF_ERROR(WriteExact(fd, &response, sizeof(response)));
 
-  std::string peer_ip = GetPeerIp(fd);
+  ASSIGN_OR_RETURN(std::string peer_ip, GetPeerIp(fd));
   std::string remote_data_endpoint =
-      peer_ip + ":" + std::to_string(req.consumer_data_port);
+      absl::StrCat(peer_ip, ":", req.consumer_data_port);
 
   VLOG(1) << "ProcessPullStream (Hybrid Bridge) successfully acknowledged "
              "consumer. Intercepting and launching StartPushInternal to "
           << remote_data_endpoint;
 
   // Intercept and Execute Hybrid Push on behalf of remote consumer!
-  StartPushInternal(req.uuid, remote_data_endpoint, src_block_ids,
-                    dst_block_ids);
+  return StartPushInternal(req.uuid, remote_data_endpoint, src_block_ids,
+                           dst_block_ids);
 }
 
-void KVCacheManagerWithTransfer::StartPushInternal(
+absl::Status KVCacheManagerWithTransfer::StartPushInternal(
     uint64_t uuid, absl::string_view remote_data_endpoint,
     const std::vector<int64_t>& src_block_ids,
     const std::vector<int64_t>& dst_block_ids) {
@@ -982,7 +1019,7 @@ void KVCacheManagerWithTransfer::StartPushInternal(
       done_sending_.insert(it->second->req_id);
       send_entries_.erase(it);
     }
-    ThrowStatus("Failed to issue D2H in StartPushInternal", future_or.status());
+    return future_or.status();
   }
 
   auto future = std::move(future_or.value());
@@ -991,6 +1028,8 @@ void KVCacheManagerWithTransfer::StartPushInternal(
        src_block_ids,
        dst_block_ids](const absl::StatusOr<raiden::BufferHolders>& s) {
         if (!s.ok()) {
+          LOG(ERROR) << "D2H future failed in StartPushInternal: "
+                     << s.status();
           std::lock_guard<std::mutex> lock(mu_);
           auto it = send_entries_.find(uuid);
           if (it != send_entries_.end()) {
@@ -1003,6 +1042,10 @@ void KVCacheManagerWithTransfer::StartPushInternal(
         std::vector<int> dst_ints(dst_block_ids.begin(), dst_block_ids.end());
         // Push across Data Plane socket!
         auto push_s = H2hWrite(remote_data_endpoint, src_ints, dst_ints, uuid);
+        if (!push_s.ok()) {
+          LOG(ERROR) << "H2hWrite failed in StartPushInternal: "
+                     << push_s.status();
+        }
         std::lock_guard<std::mutex> lock(mu_);
         auto it = send_entries_.find(uuid);
         if (it != send_entries_.end()) {
@@ -1010,6 +1053,7 @@ void KVCacheManagerWithTransfer::StartPushInternal(
           send_entries_.erase(it);
         }
       });
+  return absl::OkStatus();
 }
 
 absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
@@ -1075,16 +1119,15 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
   return absl::OkStatus();
 }
 
-std::string KVCacheManagerWithTransfer::EndpointWithPort(
+absl::StatusOr<std::string> KVCacheManagerWithTransfer::EndpointWithPort(
     absl::string_view endpoint, int port) const {
-  auto [host, ignored_port] = SplitEndpoint(endpoint);
-  (void)ignored_port;
-  return absl::StrCat(host, ":", port);
+  ASSIGN_OR_RETURN(auto host_port, SplitEndpoint(endpoint));
+  return absl::StrCat(host_port.first, ":", port);
 }
 
-void KVCacheManagerWithTransfer::AckRemote(absl::string_view remote_endpoint,
-                                           uint64_t uuid) {
-  int control_fd = ConnectTcp(remote_endpoint);
+absl::Status KVCacheManagerWithTransfer::AckRemote(
+    absl::string_view remote_endpoint, uint64_t uuid) {
+  ASSIGN_OR_RETURN(int control_fd, ConnectTcp(remote_endpoint));
   auto control_cleanup =
       std::unique_ptr<int, void (*)(int*)>(&control_fd, [](int* p) {
         if (p && *p >= 0) close(*p);
@@ -1094,26 +1137,27 @@ void KVCacheManagerWithTransfer::AckRemote(absl::string_view remote_endpoint,
   stream_request.op = kOpPullStream;
   stream_request.uuid = uuid;
   stream_request.num_blocks = 0;
-  CheckStatus("control pull stream write (empty)",
-              WriteExact(control_fd, &stream_request, sizeof(stream_request)));
-  (void)ReadControlResponseHeader(control_fd);
+  RETURN_IF_ERROR(
+      WriteExact(control_fd, &stream_request, sizeof(stream_request)));
+  ASSIGN_OR_RETURN(auto response, ReadControlResponseHeader(control_fd));
+  (void)response;
+  return absl::OkStatus();
 }
 
-KVCacheManagerWithTransfer::ControlResponseHeader
+absl::StatusOr<KVCacheManagerWithTransfer::ControlResponseHeader>
 KVCacheManagerWithTransfer::ReadControlResponseHeader(int fd) {
   ControlResponseHeader response;
-  CheckStatus("control response read",
-              ReadExact(fd, &response, sizeof(response)));
+  RETURN_IF_ERROR(ReadExact(fd, &response, sizeof(response)));
   if (response.magic != kResponseMagic) {
-    throw std::runtime_error("bad control response magic");
+    return absl::InvalidArgumentError("bad control response magic");
   }
   if (response.status != 0) {
     std::string message(response.message_len, '\0');
     if (response.message_len > 0) {
-      CheckStatus("control error body read",
-                  ReadExact(fd, message.data(), message.size()));
+      RETURN_IF_ERROR(ReadExact(fd, message.data(), message.size()));
     }
-    throw std::runtime_error("remote Raiden control error: " + message);
+    return absl::InternalError(
+        absl::StrCat("remote Raiden control error: ", message));
   }
   return response;
 }
@@ -1151,47 +1195,50 @@ KVCacheManagerWithTransfer::DeadlineFromNow() const {
          std::chrono::milliseconds(static_cast<int64_t>(timeout_s_ * 1000.0));
 }
 
-void KVCacheManagerWithTransfer::ConfigureDataPortFromKvTransfer() {
+absl::Status KVCacheManagerWithTransfer::ConfigureDataPortFromKvTransfer() {
   if (num_layers() == 0) {
     local_data_port_ = 0;
-    return;
+    return absl::OkStatus();
   }
   std::optional<int> data_port = local_port();
   if (!data_port.has_value()) {
-    throw std::runtime_error("KVCacheManager BlockTransport is not running");
+    return absl::FailedPreconditionError(
+        "KVCacheManager BlockTransport is not running");
   }
   local_data_port_ = *data_port;
   SetBlockReadinessCallback(
       [this](size_t layer_idx, size_t shard_idx, int block_id) {
         return WaitForStagingBlockRead(layer_idx, shard_idx, block_id);
       });
+  return absl::OkStatus();
 }
 
-uint64_t KVCacheManagerWithTransfer::StagingBlockBase(int64_t slot_idx) const {
+absl::StatusOr<uint64_t> KVCacheManagerWithTransfer::StagingBlockBase(
+    int64_t slot_idx) const {
   if (slot_idx < 0) {
-    throw std::out_of_range("slot_idx out of range");
+    return absl::OutOfRangeError("slot_idx out of range");
   }
   if (slot_idx >
       std::numeric_limits<int64_t>::max() / std::max<int64_t>(max_blocks_, 1)) {
-    throw std::out_of_range("staging block base exceeds int64 range");
+    return absl::OutOfRangeError("staging block base exceeds int64 range");
   }
   const int64_t base = slot_idx * max_blocks_;
   if (base < 0 ||
       base > static_cast<int64_t>(std::numeric_limits<int>::max())) {
-    throw std::out_of_range("staging block base exceeds int range");
+    return absl::OutOfRangeError("staging block base exceeds int range");
   }
   return static_cast<uint64_t>(base);
 }
 
-std::vector<int> KVCacheManagerWithTransfer::ContiguousBlockIds(
+absl::StatusOr<std::vector<int>> KVCacheManagerWithTransfer::ContiguousBlockIds(
     uint64_t base, uint64_t count) const {
   if (count > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
-    throw std::out_of_range("block count exceeds int range");
+    return absl::OutOfRangeError("block count exceeds int range");
   }
   if (base > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
       count >
           static_cast<uint64_t>(std::numeric_limits<int>::max()) - base + 1) {
-    throw std::out_of_range("block id range exceeds int range");
+    return absl::OutOfRangeError("block id range exceeds int range");
   }
   std::vector<int> ids;
   ids.reserve(static_cast<size_t>(count));

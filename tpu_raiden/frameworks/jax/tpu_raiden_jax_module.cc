@@ -32,9 +32,9 @@
 #include "tpu_raiden/core/raiden_future.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/frameworks/jax/kv_cache_manager.h"
-#include "tpu_raiden/frameworks/jax/nb_statusor.h"  // IWYU pragma: keep
 #include "tpu_raiden/frameworks/jax/raw_transfer_internal.h"
 #include "tpu_raiden/frameworks/jax/weight_synchronizer.h"
+#include "tpu_raiden/frameworks/nb_statusor.h"  // IWYU pragma: keep
 #include "tpu_raiden/kv_cache/kv_cache_store.h"
 
 namespace nb = nanobind;
@@ -68,22 +68,14 @@ NB_MODULE(_tpu_raiden_jax, m) {
   // compatibility.
   nb::class_<tpu_raiden::RaidenFuture>(m, "RaidenFuture")
       .def("Await",
-           [](tpu_raiden::RaidenFuture& self) {
+           [](tpu_raiden::RaidenFuture& self) -> absl::Status {
              nb::gil_scoped_release release;
-             absl::Status status = self.Await();
-             if (!status.ok()) {
-               throw std::runtime_error("Async copy failed: " +
-                                        std::string(status.message()));
-             }
+             return self.Await();
            })
       .def("wait",
-           [](tpu_raiden::RaidenFuture& self) {
+           [](tpu_raiden::RaidenFuture& self) -> absl::Status {
              nb::gil_scoped_release release;
-             absl::Status status = self.Await();
-             if (!status.ok()) {
-               throw std::runtime_error("Async copy failed: " +
-                                        std::string(status.message()));
-             }
+             return self.Await();
            })
       .def("IsReady", &tpu_raiden::RaidenFuture::IsReady)
       .def("is_ready", &tpu_raiden::RaidenFuture::IsReady);

@@ -32,6 +32,7 @@
 #include "absl/strings/string_view.h"
 #include "tpu_raiden/core/raiden_future.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
+#include "tpu_raiden/frameworks/nb_statusor.h"  // IWYU pragma: keep
 #include "tpu_raiden/frameworks/torch/kv_cache_manager.h"
 #include "tpu_raiden/frameworks/torch/torch_nanobind_utils.h"
 #include "tpu_raiden/frameworks/torch/weight_synchronizer.h"
@@ -66,22 +67,14 @@ NB_MODULE(_tpu_raiden_torch, m) {
   // =========================================================================
   nb::class_<tpu_raiden::RaidenFuture>(m, "RaidenFuture")
       .def("Await",
-           [](tpu_raiden::RaidenFuture& self) {
+           [](tpu_raiden::RaidenFuture& self) -> absl::Status {
              nb::gil_scoped_release release;
-             absl::Status status = self.Await();
-             if (!status.ok()) {
-               throw std::runtime_error("Async copy failed: " +
-                                        std::string(status.message()));
-             }
+             return self.Await();
            })
       .def("wait",
-           [](tpu_raiden::RaidenFuture& self) {
+           [](tpu_raiden::RaidenFuture& self) -> absl::Status {
              nb::gil_scoped_release release;
-             absl::Status status = self.Await();
-             if (!status.ok()) {
-               throw std::runtime_error("Async copy failed: " +
-                                        std::string(status.message()));
-             }
+             return self.Await();
            })
       .def("IsReady", &tpu_raiden::RaidenFuture::IsReady)
       .def("is_ready", &tpu_raiden::RaidenFuture::IsReady);
@@ -92,8 +85,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
   nb::class_<KVCacheManager>(m, "KVCacheManager")
       .def(nb::init<const std::vector<std::vector<at::Tensor>>&,
                     std::optional<int>, std::optional<int>, bool, int>(),
-           nb::arg("device_tensors"),
-           nb::arg("local_port") = nb::none(),
+           nb::arg("device_tensors"), nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
            nb::arg("parallelism") = 1)
@@ -108,15 +100,12 @@ NB_MODULE(_tpu_raiden_torch, m) {
           [](KVCacheManager& self,
              const std::vector<int64_t>& src_offsets_major_dim,
              const std::vector<int64_t>& dst_offsets_major_dim,
-             const std::vector<int64_t>& copy_sizes_major_dim) {
+             const std::vector<int64_t>& copy_sizes_major_dim)
+              -> absl::StatusOr<tpu_raiden::RaidenFuture> {
             auto status_or =
                 self.H2d(src_offsets_major_dim, dst_offsets_major_dim,
                          copy_sizes_major_dim);
-            if (!status_or.ok()) {
-              throw std::runtime_error(
-                  "KVCacheManager H2d failed: " +
-                  std::string(status_or.status().message()));
-            }
+            if (!status_or.ok()) return status_or.status();
             return tpu_raiden::RaidenFuture{std::move(status_or.value())};
           },
           nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
@@ -127,15 +116,12 @@ NB_MODULE(_tpu_raiden_torch, m) {
           [](KVCacheManager& self,
              const std::vector<int64_t>& src_offsets_major_dim,
              const std::vector<int64_t>& dst_offsets_major_dim,
-             const std::vector<int64_t>& copy_sizes_major_dim) {
+             const std::vector<int64_t>& copy_sizes_major_dim)
+              -> absl::StatusOr<tpu_raiden::RaidenFuture> {
             auto status_or =
                 self.D2h(src_offsets_major_dim, dst_offsets_major_dim,
                          copy_sizes_major_dim);
-            if (!status_or.ok()) {
-              throw std::runtime_error(
-                  "KVCacheManager D2h failed: " +
-                  std::string(status_or.status().message()));
-            }
+            if (!status_or.ok()) return status_or.status();
             return tpu_raiden::RaidenFuture{std::move(status_or.value())};
           },
           nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
@@ -145,14 +131,12 @@ NB_MODULE(_tpu_raiden_torch, m) {
           "D2hAutoAllocate",
           [](KVCacheManager& self,
              const std::vector<int64_t>& src_offsets_major_dim,
-             const std::vector<int64_t>& copy_sizes_major_dim) {
+             const std::vector<int64_t>& copy_sizes_major_dim)
+              -> absl::StatusOr<
+                  std::pair<std::vector<int>, tpu_raiden::RaidenFuture>> {
             auto status_or = self.D2hAutoAllocate(
                 src_offsets_major_dim, copy_sizes_major_dim);
-            if (!status_or.ok()) {
-              throw std::runtime_error(
-                  "KVCacheManager D2hAutoAllocate failed: " +
-                  std::string(status_or.status().message()));
-            }
+            if (!status_or.ok()) return status_or.status();
             return std::make_pair(
                 status_or.value().first,
                 tpu_raiden::RaidenFuture{std::move(status_or.value().second)});
@@ -162,14 +146,12 @@ NB_MODULE(_tpu_raiden_torch, m) {
       .def(
           "H2hWrite",
           [](KVCacheManager& self, std::string peer,
-             const std::vector<int>& src_block_ids) {
+             const std::vector<int>& src_block_ids)
+              -> absl::StatusOr<
+                  std::pair<std::vector<int>, tpu_raiden::RaidenFuture>> {
             auto status_or =
                 self.H2hWrite(std::move(peer), src_block_ids);
-            if (!status_or.ok()) {
-              throw std::runtime_error(
-                  "KVCacheManager H2hWrite failed: " +
-                  std::string(status_or.status().message()));
-            }
+            if (!status_or.ok()) return status_or.status();
             return std::make_pair(
                 status_or.value().first,
                 tpu_raiden::RaidenFuture{std::move(status_or.value().second)});
@@ -179,14 +161,12 @@ NB_MODULE(_tpu_raiden_torch, m) {
       .def(
           "H2hRead",
           [](KVCacheManager& self, std::string peer,
-             const std::vector<int>& src_block_ids) {
+             const std::vector<int>& src_block_ids)
+              -> absl::StatusOr<
+                  std::pair<std::vector<int>, tpu_raiden::RaidenFuture>> {
             auto status_or =
                 self.H2hRead(std::move(peer), src_block_ids);
-            if (!status_or.ok()) {
-              throw std::runtime_error(
-                  "KVCacheManager H2hRead failed: " +
-                  std::string(status_or.status().message()));
-            }
+            if (!status_or.ok()) return status_or.status();
             return std::make_pair(
                 status_or.value().first,
                 tpu_raiden::RaidenFuture{std::move(status_or.value().second)});
