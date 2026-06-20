@@ -24,6 +24,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <chrono>  // NOLINT
 #include <thread>  // NOLINT
 #include <vector>
 
@@ -297,41 +298,66 @@ absl::Status BlockTransport::WriteBlockDirect(absl::string_view peer,
                                               int remote_block_id,
                                               const uint8_t* data_ptr,
                                               size_t size_bytes) {
-  auto status_or_fd = AcquireConnection(peer);
-  if (!status_or_fd.ok()) return status_or_fd.status();
-  int fd = status_or_fd.value();
-  ApplySocketAffinityAndBinding(fd);
-  bool ok_to_pool = false;
-  auto fd_cleaner = absl::MakeCleanup([&] {
-    if (ok_to_pool) {
-      ReleaseConnection(peer, fd);
-    } else {
-      shutdown(fd, SHUT_RDWR);
-      close(fd);
+  // A pooled connection can go stale between the acquire-time health check and
+  // the write: the peer may close an idle connection, surfacing as an EPIPE
+  // "Broken pipe". A dropped block transfer is unrecoverable for the caller, so
+  // retry on a fresh connection. Each failed attempt closes its fd (ok_to_pool
+  // stays false), so the next AcquireConnection avoids the poisoned one.
+  constexpr int kMaxAttempts = 5;
+  absl::Status last = absl::OkStatus();
+  for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+    if (attempt > 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2 * attempt));
     }
-  });
+    auto status_or_fd = AcquireConnection(peer);
+    if (!status_or_fd.ok()) {
+      last = status_or_fd.status();
+      continue;
+    }
+    int fd = status_or_fd.value();
+    ApplySocketAffinityAndBinding(fd);
+    bool ok_to_pool = false;
+    auto fd_cleaner = absl::MakeCleanup([&] {
+      if (ok_to_pool) {
+        ReleaseConnection(peer, fd);
+      } else {
+        shutdown(fd, SHUT_RDWR);
+        close(fd);
+      }
+    });
 
-  PacketHeader header = {};
-  header.op = 4;
-  header.buffer_id = 0;
-  header.remote_id = static_cast<uint32_t>(remote_block_id);
-  header.count_or_size = static_cast<uint32_t>(size_bytes);
+    PacketHeader header = {};
+    header.op = 4;
+    header.buffer_id = 0;
+    header.remote_id = static_cast<uint32_t>(remote_block_id);
+    header.count_or_size = static_cast<uint32_t>(size_bytes);
 
-  RETURN_IF_ERROR(WriteExact(fd, &header, sizeof(header)));
+    last = WriteExact(fd, &header, sizeof(header));
+    if (!last.ok()) continue;
 
-  uint8_t ack = 0;
-  RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
-  if (ack != 1) return absl::InternalError("WriteBlockDirect handshake failed");
+    uint8_t ack = 0;
+    last = ReadExact(fd, &ack, 1);
+    if (!last.ok()) continue;
+    if (ack != 1) {
+      last = absl::InternalError("WriteBlockDirect handshake failed");
+      continue;
+    }
 
-  RETURN_IF_ERROR(WriteExact(fd, data_ptr, size_bytes));
+    last = WriteExact(fd, data_ptr, size_bytes);
+    if (!last.ok()) continue;
 
-  ack = 0;
-  RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
-  if (ack != 1)
-    return absl::InternalError("WriteBlockDirect completion ack failed");
+    ack = 0;
+    last = ReadExact(fd, &ack, 1);
+    if (!last.ok()) continue;
+    if (ack != 1) {
+      last = absl::InternalError("WriteBlockDirect completion ack failed");
+      continue;
+    }
 
-  ok_to_pool = true;
-  return absl::OkStatus();
+    ok_to_pool = true;
+    return absl::OkStatus();
+  }
+  return last;
 }
 
 absl::StatusOr<std::vector<int>> BlockTransport::Pull(
