@@ -20,6 +20,8 @@
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
+#include "torch_tpu/eager/tensor_to_buffer.h"
+#include "xla/pjrt/pjrt_client.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 
 namespace tpu_raiden {
@@ -52,7 +54,30 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
   const std::vector<at::Tensor>& kv_caches() const { return kv_caches_; }
 
  private:
+  // Buffers unpacked from a 2D tensor list, together with the owning
+  // DeviceBufferRefs that must outlive their use (see UnpackTorchTensor).
+  struct UnpackedLayers {
+    std::vector<std::vector<xla::PjRtBuffer*>> buffers;
+    std::vector<torch_tpu::DeviceBufferRef> refs;
+    xla::PjRtClient* client = nullptr;
+  };
+  static UnpackedLayers UnpackLayers(
+      const std::vector<std::vector<at::Tensor>>& device_tensors);
+
+  // Delegated-to constructor for BOTH public ctors. Moves the keep-alive refs
+  // into buffer_refs_ so the materialized device buffers survive for this
+  // manager's lifetime. `kv_caches` is retained for the disagg path's
+  // kv_caches() accessor (empty for the offload path).
+  KVCacheManager(UnpackedLayers unpacked, std::optional<int> local_port,
+                 std::optional<int> host_blocks_to_allocate,
+                 bool unsafe_skip_buffer_lock, int parallelism, int64_t node_id,
+                 int64_t local_control_port, int64_t max_blocks,
+                 int64_t num_slots, double timeout_s,
+                 std::vector<at::Tensor> kv_caches);
+
   std::vector<at::Tensor> kv_caches_;
+  // Keep-alives for the materialized device buffers backing the manager.
+  std::vector<torch_tpu::DeviceBufferRef> buffer_refs_;
 };
 
 }  // namespace torch

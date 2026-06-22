@@ -21,7 +21,6 @@
 #include <string>
 #include <vector>
 
-#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "tpu_raiden/transport/raw_buffer_transport.h"
@@ -34,9 +33,8 @@ enum class MajorOrder : uint8_t {
   kBlockMajor = 1,
 };
 
-using BlockReceivedCallback =
-    std::function<absl::Status(size_t layer_idx, size_t shard_idx,
-                               int block_id, size_t size_bytes)>;
+using BlockReceivedCallback = std::function<absl::Status(
+    size_t layer_idx, size_t shard_idx, int block_id, size_t size_bytes)>;
 
 // Delegate interface for BlockTransport inheriting raw memory primitives.
 class BlockTransportDelegate : public RawBufferTransportDelegate {
@@ -98,7 +96,8 @@ class BlockTransport : public RawBufferTransport {
       MajorOrder major_order = MajorOrder::kLayerMajor,
       BlockReceivedCallback on_block_received = {});
 
-  // Write a single block of data directly from a host pointer to a remote block ID.
+  // Write a single block of data directly from a host pointer to a remote block
+  // ID.
   absl::Status WriteBlockDirect(absl::string_view peer, int remote_block_id,
                                 const uint8_t* data_ptr, size_t size_bytes);
 
@@ -107,6 +106,11 @@ class BlockTransport : public RawBufferTransport {
                                    const PacketHeader& header) override;
 
  private:
+  absl::Status WriteBlockDirectInternal(absl::string_view peer,
+                                        int remote_block_id,
+                                        const uint8_t* data_ptr,
+                                        size_t size_bytes);
+
   void H2hWriteWorker(int stream_idx, absl::string_view peer,
                       size_t block_offset, size_t block_count,
                       const std::vector<int>& src_block_ids,

@@ -14,13 +14,11 @@
 
 #include "tpu_raiden/frameworks/torch/weight_synchronizer.h"
 
-#include <cstddef>
-#include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
-#include "absl/status/status.h"
-#include "xla/pjrt/pjrt_client.h"
+#include "third_party/py/torch/aten/src/ATen/core/TensorBody.h"
 #include "tpu_raiden/frameworks/torch/torch_utils.h"
 #include "tpu_raiden/weight_sync/weight_synchronizer_base.h"
 
@@ -30,10 +28,17 @@ namespace torch {
 WeightSynchronizer::WeightSynchronizer(
     const std::vector<std::vector<at::Tensor>>& device_tensors,
     std::optional<int> local_port, int parallelism)
+    : WeightSynchronizer(UnpackTorchTensors(device_tensors), local_port,
+                         parallelism) {}
+
+WeightSynchronizer::WeightSynchronizer(UnpackedTensors unpacked,
+                                       std::optional<int> local_port,
+                                       int parallelism)
     : weight_sync::WeightSynchronizerBase(
-          UnpackTorchTensors(device_tensors), local_port,
+          std::move(unpacked.buffers), local_port,
           /*external_host_ptrs=*/std::nullopt,
-          /*unsafe_skip_buffer_lock=*/true, parallelism) {}
+          /*unsafe_skip_buffer_lock=*/true, parallelism),
+      buffer_refs_(std::move(unpacked.refs)) {}
 
 WeightSynchronizer::~WeightSynchronizer() = default;
 
