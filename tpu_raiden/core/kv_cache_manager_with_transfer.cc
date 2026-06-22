@@ -241,7 +241,7 @@ static kv_cache::KVCacheCopySpec ToKVCacheCopySpecImpl(const CopySpec& spec) {
           .sizes = spec.sizes};
 }
 
-static CopySpec BuildH2dCopySpec(const std::vector<int64_t>& src_block_ids,
+static CopySpec BuildCoalescedCopySpec(const std::vector<int64_t>& src_block_ids,
                                  const std::vector<int64_t>& dst_block_ids) {
   if (src_block_ids.size() != dst_block_ids.size()) {
     throw std::invalid_argument(
@@ -326,7 +326,7 @@ static CopyPlan BuildLoadCopyPlan(
   }
 
   plan.h2d_copy =
-      BuildH2dCopySpec(plan.h2d_host_block_ids, plan.h2d_local_block_ids);
+      BuildCoalescedCopySpec(plan.h2d_host_block_ids, plan.h2d_local_block_ids);
   plan.host_dst_to_src.clear();  // No host reordering needed!
   return plan;
 }
@@ -1044,9 +1044,14 @@ void KVCacheManagerWithTransfer::StartPushInternal(
     }
   }
 
-  std::vector<int64_t> sizes(src_block_ids.size(), 1);
-  auto future_or =
-      D2h(src_block_ids, host_block_ids, sizes, /*slot_idx=*/std::nullopt);
+  // Coalesce contiguous (device,host) block runs into a few large copies. With
+  // per-block segments (sizes=1) a contiguous KV range becomes n device copies
+  // that flood the command queue with small ops and serialize against prefill
+  // GEMMs on the shared TensorCore; coalescing collapses a contiguous range to
+  // one copy, matching the pre-Hybrid-Push pull path.
+  CopySpec d2h_copy = BuildCoalescedCopySpec(src_block_ids, host_block_ids);
+  auto future_or = D2h(d2h_copy.src_offsets, d2h_copy.dst_offsets,
+                       d2h_copy.sizes, /*slot_idx=*/std::nullopt);
   if (!future_or.ok()) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = send_entries_.find(uuid);
@@ -1120,10 +1125,10 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
           << " with " << chunk_size << " blocks. Launching H2D copy for req_id "
           << target_req_id;
 
-  std::vector<int64_t> copy_sizes(chunk_size, 1);
+  CopySpec h2d_copy = BuildCoalescedCopySpec(host_src_blocks, chip_dst_blocks);
 
-  auto future_or = H2d(host_src_blocks, chip_dst_blocks, copy_sizes,
-                       /*slot_idx=*/std::nullopt);
+  auto future_or = H2d(h2d_copy.src_offsets, h2d_copy.dst_offsets,
+                       h2d_copy.sizes, /*slot_idx=*/std::nullopt);
   if (!future_or.ok()) {
     std::lock_guard<std::mutex> lock(mu_);
     failed_recving_.insert(target_req_id);
