@@ -325,6 +325,10 @@ void RawBufferTransport::ConnectionWorker(int client_fd) {
     pfd.events = POLLIN;
     int ret = poll(&pfd, 1, 50);
     if (ret < 0) {
+      // EINTR (interrupted by a signal) and EAGAIN (transient kernel resource
+      // pressure) are benign: retry the poll rather than tearing down a healthy
+      // connection. Only a genuine error closes the connection.
+      if (errno == EINTR || errno == EAGAIN) continue;
       break;
     }
     if (ret == 0) continue;

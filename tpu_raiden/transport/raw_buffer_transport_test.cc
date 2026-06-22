@@ -14,6 +14,8 @@
 
 #include "tpu_raiden/transport/raw_buffer_transport.h"
 
+#include <signal.h>
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -116,6 +118,35 @@ TEST(RawBufferTransportTest, PushBufferCorrectness) {
   EXPECT_EQ(delegate2.data()[512], 0xAB);
   EXPECT_EQ(delegate2.data()[1535], 0xAB);
   EXPECT_EQ(delegate2.data()[1536], 0x00);
+}
+
+TEST(RawBufferTransportTest, PollEINTRIsBenign) {
+  size_t size = 4096;
+  RawMockDelegate delegate1(size);
+  RawMockDelegate delegate2(size);
+
+  std::memset(delegate2.data(), 0x00, size);
+
+  RawBufferTransport transport1(&delegate1, 0);
+  RawBufferTransport transport2(&delegate2, 0);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::string peer2 = "localhost:" + std::to_string(transport2.local_port());
+
+  // Register a dummy signal handler
+  signal(SIGUSR1, [](int) {});
+
+  // Send a signal to the process, which will interrupt some poll() calls with
+  // EINTR.
+  kill(getpid(), SIGUSR1);
+
+  // Perform a push to verify the connection worker didn't die.
+  std::vector<uint8_t> push_payload(1024, 0xAB);
+  auto push_res = transport1.PushBuffer(
+      peer2, /*buffer_id=*/0, /*dst_shard_idx=*/0, /*dst_offset_bytes=*/512,
+      push_payload.data(), push_payload.size());
+  ASSERT_TRUE(push_res.ok()) << push_res.message();
 }
 
 TEST(RawBufferTransportTest, RejectsOutOfBounds) {
