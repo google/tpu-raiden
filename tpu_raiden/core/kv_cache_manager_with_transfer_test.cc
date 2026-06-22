@@ -160,6 +160,73 @@ TEST(KVCacheManagerWithTransferTest, StartReadAcceptsParallelism) {
   engine->StartRead("req_parallel", 99999, "127.0.0.1:8888", {0}, {0},
                     /*parallelism=*/2);
 }
+
+TEST(KVCacheManagerWithTransferTest, StartReadAllocatesStagingSlot) {
+  TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
+                          TpuPjrtManager::GetDefault());
+  std::vector<int64_t> shape_dims = {2, 32, 32};
+  std::vector<float> host_data(2 * 32 * 32, 0.0f);
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<xla::PjRtBuffer> buffer,
+      pjrt_manager->BufferFromHost(host_data.data(), xla::F32, shape_dims));
+  ASSERT_THAT(buffer->GetReadyFuture().Await(), IsOk());
+
+  std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers = {{buffer.get()}};
+  auto engine = std::make_unique<KVCacheManagerWithTransfer>(
+      layer_buffers,
+      /*local_port=*/std::nullopt,
+      /*host_blocks_to_allocate=*/std::nullopt,
+      /*unsafe_skip_buffer_lock=*/true,
+      /*parallelism=*/1,
+      /*host_allocator=*/nullptr,
+      /*node_id=*/0,
+      /*local_control_port=*/0,
+      /*max_blocks=*/2,
+      /*num_slots=*/2,
+      /*timeout_s=*/10.0);
+  ASSERT_THAT(engine->ConfigureHostStagingSlots(2, 2), IsOk());
+
+  // Call StartRead without local_host_block_ids, should allocate a staging slot
+  engine->StartRead("req_staging", 11111, "127.0.0.1:8888", {0}, {0}, 1, std::nullopt);
+}
+
+TEST(KVCacheManagerWithTransferTest, StartReadTimeoutReclaimsSlot) {
+  TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
+                          TpuPjrtManager::GetDefault());
+  std::vector<int64_t> shape_dims = {2, 32, 32};
+  std::vector<float> host_data(2 * 32 * 32, 0.0f);
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<xla::PjRtBuffer> buffer,
+      pjrt_manager->BufferFromHost(host_data.data(), xla::F32, shape_dims));
+  ASSERT_THAT(buffer->GetReadyFuture().Await(), IsOk());
+
+  std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers = {{buffer.get()}};
+  auto engine = std::make_unique<KVCacheManagerWithTransfer>(
+      layer_buffers,
+      /*local_port=*/std::nullopt,
+      /*host_blocks_to_allocate=*/std::nullopt,
+      /*unsafe_skip_buffer_lock=*/true,
+      /*parallelism=*/1,
+      /*host_allocator=*/nullptr,
+      /*node_id=*/0,
+      /*local_control_port=*/0,
+      /*max_blocks=*/2,
+      /*num_slots=*/2,
+      /*timeout_s=*/0.1);
+  ASSERT_THAT(engine->ConfigureHostStagingSlots(2, 2), IsOk());
+
+  engine->StartRead("req_timeout", 22222, "127.0.0.1:8888", {0}, {0}, 1, std::nullopt);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  auto [done_sending, done_recving, failed_recving] = engine->CompleteReadRaw();
+
+  bool found_failure = false;
+  for (const auto& failed : failed_recving) {
+    if (failed == "req_timeout") found_failure = true;
+  }
+  EXPECT_TRUE(found_failure);
+}
+
 TEST(KVCacheManagerWithTransferTest,
      LocalOrchestratedTransferToCustomHostBlock) {
   TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,

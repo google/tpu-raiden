@@ -529,8 +529,32 @@ void KVCacheManagerWithTransfer::StartRead(
              "req_id: "
           << req_id << ", uuid: " << uuid << ", remote: " << remote_endpoint
           << ", Thread: " << std::this_thread::get_id();
-  std::vector<int64_t> host_block_ids =
-      local_host_block_ids.value_or(local_block_ids);
+  // local_block_ids index the consumer's DEVICE KV cache (the H2D chip dst),
+  // not the host staging pool. If the caller didn't supply explicit host
+  // staging indices, borrow a staging slot and use its host block range so the
+  // inbound push lands at valid host indices (< num_host_blocks). Reusing
+  // local_block_ids as host indices overflows the staging buffer (OUT_OF_RANGE)
+  // once a device block id exceeds num_host_blocks.
+  std::vector<int64_t> host_block_ids;
+  int64_t recv_slot = -1;
+  if (local_host_block_ids.has_value()) {
+    host_block_ids = *local_host_block_ids;
+  } else if (!local_block_ids.empty()) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (static_cast<int64_t>(local_block_ids.size()) > max_blocks_ ||
+        free_slots_.empty()) {
+      // Request larger than a slot, or staging pool exhausted: surface as a
+      // recv failure (the connector can recompute) rather than throwing.
+      failed_recving_.insert(std::string(req_id));
+      return;
+    }
+    recv_slot = AcquireSlotLocked();
+    const int64_t base = static_cast<int64_t>(StagingBlockBase(recv_slot));
+    host_block_ids.reserve(local_block_ids.size());
+    for (size_t k = 0; k < local_block_ids.size(); ++k) {
+      host_block_ids.push_back(base + static_cast<int64_t>(k));
+    }
+  }
   CopyPlan load_plan =
       BuildLoadCopyPlan(remote_block_ids, local_block_ids, host_block_ids);
 
@@ -538,6 +562,8 @@ void KVCacheManagerWithTransfer::StartRead(
     std::lock_guard<std::mutex> lock(mu_);
     RecvEntry entry;
     entry.req_id = req_id;
+    entry.slot_idx = recv_slot;
+    entry.deadline = DeadlineFromNow();
     entry.total_blocks =
         static_cast<int64_t>(load_plan.h2d_host_block_ids.size());
     for (size_t k = 0; k < load_plan.h2d_host_block_ids.size(); ++k) {
@@ -550,6 +576,7 @@ void KVCacheManagerWithTransfer::StartRead(
   if (load_plan.num_blocks == 0) {
     std::lock_guard<std::mutex> lock(mu_);
     done_recving_.insert(std::string(req_id));
+    ReleaseSlotLocked(recv_slot);
     active_recv_entries_.erase(uuid);
     return;
   }
@@ -594,7 +621,11 @@ void KVCacheManagerWithTransfer::StartRead(
           << e.what();
       std::lock_guard<std::mutex> lock(mu_);
       failed_recving_.insert(req_id);
-      active_recv_entries_.erase(uuid);
+      auto it = active_recv_entries_.find(uuid);
+      if (it != active_recv_entries_.end()) {
+        ReleaseSlotLocked(it->second.slot_idx);
+        active_recv_entries_.erase(it);
+      }
     }
   });
 }
@@ -614,6 +645,20 @@ KVCacheManagerWithTransfer::CompleteReadRaw() {
         done_sending_.insert(entry->req_id);
         ReleaseEntrySlotLocked(entry);
         it = send_entries_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    // Reclaim recv entries whose transfer never completed (e.g. the producer
+    // died or never finished pushing). Without this the entry and its host
+    // staging slot leak forever, eventually exhausting the slot pool. Surface
+    // the timeout as a recv failure so the connector can recompute the blocks.
+    for (auto it = active_recv_entries_.begin();
+         it != active_recv_entries_.end();) {
+      if (it->second.deadline <= now) {
+        failed_recving_.insert(it->second.req_id);
+        ReleaseSlotLocked(it->second.slot_idx);
+        active_recv_entries_.erase(it++);
       } else {
         ++it;
       }
@@ -972,14 +1017,42 @@ void KVCacheManagerWithTransfer::StartPushInternal(
     uint64_t uuid, absl::string_view remote_data_endpoint,
     const std::vector<int64_t>& src_block_ids,
     const std::vector<int64_t>& dst_block_ids) {
+  // Stage the producer's device KV into a compact host slot
+  // ([StagingBlockBase(slot), +n)) and send those slot blocks to the consumer,
+  // keeping host offsets within the staging pool.
+  int64_t send_slot = -1;
+  std::vector<int64_t> host_block_ids;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (static_cast<int64_t>(src_block_ids.size()) > max_blocks_ ||
+        free_slots_.empty()) {
+      auto it = send_entries_.find(uuid);
+      if (it != send_entries_.end()) {
+        done_sending_.insert(it->second->req_id);
+        ReleaseEntrySlotLocked(it->second);
+        send_entries_.erase(it);
+      }
+      return;
+    }
+    send_slot = AcquireSlotLocked();
+    auto it = send_entries_.find(uuid);
+    if (it != send_entries_.end()) it->second->slot_idx = send_slot;
+    const int64_t base = static_cast<int64_t>(StagingBlockBase(send_slot));
+    host_block_ids.reserve(src_block_ids.size());
+    for (size_t k = 0; k < src_block_ids.size(); ++k) {
+      host_block_ids.push_back(base + static_cast<int64_t>(k));
+    }
+  }
+
   std::vector<int64_t> sizes(src_block_ids.size(), 1);
   auto future_or =
-      D2h(src_block_ids, src_block_ids, sizes, /*slot_idx=*/std::nullopt);
+      D2h(src_block_ids, host_block_ids, sizes, /*slot_idx=*/std::nullopt);
   if (!future_or.ok()) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = send_entries_.find(uuid);
     if (it != send_entries_.end()) {
       done_sending_.insert(it->second->req_id);
+      ReleaseEntrySlotLocked(it->second);
       send_entries_.erase(it);
     }
     ThrowStatus("Failed to issue D2H in StartPushInternal", future_or.status());
@@ -988,18 +1061,19 @@ void KVCacheManagerWithTransfer::StartPushInternal(
   auto future = std::move(future_or.value());
   future.OnReady(
       [this, uuid, remote_data_endpoint = std::string(remote_data_endpoint),
-       src_block_ids,
+       host_block_ids,
        dst_block_ids](const absl::StatusOr<raiden::BufferHolders>& s) {
         if (!s.ok()) {
           std::lock_guard<std::mutex> lock(mu_);
           auto it = send_entries_.find(uuid);
           if (it != send_entries_.end()) {
             done_sending_.insert(it->second->req_id);
+            ReleaseEntrySlotLocked(it->second);
             send_entries_.erase(it);
           }
           return;
         }
-        std::vector<int> src_ints(src_block_ids.begin(), src_block_ids.end());
+        std::vector<int> src_ints(host_block_ids.begin(), host_block_ids.end());
         std::vector<int> dst_ints(dst_block_ids.begin(), dst_block_ids.end());
         // Push across Data Plane socket!
         auto push_s = H2hWrite(remote_data_endpoint, src_ints, dst_ints, uuid);
@@ -1007,6 +1081,7 @@ void KVCacheManagerWithTransfer::StartPushInternal(
         auto it = send_entries_.find(uuid);
         if (it != send_entries_.end()) {
           done_sending_.insert(it->second->req_id);
+          ReleaseEntrySlotLocked(it->second);
           send_entries_.erase(it);
         }
       });
@@ -1031,7 +1106,8 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
       auto map_it = it->second.host_to_chip.find(h_id);
       if (map_it == it->second.host_to_chip.end()) {
         failed_recving_.insert(target_req_id);
-        active_recv_entries_.erase(uuid);
+        ReleaseSlotLocked(it->second.slot_idx);
+        active_recv_entries_.erase(it);
         return absl::FailedPreconditionError(
             "Received unexpected host block ID");
       }
@@ -1051,7 +1127,11 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
   if (!future_or.ok()) {
     std::lock_guard<std::mutex> lock(mu_);
     failed_recving_.insert(target_req_id);
-    active_recv_entries_.erase(uuid);
+    auto it = active_recv_entries_.find(uuid);
+    if (it != active_recv_entries_.end()) {
+      ReleaseSlotLocked(it->second.slot_idx);
+      active_recv_entries_.erase(it);
+    }
     return future_or.status();
   }
 
@@ -1065,11 +1145,13 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
       it->second.num_completed_blocks += chunk_size;
       if (it->second.num_completed_blocks == it->second.total_blocks) {
         done_recving_.insert(target_req_id);
-        active_recv_entries_.erase(uuid);
+        ReleaseSlotLocked(it->second.slot_idx);
+        active_recv_entries_.erase(it);
       }
     } else {
       failed_recving_.insert(target_req_id);
-      active_recv_entries_.erase(uuid);
+      ReleaseSlotLocked(it->second.slot_idx);
+      active_recv_entries_.erase(it);
     }
   });
   return absl::OkStatus();

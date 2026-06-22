@@ -16,13 +16,13 @@
 
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 #include "tpu_raiden/core/utils.h"
-#include "tpu_raiden/frameworks/torch/torch_tpu_utils.h"
 #include "tpu_raiden/frameworks/torch/torch_utils.h"
 
 namespace tpu_raiden {
@@ -43,42 +43,59 @@ std::vector<std::vector<at::Tensor>> SingleShardLayers(
 
 }  // namespace
 
+KVCacheManager::UnpackedLayers KVCacheManager::UnpackLayers(
+    const std::vector<std::vector<at::Tensor>>& device_tensors) {
+  // Retain the owning DeviceBufferRefs: for view tensors the materialized
+  // buffers are fresh allocations owned solely by these refs, so they must
+  // outlive every D2h/H2d the manager dispatches.
+  UnpackedTensors u = UnpackTorchTensors(device_tensors);
+  UnpackedLayers unpacked;
+  unpacked.buffers = std::move(u.buffers);
+  unpacked.refs = std::move(u.refs);
+  if (!unpacked.buffers.empty() && !unpacked.buffers[0].empty()) {
+    unpacked.client = unpacked.buffers[0][0]->device()->client();
+  }
+  return unpacked;
+}
+
 KVCacheManager::KVCacheManager(
     const std::vector<std::vector<at::Tensor>>& device_tensors,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     bool unsafe_skip_buffer_lock, int parallelism)
+    : KVCacheManager(UnpackLayers(device_tensors), local_port,
+                     host_blocks_to_allocate, unsafe_skip_buffer_lock,
+                     parallelism, /*node_id=*/0, /*local_control_port=*/-1,
+                     /*max_blocks=*/0, /*num_slots=*/0, /*timeout_s=*/120.0,
+                     /*kv_caches=*/{}) {}
+
+KVCacheManager::KVCacheManager(UnpackedLayers unpacked,
+                               std::optional<int> local_port,
+                               std::optional<int> host_blocks_to_allocate,
+                               bool unsafe_skip_buffer_lock, int parallelism,
+                               int64_t node_id, int64_t local_control_port,
+                               int64_t max_blocks, int64_t num_slots,
+                               double timeout_s,
+                               std::vector<at::Tensor> kv_caches)
     : KVCacheManagerWithTransfer(
-          UnpackTorchTensors(device_tensors), local_port,
-          host_blocks_to_allocate,
+          std::move(unpacked.buffers), local_port, host_blocks_to_allocate,
           unsafe_skip_buffer_lock, parallelism,
-          tpu_raiden::CreateHostMemoryAllocator(
-              device_tensors.empty() || device_tensors[0].empty()
-                  ? nullptr
-                  : UnpackTorchTensor(device_tensors[0][0])
-                        ->device()
-                        ->client()),
-          /*node_id=*/0,
-          /*local_control_port=*/-1,
-          /*max_blocks=*/0,
-          /*num_slots=*/0,
-          /*timeout_s=*/120.0) {}
+          tpu_raiden::CreateHostMemoryAllocator(unpacked.client), node_id,
+          local_control_port, max_blocks, num_slots, timeout_s),
+      kv_caches_(std::move(kv_caches)),
+      // Move the keep-alive refs in AFTER the base ctor has acquired the
+      // buffers; they pin the materialized device buffers for our lifetime.
+      buffer_refs_(std::move(unpacked.refs)) {}
 
 KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
                                int64_t node_id, int64_t local_control_port,
                                int64_t max_blocks, int64_t num_slots,
                                double timeout_s, bool unsafe_skip_buffer_lock)
-    : KVCacheManagerWithTransfer(
-          UnpackTorchTensors(SingleShardLayers(kv_caches)),
-          /*local_port=*/std::nullopt,
-          /*host_blocks_to_allocate=*/std::nullopt,
-          unsafe_skip_buffer_lock,
-          /*parallelism=*/1,
-          tpu_raiden::CreateHostMemoryAllocator(
-              kv_caches.empty()
-                  ? nullptr
-                  : UnpackTorchTensor(kv_caches[0])->device()->client()),
-          node_id, local_control_port, max_blocks, num_slots, timeout_s),
-      kv_caches_(kv_caches) {}
+    : KVCacheManager(UnpackLayers(SingleShardLayers(kv_caches)),
+                     /*local_port=*/std::nullopt,
+                     /*host_blocks_to_allocate=*/std::nullopt,
+                     unsafe_skip_buffer_lock, /*parallelism=*/1, node_id,
+                     local_control_port, max_blocks, num_slots, timeout_s,
+                     kv_caches) {}
 
 KVCacheManager::~KVCacheManager() = default;
 
