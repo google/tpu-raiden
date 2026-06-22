@@ -502,9 +502,7 @@ absl::Status BlockTransport::WriteBlockDirect(absl::string_view peer,
                                               int remote_block_id,
                                               const uint8_t* data_ptr,
                                               size_t size_bytes) {
-  auto status_or_fd = AcquireConnection(peer);
-  if (!status_or_fd.ok()) return status_or_fd.status();
-  int fd = status_or_fd.value();
+  TF_ASSIGN_OR_RETURN(int fd, AcquireConnection(peer));
   ApplySocketAffinityAndBinding(fd);
   bool ok_to_pool = false;
   auto fd_cleaner = absl::MakeCleanup([&] {
@@ -526,14 +524,17 @@ absl::Status BlockTransport::WriteBlockDirect(absl::string_view peer,
 
   uint8_t ack = 0;
   RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
-  if (ack != 1) return absl::InternalError("WriteBlockDirect handshake failed");
+  if (ack != 1) {
+    return absl::InternalError("WriteBlockDirect handshake failed");
+  }
 
   RETURN_IF_ERROR(WriteExact(fd, data_ptr, size_bytes));
 
   ack = 0;
   RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
-  if (ack != 1)
+  if (ack != 1) {
     return absl::InternalError("WriteBlockDirect completion ack failed");
+  }
 
   ok_to_pool = true;
   return absl::OkStatus();
