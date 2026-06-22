@@ -19,6 +19,8 @@
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
+#include "torch_tpu/eager/tensor_to_buffer.h"
+#include "tpu_raiden/frameworks/torch/torch_utils.h"
 #include "tpu_raiden/weight_sync/weight_synchronizer_base.h"
 
 namespace tpu_raiden {
@@ -32,6 +34,14 @@ class WeightSynchronizer : public weight_sync::WeightSynchronizerBase {
                      int parallelism = 1);
 
   ~WeightSynchronizer() override;
+
+ private:
+  // Delegated-to ctor: moves the keep-alive refs into buffer_refs_ so the
+  // materialized (possibly view) device buffers survive for our lifetime.
+  WeightSynchronizer(UnpackedTensors unpacked, std::optional<int> local_port,
+                     int parallelism);
+
+  std::vector<torch_tpu::DeviceBufferRef> buffer_refs_;
 };
 
 }  // namespace torch

@@ -41,14 +41,14 @@ cc_library(
     linkopts = ["-Wl,--allow-shlib-undefined"],
     visibility = ["//visibility:public"],
     deps = [
+        ":torch_utils",
         "//tpu_raiden/core:xla_raw_transfer_headers",
-        "//tpu_raiden/frameworks/torch:torch_utils",
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
         "@torch_tpu//shims/torch:aten_headers",
-        "@torch_tpu//shims/torch:torch_headers",
         "@torch_tpu//shims/torch/c10/core:base_headers",
         "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
+        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
 
@@ -69,10 +69,8 @@ cc_library(
     deps = [
         ":torch_tpu_tensor_to_buffer_headers",
         "//tpu_raiden/core:xla_raw_transfer_headers",
-        "@com_google_absl//absl/status",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
-        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
     ],
 )
 
@@ -91,7 +89,7 @@ cc_library(
     deps = [
         ":torch_tpu_utils",
         "//tpu_raiden/core:xla_raw_transfer_headers",
-        "@torch_tpu//shims/torch:aten_headers",
+        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
 
@@ -107,7 +105,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "@nanobind",
-        "@pybind11",
+        "@pybind11",  # buildcleaner: keep
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
     ],
@@ -134,7 +132,7 @@ cc_library(
         "//tpu_raiden/core:utils",
         "//tpu_raiden/core:xla_raw_transfer_headers",
         "@torch_tpu//shims/torch:aten_headers",
-        "@torch_tpu//shims/torch:torch_headers",
+        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
 
@@ -184,6 +182,7 @@ cc_library(
         "@com_google_absl//absl/types:span",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch/c10/core:base_headers",
+        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
     alwayslink = 1,
 )
@@ -230,6 +229,7 @@ cc_library(
         "@com_google_absl//absl/types:span",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch/c10/core:base_headers",
+        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
 
@@ -249,7 +249,7 @@ cc_library(
     deps = [
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
-        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
+        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
         "@xla//xla/pjrt:pjrt_client",
     ],
 )
@@ -268,6 +268,7 @@ cc_library(
         ":torch_tpu_utils_mock",
         "//tpu_raiden/core:xla_raw_transfer_headers",
         "@torch_tpu//shims/torch:aten_headers",
+        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
 
@@ -290,6 +291,7 @@ cc_library(
         "//tpu_raiden/core:xla_raw_transfer_headers",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
+        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
 
@@ -313,6 +315,7 @@ cc_library(
         "@torch_tpu//shims/torch:torch_headers",
         "@torch_tpu//shims/torch/c10/core:base_headers",
         "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
+        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
 

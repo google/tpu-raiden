@@ -22,11 +22,17 @@
 #include <thread>  // NOLINT
 #include <tuple>
 #include <vector>
+#include <atomic>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
 
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -379,6 +385,55 @@ TEST(BlockTransportTest, WriteBlockDirectCorrectness) {
   EXPECT_TRUE(delegate2.on_single_block_received_called());
   EXPECT_EQ(delegate2.received_block_id(), 0);
   EXPECT_EQ(delegate2.received_size_bytes(), size);
+}
+
+TEST(BlockTransportTest, WriteBlockDirectRetryOnDroppedConnection) {
+  int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(server_fd, 0);
+  struct sockaddr_in address;
+  int opt = 1;
+  setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = INADDR_ANY;
+  address.sin_port = 0;
+  ASSERT_EQ(bind(server_fd, (struct sockaddr*)&address, sizeof(address)), 0);
+  ASSERT_EQ(listen(server_fd, 5), 0);
+  socklen_t addrlen = sizeof(address);
+  ASSERT_EQ(getsockname(server_fd, (struct sockaddr*)&address, &addrlen), 0);
+  int port = ntohs(address.sin_port);
+
+  std::atomic<int> accept_count{0};
+  std::thread server_thread([&]() {
+    while (true) {
+      struct sockaddr_in client_addr;
+      socklen_t client_len = sizeof(client_addr);
+      int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+      if (client_fd >= 0) {
+        accept_count++;
+        // Drop the connection immediately!
+        close(client_fd);
+      } else {
+        break;
+      }
+    }
+  });
+
+  MockDelegate delegate(1024);
+  BlockTransport transport(&delegate, 0);
+
+  std::string peer = absl::StrCat("localhost:", port);
+  std::vector<uint8_t> dummy_data(1024, 0);
+  absl::Time start = absl::Now();
+  auto status = transport.WriteBlockDirect(peer, 0, dummy_data.data(), dummy_data.size());
+  absl::Duration elapsed = absl::Now() - start;
+
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(accept_count.load(), 5);
+  EXPECT_GE(elapsed, absl::Milliseconds(20));
+
+  shutdown(server_fd, SHUT_RDWR);
+  close(server_fd);
+  server_thread.join();
 }
 
 }  // namespace

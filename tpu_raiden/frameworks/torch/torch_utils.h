@@ -18,15 +18,30 @@
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
+#include "torch_tpu/eager/tensor_to_buffer.h"
 #include "xla/pjrt/pjrt_client.h"
 
 namespace tpu_raiden {
 namespace torch {
 
-// Unpacks a 2D vector of PyTorch sharded tensors into a 2D vector of raw
-// PjRtBuffer pointers. Throws exceptions if validation or materialization
-// fails.
-std::vector<std::vector<xla::PjRtBuffer*>> UnpackTorchTensors(
+// A 2D (layer x shard) batch of unpacked buffers together with the owning
+// DeviceBufferRefs (flattened). Returned by value -- rather than via an
+// optional out-param -- precisely so the caller cannot silently drop the refs:
+// it MUST take `refs` and keep them alive for as long as it uses `buffers`
+// (view-materialized buffers are owned solely by these refs).
+//
+// IMPORTANT: the `buffer` pointer is only valid while `ref` is alive. Callers
+// that retain `buffer` past this call MUST keep `ref` alive for as long as they
+// use it (e.g. store it in a member / attach it to the transfer future).
+struct UnpackedTensors {
+  std::vector<std::vector<xla::PjRtBuffer*>> buffers;
+  std::vector<torch_tpu::DeviceBufferRef> refs;
+};
+
+// Unpacks a 2D vector of PyTorch sharded tensors (the batch form of
+// UnpackTorchTensor). Throws if validation or materialization fails.
+
+UnpackedTensors UnpackTorchTensors(
     const std::vector<std::vector<at::Tensor>>& device_tensors);
 
 }  // namespace torch

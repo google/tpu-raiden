@@ -28,7 +28,10 @@
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "third_party/py/torch/c10/core/Device.h"
+#include "third_party/py/torch/torch/headeronly/core/DeviceType.h"
+#include "torch_tpu/eager/device_buffer.h"
 #include "xla/future.h"
+#include "xla/layout.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/shape.h"
 #include "xla/shape_util.h"
@@ -145,18 +148,51 @@ T ValueOrThrow(absl::string_view context, absl::StatusOr<T> value_or) {
   return std::move(value_or).value();
 }
 
-void ValidateCpuTensor(const at::Tensor& tensor, const char* role) {
+void ValidateCpuTensor(const at::Tensor& tensor, absl::string_view role) {
   if (!tensor.device().is_cpu()) {
-    throw std::invalid_argument(std::string(role) + " must be a CPU tensor");
+    throw std::invalid_argument(absl::StrCat(role, " must be a CPU tensor"));
   }
   if (!tensor.is_contiguous()) {
-    throw std::invalid_argument(std::string(role) + " must be contiguous");
+    throw std::invalid_argument(absl::StrCat(role, " must be contiguous"));
   }
 }
 
-void AwaitReady(xla::PjRtBuffer* buffer, const char* role) {
+void AwaitReady(xla::PjRtBuffer* buffer, absl::string_view role) {
   (void)buffer;
   (void)role;
+}
+
+// Raw transfer addresses the device buffer as a flat array of equal-size
+// major-dimension slices ("blocks"): block i lives at byte offset
+// i * GetMajorSliceByteSize(buffer). That mapping is only correct when logical
+// dimension 0 is the most-major physical dimension and the buffer's physical
+// size is an exact multiple of the slice size (the blocks tile it with no
+// remainder). Assert both so a buffer with an unexpected on-device layout fails
+// loudly here instead of silently transferring the wrong bytes.
+void ValidateMajorDimLayout(xla::PjRtBuffer* buffer, absl::string_view role) {
+  const xla::Shape& shape = buffer->on_device_shape();
+  const int rank = shape.dimensions().size();
+  if (rank < 1) {
+    throw std::invalid_argument(
+        absl::StrCat(role, " buffer must have rank >= 1 for block transfer"));
+  }
+  // In xla::Layout, minor_to_major(rank - 1) is the most-major physical dim.
+  if (auto pjrt_layout = buffer->layout();
+      pjrt_layout && pjrt_layout->xla_layout().minor_to_major(rank - 1) != 0) {
+    throw std::invalid_argument(
+        absl::StrCat(role, " buffer layout must place logical dimension 0 as the most-major "
+                     "physical dimension; block offsetting assumes blocks are the "
+                     "outermost, physically contiguous dimension."));
+  }
+  const int64_t slice = GetMajorSliceByteSize(buffer);
+  const int64_t physical_size =
+      ValueOrThrow(absl::StrCat(role, " physical buffer size for layout check"),
+                   buffer->GetOnDeviceSizeInBytes());
+  if (slice <= 0 || physical_size % slice != 0) {
+    throw std::invalid_argument(
+        absl::StrCat(role, " buffer physical size is not an exact multiple of its major-dimension "
+                     "slice size; the block-layout assumption does not hold."));
+  }
 }
 
 PjRtCopyFuture IssueD2HCopy(xla::PjRtBuffer* src_buffer, uint8_t* dst_data,
@@ -165,6 +201,7 @@ PjRtCopyFuture IssueD2HCopy(xla::PjRtBuffer* src_buffer, uint8_t* dst_data,
                             const std::vector<int64_t>& dst_offsets_major_dim,
                             const std::vector<int64_t>& copy_sizes_major_dim,
                             std::shared_ptr<void> user_hold = nullptr) {
+  ValidateMajorDimLayout(src_buffer, "Source");
   const bool is_partial = tpu_raiden::IsPartialCopy(
       src_buffer->on_device_shape(), src_offsets_major_dim,
       dst_offsets_major_dim, copy_sizes_major_dim);
@@ -205,6 +242,7 @@ PjRtCopyFuture IssueH2DCopy(const uint8_t* src_data, size_t src_size,
                             const std::vector<int64_t>& dst_offsets_major_dim,
                             const std::vector<int64_t>& copy_sizes_major_dim,
                             std::shared_ptr<void> user_hold = nullptr) {
+  ValidateMajorDimLayout(dst_buffer, "Destination");
   const bool is_partial = tpu_raiden::IsPartialCopy(
       dst_buffer->on_device_shape(), src_offsets_major_dim,
       dst_offsets_major_dim, copy_sizes_major_dim);
@@ -254,17 +292,25 @@ PjRtCopyFuture TransferD2HBatchAsync(
   futures.reserve(src_arrs.size());
   for (size_t i = 0; i < src_arrs.size(); ++i) {
     ValidateCpuTensor(dst_arrs[i], "Destination");
-    xla::PjRtBuffer* src_buffer = UnpackTorchTensor(src_arrs[i]);
+    auto unpacked = UnpackTorchTensor(src_arrs[i]);
+    xla::PjRtBuffer* src_buffer = unpacked.buffer;
     AwaitReady(src_buffer, "Source");
 
     auto torch_holds = std::make_shared<std::vector<at::Tensor>>();
     torch_holds->push_back(src_arrs[i]);
     torch_holds->push_back(dst_arrs[i]);
 
-    futures.push_back(IssueD2HCopy(
+    auto fut = IssueD2HCopy(
         src_buffer, reinterpret_cast<uint8_t*>(dst_arrs[i].data_ptr()),
         dst_arrs[i].nbytes(), src_offsets_major_dim, dst_offsets_major_dim,
-        copy_sizes_major_dim, std::move(torch_holds)));
+        copy_sizes_major_dim, std::move(torch_holds));
+    // Keep the materialized (possibly view) buffer alive until the copy is
+    // done.
+    if (unpacked.ref) {
+      fut.AddKeepAlive(std::make_shared<torch_tpu::DeviceBufferRef>(
+          std::move(*unpacked.ref)));
+    }
+    futures.push_back(std::move(fut));
   }
   return JoinPjRtCopyFutures(absl::MakeSpan(futures));
 }
@@ -283,17 +329,25 @@ PjRtCopyFuture TransferH2DBatchAsync(
   futures.reserve(src_arrs.size());
   for (size_t i = 0; i < src_arrs.size(); ++i) {
     ValidateCpuTensor(src_arrs[i], "Source");
-    xla::PjRtBuffer* dst_buffer = UnpackTorchTensor(dst_arrs[i]);
+    auto unpacked = UnpackTorchTensor(dst_arrs[i]);
+    xla::PjRtBuffer* dst_buffer = unpacked.buffer;
     AwaitReady(dst_buffer, "Destination");
 
     auto torch_holds = std::make_shared<std::vector<at::Tensor>>();
     torch_holds->push_back(src_arrs[i]);
     torch_holds->push_back(dst_arrs[i]);
 
-    futures.push_back(IssueH2DCopy(
+    auto fut = IssueH2DCopy(
         reinterpret_cast<const uint8_t*>(src_arrs[i].data_ptr()),
         src_arrs[i].nbytes(), dst_buffer, src_offsets_major_dim,
-        dst_offsets_major_dim, copy_sizes_major_dim, std::move(torch_holds)));
+        dst_offsets_major_dim, copy_sizes_major_dim, std::move(torch_holds));
+    // Keep the materialized (possibly view) buffer alive until the copy is
+    // done.
+    if (unpacked.ref) {
+      fut.AddKeepAlive(std::make_shared<torch_tpu::DeviceBufferRef>(
+          std::move(*unpacked.ref)));
+    }
+    futures.push_back(std::move(fut));
   }
   return JoinPjRtCopyFutures(absl::MakeSpan(futures));
 }
@@ -323,7 +377,9 @@ PreparedTorchRawTransfer::PreparedTorchRawTransfer(
   if (!host_buffer_) {
     throw std::invalid_argument("host_buffer must not be None");
   }
-  pjrt_buffer_ = UnpackTorchTensor(tpu_tensor);
+  auto unpacked = UnpackTorchTensor(tpu_tensor);
+  pjrt_buffer_ = unpacked.buffer;
+  buffer_ref_ = std::move(unpacked.ref);  // keep the materialized buffer alive
   host_buffer_->EnsureBoundToDevice(pjrt_buffer_->device());
   physical_size_ =
       static_cast<size_t>(ValueOrThrow("Failed to get TPU physical buffer size",

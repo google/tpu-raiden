@@ -15,15 +15,29 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_TORCH_TORCH_TPU_UTILS_TORCH_TPU_UTILS_H_
 #define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_TORCH_TORCH_TPU_UTILS_TORCH_TPU_UTILS_H_
 
+#include <optional>
+
 #include "ATen/core/TensorBody.h"
+#include "torch_tpu/eager/device_buffer.h"
 #include "xla/pjrt/pjrt_client.h"
 
 namespace tpu_raiden {
 namespace torch {
 
-// Unpacks a single PyTorch tensor into a raw PjRtBuffer pointer.
-// Throws exceptions if validation or materialization fails.
-xla::PjRtBuffer* UnpackTorchTensor(const at::Tensor& tensor);
+// A materialized PjRtBuffer together with the owning DeviceBufferRef that keeps
+// it alive.
+//
+// IMPORTANT: the `buffer` pointer is only valid while `ref` is alive. Callers
+// that retain `buffer` past this call MUST keep `ref` alive for as long as they
+// use it (e.g. store it in a member / attach it to the transfer future).
+struct UnpackedTensor {
+  xla::PjRtBuffer* buffer = nullptr;
+  std::optional<torch_tpu::DeviceBufferRef> ref;
+};
+
+// Unpacks a single PyTorch tensor into its materialized PjRtBuffer AND the
+// owning DeviceBufferRef. Throws if validation or materialization fails.
+UnpackedTensor UnpackTorchTensor(const at::Tensor& tensor);
 
 }  // namespace torch
 }  // namespace tpu_raiden
