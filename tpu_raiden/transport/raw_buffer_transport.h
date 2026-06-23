@@ -1,0 +1,172 @@
+// Copyright 2026 Google LLC.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef THIRD_PARTY_TPU_RAIDEN_TRANSPORT_RAW_BUFFER_TRANSPORT_H_
+#define THIRD_PARTY_TPU_RAIDEN_TRANSPORT_RAW_BUFFER_TRANSPORT_H_
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <string>
+#include <thread>  // NOLINT
+#include <vector>
+
+#include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
+
+namespace tpu_raiden {
+namespace transport {
+
+// Foundational delegate interface for RawBufferTransport to query base host
+// memory.
+class RawBufferTransportDelegate {
+ public:
+  virtual ~RawBufferTransportDelegate() = default;
+
+  // Authoritative physical Host / pinned HBM base starting pointer.
+  // The buffer_id parameter allows multidimensional indexing across
+  // layers/buffers.
+  virtual uint8_t* GetHostPointer(size_t buffer_id, size_t shard_idx) = 0;
+
+  // Authoritative total byte capacity of the target shard staging buffer.
+  virtual size_t GetHostSize(size_t buffer_id, size_t shard_idx) = 0;
+
+  // Notification triggered upon verified data chunk arrival.
+  virtual absl::Status OnDataReceived() { return absl::OkStatus(); }
+};
+
+struct BufferSendSlice {
+  const uint8_t* data_ptr;
+  size_t size_bytes;
+};
+
+struct SendSpec {
+  std::vector<BufferSendSlice> slices;
+  int fd;  // Required. Active socket connection FD.
+};
+
+struct BufferReceiveSlice {
+  uint8_t* data_ptr;
+  size_t size_bytes;
+};
+
+struct ReceiveSpec {
+  std::vector<BufferReceiveSlice> slices;
+  int fd;  // Required. Active socket connection FD.
+};
+
+// Standalone raw buffer POSIX TCP socket transport engine.
+class RawBufferTransport {
+ public:
+  // Compact 32-byte binary packet header layout.
+  struct alignas(8) PacketHeader {
+    uint8_t op;  // 3=BytePull, 5=ByteSlicePush, 1,2,4,6=HigherLevelBlockOps
+    uint8_t flags;           // Holds major_order or protocol flags
+    uint16_t buffer_id;      // Multidimensional Buffer / Layer ID coordinate
+    uint32_t remote_id;      // Remote block ID or linear memory offset
+    uint32_t local_id;       // Local block ID or target shard index
+    uint32_t count_or_size;  // Number of blocks or continuous payload bytes
+    uint64_t uuid;           // Globally unique transaction routing ID
+  };
+
+  RawBufferTransport(RawBufferTransportDelegate* delegate, int local_port,
+                     bool enable_conn_pool = true);
+  virtual ~RawBufferTransport();
+
+  // Directly pushes an arbitrary continuous byte array into a specific offset
+  // of a remote peer's buffer.
+  absl::Status PushBuffer(absl::string_view peer, size_t buffer_id,
+                          size_t dst_shard_idx, size_t dst_offset_bytes,
+                          const uint8_t* data_ptr, size_t size_bytes);
+
+  // Synchronously requests an arbitrary continuous byte slice from a remote
+  // peer's staging memory.
+  absl::Status PullBuffer(absl::string_view source, size_t buffer_id,
+                          size_t src_shard_idx, size_t src_offset_bytes,
+                          size_t dst_shard_idx, size_t dst_offset_bytes,
+                          size_t size_bytes);
+
+  // Sends a batch of buffer slices to a peer.
+  absl::Status Send(const SendSpec& spec);
+
+  // Receives a batch of buffer slices from a source peer.
+  absl::Status Receive(const ReceiveSpec& spec);
+
+  struct ConnectionCloser {
+    int fd;
+    std::function<void(bool ok_to_pool)> close_fn;
+  };
+
+  using CommandCallback = std::function<absl::Status(
+      ConnectionCloser closer, absl::string_view command_meta)>;
+
+  // Registers a callback to handle a command ID when received.
+  absl::Status RegisterCommand(uint32_t command_id, CommandCallback callback);
+
+  // Issues a command to a remote peer.
+  absl::StatusOr<ConnectionCloser> IssueCommand(absl::string_view peer,
+                                                uint32_t command_id,
+                                                absl::string_view command_meta);
+
+  int local_port() const { return local_port_; }
+
+  // Shared socket IO helpers.
+  static absl::Status WriteExact(int fd, const void* buffer, size_t length);
+  static absl::Status ReadExact(int fd, void* buffer, size_t length);
+
+ protected:
+  absl::StatusOr<int> ConnectToPeer(absl::string_view peer);
+  absl::StatusOr<int> AcquireConnection(absl::string_view peer);
+  void ReleaseConnection(absl::string_view peer, int fd);
+  void ClosePooledConnections();
+
+  virtual absl::Status ProcessSingleRequest(int client_fd);
+  virtual absl::Status HandleCustomRequest(int client_fd,
+                                           const PacketHeader& header);
+  absl::Status ProcessCommandRequest(int client_fd, const PacketHeader& header);
+
+  void ConnectionWorker(int client_fd);
+  void ListenerLoop();
+
+  RawBufferTransportDelegate* raw_delegate_;
+  int local_port_;
+  int server_fd_ = -1;
+  std::atomic<bool> stopping_{false};
+
+  absl::Mutex mu_;
+  std::vector<int> active_client_fds_ ABSL_GUARDED_BY(mu_);
+
+  absl::Mutex pool_mu_;
+  absl::flat_hash_map<std::string, std::vector<int>> conn_pool_
+      ABSL_GUARDED_BY(pool_mu_);
+  bool pooling_enabled_ = true;
+
+  absl::Mutex cmd_mu_;
+  absl::flat_hash_map<uint32_t, CommandCallback> registered_commands_
+      ABSL_GUARDED_BY(cmd_mu_);
+
+  std::thread listener_thread_;
+  std::vector<std::thread> worker_threads_;
+};
+
+}  // namespace transport
+
+}  // namespace tpu_raiden
+
+#endif  // THIRD_PARTY_TPU_RAIDEN_TRANSPORT_RAW_BUFFER_TRANSPORT_H_

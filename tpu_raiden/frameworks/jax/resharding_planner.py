@@ -1,0 +1,295 @@
+# Copyright 2026 Google LLC.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Copyright 2026 The TPU Raiden Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Lightweight generalized 2D block resharding planner for TPU Raiden."""
+
+from dataclasses import dataclass
+import itertools
+from typing import List, Tuple
+import jax
+from tpu_raiden.weight_sync import weight_synchronizer_service_pb2
+
+
+@dataclass
+class ReshardChunk:
+  src_device_id: int
+  dst_device_id: int
+  # Slices represented as (row_start, row_end, col_start, col_end)
+  src_slice: Tuple[int, int, int, int]
+  dst_slice: Tuple[int, int, int, int]
+  shape: Tuple[int, int]
+
+
+def make_resharding_plan(
+    global_shape: Tuple[int, int],
+    src_sharding: jax.sharding.NamedSharding,
+    dst_sharding: jax.sharding.NamedSharding,
+) -> List[ReshardChunk]:
+  """Generates the complete 2D sub-block transfer plan between two arbitrary JAX NamedShardings.
+
+  Args:
+    global_shape: The global 2D shape [K, N] of the weight matrix.
+    src_sharding: The source NamedSharding specification.
+    dst_sharding: The destination NamedSharding specification.
+
+  Returns:
+    A list of ReshardChunk descriptions mapping source device slices to
+    destination device offsets.
+  """
+  K, N = global_shape
+
+  # Retrieve the complete logical global slice maps for both layouts
+  src_map = src_sharding.devices_indices_map(global_shape)
+  dst_map = dst_sharding.devices_indices_map(global_shape)
+
+  # Canonical Sorting: Sort addressable devices strictly by global row/col slice starts!
+  # This maps physical device placements to deterministic logical index coordinates.
+  src_devices = sorted(
+      src_sharding.mesh.devices.flatten(),
+      key=lambda d: (src_map[d][0].start or 0, src_map[d][1].start or 0),
+  )
+  dst_devices = sorted(
+      dst_sharding.mesh.devices.flatten(),
+      key=lambda d: (dst_map[d][0].start or 0, dst_map[d][1].start or 0),
+  )
+
+  # TODO(b/12345678): Support arbitrary TPU hardware memory tiling alignments
+  # (e.g. padding sub-blocks to multiples of 8/32/128 bytes) to avoid padding
+  # degradation during transfer. Currently we assume K and N are sufficiently
+  # large and divisible.
+
+  plan = []
+
+  # Loop through all combinations of source and destination devices
+  for i, src_dev in enumerate(src_devices):
+    # Get global coordinates of source shard i
+    src_row_slice, src_col_slice = src_map[src_dev]
+    src_row_start = (
+        src_row_slice.start if src_row_slice.start is not None else 0
+    )
+    src_row_end = src_row_slice.stop if src_row_slice.stop is not None else K
+    src_col_start = (
+        src_col_slice.start if src_col_slice.start is not None else 0
+    )
+    src_col_end = src_col_slice.stop if src_col_slice.stop is not None else N
+
+    for j, dst_dev in enumerate(dst_devices):
+      # Get global coordinates of destination shard j
+      dst_row_slice, dst_col_slice = dst_map[dst_dev]
+      dst_row_start = (
+          dst_row_slice.start if dst_row_slice.start is not None else 0
+      )
+      dst_row_end = dst_row_slice.stop if dst_row_slice.stop is not None else K
+      dst_col_start = (
+          dst_col_slice.start if dst_col_slice.start is not None else 0
+      )
+      dst_col_end = dst_col_slice.stop if dst_col_slice.stop is not None else N
+
+      # Find the intersection bounds in global coordinate space
+      intersect_row_start = max(src_row_start, dst_row_start)
+      intersect_row_end = min(src_row_end, dst_row_end)
+      intersect_col_start = max(src_col_start, dst_col_start)
+      intersect_col_end = min(src_col_end, dst_col_end)
+
+      # Record transfer chunk if there is a non-empty overlap
+      if (
+          intersect_row_start < intersect_row_end
+          and intersect_col_start < intersect_col_end
+      ):
+        chunk_shape = (
+            intersect_row_end - intersect_row_start,
+            intersect_col_end - intersect_col_start,
+        )
+
+        # Map intersection bounds relative to source i's local shard buffer
+        local_src_row_start = intersect_row_start - src_row_start
+        local_src_row_end = intersect_row_end - src_row_start
+        local_src_col_start = intersect_col_start - src_col_start
+        local_src_col_end = intersect_col_end - src_col_start
+
+        # Map intersection bounds relative to destination j's local shard buffer
+        local_dst_row_start = intersect_row_start - dst_row_start
+        local_dst_row_end = intersect_row_end - dst_row_start
+        local_dst_col_start = intersect_col_start - dst_col_start
+        local_dst_col_end = intersect_col_end - dst_col_start
+
+        plan.append(
+            ReshardChunk(
+                src_device_id=i,
+                dst_device_id=j,
+                src_slice=(
+                    local_src_row_start,
+                    local_src_row_end,
+                    local_src_col_start,
+                    local_src_col_end,
+                ),
+                dst_slice=(
+                    local_dst_row_start,
+                    local_dst_row_end,
+                    local_dst_col_start,
+                    local_dst_col_end,
+                ),
+                shape=chunk_shape,
+            )
+        )
+
+  return plan
+
+
+def make_resharding_plan_from_metadata(
+    global_shape: Tuple[int, int],
+    src_metadata: List[Tuple[int, int, int, int, int]],
+    dst_sharding: jax.sharding.NamedSharding,
+) -> List[ReshardChunk]:
+  """Generates plan from metadata when src_sharding is not available."""
+  K, N = global_shape
+  dst_map = dst_sharding.devices_indices_map(global_shape)
+
+  dst_devices = sorted(
+      dst_sharding.mesh.devices.flatten(),
+      key=lambda d: (dst_map[d][0].start or 0, dst_map[d][1].start or 0),
+  )
+
+  sorted_src_metadata = sorted(src_metadata, key=lambda x: (x[1], x[3]))
+
+  plan = []
+
+  for (
+      src_dev_id,
+      src_row_start,
+      src_row_end,
+      src_col_start,
+      src_col_end,
+  ) in sorted_src_metadata:
+    for j, dst_dev in enumerate(dst_devices):
+      dst_row_slice, dst_col_slice = dst_map[dst_dev]
+      dst_row_start = (
+          dst_row_slice.start if dst_row_slice.start is not None else 0
+      )
+      dst_row_end = dst_row_slice.stop if dst_row_slice.stop is not None else K
+      dst_col_start = (
+          dst_col_slice.start if dst_col_slice.start is not None else 0
+      )
+      dst_col_end = dst_col_slice.stop if dst_col_slice.stop is not None else N
+
+      intersect_row_start = max(src_row_start, dst_row_start)
+      intersect_row_end = min(src_row_end, dst_row_end)
+      intersect_col_start = max(src_col_start, dst_col_start)
+      intersect_col_end = min(src_col_end, dst_col_end)
+
+      if (
+          intersect_row_start < intersect_row_end
+          and intersect_col_start < intersect_col_end
+      ):
+        chunk_shape = (
+            intersect_row_end - intersect_row_start,
+            intersect_col_end - intersect_col_start,
+        )
+
+        local_src_row_start = intersect_row_start - src_row_start
+        local_src_row_end = intersect_row_end - src_row_start
+        local_src_col_start = intersect_col_start - src_col_start
+        local_src_col_end = intersect_col_end - src_col_start
+
+        local_dst_row_start = intersect_row_start - dst_row_start
+        local_dst_row_end = intersect_row_end - dst_row_start
+        local_dst_col_start = intersect_col_start - dst_col_start
+        local_dst_col_end = intersect_col_end - dst_col_start
+
+        plan.append(
+            ReshardChunk(
+                src_device_id=src_dev_id,
+                dst_device_id=dst_dev.id,
+                src_slice=(
+                    local_src_row_start,
+                    local_src_row_end,
+                    local_src_col_start,
+                    local_src_col_end,
+                ),
+                dst_slice=(
+                    local_dst_row_start,
+                    local_dst_row_end,
+                    local_dst_col_start,
+                    local_dst_col_end,
+                ),
+                shape=chunk_shape,
+            )
+        )
+
+  return plan
+
+
+def compute_nd_shard_slices(
+    global_shape: Tuple[int, ...],
+    mesh_shape: Tuple[int, ...],
+) -> List[weight_synchronizer_service_pb2.NDSliceProto]:
+  """Computes N-dimensional logical tensor bounding boxes for a sharded grid.
+
+  This function derives the exact coordinate intervals along every dimension
+  for every logical accelerator shard in canonical row-major order.
+
+  Args:
+    global_shape: The global multi-dimensional shape of the tensor.
+    mesh_shape: The sharding grid configuration (number of devices per
+      dimension).
+
+  Returns:
+    A list of NDSliceProto messages containing the multi-dimensional bounding
+    box for each logical device shard.
+  """
+  if len(global_shape) != len(mesh_shape):
+    raise ValueError(
+        f"Tensor rank ({len(global_shape)}) and sharding mesh rank"
+        f" ({len(mesh_shape)}) must match exactly."
+    )
+
+  rank = len(global_shape)
+  tile_sizes = []
+  for d in range(rank):
+    if mesh_shape[d] <= 0:
+      raise ValueError(f"Mesh shape at dimension {d} must be positive.")
+    tile_sizes.append(global_shape[d] // mesh_shape[d])
+
+  # Generate all multi-dimensional device coordinates in row-major sequence
+  coordinate_ranges = [range(mesh_shape[d]) for d in range(rank)]
+
+  shard_slices = []
+  for device_coord in itertools.product(*coordinate_ranges):
+    slice_proto = weight_synchronizer_service_pb2.NDSliceProto()
+    for d in range(rank):
+      c = device_coord[d]
+      start = c * tile_sizes[d]
+      # Ensure any exact remainders land nicely in the last physical mesh shard boundary
+      end = (
+          (c + 1) * tile_sizes[d]
+          if c < mesh_shape[d] - 1
+          else global_shape[d]
+      )
+      slice_proto.dimensions.add(start=start, end=end)
+    shard_slices.append(slice_proto)
+
+  return shard_slices

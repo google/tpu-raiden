@@ -1,0 +1,40 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Run Benchmarks
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - main
+
+  schedule:
+    - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  run_benchmarks:
+    name: Run TPU Raiden H2H Benchmarks
+    uses: google-ml-infra/actions/.github/workflows/run-benchmarks.yaml@578b24891a0d77f3b3b837008b30835f670e94b6
+    with:
+      registry_file: "benchmarks/benchmark_registry.pbtxt"
+      ml_actions_ref: "578b24891a0d77f3b3b837008b30835f670e94b6"
+      publish_metrics: true
+      pub_sub_gcp_project_id: "ml-oss-benchmarking-production"
+      pub_sub_gcp_topic_id: "public-results-prod"

@@ -1,0 +1,148 @@
+# Copyright 2026 Google LLC.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Builds the tpu_raiden Python wheels — one per framework, so the JAX and Torch
+# stacks can be pinned/installed independently:
+#   //ci/wheel:raiden_jax_wheel    -> tpu_raiden_jax   (pulls jax/jaxlib)
+#   //ci/wheel:raiden_torch_wheel  -> tpu_raiden_torch (no jax deps)
+# Both share the tpu_raiden import root (tpu_raiden.frameworks.*, tpu_raiden.api.*)
+# and are mutually-exclusive variants — install one. Build with:
+#
+#   bazel build -c opt //ci/wheel:raiden_torch_wheel \
+#     --repo_env=WHEEL_VERSION_EXTRAS=.dev$(date +%Y%m%d%H%M%S)
+#
+# The torch wheel additionally needs the torch_tpu module
+# (--override_module=torch_tpu=../torch_tpu) and a local torch
+# (--define=TORCH_SOURCE=local). See //ci/build_wheel.sh.
+
+load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
+load("@raiden_version//:version.bzl", "WHEEL_VERSION")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
+load("@rules_python//python:packaging.bzl", "py_package")
+load(":wheel.bzl", "raiden_framework_wheel")
+
+package(default_visibility = ["//visibility:public"])
+
+# When building against a locally-provided torch (TORCH_SOURCE=local, as the
+# torch extensions require), do not pin a torch version in the wheel so it can
+# be installed alongside whatever torch_tpu/torch the environment provides.
+config_setting(
+    name = "use_local_torch",
+    define_values = {
+        "TORCH_SOURCE": "local",
+    },
+)
+
+TORCH_REQ = select({
+    ":use_local_torch": [],
+    "//conditions:default": ["torch"],
+})
+
+# Runtime deps that live on a public index. torch_tpu is intentionally omitted
+# (private Artifact Registry) — see pyproject.toml.
+COMMON_REQUIRES = [
+    "libtpu==0.0.40",
+    "tpu-info==0.7.1",
+    "numpy",
+    "absl-py",
+]
+
+# The JAX wheel pulls the JAX stack; the Torch wheel deliberately does NOT, so
+# it can be installed alongside torch_tpu/torch without dragging jax/jaxlib
+# (e.g. sglang / vLLM). torch itself is provided by the environment (TORCH_REQ).
+JAX_REQUIRES = COMMON_REQUIRES + [
+    "jax==0.10.0",
+    "jaxlib==0.10.0",
+]
+
+TORCH_REQUIRES = COMMON_REQUIRES + TORCH_REQ
+
+# Framework-agnostic python deps for the py_library aggregator.
+#
+COMMON_DEPS = [
+    "//tpu_raiden/rpc:coordination_helper",
+]
+
+# JAX native extensions + wrappers + public API. (TransferEngine was merged into
+# KVCacheManager upstream, so there is no _transfer_engine target.)
+JAX_DEPS = [
+    "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
+    "//tpu_raiden/frameworks/jax:_kv_cache_manager_ffi",
+    "//tpu_raiden/frameworks/jax:_weight_synchronizer_ffi",
+    "//tpu_raiden/frameworks/jax:weight_synchronizer_ffi_py",
+    "//tpu_raiden/frameworks/jax:resharding_engine",
+    "//tpu_raiden/frameworks/jax:resharding_planner",
+    "//tpu_raiden/frameworks/jax:jax_test_utils",
+    "//tpu_raiden/api/jax:kv_cache_manager_jax_py",
+    "//tpu_raiden/api/jax:weight_synchronizer_jax_py",
+]
+# Excluded (non-OSS internal grpc / global registry):
+# //tpu_raiden/api/jax:kv_cache_store depends on
+# //tpu_raiden/kv_cache:kv_cache_store -> //kv_cache/global_registry.
+
+# Torch native extensions + public API (require the torch_tpu module at build).
+TORCH_DEPS = [
+    "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",
+    "//tpu_raiden/api/torch:kv_cache_manager_torch_py",
+    "//tpu_raiden/api/torch:weight_synchronizer_torch_py",
+]
+
+# Two separate wheels, one per framework, so the JAX and Torch stacks can be
+# pinned and installed independently (e.g. sglang/vLLM consume tpu_raiden_torch
+# without the JAX deps). Both share the `tpu_raiden` import root and are
+# mutually-exclusive variants (like opencv-python vs opencv-python-headless):
+# install one. Common py attributes are factored into //ci/wheel:wheel.bzl.
+
+# ---- JAX wheel (tpu_raiden_jax) ----
+py_library(
+    name = "jax_raiden_files",
+    visibility = ["//visibility:private"],
+    deps = COMMON_DEPS + JAX_DEPS,
+)
+
+py_package(
+    name = "raiden_jax_package",
+    packages = ["tpu_raiden"],
+    deps = [":jax_raiden_files"],
+)
+
+raiden_framework_wheel(
+    name = "raiden_jax_wheel",
+    distribution = "tpu_raiden_jax",
+    package = ":raiden_jax_package",
+    requires = JAX_REQUIRES,
+    version = WHEEL_VERSION,
+)
+
+# ---- Torch wheel (tpu_raiden_torch) ----
+py_library(
+    name = "torch_raiden_files",
+    visibility = ["//visibility:private"],
+    deps = COMMON_DEPS + TORCH_DEPS,
+)
+
+py_package(
+    name = "raiden_torch_package",
+    packages = ["tpu_raiden"],
+    deps = [":torch_raiden_files"],
+)
+
+raiden_framework_wheel(
+    name = "raiden_torch_wheel",
+    distribution = "tpu_raiden_torch",
+    package = ":raiden_torch_package",
+    requires = TORCH_REQUIRES,
+    version = WHEEL_VERSION,
+)

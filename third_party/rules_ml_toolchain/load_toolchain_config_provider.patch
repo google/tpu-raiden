@@ -1,0 +1,18 @@
+diff --git a/third_party/rules_cc_toolchain/toolchain_config.bzl b/third_party/rules_cc_toolchain/toolchain_config.bzl
+--- a/third_party/rules_cc_toolchain/toolchain_config.bzl
++++ b/third_party/rules_cc_toolchain/toolchain_config.bzl
+@@ -20,6 +20,7 @@
++load("@rules_cc//cc:defs.bzl", "CcToolchainConfigInfo")
+ load(
+     "@rules_cc//cc:action_names.bzl",
+     "ACTION_NAMES",
+     "ACTION_NAME_GROUPS",
+ )
+ load(
+diff --git a/MODULE.bazel b/MODULE.bazel
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -177,3 +177,1 @@
+ use_repo(local_sysroot, "local_sysroot_config")
+-
+-register_toolchains("//cc/...")

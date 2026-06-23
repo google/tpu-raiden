@@ -1,0 +1,139 @@
+module(name = "tpu_raiden")
+
+bazel_dep(name = "protobuf", version = "32.1", repo_name = "com_google_protobuf")
+bazel_dep(name = "rules_cc", version = "0.2.9")
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
+bazel_dep(name = "aspect_rules_esbuild", version = "0.25.1")
+bazel_dep(name = "rules_foreign_cc", version = "0.15.1")
+bazel_dep(name = "rules_go", version = "0.60.0", repo_name = "io_bazel_rules_go")
+bazel_dep(name = "rules_ml_toolchain")
+archive_override(
+    module_name = "rules_ml_toolchain",
+    integrity = "sha256-y3Y1Yi6lJsiSOl6tbpncK6Vc3mrpYTv5stNLPwAPKc4=",
+    patch_strip = 1,
+    patches = [
+        "//:third_party/rules_ml_toolchain/load_toolchain_config_provider.patch",
+    ],
+    strip_prefix = "rules_ml_toolchain-84ac62e4db38215a2a7d3ad8cd4d7452134e3ec6",
+    urls = ["https://github.com/google-ml-infra/rules_ml_toolchain/archive/84ac62e4db38215a2a7d3ad8cd4d7452134e3ec6.tar.gz"],
+)
+
+bazel_dep(name = "jax")
+git_override(
+    module_name = "jax",
+    commit = "a33ed614c58ee8a10d0b7536c50c2609c38500c1",
+    patch_strip = 1,
+    patches = [
+        "//:third_party/py/remove_rules_ml_toolchain.patch",
+    ],
+    remote = "https://github.com/jax-ml/jax.git",
+)
+
+bazel_dep(name = "xla")
+git_override(
+    module_name = "xla",
+    commit = "a98e42b8b195e578a97025654f4e7b9b3fb5001a",
+    patch_strip = 1,
+    patches = [
+        "//:third_party/xla/future_sfinae.patch",
+        "//:third_party/xla/attribute_map_static_assert.patch",
+        "//:third_party/xla/attribute_map_cc_static_assert.patch",
+    ],
+    remote = "https://github.com/openxla/xla.git",
+)
+
+bazel_dep(name = "rules_python", version = "1.8.5")
+bazel_dep(name = "torch_tpu", version = "0.1.1", dev_dependency = True)
+
+single_version_override(
+    module_name = "rules_python",
+    patch_strip = 1,
+    patches = [
+        "//:third_party/py/rules_python_missing_version_safe.patch",
+    ],
+    version = "1.8.5",
+)
+
+bazel_dep(name = "grpc", version = "1.78.0", repo_name = "com_github_grpc_grpc")
+single_version_override(
+    module_name = "grpc",
+    patch_strip = 1,
+    patches = [
+        "//:third_party/grpc/grpc.patch",
+    ],
+    version = "1.78.0",
+)
+
+third_party = use_extension("@xla//third_party/extensions:third_party.bzl", "third_party_ext")
+use_repo(
+    third_party,
+    "nanobind",
+    "stablehlo",
+)
+
+bazel_dep(name = "abseil-cpp", version = "20260107.1", repo_name = "com_google_absl")
+
+llvm = use_extension("@xla//third_party/extensions:llvm.bzl", "llvm_extension")
+use_repo(llvm, "llvm-project")
+
+jax_python_wheel_repository = use_repo_rule(
+    "@jax//jaxlib:jax_python_wheel.bzl",
+    "jax_python_wheel_repository",
+)
+
+bazel_dep(name = "pybind11_bazel", version = "2.13.6")
+bazel_dep(name = "nanobind_bazel", version = "2.12.0")
+bazel_dep(name = "nanobind_abseil")
+bazel_dep(name = "abseil-py", version = "2.1.0", repo_name = "com_google_absl_py")
+bazel_dep(name = "googletest", version = "1.17.0.bcr.2", repo_name = "com_google_googletest")
+
+pybind11_internal_configure = use_extension(
+    "@pybind11_bazel//:internal_configure.bzl",
+    "internal_configure_extension",
+)
+use_repo(pybind11_internal_configure, "pybind11")
+
+jax_python_wheel_repository(
+    name = "jax_wheel",
+    version_key = "_version",
+    version_source = "@jax//jax:version.py",
+)
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.defaults(
+    python_version = "3.12",
+    python_version_env = "HERMETIC_PYTHON_VERSION",
+)
+python.toolchain(python_version = "3.11")
+python.toolchain(python_version = "3.12")
+python.toolchain(python_version = "3.13")
+python.toolchain(python_version = "3.14")
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+use_repo(pip, pypi = "jax_pypi")
+
+override_repo(
+    pip,
+    xla_pypi = "pypi",
+)
+
+git_override(
+    module_name = "nanobind_abseil",
+    commit = "7cd4a4749edbeb77da49f209826bf892756e57a2",
+    patch_strip = 1,
+    patches = [
+        "//:third_party/nanobind_abseil/inject_module_block.patch",
+    ],
+    remote = "https://github.com/google/nanobind_abseil.git",
+)
+
+# Single-sources the wheel version from pyproject.toml [project].version and
+# appends WHEEL_VERSION_EXTRAS (e.g. ".dev<timestamp>"). Consumed by
+# //ci/wheel:raiden_wheel via @raiden_version//:version.bzl.
+raiden_version_repo = use_repo_rule("//bazel:wheel_version.bzl", "raiden_version_repo")
+
+raiden_version_repo(
+    name = "raiden_version",
+    pyproject_toml = "//:pyproject.toml",
+)

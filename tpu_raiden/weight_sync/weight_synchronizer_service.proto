@@ -1,0 +1,107 @@
+// Copyright 2026 Google LLC.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package tpu_raiden.weight_sync;
+
+option java_multiple_files = true;
+option java_outer_classname = "WeightSynchronizerServiceProto";
+
+message RaidenIdProto {
+  string job_name = 1;
+  string job_replica_id = 2;
+  string data_name = 3;
+}
+
+// Coordinate intervals representing a contiguous slice along a single tensor
+// dimension.
+message NDSliceDimensionProto {
+  // Inclusive start coordinate.
+  int64 start = 1;
+  // Exclusive end coordinate.
+  int64 end = 2;
+}
+
+// Slices representing a multi-dimensional bounding box inside a distributed
+// tensor.
+message NDSliceProto {
+  // Dimension intervals ordered from outer-most dimension to inner-most minor
+  // dimension.
+  repeated NDSliceDimensionProto dimensions = 1;
+}
+
+message RegisterWorkUnitRequest {
+  RaidenIdProto unit = 1;
+  repeated string shards = 2;
+  string control_plane_rpc_address = 3;
+  // Multi-dimensional bounding boxes owned by each logical device shard in
+  // row-major order.
+  repeated NDSliceProto shard_nd_slices = 4;
+  // Byte size of a single array scalar element (e.g., 4 for float32).
+  int32 itemsize = 5;
+}
+
+// Defines an explicit 1D linear memory push operation from a local source to a
+// remote destination shard.
+message ShardPushEntryProto {
+  // Network coordinate "ip:port" or BNS of the remote Destination Worker Data
+  // servicer.
+  string dst_peer = 1;
+  // Logical shard partition index managed by the target Destination Worker
+  // process.
+  int32 dst_shard_idx = 2;
+  // Exact linear memory byte offset to paste data into within the target
+  // destination buffer.
+  int64 dst_offset_bytes = 3;
+  // Exact linear memory byte offset to copy data out of within the local source
+  // buffer.
+  int64 src_offset_bytes = 4;
+  // Number of continuous bytes to transmit across the TCP stream.
+  int64 size_bytes = 5;
+}
+
+// A collection of network push entries orchestrated by a specific source TPU
+// shard.
+message ShardPushScheduleProto {
+  repeated ShardPushEntryProto entries = 1;
+}
+
+message StartTransferRequest {
+  repeated RaidenIdProto src_units = 1;
+  repeated RaidenIdProto dst_units = 2;
+  // Centralized transfer execution plans mapped by local Source Worker logical
+  // shard partition index.
+  map<int32, ShardPushScheduleProto> shard_push_schedules = 3;
+}
+
+message ControlRequest {
+  enum Command {
+    COMMAND_UNSPECIFIED = 0;
+    COMMAND_START_TRANSFER = 1;
+    COMMAND_SHUTDOWN = 2;
+    COMMAND_REGISTER_WORK_UNIT = 3;
+  }
+  Command command = 1;
+  repeated string peers = 2;
+
+  RegisterWorkUnitRequest register_work_unit_request = 3;
+  StartTransferRequest start_transfer_request = 4;
+}
+
+message ControlResponse {
+  bool success = 1;
+  string message = 2;
+  string response_data = 3;
+}

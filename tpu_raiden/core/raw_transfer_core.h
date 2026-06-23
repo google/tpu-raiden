@@ -1,0 +1,562 @@
+// Copyright 2026 Google LLC.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#ifndef THIRD_PARTY_TPU_RAIDEN_RAIDEN_LIB_RAW_TRANSFER_RAW_TRANSFER_CORE_H_
+#define THIRD_PARTY_TPU_RAIDEN_RAIDEN_LIB_RAW_TRANSFER_RAW_TRANSFER_CORE_H_
+
+#include <cstdint>
+#include <iterator>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/types/span.h"
+#include "xla/future.h"
+#include "xla/layout.h"
+#include "xla/pjrt/abstract_tracked_device_buffer.h"
+#include "xla/pjrt/c/pjrt_c_api.h"
+#include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
+#include "xla/pjrt/c/pjrt_c_api_raw_buffer_external.h"
+#include "xla/pjrt/c_api_client/pjrt_c_api_client.h"
+#include "xla/pjrt/pjrt_client.h"
+#include "xla/pjrt/raw_buffer.h"
+#include "xla/shape.h"
+#include "xla/shape_util.h"
+#include "xla/tsl/concurrency/async_value.h"
+#include "xla/tsl/concurrency/ref_count.h"
+
+namespace raiden {
+
+struct RawBufferHolder {
+  const PJRT_Api* c_api;
+  const PJRT_RawBuffer_Extension* extension;
+  PJRT_RawBuffer* buffer;
+
+  RawBufferHolder(const PJRT_Api* api, const PJRT_RawBuffer_Extension* ext,
+                  PJRT_RawBuffer* buf)
+      : c_api(api), extension(ext), buffer(buf) {}
+
+  ~RawBufferHolder() {
+    if (buffer) {
+      pjrt::PjRtCApiRawBuffer_Destroy(c_api, extension, buffer);
+    }
+  }
+};
+
+// Self-contained PJRT_Error -> absl::Status (consumes/destroys the error).
+inline absl::Status PjrtErrorToStatusLocal(const PJRT_Api* c_api,
+                                           PJRT_Error* error) {
+  if (error == nullptr) return absl::OkStatus();
+  PJRT_Error_Message_Args ma;
+  ma.struct_size = PJRT_Error_Message_Args_STRUCT_SIZE;
+  ma.extension_start = nullptr;
+  ma.error = error;
+  ma.message = nullptr;
+  ma.message_size = 0;
+  c_api->PJRT_Error_Message(&ma);
+  std::string msg(ma.message, ma.message_size);
+  PJRT_Error_Destroy_Args da;
+  da.struct_size = PJRT_Error_Destroy_Args_STRUCT_SIZE;
+  da.extension_start = nullptr;
+  da.error = error;
+  c_api->PJRT_Error_Destroy(&da);
+  return absl::InternalError(msg);
+}
+
+inline const PJRT_RawBuffer_Extension* GetRawBufferExtension(
+    const xla::PjRtBuffer* buffer, const PJRT_Api** out_c_api = nullptr) {
+  auto* capi_buffer = dynamic_cast<const xla::PjRtCApiBuffer*>(buffer);
+  if (!capi_buffer) return nullptr;
+  if (out_c_api) *out_c_api = capi_buffer->pjrt_c_api();
+  auto* capi_client = dynamic_cast<xla::PjRtCApiClient*>(
+      const_cast<xla::PjRtClient*>(capi_buffer->client()));
+  if (!capi_client) return nullptr;
+  return capi_client->FindExtension<PJRT_RawBuffer_Extension>(
+      PJRT_Extension_Type::PJRT_Extension_Type_RawBuffer);
+}
+
+inline int64_t GetMajorSliceByteSize(const xla::PjRtBuffer* buffer) {
+  const xla::Shape& shape = buffer->on_device_shape();
+  if (shape.dimensions_size() == 0) return 0;
+
+  int64_t itemsize =
+      xla::ShapeUtil::ByteSizeOfPrimitiveType(shape.element_type());
+  int64_t stride = 1;
+  for (int i = 1; i < shape.dimensions_size(); ++i) {
+    stride *= shape.dimensions(i);
+  }
+
+  auto pjrt_layout = buffer->layout();
+  const xla::Layout* xla_layout = nullptr;
+  if (pjrt_layout) {
+    xla_layout = &pjrt_layout->xla_layout();
+  }
+
+  if (xla_layout && !xla_layout->tiles().empty() &&
+      shape.dimensions_size() >= 3) {
+    const xla::Tile& tile = xla_layout->tiles()[0];
+    auto tile_dims = tile.dimensions();
+    if (tile_dims.size() != 2) {
+      throw std::runtime_error("Only 2D tiling supported for now");
+    }
+    int64_t tH = tile_dims[0];
+    int64_t tW = tile_dims[1];
+    int64_t rank = shape.dimensions_size();
+
+    // Find the two most minor logical dimensions physically.
+    int64_t logical_minor_0 = xla_layout->minor_to_major(0);
+    int64_t logical_minor_1 = xla_layout->minor_to_major(1);
+
+    int64_t num_tiles_0 = (shape.dimensions(logical_minor_0) + tW - 1) / tW;
+    int64_t num_tiles_1 = (shape.dimensions(logical_minor_1) + tH - 1) / tH;
+    int64_t tiled_2d_block_size =
+        num_tiles_0 * num_tiles_1 * tH * tW * itemsize;
+
+    int64_t multiplier = 1;
+    for (int i = 1; i < rank; ++i) {
+      if (i != logical_minor_0 && i != logical_minor_1) {
+        multiplier *= shape.dimensions(i);
+      }
+    }
+
+    int64_t size_per_major_dim = tiled_2d_block_size * multiplier;
+
+    return size_per_major_dim;
+  }
+
+  return stride * itemsize;
+}
+
+struct BufferHoldAndAlias {
+  xla::PjRtBuffer* buffer = nullptr;
+  bool is_common_buffer = false;
+
+  // For CommonPjRtBuffer:
+  xla::PjRtRawBufferRef common_raw_buffer;
+  std::shared_ptr<xla::CommonPjRtBuffer::ScopedHold> common_hold;
+
+  // For PjRtCApiBuffer:
+  PJRT_RawBuffer* c_raw_buffer = nullptr;
+  std::shared_ptr<RawBufferHolder> c_hold;
+
+  static absl::StatusOr<BufferHoldAndAlias> Acquire(
+      xla::PjRtBuffer* buf, const PJRT_Api* c_api = nullptr,
+      const PJRT_RawBuffer_Extension* extension = nullptr,
+      bool unsafe_skip_buffer_lock = false) {
+    BufferHoldAndAlias result;
+    result.buffer = buf;
+    auto* common_buf = dynamic_cast<xla::CommonPjRtBuffer*>(buf);
+    auto* capi_buf = dynamic_cast<xla::PjRtCApiBuffer*>(buf);
+
+    if (common_buf) {
+      result.is_common_buffer = true;
+      auto hold = common_buf->GetBufferWithHold(
+          xla::CommonPjRtBuffer::ScopedHold::kUsage);
+      if (!hold.ok()) {
+        return hold.status();
+      }
+      result.common_raw_buffer = hold.buffer()->raw_buffer();
+      if (!unsafe_skip_buffer_lock) {
+        result.common_hold =
+            std::make_shared<xla::CommonPjRtBuffer::ScopedHold>(
+                std::move(hold));
+      }
+      return result;
+    }
+
+    if (capi_buf) {
+      result.is_common_buffer = false;
+      if (!extension) {
+        extension = GetRawBufferExtension(buf, &c_api);
+        if (!extension) {
+          return absl::InternalError("RawBuffer extension missing");
+        }
+      }
+      auto status_or_raw = pjrt::PjRtCApiBuffer_CreateRawAliasOfBuffer(
+          c_api, extension, capi_buf->c_buffer());
+      if (!status_or_raw.ok()) {
+        return status_or_raw.status();
+      }
+      result.c_raw_buffer = status_or_raw.value();
+      result.c_hold = std::make_shared<RawBufferHolder>(c_api, extension,
+                                                        result.c_raw_buffer);
+      return result;
+    }
+
+    return absl::InvalidArgumentError("Unsupported PjRtBuffer type");
+  }
+
+  xla::Future<> CopyRawHostToDevice(const void* src, int64_t device_offset,
+                                    int64_t size) const {
+    if (is_common_buffer) {
+      return common_raw_buffer->CopyRawHostToDevice(src, device_offset, size);
+    }
+    return pjrt::PjRtCApiRawBuffer_CopyRawHostToDevice(
+        c_hold->c_api, c_hold->extension, c_raw_buffer, src, device_offset,
+        size);
+  }
+
+  xla::Future<> CopyRawDeviceToHost(void* host_ptr, int64_t device_offset,
+                                    int64_t size) const {
+    if (is_common_buffer) {
+      return buffer->CopyRawToHost(host_ptr, device_offset, size);
+    }
+    return pjrt::PjRtCApiRawBuffer_CopyRawDeviceToHost(
+        c_hold->c_api, c_hold->extension, c_raw_buffer, host_ptr, device_offset,
+        size);
+  }
+
+  // --- PJRT C-API completion path (raw PJRT_Event*, NOT xla::Future) ---
+  // Routes completion through the stable C ABI, avoiding xla::Future /
+  // tsl::AsyncValue / JoinFutures, whose C++ ABI mismatches when raiden and
+  // the framework (torch_tpu libpywrap) are independent XLA builds. Valid
+  // only for C-API buffers (TPU); common buffers use the xla::Future path.
+  bool supports_event() const { return !is_common_buffer && c_hold != nullptr; }
+  const PJRT_Api* c_api() const { return c_hold ? c_hold->c_api : nullptr; }
+
+  absl::StatusOr<PJRT_Event*> CopyRawHostToDeviceEvent(const void* src,
+                                                       int64_t device_offset,
+                                                       int64_t size) const {
+    PJRT_RawBuffer_CopyRawHostToDevice_Args args;
+    args.struct_size = PJRT_RawBuffer_CopyRawHostToDevice_Args_STRUCT_SIZE;
+    args.extension_start = nullptr;
+    args.buffer = c_raw_buffer;
+    args.src = src;
+    args.offset = device_offset;
+    args.transfer_size = size;
+    args.event = nullptr;
+    PJRT_Error* err =
+        c_hold->extension->PJRT_RawBuffer_CopyRawHostToDevice(&args);
+    if (err) return PjrtErrorToStatusLocal(c_hold->c_api, err);
+    return args.event;
+  }
+
+  absl::StatusOr<PJRT_Event*> CopyRawDeviceToHostEvent(void* host_ptr,
+                                                       int64_t device_offset,
+                                                       int64_t size) const {
+    PJRT_RawBuffer_CopyRawDeviceToHost_Args args;
+    args.struct_size = PJRT_RawBuffer_CopyRawDeviceToHost_Args_STRUCT_SIZE;
+    args.extension_start = nullptr;
+    args.buffer = c_raw_buffer;
+    args.dst = host_ptr;
+    args.offset = device_offset;
+    args.transfer_size = size;
+    args.event = nullptr;
+    PJRT_Error* err =
+        c_hold->extension->PJRT_RawBuffer_CopyRawDeviceToHost(&args);
+    if (err) return PjrtErrorToStatusLocal(c_hold->c_api, err);
+    return args.event;
+  }
+};
+
+struct BufferHolder {
+  std::shared_ptr<RawBufferHolder> c_api_hold;
+  std::shared_ptr<xla::CommonPjRtBuffer::ScopedHold> hold;
+  std::shared_ptr<xla::PjRtBuffer::ExternalReference> ext_hold;
+  std::shared_ptr<void> user_hold;
+};
+
+using BufferHolders = std::vector<BufferHolder>;
+
+inline xla::Future<BufferHolder> CreateBufferFuture(
+    std::vector<xla::Future<>> futures,
+    std::shared_ptr<RawBufferHolder> c_api_hold = nullptr,
+    std::shared_ptr<xla::CommonPjRtBuffer::ScopedHold> hold = nullptr,
+    std::shared_ptr<xla::PjRtBuffer::ExternalReference> ext_hold = nullptr,
+    std::shared_ptr<void> user_hold = nullptr) {
+  auto join_future = xla::JoinFutures(futures);
+  if (!join_future.IsValid()) {
+    return xla::Future<BufferHolder>(
+        BufferHolder{std::move(c_api_hold), std::move(hold),
+                     std::move(ext_hold), std::move(user_hold)});
+  }
+  return join_future.Map([c_api_hold = std::move(c_api_hold),
+                          hold = std::move(hold),
+                          ext_hold = std::move(ext_hold),
+                          user_hold = std::move(user_hold)]() mutable {
+    return BufferHolder{std::move(c_api_hold), std::move(hold),
+                        std::move(ext_hold), std::move(user_hold)};
+  });
+}
+
+inline xla::Future<BufferHolders> FlattenPjRtFutures(
+    xla::Future<std::vector<BufferHolders>> futures) {
+  if (!futures.IsValid()) {
+    return xla::Future<BufferHolders>(BufferHolders{});
+  }
+  return futures.Map([](std::vector<BufferHolders> vecs) {
+    std::vector<BufferHolder> result;
+    for (auto& vec : vecs) {
+      for (auto& h : vec) {
+        result.push_back(std::move(h));
+      }
+    }
+    return result;
+  });
+}
+
+// Shared bundle of PJRT_Events; destroys them once when the last copy of the
+// owning PjRtCopyFuture drops. Copy-safe (shared ownership).
+struct PjRtEventBundle {
+  const PJRT_Api* c_api = nullptr;
+  std::vector<PJRT_Event*> events;
+  ~PjRtEventBundle() {
+    if (!c_api) return;
+    for (PJRT_Event* e : events) {
+      if (!e) continue;
+      PJRT_Event_Destroy_Args a;
+      a.struct_size = PJRT_Event_Destroy_Args_STRUCT_SIZE;
+      a.extension_start = nullptr;
+      a.event = e;
+      c_api->PJRT_Event_Destroy(&a);
+    }
+  }
+};
+
+struct PjRtCopyFuture {
+  xla::Future<> future;
+  BufferHolders holds;
+  std::shared_ptr<void> keep_alive;
+  // PJRT C-API completion (stable C ABI; offload/TPU path). When set, IsReady/
+  // Await use PJRT_Event_* instead of xla::Future/AsyncValue. A vector so that
+  // JoinPjRtCopyFutures can aggregate bundles without re-owning/freeing events.
+  std::vector<std::shared_ptr<PjRtEventBundle>> event_bundles;
+
+  PjRtCopyFuture() = default;
+  PjRtCopyFuture(xla::Future<> f, BufferHolders h,
+                 std::shared_ptr<void> k = nullptr)
+      : future(std::move(f)), holds(std::move(h)), keep_alive(std::move(k)) {}
+
+  explicit PjRtCopyFuture(BufferHolders h)
+      : future(xla::Future<>()), holds(std::move(h)) {}
+
+  template <typename T>
+  static PjRtCopyFuture FromFuture(xla::Future<T> f) {
+    auto ready_future = f.GetReadyFuture();
+    auto keep_alive = std::make_shared<xla::Future<T>>(std::move(f));
+    return PjRtCopyFuture(std::move(ready_future), {}, std::move(keep_alive));
+  }
+
+  // Build from raw PJRT_Events (C-API completion path).
+  static PjRtCopyFuture FromEvents(const PJRT_Api* c_api,
+                                   std::vector<PJRT_Event*> evs,
+                                   BufferHolders h) {
+    PjRtCopyFuture out;
+    out.holds = std::move(h);
+    auto bundle = std::make_shared<PjRtEventBundle>();
+    bundle->c_api = c_api;
+    bundle->events = std::move(evs);
+    out.event_bundles.push_back(std::move(bundle));
+    return out;
+  }
+
+  bool IsValid() const {
+    if (future.IsValid()) return true;
+    for (const auto& b : event_bundles) {
+      if (b && !b->events.empty()) return true;
+    }
+    return false;
+  }
+
+  bool IsReady() const {
+    for (const auto& b : event_bundles) {
+      if (!b || !b->c_api) continue;
+      for (PJRT_Event* e : b->events) {
+        PJRT_Event_IsReady_Args a;
+        a.struct_size = PJRT_Event_IsReady_Args_STRUCT_SIZE;
+        a.extension_start = nullptr;
+        a.event = e;
+        a.is_ready = false;
+        PJRT_Error* err = b->c_api->PJRT_Event_IsReady(&a);
+        if (err) {
+          (void)PjrtErrorToStatusLocal(b->c_api, err);
+          return false;
+        }
+        if (!a.is_ready) return false;
+      }
+    }
+    if (future.IsValid() && !future.IsReady()) return false;
+    return true;
+  }
+
+  template <typename F>
+  void OnReady(F&& f) {
+    if (future.IsValid()) {
+      future.OnReady([holds = holds, keep_alive = keep_alive,
+                      f = std::forward<F>(f)](absl::Status status) mutable {
+        if (status.ok()) {
+          std::forward<F>(f)(absl::StatusOr<BufferHolders>(holds));
+        } else {
+          std::forward<F>(f)(absl::StatusOr<BufferHolders>(status));
+        }
+      });
+      return;
+    }
+    // Event-only (offload) path: callers normally poll via IsReady/Await;
+    // resolve synchronously here for the rare OnReady caller.
+    absl::Status s = Await();
+    if (s.ok()) {
+      std::forward<F>(f)(absl::StatusOr<BufferHolders>(holds));
+    } else {
+      std::forward<F>(f)(absl::StatusOr<BufferHolders>(s));
+    }
+  }
+
+  absl::Status Await() {
+    absl::Status status = absl::OkStatus();
+    for (const auto& b : event_bundles) {
+      if (!b || !b->c_api) continue;
+      for (PJRT_Event* e : b->events) {
+        PJRT_Event_Await_Args aw;
+        aw.struct_size = PJRT_Event_Await_Args_STRUCT_SIZE;
+        aw.extension_start = nullptr;
+        aw.event = e;
+        PJRT_Error* err = b->c_api->PJRT_Event_Await(&aw);
+        if (err) {
+          status = PjrtErrorToStatusLocal(b->c_api, err);
+          continue;
+        }
+        PJRT_Event_Error_Args ee;
+        ee.struct_size = PJRT_Event_Error_Args_STRUCT_SIZE;
+        ee.extension_start = nullptr;
+        ee.event = e;
+        PJRT_Error* eerr = b->c_api->PJRT_Event_Error(&ee);
+        if (eerr) status = PjrtErrorToStatusLocal(b->c_api, eerr);
+      }
+    }
+    if (future.IsValid()) {
+      future.BlockUntilReady(
+          static_cast<void (*)(tsl::AsyncValue*)>(tsl::BlockUntilReady));
+      tsl::AsyncValue* av = future.async_value();
+      if (av->IsError()) {
+        status = av->GetError();
+      }
+    }
+    return status;
+  }
+
+  void AddKeepAlive(std::shared_ptr<void> k) {
+    if (!k) return;
+    if (!keep_alive) {
+      keep_alive = std::move(k);
+    } else {
+      struct CombinedKeepAlive {
+        std::shared_ptr<void> old_ka;
+        std::shared_ptr<void> new_ka;
+      };
+      keep_alive = std::make_shared<CombinedKeepAlive>(
+          CombinedKeepAlive{std::move(keep_alive), std::move(k)});
+    }
+  }
+};
+
+inline PjRtCopyFuture JoinPjRtCopyFutures(
+    absl::Span<const PjRtCopyFuture> futures) {
+  std::vector<xla::Future<>> sub_futures;
+  BufferHolders combined_holds;
+  PjRtCopyFuture joined;
+  for (const auto& f : futures) {
+    if (f.future.IsValid()) {
+      sub_futures.push_back(f.future);
+    }
+    for (const auto& h : f.holds) {
+      combined_holds.push_back(h);
+    }
+    for (const auto& b : f.event_bundles) {
+      if (b) joined.event_bundles.push_back(b);
+    }
+    if (f.keep_alive) {
+      joined.AddKeepAlive(f.keep_alive);
+    }
+  }
+  // Only build an xla::Future join if there is at least one (avoids
+  // instantiating the JoinFutures/AsyncValue path on the pure-event path).
+  if (!sub_futures.empty()) {
+    joined.future = xla::JoinFutures(sub_futures);
+  }
+  joined.holds = std::move(combined_holds);
+  return joined;
+}
+
+// One shard's worth of D2h copies (device->host). offsets in BYTES.
+struct D2hCopy {
+  void* dst;
+  int64_t src_off;
+  int64_t size;
+};
+struct H2dCopy {
+  const void* src;
+  int64_t dst_off;
+  int64_t size;
+};
+
+// Issue a shard's copies and return one completion future. Uses the PJRT
+// C-API event path when the buffer supports it (TPU); otherwise the legacy
+// xla::Future path. `copies` offsets are already in bytes.
+inline absl::StatusOr<PjRtCopyFuture> IssueD2hShard(
+    const BufferHoldAndAlias& hold, const std::vector<D2hCopy>& copies) {
+  BufferHolders holds{
+      BufferHolder{hold.c_hold, hold.common_hold, nullptr, nullptr}};
+  if (hold.supports_event()) {
+    std::vector<PJRT_Event*> evs;
+    evs.reserve(copies.size());
+    for (const auto& c : copies) {
+      auto ev = hold.CopyRawDeviceToHostEvent(c.dst, c.src_off, c.size);
+      if (!ev.ok()) return ev.status();
+      evs.push_back(ev.value());
+    }
+    return PjRtCopyFuture::FromEvents(hold.c_api(), std::move(evs),
+                                      std::move(holds));
+  }
+  std::vector<xla::Future<>> fs;
+  fs.reserve(copies.size());
+  for (const auto& c : copies) {
+    fs.push_back(hold.CopyRawDeviceToHost(c.dst, c.src_off, c.size));
+  }
+  return PjRtCopyFuture::FromFuture(
+      CreateBufferFuture(std::move(fs), hold.c_hold, hold.common_hold));
+}
+
+inline absl::StatusOr<PjRtCopyFuture> IssueH2dShard(
+    const BufferHoldAndAlias& hold, const std::vector<H2dCopy>& copies) {
+  BufferHolders holds{
+      BufferHolder{hold.c_hold, hold.common_hold, nullptr, nullptr}};
+  if (hold.supports_event()) {
+    std::vector<PJRT_Event*> evs;
+    evs.reserve(copies.size());
+    for (const auto& c : copies) {
+      auto ev = hold.CopyRawHostToDeviceEvent(c.src, c.dst_off, c.size);
+      if (!ev.ok()) return ev.status();
+      evs.push_back(ev.value());
+    }
+    return PjRtCopyFuture::FromEvents(hold.c_api(), std::move(evs),
+                                      std::move(holds));
+  }
+  std::vector<xla::Future<>> fs;
+  fs.reserve(copies.size());
+  for (const auto& c : copies) {
+    fs.push_back(hold.CopyRawHostToDevice(c.src, c.dst_off, c.size));
+  }
+  return PjRtCopyFuture::FromFuture(
+      CreateBufferFuture(std::move(fs), hold.c_hold, hold.common_hold));
+}
+
+}  // namespace raiden
+
+#endif  // THIRD_PARTY_TPU_RAIDEN_RAIDEN_LIB_RAW_TRANSFER_RAW_TRANSFER_CORE_H_
