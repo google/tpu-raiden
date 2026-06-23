@@ -30,7 +30,9 @@ struct HostBufferAllocation {
   uint8_t* ptr = nullptr;
   size_t size = 0;
   std::shared_ptr<void> owner;
+  int fd = -1;  // Optional file descriptor for shared memory
 };
+
 
 // Returns a HostBufferAllocation of at least the requested size for a given
 // device. If device is nullptr, it allocates on the default/current NUMA node.
@@ -48,6 +50,13 @@ class HostMemoryAllocator {
       xla::PjRtClient* pjrt_client);
 
   virtual absl::StatusOr<HostBufferAllocation> Allocate(size_t size_bytes) = 0;
+
+  virtual absl::StatusOr<HostBufferAllocation> AllocateShared(
+      size_t size_bytes) {
+    return absl::UnimplementedError(
+        "AllocateShared is not supported by this allocator.");
+  }
+
 
   // Allocates host memory registered with the device DMA engine
   // (PjRtClient::DmaMap), so raw C-API D2H/H2D into it run as a true async DMA
@@ -73,6 +82,10 @@ class XlaHostMemoryAllocator : public HostMemoryAllocator {
 
   absl::StatusOr<HostBufferAllocation> Allocate(size_t size_bytes) override;
 
+  absl::StatusOr<HostBufferAllocation> AllocateShared(
+      size_t size_bytes) override;
+
+
   absl::StatusOr<HostBufferAllocation> AllocateDmaMapped(
       size_t size_bytes) override;
 
@@ -81,6 +94,9 @@ class XlaHostMemoryAllocator : public HostMemoryAllocator {
 
  private:
   explicit XlaHostMemoryAllocator(xla::PjRtClient* client);
+
+  absl::StatusOr<HostBufferAllocation> AllocateInternal(size_t size_bytes,
+                                                         bool shared);
 
   xla::PjRtClient* client_ = nullptr;
 };
