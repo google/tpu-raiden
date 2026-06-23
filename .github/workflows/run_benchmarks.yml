@@ -20,6 +20,7 @@ on:
   push:
     branches:
       - main
+      - fix/benchmark_debug
 
   schedule:
     - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
