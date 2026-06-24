@@ -81,7 +81,7 @@ read -r -d '' INNER <<'INNER_EOF' || true
 set -exu -o pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq wget gnupg ca-certificates >/dev/null
+apt-get install -y -qq wget gnupg ca-certificates patchelf >/dev/null
 # Add the LLVM jammy-18 apt repo manually (the container's add-apt-repository is
 # broken: python apt_pkg is missing for python3.12).
 wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
@@ -120,6 +120,25 @@ cd /workspace
 
 mkdir -p /workspace/dist
 cp /cache/output_base/execroot/_main/bazel-out/k8-opt/bin/ci/wheel/${WHEEL_GLOB} /workspace/dist/
+
+# The bazel-built _tpu_raiden_torch.so does not link libpywrap; the torch
+# extension loader (tpu_raiden/api/torch/kv_cache_manager.py) requires it as a
+# NEEDED so the torch_tpu symbols (MaterializeAndReturn, AwaitBuffer, ...)
+# resolve in RTLD_LOCAL scope at import. build.sh injects this for its
+# source-tree copy, but the wheel packages the raw bazel .so -- so inject it
+# into the wheel here and repack (which regenerates RECORD with valid hashes).
+if [[ "${WITH_TORCH}" == "1" ]]; then
+  pip install -q wheel
+  WHL="$(ls /workspace/dist/${WHEEL_GLOB})"
+  UNPACK_DIR="$(mktemp -d)"
+  wheel unpack "${WHL}" -d "${UNPACK_DIR}"
+  PKG_DIR="$(ls -d "${UNPACK_DIR}"/*/)"
+  patchelf --add-needed libpywrap_torch_tpu_common.so \
+    "${PKG_DIR}tpu_raiden/frameworks/torch/_tpu_raiden_torch.so"
+  rm -f "${WHL}"
+  wheel pack "${PKG_DIR}" -d /workspace/dist
+  echo "patchelf: injected NEEDED libpywrap_torch_tpu_common.so into wheel .so"
+fi
 INNER_EOF
 
 echo "===> Building ${BUILD_MODE} wheel in ${CONTAINER_IMAGE}..."
