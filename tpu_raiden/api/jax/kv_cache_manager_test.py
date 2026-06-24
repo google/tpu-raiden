@@ -97,14 +97,15 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     np.testing.assert_array_equal(actual_numpy, expected_numpy)
 
   def _to_loopback_endpoints(self, endpoints):
-    """Maps real detected endpoints to 127.0.0.1 for sandboxed loopback test safety."""
-    loopback_endpoints = []
-    for ep in endpoints:
-      port = ep["endpoint"].split(":")[-1]
-      loopback_endpoints.append(
-          {"endpoint": f"127.0.0.1:{port}", "shards": ep["shards"]}
-      )
-    return loopback_endpoints
+    """Returns the producer's real advertised endpoints unchanged.
+
+    The H2H transport's control-plane rendezvous is keyed on the producer's real
+    advertised NIC address. Rewriting endpoints to a loopback address
+    (127.0.0.1 stalls silently; ::1 / localhost fail) breaks the handshake so the
+    transfer never completes. The server binds 0.0.0.0, and connecting to the
+    host's own NIC IP routes locally, so the real endpoints work in-process.
+    """
+    return endpoints
 
   def test_initialization(self):
     tpu_sharding = self.setup_shardings()

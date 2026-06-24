@@ -63,6 +63,8 @@ else
   DEFAULT_BAZEL_CACHE_BASE="${HOME}/.bazel_cache"
   DEFAULT_BAZEL_OUTPUT_BASE="/tmp/tpu_raiden_bazel_output_${USER}"
 fi
+DEFAULT_BAZEL_CACHE_BASE="/mnt/disks/jcgu/bazel_cache"
+DEFAULT_BAZEL_OUTPUT_BASE="/mnt/disks/jcgu/bazel_output"
 BAZEL_CACHE_BASE="${BAZEL_CACHE_DIR:-${DEFAULT_BAZEL_CACHE_BASE}}"
 BAZEL_DISK_CACHE="${BAZEL_CACHE_BASE}/disk_cache"
 BAZEL_REPO_CACHE="${BAZEL_CACHE_BASE}/repo_cache"

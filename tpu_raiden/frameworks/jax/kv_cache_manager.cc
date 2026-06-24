@@ -215,59 +215,83 @@ void KVCacheManager::InitSubManagers(
     numa_to_shards[0] = std::move(all_shards);
   }
 
-  submanager_to_global_shards_.reserve(numa_to_shards.size());
-  std::optional<int> bound_base_port = std::nullopt;
-  for (const auto& [numa, shards] : numa_to_shards) {
-    int sub_idx = static_cast<int>(sub_managers_.size());
-    std::vector<int64_t> gshards;
-    for (size_t local_sh = 0; local_sh < shards.size(); ++local_sh) {
-      global_shard_to_submanager_[shards[local_sh]] = {
-          sub_idx, static_cast<int>(local_sh)};
-      gshards.push_back(shards[local_sh]);
-    }
-    submanager_to_global_shards_.push_back(std::move(gshards));
-
-    std::vector<std::vector<xla::PjRtBuffer*>> sub_buffers(num_layers);
-    for (size_t l = 0; l < num_layers; ++l) {
-      sub_buffers[l].reserve(shards.size());
-      for (int sh : shards) {
-        sub_buffers[l].push_back(layer_buffers[l][sh]);
+  // Allocate the per-NUMA sub-managers. With an ephemeral data-plane port
+  // (local_port == 0), the first sub-manager binds a kernel-assigned base port
+  // P and the rest bind the consecutive ports P+1, P+2, ... so a peer can
+  // address every shard from a single "ip:base_port". Those consecutive ports
+  // are bound explicitly and can collide with a port already held by another
+  // manager alive in this process. If that happens, tear down the partially
+  // built managers and retry the whole allocation from a fresh ephemeral base.
+  const bool ephemeral_data_port = (local_port.value_or(-1) == 0);
+  const int kMaxPortAttempts = ephemeral_data_port ? 64 : 1;
+  for (int attempt = 0; attempt < kMaxPortAttempts; ++attempt) {
+    sub_managers_.clear();
+    submanager_to_global_shards_.clear();
+    submanager_to_global_shards_.reserve(numa_to_shards.size());
+    std::optional<int> bound_base_port = std::nullopt;
+    bool bind_conflict = false;
+    for (const auto& [numa, shards] : numa_to_shards) {
+      int sub_idx = static_cast<int>(sub_managers_.size());
+      std::vector<int64_t> gshards;
+      for (size_t local_sh = 0; local_sh < shards.size(); ++local_sh) {
+        global_shard_to_submanager_[shards[local_sh]] = {
+            sub_idx, static_cast<int>(local_sh)};
+        gshards.push_back(shards[local_sh]);
       }
-    }
+      submanager_to_global_shards_.push_back(std::move(gshards));
 
-    xla::PjRtClient* client = nullptr;
-    if (!sub_buffers.empty() && !sub_buffers[0].empty() &&
-        sub_buffers[0][0] != nullptr) {
-      if (sub_buffers[0][0]->device() != nullptr) {
-        client = sub_buffers[0][0]->device()->client();
+      std::vector<std::vector<xla::PjRtBuffer*>> sub_buffers(num_layers);
+      for (size_t l = 0; l < num_layers; ++l) {
+        sub_buffers[l].reserve(shards.size());
+        for (int sh : shards) {
+          sub_buffers[l].push_back(layer_buffers[l][sh]);
+        }
       }
-    }
-    tpu_raiden::HostBufferAllocator host_alloc =
-        LocalCreateHostMemoryAllocator(client);
 
-    std::optional<int> sub_port = local_port;
-    if (sub_port.has_value()) {
-      if (bound_base_port.has_value()) {
-        sub_port = *bound_base_port + sub_idx;
-      } else if (*sub_port > 0) {
-        sub_port = *sub_port + sub_idx;
+      xla::PjRtClient* client = nullptr;
+      if (!sub_buffers.empty() && !sub_buffers[0].empty() &&
+          sub_buffers[0][0] != nullptr) {
+        if (sub_buffers[0][0]->device() != nullptr) {
+          client = sub_buffers[0][0]->device()->client();
+        }
       }
-    }
-    int64_t sub_ctrl_port = local_control_port > 0
-                                ? local_control_port + sub_idx
-                                : local_control_port;
+      tpu_raiden::HostBufferAllocator host_alloc =
+          LocalCreateHostMemoryAllocator(client);
 
-    auto sub_mgr = std::make_unique<KVCacheManagerWithTransfer>(
-        sub_buffers, sub_port, host_blocks_to_allocate, unsafe_skip_buffer_lock,
-        parallelism, host_alloc, node_id + sub_idx, sub_ctrl_port, max_blocks,
-        num_slots, timeout_s);
-    if (local_port.has_value()) {
-      (void)sub_mgr->local_port();
+      std::optional<int> sub_port = local_port;
+      if (sub_port.has_value()) {
+        if (bound_base_port.has_value()) {
+          sub_port = *bound_base_port + sub_idx;
+        } else if (*sub_port > 0) {
+          sub_port = *sub_port + sub_idx;
+        }
+      }
+      int64_t sub_ctrl_port = local_control_port > 0
+                                  ? local_control_port + sub_idx
+                                  : local_control_port;
+
+      std::unique_ptr<KVCacheManagerWithTransfer> sub_mgr;
+      try {
+        sub_mgr = std::make_unique<KVCacheManagerWithTransfer>(
+            sub_buffers, sub_port, host_blocks_to_allocate,
+            unsafe_skip_buffer_lock, parallelism, host_alloc,
+            node_id + sub_idx, sub_ctrl_port, max_blocks, num_slots, timeout_s);
+      } catch (const std::exception& e) {
+        // A consecutive (or requested) port was unavailable. Retry the whole
+        // allocation from a fresh ephemeral base; for fixed ports, propagate.
+        if (!ephemeral_data_port || attempt + 1 >= kMaxPortAttempts) throw;
+        bind_conflict = true;
+        break;
+      }
+      if (local_port.has_value()) {
+        (void)sub_mgr->local_port();
+      }
+      if (!bound_base_port.has_value() && sub_mgr->local_port().has_value()) {
+        bound_base_port = sub_mgr->local_port().value();
+      }
+      sub_managers_.push_back(std::move(sub_mgr));
     }
-    if (!bound_base_port.has_value() && sub_mgr->local_port().has_value()) {
-      bound_base_port = sub_mgr->local_port().value();
-    }
-    sub_managers_.push_back(std::move(sub_mgr));
+    if (!bind_conflict) break;
   }
 }
 
@@ -428,23 +452,19 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::H2d(
   if (sub_managers_.empty()) {
     return raiden::PjRtCopyFuture();
   }
-  std::vector<xla::Future<>> futures;
   std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
-  futures.reserve(sub_managers_.size());
   sub_copy_futures.reserve(sub_managers_.size());
   for (auto& sub : sub_managers_) {
     ASSIGN_OR_RETURN(auto f, sub->H2d(src_offsets, dst_offsets, copy_sizes,
                                       slot_idx, layer_idx, shard_idx));
-    futures.push_back(f.future);
     sub_copy_futures.push_back(std::move(f));
   }
-  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
-  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
-      std::move(sub_copy_futures));
-  raiden::PjRtCopyFuture composite;
-  composite.future = std::move(joined);
-  composite.keep_alive = std::move(keep_alive);
-  return composite;
+  // Use the event-aware join. On TPU the per-shard copies complete via the
+  // PJRT C-API event path (PjRtCopyFuture::FromEvents), which leaves
+  // f.future invalid and signals through event_bundles. Joining the raw
+  // f.future via xla::JoinFutures would CHECK-fail IsValid() and also drop the
+  // event-based completion. JoinPjRtCopyFutures handles both paths.
+  return raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::D2h(
@@ -455,23 +475,18 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::D2h(
   if (sub_managers_.empty()) {
     return raiden::PjRtCopyFuture();
   }
-  std::vector<xla::Future<>> futures;
   std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
-  futures.reserve(sub_managers_.size());
   sub_copy_futures.reserve(sub_managers_.size());
   for (auto& sub : sub_managers_) {
     ASSIGN_OR_RETURN(auto f, sub->D2h(src_offsets, dst_offsets, copy_sizes,
                                       slot_idx, layer_idx, shard_idx));
-    futures.push_back(f.future);
     sub_copy_futures.push_back(std::move(f));
   }
-  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
-  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
-      std::move(sub_copy_futures));
-  raiden::PjRtCopyFuture composite;
-  composite.future = std::move(joined);
-  composite.keep_alive = std::move(keep_alive);
-  return composite;
+  // Use the event-aware join (see H2d above): on TPU the per-shard copies
+  // complete via the PJRT C-API event path, leaving f.future invalid and
+  // signalling through event_bundles, so xla::JoinFutures on the raw future
+  // would CHECK-fail IsValid().
+  return raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
 }
 
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
@@ -481,7 +496,6 @@ KVCacheManager::D2hAutoAllocate(const std::vector<int64_t>& src_offsets,
     return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
   }
   std::vector<int> all_ids;
-  std::vector<xla::Future<>> futures;
   std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
   for (size_t s = 0; s < sub_managers_.size(); ++s) {
     ASSIGN_OR_RETURN(
@@ -489,15 +503,13 @@ KVCacheManager::D2hAutoAllocate(const std::vector<int64_t>& src_offsets,
     if (s == 0) {
       all_ids = res.first;
     }
-    futures.push_back(res.second.future);
     sub_copy_futures.push_back(std::move(res.second));
   }
-  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
-  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
-      std::move(sub_copy_futures));
-  raiden::PjRtCopyFuture composite;
-  composite.future = std::move(joined);
-  composite.keep_alive = std::move(keep_alive);
+  // Event-aware join (see D2h/H2d): on TPU the per-shard copies use the PJRT
+  // C-API event path, so f.future is invalid and completion is via
+  // event_bundles; xla::JoinFutures on the raw future would CHECK-fail.
+  raiden::PjRtCopyFuture composite =
+      raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
   return std::make_pair(std::move(all_ids), std::move(composite));
 }
 
@@ -521,7 +533,6 @@ KVCacheManager::H2hWrite(std::string peer,
   }
 
   std::vector<int> all_ids;
-  std::vector<xla::Future<>> futures;
   std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
   for (size_t s = 0; s < sub_managers_.size(); ++s) {
     std::string sub_peer =
@@ -532,15 +543,13 @@ KVCacheManager::H2hWrite(std::string peer,
     if (s == 0) {
       all_ids = res.first;
     }
-    futures.push_back(res.second.future);
     sub_copy_futures.push_back(std::move(res.second));
   }
-  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
-  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
-      std::move(sub_copy_futures));
-  raiden::PjRtCopyFuture composite;
-  composite.future = std::move(joined);
-  composite.keep_alive = std::move(keep_alive);
+  // Event-aware join (see D2h/H2d): on TPU the per-shard transfers complete via
+  // the PJRT C-API event path, leaving f.future invalid and signalling through
+  // event_bundles; xla::JoinFutures on the raw future would CHECK-fail.
+  raiden::PjRtCopyFuture composite =
+      raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
   return std::make_pair(std::move(all_ids), std::move(composite));
 }
 
@@ -563,7 +572,6 @@ KVCacheManager::H2hRead(std::string peer,
   }
 
   std::vector<int> all_ids;
-  std::vector<xla::Future<>> futures;
   std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
   for (size_t s = 0; s < sub_managers_.size(); ++s) {
     std::string sub_peer =
@@ -573,15 +581,13 @@ KVCacheManager::H2hRead(std::string peer,
     if (s == 0) {
       all_ids = res.first;
     }
-    futures.push_back(res.second.future);
     sub_copy_futures.push_back(std::move(res.second));
   }
-  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
-  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
-      std::move(sub_copy_futures));
-  raiden::PjRtCopyFuture composite;
-  composite.future = std::move(joined);
-  composite.keep_alive = std::move(keep_alive);
+  // Event-aware join (see D2h/H2d): on TPU the per-shard transfers complete via
+  // the PJRT C-API event path, leaving f.future invalid and signalling through
+  // event_bundles; xla::JoinFutures on the raw future would CHECK-fail.
+  raiden::PjRtCopyFuture composite =
+      raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
   return std::make_pair(std::move(all_ids), std::move(composite));
 }
 
@@ -594,7 +600,6 @@ KVCacheManager::H2hWrite(
     return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
   }
   std::vector<int> all_ids;
-  std::vector<xla::Future<>> futures;
   std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
 
   for (size_t s = 0; s < sub_managers_.size(); ++s) {
@@ -620,15 +625,13 @@ KVCacheManager::H2hWrite(
     if (s == 0) {
       all_ids = res.first;
     }
-    futures.push_back(res.second.future);
     sub_copy_futures.push_back(std::move(res.second));
   }
-  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
-  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
-      std::move(sub_copy_futures));
-  raiden::PjRtCopyFuture composite;
-  composite.future = std::move(joined);
-  composite.keep_alive = std::move(keep_alive);
+  // Event-aware join (see D2h/H2d): on TPU the per-shard transfers complete via
+  // the PJRT C-API event path, leaving f.future invalid and signalling through
+  // event_bundles; xla::JoinFutures on the raw future would CHECK-fail.
+  raiden::PjRtCopyFuture composite =
+      raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
   return std::make_pair(std::move(all_ids), std::move(composite));
 }
 
@@ -640,7 +643,6 @@ KVCacheManager::H2hRead(
     return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
   }
   std::vector<int> all_ids;
-  std::vector<xla::Future<>> futures;
   std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
 
   for (size_t s = 0; s < sub_managers_.size(); ++s) {
@@ -665,15 +667,13 @@ KVCacheManager::H2hRead(
     if (s == 0) {
       all_ids = res.first;
     }
-    futures.push_back(res.second.future);
     sub_copy_futures.push_back(std::move(res.second));
   }
-  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
-  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
-      std::move(sub_copy_futures));
-  raiden::PjRtCopyFuture composite;
-  composite.future = std::move(joined);
-  composite.keep_alive = std::move(keep_alive);
+  // Event-aware join (see D2h/H2d): on TPU the per-shard transfers complete via
+  // the PJRT C-API event path, leaving f.future invalid and signalling through
+  // event_bundles; xla::JoinFutures on the raw future would CHECK-fail.
+  raiden::PjRtCopyFuture composite =
+      raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
   return std::make_pair(std::move(all_ids), std::move(composite));
 }
 
