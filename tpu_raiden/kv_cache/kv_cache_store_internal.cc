@@ -68,7 +68,7 @@ KVCacheStoreInternal::KVCacheStoreInternal(int capacity,
         std::make_unique<global_registry::GlobalRegistryClient>(channel);
   }
 
-  block_manager_ = std::make_unique<LogicalBlockManager>(capacity);
+  host_block_manager_ = std::make_unique<LogicalBlockManager>(capacity);
 
   if (!local_address.empty()) {
     int port = ParsePort(local_address);
@@ -89,7 +89,7 @@ KVCacheStoreInternal::KVCacheStoreInternal(int capacity,
 KVCacheStoreInternal::~KVCacheStoreInternal() {
   Clear();
   server_.reset();
-  block_manager_.reset();
+  host_block_manager_.reset();
 }
 
 void KVCacheStoreInternal::Clear() {
@@ -97,8 +97,8 @@ void KVCacheStoreInternal::Clear() {
   lru_list_.clear();
   cache_map_.clear();
   block_to_ptrs_.clear();
-  if (block_manager_) {
-    block_manager_ = std::make_unique<LogicalBlockManager>(capacity_);
+  if (host_block_manager_) {
+    host_block_manager_ = std::make_unique<LogicalBlockManager>(capacity_);
   }
 }
 
@@ -117,10 +117,10 @@ uint8_t* KVCacheStoreInternal::GetBlockHostPointer(size_t layer_idx,
 absl::StatusOr<std::vector<int>> KVCacheStoreInternal::AllocateBlocks(
     size_t num_blocks, uint64_t uuid) {
   absl::MutexLock lock(mutex_);
-  if (!block_manager_) {
+  if (!host_block_manager_) {
     return absl::FailedPreconditionError("Block manager is not initialized");
   }
-  return block_manager_->Allocate(num_blocks);
+  return host_block_manager_->Allocate(num_blocks);
 }
 
 absl::Status KVCacheStoreInternal::OnSingleBlockReceived(int block_id,
@@ -267,7 +267,7 @@ absl::Status KVCacheStoreInternal::Insert(
   {
     absl::MutexLock lock(mutex_);
     ASSIGN_OR_RETURN(store_block_ids,
-                     block_manager_->Allocate(total_needed_blocks));
+                     host_block_manager_->Allocate(total_needed_blocks));
   }
 
   size_t shard_alloc_size = total_needed_blocks * bytes_per_block;
@@ -290,7 +290,7 @@ absl::Status KVCacheStoreInternal::Insert(
   auto fut_or = manager.D2hAutoAllocate(src_offsets_64, copy_sizes_64);
   if (!fut_or.ok()) {
     absl::MutexLock lock(mutex_);
-    (void)block_manager_->Unlock(store_block_ids);
+    (void)host_block_manager_->Unlock(store_block_ids);
     return fut_or.status();
   }
 
@@ -321,7 +321,7 @@ absl::Status KVCacheStoreInternal::Insert(
       auto map_it = cache_map_.find(hash);
       if (map_it != cache_map_.end()) {
         auto entry = *map_it->second;
-        (void)block_manager_->Unlock(entry.internal_block_ids);
+        (void)host_block_manager_->Unlock(entry.internal_block_ids);
         for (int block_id : entry.internal_block_ids) {
           block_to_ptrs_.erase(block_id);
         }
@@ -331,7 +331,7 @@ absl::Status KVCacheStoreInternal::Insert(
 
       while (lru_list_.size() >= capacity_) {
         auto back = lru_list_.back();
-        (void)block_manager_->Unlock(back.internal_block_ids);
+        (void)host_block_manager_->Unlock(back.internal_block_ids);
         for (int block_id : back.internal_block_ids) {
           block_to_ptrs_.erase(block_id);
         }

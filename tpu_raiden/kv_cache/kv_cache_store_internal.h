@@ -113,8 +113,7 @@ class KVCacheStoreInternal
 
   std::string local_address_;
 
-
-  std::unique_ptr<LogicalBlockManager> block_manager_;
+  std::unique_ptr<LogicalBlockManager> host_block_manager_;
   absl::flat_hash_map<int, std::vector<uint8_t*>> block_to_ptrs_
       ABSL_GUARDED_BY(mutex_);
   std::unique_ptr<tpu_raiden::transport::BlockTransport> server_;

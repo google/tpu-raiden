@@ -204,7 +204,9 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       const std::vector<raiden::BufferHoldAndAlias>& buffer_holds);
 
   // Returns the internal LogicalBlockManager.
-  LogicalBlockManager* block_manager() const { return block_manager_.get(); }
+  LogicalBlockManager* host_block_manager() const {
+    return host_block_manager_.get();
+  }
 
   size_t bytes_per_block() const override;
 
@@ -228,7 +230,7 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   int64_t staging_max_major_per_slot_ = 0;
   bool is_blocked_layout_ = false;
 
-  std::unique_ptr<LogicalBlockManager> block_manager_;
+  std::unique_ptr<LogicalBlockManager> host_block_manager_;
 
   // Separate PJRT active holds matrix to protect subclass scoping E2E!
   std::vector<std::vector<raiden::BufferHoldAndAlias>> buffer_holds_;
@@ -257,7 +259,7 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   // Override parent AllocateBlocks using our dynamic block manager!
   absl::StatusOr<std::vector<int>> AllocateBlocks(
       size_t num_blocks, uint64_t uuid = 0) override {
-    return block_manager_->Allocate(num_blocks, /*lock=*/true);
+    return host_block_manager_->Allocate(num_blocks, /*lock=*/true);
   }
 
   absl::Status OnSingleBlockReceived(int block_id, size_t size_bytes) override;

@@ -126,15 +126,12 @@ KVCacheManagerBase::KVCacheManagerBase(
   physical_size_ = first_buffer->GetOnDeviceSizeInBytes().value();
   extension_ = raiden::GetRawBufferExtension(first_buffer, &c_api_);
 
-  int total_blocks = 0;
+  int num_host_blocks = host_blocks_to_allocate.value_or(64);
+  host_block_manager_ = std::make_unique<LogicalBlockManager>(num_host_blocks);
   if (!shape.dimensions().empty()) {
     major_dim_size_ = shape.dimensions(0);
-    total_blocks = major_dim_size_;
-    block_manager_ = std::make_unique<LogicalBlockManager>(total_blocks);
   }
   semaphore_ = std::make_unique<xla::Semaphore>(4);
-
-  int num_host_blocks = host_blocks_to_allocate.value_or(64);
 
   layers_.reserve(num_layers_);
   buffer_holds_.reserve(num_layers_);
@@ -234,7 +231,7 @@ KVCacheManagerBase::KVCacheManagerBase(
                         parallelism, bind_ip),
       host_allocator_(host_allocator) {
   int total_blocks = host_blocks_to_allocate.value_or(0);
-  block_manager_ = std::make_unique<LogicalBlockManager>(total_blocks);
+  host_block_manager_ = std::make_unique<LogicalBlockManager>(total_blocks);
   semaphore_ = std::make_unique<xla::Semaphore>(4);
 
   layers_.reserve(num_layers_);
@@ -298,7 +295,7 @@ KVCacheManagerBase::KVCacheManagerBase(
 KVCacheManagerBase::~KVCacheManagerBase() {
   buffer_holds_.clear();
   layers_.clear();
-  block_manager_.reset();
+  host_block_manager_.reset();
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(

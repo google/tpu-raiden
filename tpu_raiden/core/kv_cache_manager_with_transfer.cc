@@ -393,13 +393,17 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     }
     auto status = ConfigureHostStagingSlots(num_slots_, max_blocks_);
     if (!status.ok()) {
-      throw std::runtime_error("Failed to configure host staging slots: " +
-                               std::string(status.message()));
+      throw std::runtime_error(absl::StrCat(
+          "Failed to configure host staging slots: ", status.message()));
     }
     if (num_layers() > 0) {
       ConfigureDataPortFromKvTransfer();
     }
-    InitializeSlotPool(num_slots_);
+    status = InitializeSlotPool(num_slots_);
+    if (!status.ok()) {
+      throw std::runtime_error(
+          absl::StrCat("Failed to initialize slot pool: ", status.message()));
+    }
     StartControlServer();
   }
 }
@@ -435,13 +439,17 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     }
     auto status = ConfigureHostStagingSlots(num_slots_, max_blocks_);
     if (!status.ok()) {
-      throw std::runtime_error("Failed to configure host staging slots: " +
-                               std::string(status.message()));
+      throw std::runtime_error(absl::StrCat(
+          "Failed to configure host staging slots: ", status.message()));
     }
     if (num_layers() > 0) {
       ConfigureDataPortFromKvTransfer();
     }
-    InitializeSlotPool(num_slots_);
+    status = InitializeSlotPool(num_slots_);
+    if (!status.ok()) {
+      throw std::runtime_error(
+          absl::StrCat("Failed to initialize slot pool: ", status.message()));
+    }
     StartControlServer();
   }
 }
@@ -471,13 +479,17 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     }
     auto status = ConfigureHostStagingSlots(num_slots_, max_blocks_);
     if (!status.ok()) {
-      throw std::runtime_error("Failed to configure host staging slots: " +
-                               std::string(status.message()));
+      throw std::runtime_error(absl::StrCat(
+          "Failed to configure host staging slots: ", status.message()));
     }
     if (num_layers > 0) {
       ConfigureDataPortFromKvTransfer();
     }
-    InitializeSlotPool(num_slots_);
+    status = InitializeSlotPool(num_slots_);
+    if (!status.ok()) {
+      throw std::runtime_error(
+          absl::StrCat("Failed to initialize slot pool: ", status.message()));
+    }
     StartControlServer();
   }
 }
@@ -488,6 +500,16 @@ KVCacheManagerWithTransfer::~KVCacheManagerWithTransfer() {
   pull_pool_.reset();
   if (num_layers() > 0) {
     SetBlockReadinessCallback(nullptr);
+  }
+  if (host_block_manager_ && !all_slots_.empty()) {
+    std::vector<int> blocks_to_unlock;
+    blocks_to_unlock.reserve(all_slots_.size() * max_blocks_);
+    for (const Slot& slot : all_slots_) {
+      for (int block_id : slot.block_ids) {
+        blocks_to_unlock.push_back(block_id);
+      }
+    }
+    (void)host_block_manager_->Unlock(blocks_to_unlock);
   }
 }
 
@@ -735,25 +757,51 @@ KVCacheManagerWithTransfer::CompleteReadRaw() {
 StageResult KVCacheManagerWithTransfer::IssueH2D(
     int64_t slot_idx, int64_t num_blocks,
     const std::vector<int64_t>& local_block_ids) {
+  if (num_layers() == 0) {
+    throw std::runtime_error("KV cache manager is not registered");
+  }
+  if (slot_idx < 0 || slot_idx >= num_slots_) {
+    throw std::out_of_range("slot_idx out of range");
+  }
+  if (num_blocks < 0 || num_blocks > max_blocks_) {
+    throw std::out_of_range("num_blocks out of range");
+  }
   if (num_blocks != static_cast<int64_t>(local_block_ids.size())) {
     throw std::invalid_argument("num_blocks must match len(local_block_ids)");
   }
-  CopySpec copy_spec = Offsets(local_block_ids, /*source_is_compact=*/true);
+
+  // Get the actual host block IDs for the first num_blocks in the slot
+  const Slot& slot = all_slots_[slot_idx];
+  std::vector<int64_t> host_block_ids;
+  host_block_ids.reserve(num_blocks);
+  for (int64_t i = 0; i < num_blocks; ++i) {
+    host_block_ids.push_back(slot.block_ids[i]);
+  }
+
+  // Coalesce contiguous (host, device) block runs
+  CopySpec copy_spec = BuildCoalescedCopySpec(host_block_ids, local_block_ids);
   kv_cache::KVCacheCopySpec transfer_spec = ToKVCacheCopySpec(copy_spec);
+
+  // We still calculate host_spans for the result, but we don't use slot_idx
+  // in H2d call to avoid slot-based double offsetting in the base class.
   std::vector<kv_cache::KVCacheHostSpan> host_spans =
       LayerSpans(slot_idx, num_blocks);
+
   auto future = std::make_shared<TransferFuture>();
   int64_t total_bytes = 0;
   for (const kv_cache::KVCacheHostSpan& span : host_spans) {
     total_bytes += static_cast<int64_t>(span.nbytes);
   }
+
+  // Call H2d with slot_idx = std::nullopt to use actual host block IDs
   auto fut_or = H2d(transfer_spec.src_offsets, transfer_spec.dst_offsets,
-                    transfer_spec.sizes, slot_idx);
+                    transfer_spec.sizes, /*slot_idx=*/std::nullopt);
   if (!fut_or.ok()) {
     throw std::runtime_error("Failed to issue H2D transfer: " +
                              std::string(fut_or.status().message()));
   }
   future->Add(std::move(fut_or.value()));
+
   return {.future = std::move(future),
           .host_spans = std::move(host_spans),
           .total_bytes = total_bytes,
@@ -769,41 +817,92 @@ std::vector<kv_cache::KVCacheHostSpan> KVCacheManagerWithTransfer::LayerSpans(
     throw std::out_of_range("num_blocks out of range");
   }
   std::vector<kv_cache::KVCacheHostSpan> spans;
-  spans.reserve(num_layers() * num_shards());
+  const Slot& slot = all_slots_[slot_idx];
+
+  // Coalesce contiguous runs of block IDs in the slot
+  struct Run {
+    int64_t start_block_id;
+    int64_t size;
+  };
+  std::vector<Run> runs;
+  for (int64_t start = 0; start < num_blocks;) {
+    int64_t end = start + 1;
+    while (end < num_blocks &&
+           slot.block_ids[end] == slot.block_ids[end - 1] + 1) {
+      ++end;
+    }
+    runs.push_back({slot.block_ids[start], end - start});
+    start = end;
+  }
+
+  spans.reserve(num_layers() * num_shards() * runs.size());
   for (size_t layer_idx = 0; layer_idx < num_layers(); ++layer_idx) {
     for (size_t shard_idx = 0; shard_idx < num_shards(); ++shard_idx) {
-      spans.push_back(
-          ValueOrThrow("Failed to get KVCacheManager host staging span",
-                       HostSpan(layer_idx, shard_idx, slot_idx, num_blocks)));
+      const auto& shard_info = layers_[layer_idx].shards[shard_idx];
+      for (const auto& run : runs) {
+        const size_t byte_offset =
+            static_cast<size_t>(run.start_block_id) * slice_byte_size_;
+        const size_t nbytes = static_cast<size_t>(run.size) * slice_byte_size_;
+        spans.push_back(kv_cache::KVCacheHostSpan{
+            .ptr = const_cast<uint8_t*>(shard_info.host_ptr) + byte_offset,
+            .nbytes = nbytes,
+            .slot_idx = slot_idx,
+            .base_major = run.start_block_id,
+            .num_major = run.size,
+            .layer_idx = layer_idx,
+            .shard_idx = shard_idx});
+      }
     }
   }
   return spans;
 }
 
-void KVCacheManagerWithTransfer::InitializeSlotPool(int64_t num_slots) {
+absl::Status KVCacheManagerWithTransfer::InitializeSlotPool(int64_t num_slots) {
+  if (host_block_manager_->num_free_blocks() < num_slots * max_blocks_) {
+    return absl::FailedPreconditionError(absl::StrCat(
+        "Insufficient free host blocks to initialize slot pool. Required: ",
+        num_slots * max_blocks_,
+        ", Available: ", host_block_manager_->num_free_blocks()));
+  }
   free_slots_.clear();
-  for (int64_t slot = 0; slot < num_slots; ++slot) {
+  all_slots_.clear();
+  all_slots_.reserve(num_slots);
+  for (int64_t i = 0; i < num_slots; ++i) {
+    ASSIGN_OR_RETURN(std::vector<int> allocated_ids,
+                     host_block_manager_->Allocate(max_blocks_,
+                                                   /*lock=*/true));
+    if (allocated_ids.size() != max_blocks_) {
+      return absl::InternalError(absl::StrCat(
+          "Slot pool allocation returned incorrect number of blocks: ",
+          allocated_ids.size(), ", expected: ", max_blocks_));
+    }
+    Slot slot{/*slot_idx=*/i, /*block_ids=*/allocated_ids};
+    all_slots_.push_back(slot);
     free_slots_.push_back(slot);
   }
+  return absl::OkStatus();
 }
 
-int64_t KVCacheManagerWithTransfer::AcquireSlot() {
+KVCacheManagerWithTransfer::Slot KVCacheManagerWithTransfer::AcquireSlot() {
   std::lock_guard<std::mutex> lock(mu_);
   return AcquireSlotLocked();
 }
 
-int64_t KVCacheManagerWithTransfer::AcquireSlotLocked() {
+KVCacheManagerWithTransfer::Slot
+KVCacheManagerWithTransfer::AcquireSlotLocked() {
   if (free_slots_.empty()) {
     throw std::runtime_error("Raiden host slot pool exhausted");
   }
-  int64_t slot = free_slots_.front();
+  Slot slot = free_slots_.front();
   free_slots_.pop_front();
   return slot;
 }
 
 void KVCacheManagerWithTransfer::ReleaseSlotLocked(int64_t slot_idx) {
-  if (slot_idx < 0) return;
-  free_slots_.push_back(slot_idx);
+  if (slot_idx < 0 || slot_idx >= num_slots_) {
+    return;
+  }
+  free_slots_.push_back(all_slots_[slot_idx]);
 }
 
 void KVCacheManagerWithTransfer::ReleaseEntrySlotLocked(
@@ -1233,21 +1332,6 @@ void KVCacheManagerWithTransfer::ConfigureDataPortFromKvTransfer() {
       });
 }
 
-uint64_t KVCacheManagerWithTransfer::StagingBlockBase(int64_t slot_idx) const {
-  if (slot_idx < 0) {
-    throw std::out_of_range("slot_idx out of range");
-  }
-  if (slot_idx >
-      std::numeric_limits<int64_t>::max() / std::max<int64_t>(max_blocks_, 1)) {
-    throw std::out_of_range("staging block base exceeds int64 range");
-  }
-  const int64_t base = slot_idx * max_blocks_;
-  if (base < 0 ||
-      base > static_cast<int64_t>(std::numeric_limits<int>::max())) {
-    throw std::out_of_range("staging block base exceeds int range");
-  }
-  return static_cast<uint64_t>(base);
-}
 
 std::vector<int> KVCacheManagerWithTransfer::ContiguousBlockIds(
     uint64_t base, uint64_t count) const {

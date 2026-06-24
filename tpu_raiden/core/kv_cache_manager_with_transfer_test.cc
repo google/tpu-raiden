@@ -190,7 +190,7 @@ TEST(KVCacheManagerWithTransferTest,
   auto engine = std::make_unique<KVCacheManagerWithTransfer>(
       layer_buffers,
       /*local_port=*/std::nullopt,
-      /*host_blocks_to_allocate=*/2,  // Allocate 2 blocks in host
+      /*host_blocks_to_allocate=*/6,  // Allocate 6 blocks in host
       /*unsafe_skip_buffer_lock=*/true,
       /*parallelism=*/1,
       /*host_allocator=*/nullptr,
@@ -219,7 +219,7 @@ TEST(KVCacheManagerWithTransferTest,
                     /*remote_block_ids=*/{0},
                     /*local_block_ids=*/{1},
                     /*parallelism=*/1,
-                    /*local_host_block_ids=*/std::vector<int64_t>{0});
+                    /*local_host_block_ids=*/std::vector<int64_t>{4});
 
   // Wait for transfer to complete
   bool done = false;
@@ -250,27 +250,27 @@ TEST(KVCacheManagerWithTransferTest,
   }
 
   // Verify host buffer:
-  uint8_t* host_block_0 = engine->GetBlockHostPointer(0, 0, 0);
-  uint8_t* host_block_1 = engine->GetBlockHostPointer(0, 0, 1);
+  uint8_t* host_block_4 = engine->GetBlockHostPointer(0, 0, 4);
+  uint8_t* host_block_5 = engine->GetBlockHostPointer(0, 0, 5);
 
-  float* host_block_0_float = reinterpret_cast<float*>(host_block_0);
-  float* host_block_1_float = reinterpret_cast<float*>(host_block_1);
+  float* host_block_4_float = reinterpret_cast<float*>(host_block_4);
+  float* host_block_5_float = reinterpret_cast<float*>(host_block_5);
 
-  // Host Block 0 should contain the transferred data in tiled layout.
+  // Host Block 4 should contain the transferred data in tiled layout.
   // Tile width is 128 floats (512 bytes) due to TPU alignment.
   const int tile_width = 128;
   for (int r = 0; r < 32; ++r) {
     for (int c = 0; c < 32; ++c) {
       int physical_idx = r * tile_width + c;
       int logical_val = r * 32 + c;
-      EXPECT_EQ(host_block_0_float[physical_idx],
+      EXPECT_EQ(host_block_4_float[physical_idx],
                 static_cast<float>(logical_val));
     }
   }
 
-  // Host Block 1 should still be 0 (untouched, since we targeted Host Block 0)
+  // Host Block 5 should still be 0 (untouched, since we targeted Host Block 4)
   for (int i = 0; i < elements_per_slice; ++i) {
-    EXPECT_EQ(host_block_1_float[i], 0.0f);
+    EXPECT_EQ(host_block_5_float[i], 0.0f);
   }
 }
 

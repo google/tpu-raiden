@@ -145,6 +145,11 @@ struct PendingCopy {
 
 class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
  public:
+  struct Slot {
+    int64_t slot_idx;
+    std::vector<int> block_ids;
+  };
+
   KVCacheManagerWithTransfer(
       const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
       std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
@@ -279,14 +284,14 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   ControlResponseHeader ReadControlResponseHeader(int fd);
   void AckSend(uint64_t uuid);
   void ConfigureDataPortFromKvTransfer();
-  uint64_t StagingBlockBase(int64_t slot_idx) const;
+
   std::vector<int> ContiguousBlockIds(uint64_t base, uint64_t count) const;
   static void ValidateRequestedBlocks(
       const SendEntry& entry, const std::vector<int64_t>& requested_block_ids);
 
-  void InitializeSlotPool(int64_t num_slots);
-  int64_t AcquireSlot();
-  int64_t AcquireSlotLocked();
+  absl::Status InitializeSlotPool(int64_t num_slots);
+  Slot AcquireSlot();
+  Slot AcquireSlotLocked();
   void ReleaseSlotLocked(int64_t slot_idx);
   void ReleaseEntrySlotLocked(const std::shared_ptr<SendEntry>& entry);
 
@@ -342,7 +347,8 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   double timeout_s_ = 120.0;
   bool unsafe_skip_buffer_lock_ = true;
 
-  std::deque<int64_t> free_slots_;
+  std::deque<Slot> free_slots_;
+  std::vector<Slot> all_slots_;
   // SendEntry is shared across threads: created/timed-out/cleaned-up on the
   // main thread, but accessed asynchronously in control worker threads
   // handling pull connections.
