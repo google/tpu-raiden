@@ -57,6 +57,7 @@ COMMON_REQUIRES = [
     "tpu-info==0.7.1",
     "numpy",
     "absl-py",
+    "requests",
 ]
 
 # The JAX wheel pulls the JAX stack; the Torch wheel deliberately does NOT, so
