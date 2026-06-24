@@ -20,9 +20,11 @@
 #include <utility>
 #include <vector>
 
+#include "absl/strings/match.h"
 #include "ATen/core/TensorBody.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
+#include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/core/utils.h"
 #include "tpu_raiden/frameworks/torch/torch_utils.h"
 #include "tpu_raiden/kv_cache/kv_cache_listener.h"
@@ -92,28 +94,41 @@ KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
                                int64_t node_id, int64_t local_control_port,
                                int64_t max_blocks, int64_t num_slots,
                                double timeout_s, bool unsafe_skip_buffer_lock,
-                               int parallelism,
-                               std::optional<int> listener_port)
+                               int parallelism)
     : KVCacheManager(UnpackLayers(SingleShardLayers(kv_caches)),
                      /*local_port=*/std::nullopt,
                      /*host_blocks_to_allocate=*/std::nullopt,
                      unsafe_skip_buffer_lock, parallelism, node_id,
                      local_control_port, max_blocks, num_slots, timeout_s,
                      kv_caches) {
-  if (listener_port) {
-    listener_ =
-        std::make_unique<tpu_raiden::kv_cache::KVCacheListener>(
-            this, *listener_port);
-  }
+  // Always start listener on port 0 (ephemeral) for transfer-enabled managers.
+  listener_ = std::make_unique<tpu_raiden::kv_cache::KVCacheListener>(this, 0);
 }
 
 KVCacheManager::~KVCacheManager() = default;
 
-std::optional<int> KVCacheManager::listener_port() const {
-  if (listener_) {
-    return listener_->listener_port();
+std::vector<std::string> KVCacheManager::listener_addresses() const {
+  std::vector<std::string> addresses;
+  if (!listener_) {
+    return addresses;
   }
-  return std::nullopt;
+
+  std::vector<HostNicAddress> host_nics = GetLocalHostNicAddresses();
+  std::string local_ip = "127.0.0.1";
+  for (const auto& nic : host_nics) {
+    if (nic.interface_name != "lo" && !nic.ip_address.empty()) {
+      local_ip = nic.ip_address;
+      break;
+    }
+  }
+
+  if (absl::StrContains(local_ip, ':')) {
+    local_ip = "[" + local_ip + "]";
+  }
+
+  addresses.push_back(local_ip + ":" +
+                      std::to_string(listener_->listener_port()));
+  return addresses;
 }
 
 bool KVCacheManager::is_listener_active() const {

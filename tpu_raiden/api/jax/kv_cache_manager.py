@@ -54,10 +54,10 @@ class KVCacheManager:
     """Instantiates the TransferEngine-based KVCacheManager.
 
     Args:
-      kv_caches: List of device-placed contiguous Tensors representing the
-        sharded KV caches.
-      local_control_port: TCP socket server port for control plane coordination.
-      max_blocks: Maximum number of blocks per staging slot.
+      kv_caches: List of JAX sharded arrays representing the KV caches.
+      local_control_port: TCP socket server port for control plane coordination
+        (use -1 to disable the server).
+      max_blocks: Maximum number of blocks in the host pool.
       num_slots: Number of transfer slots to allocate.
       timeout_s: Timeout in seconds for transfer operations.
       unsafe_skip_buffer_lock: Skip dynamic safety locking.
@@ -178,3 +178,8 @@ class KVCacheManager:
     if copy_sizes is None:
       copy_sizes = [1] * len(src_offsets)
     return self._impl.h2d(src_offsets, dst_offsets, copy_sizes)
+
+  @property
+  def listener_addresses(self) -> List[str]:
+    """Returns the full network addresses (IP:port) of all active local control listeners."""
+    return self._impl.listener_addresses

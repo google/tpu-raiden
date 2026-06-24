@@ -36,6 +36,10 @@ class PjRtBuffer;
 
 namespace tpu_raiden {
 namespace kv_cache {
+class KVCacheListener;
+}  // namespace kv_cache
+
+namespace kv_cache {
 namespace jax {
 
 struct UnpackedCache {
@@ -49,8 +53,8 @@ class KVCacheManager {
  public:
   KVCacheManager(const KVCacheManager&) = delete;
   KVCacheManager& operator=(const KVCacheManager&) = delete;
-  KVCacheManager(KVCacheManager&&) = default;
-  KVCacheManager& operator=(KVCacheManager&&) = default;
+  KVCacheManager(KVCacheManager&&);
+  KVCacheManager& operator=(KVCacheManager&&);
 
 #ifndef WITHOUT_PYTHON
   // JAX sharded constructor E2E (cache-only by default)
@@ -93,6 +97,7 @@ class KVCacheManager {
   std::optional<int> local_port() const;
   int local_control_port() const;
   int64_t node_id() const;
+  std::vector<std::string> listener_addresses() const;
 
   uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx);
   const uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) const;
@@ -193,6 +198,11 @@ class KVCacheManager {
   std::map<std::string, int> done_sending_counts_;
   std::map<std::string, int> done_recving_counts_;
   std::set<std::string> failed_recving_set_;
+  // We maintain a KVCacheListener for each sub-manager. Since sub-managers are
+  // partitioned by NUMA node to optimize memory bandwidth, we can have multiple
+  // listeners per host (one for each NUMA node/sub-manager).
+  std::vector<std::unique_ptr<tpu_raiden::kv_cache::KVCacheListener>>
+      listeners_;
 };
 
 }  // namespace jax

@@ -109,12 +109,12 @@ NB_MODULE(_tpu_raiden_torch, m) {
            nb::arg("unsafe_skip_buffer_lock") = false,
            nb::arg("parallelism") = 1)
       .def(nb::init<const std::vector<at::Tensor>&, int64_t, int64_t, int64_t,
-                    int64_t, double, bool, int, std::optional<int>>(),
+                    int64_t, double, bool, int>(),
            nb::arg("kv_caches"), nb::arg("node_id"),
            nb::arg("local_control_port"), nb::arg("max_blocks"),
            nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
            nb::arg("unsafe_skip_buffer_lock") = true,
-           nb::arg("parallelism") = 4, nb::arg("listener_port") = nb::none())
+           nb::arg("parallelism") = 4)
       .def(
           "H2d",
           [](KVCacheManager& self,
@@ -220,7 +220,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
              }
              return py_eps;
            })
-      .def_prop_ro("listener_port", &KVCacheManager::listener_port)
+      .def_prop_ro("listener_addresses", &KVCacheManager::listener_addresses)
       .def_prop_ro("is_listener_active", &KVCacheManager::is_listener_active)
 
       .def("notify_for_read", &KVCacheManager::NotifyForRead, nb::arg("req_id"),

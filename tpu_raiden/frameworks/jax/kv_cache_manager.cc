@@ -20,12 +20,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "absl/types/span.h"
 #include "xla/future.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
@@ -33,6 +35,7 @@
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
+#include "tpu_raiden/kv_cache/kv_cache_listener.h"
 #ifndef WITHOUT_PYTHON
 #include "tpu_raiden/frameworks/jax/utils.h"
 
@@ -177,6 +180,8 @@ KVCacheManager::KVCacheManager(
 }
 
 KVCacheManager::~KVCacheManager() = default;
+KVCacheManager::KVCacheManager(KVCacheManager&&) = default;
+KVCacheManager& KVCacheManager::operator=(KVCacheManager&&) = default;
 
 void KVCacheManager::InitSubManagers(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
@@ -292,6 +297,16 @@ void KVCacheManager::InitSubManagers(
       sub_managers_.push_back(std::move(sub_mgr));
     }
     if (!bind_conflict) break;
+  }
+
+  // Always start listener on port 0 (ephemeral) for transfer-enabled
+  // managers.
+  listeners_.clear();
+  listeners_.reserve(sub_managers_.size());
+  for (const auto& sub_mgr : sub_managers_) {
+    auto listener = std::make_unique<tpu_raiden::kv_cache::KVCacheListener>(
+        sub_mgr.get(), 0);
+    listeners_.push_back(std::move(listener));
   }
 }
 
@@ -452,19 +467,23 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::H2d(
   if (sub_managers_.empty()) {
     return raiden::PjRtCopyFuture();
   }
+  std::vector<xla::Future<>> futures;
   std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
+  futures.reserve(sub_managers_.size());
   sub_copy_futures.reserve(sub_managers_.size());
   for (auto& sub : sub_managers_) {
     ASSIGN_OR_RETURN(auto f, sub->H2d(src_offsets, dst_offsets, copy_sizes,
                                       slot_idx, layer_idx, shard_idx));
+    futures.push_back(f.future);
     sub_copy_futures.push_back(std::move(f));
   }
-  // Use the event-aware join. On TPU the per-shard copies complete via the
-  // PJRT C-API event path (PjRtCopyFuture::FromEvents), which leaves
-  // f.future invalid and signals through event_bundles. Joining the raw
-  // f.future via xla::JoinFutures would CHECK-fail IsValid() and also drop the
-  // event-based completion. JoinPjRtCopyFutures handles both paths.
-  return raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
+  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
+  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
+      std::move(sub_copy_futures));
+  raiden::PjRtCopyFuture composite;
+  composite.future = std::move(joined);
+  composite.keep_alive = std::move(keep_alive);
+  return composite;
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::D2h(
@@ -475,18 +494,23 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::D2h(
   if (sub_managers_.empty()) {
     return raiden::PjRtCopyFuture();
   }
+  std::vector<xla::Future<>> futures;
   std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
+  futures.reserve(sub_managers_.size());
   sub_copy_futures.reserve(sub_managers_.size());
   for (auto& sub : sub_managers_) {
     ASSIGN_OR_RETURN(auto f, sub->D2h(src_offsets, dst_offsets, copy_sizes,
                                       slot_idx, layer_idx, shard_idx));
+    futures.push_back(f.future);
     sub_copy_futures.push_back(std::move(f));
   }
-  // Use the event-aware join (see H2d above): on TPU the per-shard copies
-  // complete via the PJRT C-API event path, leaving f.future invalid and
-  // signalling through event_bundles, so xla::JoinFutures on the raw future
-  // would CHECK-fail IsValid().
-  return raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
+  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
+  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
+      std::move(sub_copy_futures));
+  raiden::PjRtCopyFuture composite;
+  composite.future = std::move(joined);
+  composite.keep_alive = std::move(keep_alive);
+  return composite;
 }
 
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
@@ -496,6 +520,7 @@ KVCacheManager::D2hAutoAllocate(const std::vector<int64_t>& src_offsets,
     return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
   }
   std::vector<int> all_ids;
+  std::vector<xla::Future<>> futures;
   std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
   for (size_t s = 0; s < sub_managers_.size(); ++s) {
     ASSIGN_OR_RETURN(
@@ -503,13 +528,15 @@ KVCacheManager::D2hAutoAllocate(const std::vector<int64_t>& src_offsets,
     if (s == 0) {
       all_ids = res.first;
     }
+    futures.push_back(res.second.future);
     sub_copy_futures.push_back(std::move(res.second));
   }
-  // Event-aware join (see D2h/H2d): on TPU the per-shard copies use the PJRT
-  // C-API event path, so f.future is invalid and completion is via
-  // event_bundles; xla::JoinFutures on the raw future would CHECK-fail.
-  raiden::PjRtCopyFuture composite =
-      raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
+  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
+  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
+      std::move(sub_copy_futures));
+  raiden::PjRtCopyFuture composite;
+  composite.future = std::move(joined);
+  composite.keep_alive = std::move(keep_alive);
   return std::make_pair(std::move(all_ids), std::move(composite));
 }
 
@@ -533,6 +560,7 @@ KVCacheManager::H2hWrite(std::string peer,
   }
 
   std::vector<int> all_ids;
+  std::vector<xla::Future<>> futures;
   std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
   for (size_t s = 0; s < sub_managers_.size(); ++s) {
     std::string sub_peer =
@@ -543,13 +571,15 @@ KVCacheManager::H2hWrite(std::string peer,
     if (s == 0) {
       all_ids = res.first;
     }
+    futures.push_back(res.second.future);
     sub_copy_futures.push_back(std::move(res.second));
   }
-  // Event-aware join (see D2h/H2d): on TPU the per-shard transfers complete via
-  // the PJRT C-API event path, leaving f.future invalid and signalling through
-  // event_bundles; xla::JoinFutures on the raw future would CHECK-fail.
-  raiden::PjRtCopyFuture composite =
-      raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
+  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
+  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
+      std::move(sub_copy_futures));
+  raiden::PjRtCopyFuture composite;
+  composite.future = std::move(joined);
+  composite.keep_alive = std::move(keep_alive);
   return std::make_pair(std::move(all_ids), std::move(composite));
 }
 
@@ -572,6 +602,7 @@ KVCacheManager::H2hRead(std::string peer,
   }
 
   std::vector<int> all_ids;
+  std::vector<xla::Future<>> futures;
   std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
   for (size_t s = 0; s < sub_managers_.size(); ++s) {
     std::string sub_peer =
@@ -581,13 +612,15 @@ KVCacheManager::H2hRead(std::string peer,
     if (s == 0) {
       all_ids = res.first;
     }
+    futures.push_back(res.second.future);
     sub_copy_futures.push_back(std::move(res.second));
   }
-  // Event-aware join (see D2h/H2d): on TPU the per-shard transfers complete via
-  // the PJRT C-API event path, leaving f.future invalid and signalling through
-  // event_bundles; xla::JoinFutures on the raw future would CHECK-fail.
-  raiden::PjRtCopyFuture composite =
-      raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
+  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
+  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
+      std::move(sub_copy_futures));
+  raiden::PjRtCopyFuture composite;
+  composite.future = std::move(joined);
+  composite.keep_alive = std::move(keep_alive);
   return std::make_pair(std::move(all_ids), std::move(composite));
 }
 
@@ -600,6 +633,7 @@ KVCacheManager::H2hWrite(
     return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
   }
   std::vector<int> all_ids;
+  std::vector<xla::Future<>> futures;
   std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
 
   for (size_t s = 0; s < sub_managers_.size(); ++s) {
@@ -625,13 +659,15 @@ KVCacheManager::H2hWrite(
     if (s == 0) {
       all_ids = res.first;
     }
+    futures.push_back(res.second.future);
     sub_copy_futures.push_back(std::move(res.second));
   }
-  // Event-aware join (see D2h/H2d): on TPU the per-shard transfers complete via
-  // the PJRT C-API event path, leaving f.future invalid and signalling through
-  // event_bundles; xla::JoinFutures on the raw future would CHECK-fail.
-  raiden::PjRtCopyFuture composite =
-      raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
+  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
+  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
+      std::move(sub_copy_futures));
+  raiden::PjRtCopyFuture composite;
+  composite.future = std::move(joined);
+  composite.keep_alive = std::move(keep_alive);
   return std::make_pair(std::move(all_ids), std::move(composite));
 }
 
@@ -643,6 +679,7 @@ KVCacheManager::H2hRead(
     return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
   }
   std::vector<int> all_ids;
+  std::vector<xla::Future<>> futures;
   std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
 
   for (size_t s = 0; s < sub_managers_.size(); ++s) {
@@ -667,14 +704,40 @@ KVCacheManager::H2hRead(
     if (s == 0) {
       all_ids = res.first;
     }
+    futures.push_back(res.second.future);
     sub_copy_futures.push_back(std::move(res.second));
   }
-  // Event-aware join (see D2h/H2d): on TPU the per-shard transfers complete via
-  // the PJRT C-API event path, leaving f.future invalid and signalling through
-  // event_bundles; xla::JoinFutures on the raw future would CHECK-fail.
-  raiden::PjRtCopyFuture composite =
-      raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
+  auto joined = xla::JoinFutures(absl::MakeSpan(futures));
+  auto keep_alive = std::make_shared<std::vector<raiden::PjRtCopyFuture>>(
+      std::move(sub_copy_futures));
+  raiden::PjRtCopyFuture composite;
+  composite.future = std::move(joined);
+  composite.keep_alive = std::move(keep_alive);
   return std::make_pair(std::move(all_ids), std::move(composite));
+}
+
+std::vector<std::string> KVCacheManager::listener_addresses() const {
+  std::vector<std::string> addresses;
+  std::vector<HostNicAddress> host_nics = GetLocalHostNicAddresses();
+  std::string local_ip = "127.0.0.1";
+  for (const auto& nic : host_nics) {
+    if (nic.interface_name != "lo" && !nic.ip_address.empty()) {
+      local_ip = nic.ip_address;
+      break;
+    }
+  }
+
+  if (absl::StrContains(local_ip, ':')) {
+    local_ip = "[" + local_ip + "]";
+  }
+
+  addresses.reserve(listeners_.size());
+  for (const auto& l : listeners_) {
+    if (l) {
+      addresses.push_back(local_ip + ":" + std::to_string(l->listener_port()));
+    }
+  }
+  return addresses;
 }
 
 }  // namespace jax

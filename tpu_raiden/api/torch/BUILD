@@ -79,6 +79,7 @@ py_test(
     ],
     deps = [
         ":kv_cache_manager_torch_py",
+        "//tpu_raiden/rpc:raiden_service_py_pb2",
         "@com_google_absl_py//absl/testing:absltest",
         "@com_google_absl_py//absl/testing:parameterized",
         "@pypi//numpy",

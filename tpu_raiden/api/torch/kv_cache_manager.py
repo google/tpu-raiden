@@ -31,9 +31,9 @@
 import ctypes
 import os
 import pathlib
-import sys
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import torch_tpu
 from torch_tpu import _loader as _torch_tpu_loader
 
 
@@ -69,7 +69,6 @@ class KVCacheManager:
       num_slots: int,
       timeout_s: float = 120.0,
       unsafe_skip_buffer_lock: bool = True,
-      listener_port: Optional[int] = None,
       parallelism: int = 4,
   ):
     """Instantiates the TransferEngine-based KVCacheManager.
@@ -77,14 +76,14 @@ class KVCacheManager:
     Args:
       kv_caches: List of device-placed contiguous Tensors representing the
         sharded KV caches.
-      node_id: Worker or Shard ID (e.g., Tensor Parallel rank).
-      local_control_port: TCP socket server port for control plane coordination.
+      node_id: Unique identifier for this host/node in the distributed mesh
+        (e.g., Tensor Parallel rank).
+      local_control_port: TCP socket server port for control plane coordination
+        (use -1 to disable the server).
       max_blocks: Maximum number of blocks in the host pool.
       num_slots: Number of transfer slots to allocate.
       timeout_s: Timeout in seconds for transfer operations.
       unsafe_skip_buffer_lock: Skip dynamic safety locking.
-      listener_port: Sockets server port for incoming C++ KVCacheListener
-        commands.
       parallelism: Number of parallel network copies per layer.
     """
     self._impl = _impl.KVCacheManager(
@@ -95,7 +94,6 @@ class KVCacheManager:
         num_slots=num_slots,
         timeout_s=timeout_s,
         unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
-        listener_port=listener_port,
         parallelism=parallelism,
     )
 
@@ -205,35 +203,11 @@ class KVCacheManager:
     return self._impl.H2d(src_offsets, dst_offsets, copy_sizes)
 
   @property
-  def listener_port(self) -> Optional[int]:
-    """Returns the active local port assigned to the C++ KVCacheListener."""
-    return self._impl.listener_port
+  def listener_addresses(self) -> List[str]:
+    """Returns the full network addresses (IP:port) of all active local control listeners."""
+    return self._impl.listener_addresses
 
   @property
   def is_listener_active(self) -> bool:
     """Returns whether the native C++ KVCacheListener is actively running."""
     return self._impl.is_listener_active
-
-  def h2d(
-      self,
-      src_offsets: List[int] = None,
-      dst_offsets: List[int] = None,
-      sizes: List[int] = None,
-  ) -> Any:
-    """Triggers Host-to-Device (H2D) copy of staged host buffer to Device memory."""
-    src_offsets = src_offsets or []
-    dst_offsets = dst_offsets or []
-    sizes = sizes or []
-    return self._impl.H2d(src_offsets, dst_offsets, sizes)
-
-  def d2h(
-      self,
-      src_offsets: List[int] = None,
-      dst_offsets: List[int] = None,
-      sizes: List[int] = None,
-  ) -> Any:
-    """Triggers Device-to-Host (D2H) copy of Device memory to Host buffer."""
-    src_offsets = src_offsets or []
-    dst_offsets = dst_offsets or []
-    sizes = sizes or []
-    return self._impl.D2h(src_offsets, dst_offsets, sizes)

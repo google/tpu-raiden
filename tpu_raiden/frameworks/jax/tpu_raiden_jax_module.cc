@@ -195,6 +195,9 @@ NB_MODULE(_tpu_raiden_jax, m) {
       .def_prop_ro(
           "local_control_port",
           &tpu_raiden::kv_cache::jax::KVCacheManager::local_control_port)
+      .def_prop_ro(
+          "listener_addresses",
+          &tpu_raiden::kv_cache::jax::KVCacheManager::listener_addresses)
       .def("get_local_endpoints",
            [](const tpu_raiden::kv_cache::jax::KVCacheManager& self) {
              auto eps = self.get_local_endpoints();
