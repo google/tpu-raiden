@@ -7,7 +7,7 @@ benchmarks {
   owner: "raiden-dev"
 
   workload {
-    action: "./ml_actions/benchmarking/actions/workload_executors/bazel"
+    action: "./ml_actions/actions/workload_executors/bazel"
     action_inputs { key: "target" value: "//tpu_raiden/benchmarks:multi_host_perf_test_oss" }
     # Flags passed to the test runner (avoid hardcoding role/peer for multi-host dynamic execution)
     action_inputs { key: "runtime_flags" value: "--num_blocks=512 --num_layers=8 --parallelism=1 --dtype=float32 --warmup=5 --iters=100" }
@@ -59,7 +59,7 @@ benchmarks {
   owner: "raiden-dev"
 
   workload {
-    action: "./ml_actions/benchmarking/actions/workload_executors/bazel"
+    action: "./ml_actions/actions/workload_executors/bazel"
     action_inputs { key: "target" value: "//tpu_raiden/benchmarks:multi_host_perf_test_oss" }
     # Flags passed to the test runner (avoid hardcoding role/peer for multi-host dynamic execution)
     action_inputs { key: "runtime_flags" value: "--num_blocks=512 --num_layers=8 --parallelism=1 --dtype=bfloat16 --warmup=5 --iters=100" }
