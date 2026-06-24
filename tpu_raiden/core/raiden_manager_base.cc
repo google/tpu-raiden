@@ -75,12 +75,14 @@ void RaidenManagerBase::DetectAndAssignNumaNode(
 RaidenManagerBase::RaidenManagerBase(size_t num_layers, size_t num_shards,
                                      size_t slice_byte_size,
                                      std::optional<int> local_port,
-                                     int parallelism)
+                                     int parallelism,
+                                     std::optional<std::string> bind_ip)
     : num_layers_(num_layers),
       num_shards_(num_shards),
       slice_byte_size_(slice_byte_size),
       parallelism_(parallelism),
-      local_port_cfg_(local_port.value_or(0)) {
+      local_port_cfg_(local_port.value_or(0)),
+      bind_ip_cfg_(bind_ip) {
   shard_factor_ = 1;
 }
 
@@ -94,17 +96,21 @@ void RaidenManagerBase::InitTransportServer() {
   absl::MutexLock lock(&server_init_mu_);
   if (server_) return;
   std::string bind_ip = "127.0.0.1";
-  std::vector<HostNicAddress> host_nics = GetLocalHostNicAddresses();
-  if (!host_nics.empty()) {
-    int target_numa = assigned_numa_node_.value_or(-1);
-    auto it = std::find_if(
-        host_nics.begin(), host_nics.end(), [&](const HostNicAddress& n) {
-          return n.numa_node == target_numa && target_numa >= 0;
-        });
-    if (it != host_nics.end()) {
-      bind_ip = it->ip_address;
-    } else {
-      bind_ip = host_nics[0].ip_address;
+  if (bind_ip_cfg_.has_value()) {
+    bind_ip = *bind_ip_cfg_;
+  } else {
+    std::vector<HostNicAddress> host_nics = GetLocalHostNicAddresses();
+    if (!host_nics.empty()) {
+      int target_numa = assigned_numa_node_.value_or(-1);
+      auto it = std::find_if(
+          host_nics.begin(), host_nics.end(), [&](const HostNicAddress& n) {
+            return n.numa_node == target_numa && target_numa >= 0;
+          });
+      if (it != host_nics.end()) {
+        bind_ip = it->ip_address;
+      } else {
+        bind_ip = host_nics[0].ip_address;
+      }
     }
   }
   server_ = std::make_unique<tpu_raiden::transport::BlockTransport>(

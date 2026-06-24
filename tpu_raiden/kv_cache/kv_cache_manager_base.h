@@ -86,7 +86,8 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<int> local_port = std::nullopt,
       std::optional<int> host_blocks_to_allocate = std::nullopt,
       bool unsafe_skip_buffer_lock = false, int parallelism = 1,
-      HostBufferAllocator host_allocator = nullptr);
+      HostBufferAllocator host_allocator = nullptr,
+      std::optional<std::string> bind_ip = std::nullopt);
 
   // Standard CPU-only Constructor for remote workers E2E
   KVCacheManagerBase(size_t num_layers, size_t num_shards,
@@ -94,7 +95,8 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
                      std::optional<int> local_port = std::nullopt,
                      std::optional<int> host_blocks_to_allocate = std::nullopt,
                      int parallelism = 1,
-                     HostBufferAllocator host_allocator = nullptr);
+                     HostBufferAllocator host_allocator = nullptr,
+                     std::optional<std::string> bind_ip = std::nullopt);
 
   ~KVCacheManagerBase() override;
 

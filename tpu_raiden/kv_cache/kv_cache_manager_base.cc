@@ -89,13 +89,13 @@ KVCacheManagerBase::KVCacheManagerBase(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     bool unsafe_skip_buffer_lock, int parallelism,
-    HostBufferAllocator host_allocator)
+    HostBufferAllocator host_allocator, std::optional<std::string> bind_ip)
     : RaidenManagerBase(layer_buffers.size(),
                         layer_buffers.empty() ? 0 : layer_buffers[0].size(),
                         layer_buffers.empty() ? 0
                                               : raiden::GetMajorSliceByteSize(
                                                     layer_buffers[0][0]),
-                        local_port, parallelism),
+                        local_port, parallelism, bind_ip),
       host_allocator_(host_allocator) {
   if (num_layers_ == 0 || num_shards_ == 0) {
     return;
@@ -228,9 +228,10 @@ KVCacheManagerBase::KVCacheManagerBase(
 KVCacheManagerBase::KVCacheManagerBase(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
-    int parallelism, HostBufferAllocator host_allocator)
+    int parallelism, HostBufferAllocator host_allocator,
+    std::optional<std::string> bind_ip)
     : RaidenManagerBase(num_layers, num_shards, slice_byte_size, local_port,
-                        parallelism),
+                        parallelism, bind_ip),
       host_allocator_(host_allocator) {
   int total_blocks = host_blocks_to_allocate.value_or(0);
   block_manager_ = std::make_unique<LogicalBlockManager>(total_blocks);

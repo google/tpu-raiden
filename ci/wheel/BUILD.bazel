@@ -28,7 +28,7 @@
 
 load("@nanobind_bazel//:build_defs.bzl", "nanobind_extension")
 load("@raiden_version//:version.bzl", "WHEEL_VERSION")
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
 load("@rules_python//python:packaging.bzl", "py_package")
 load(":wheel.bzl", "raiden_framework_wheel")

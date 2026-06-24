@@ -80,7 +80,7 @@ absl::Status RawBufferTransport::ReadExact(int fd, void* buffer,
         pfd.fd = fd;
         pfd.events = POLLIN;
         int poll_ret =
-            poll(&pfd, 1, 10000);  // 10s timeout to prevent infinite hang
+            poll(&pfd, 1, 120000);  // 120s timeout to prevent infinite hang
         if (poll_ret < 0) {
           if (errno == EINTR) continue;
           return absl::InternalError(absl::StrCat(
@@ -254,6 +254,42 @@ absl::StatusOr<int> RawBufferTransport::ConnectToPeer(absl::string_view peer) {
     int buf_opt = 16 * 1024 * 1024;  // 16MB
     setsockopt(sock_fd, SOL_SOCKET, SO_SNDBUF, &buf_opt, sizeof(buf_opt));
     setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, &buf_opt, sizeof(buf_opt));
+
+    bool should_bind = true;
+    if (bound_ip_ == "127.0.0.1" || bound_ip_ == "::1" ||
+        bound_ip_ == "0.0.0.0" || bound_ip_ == "::" ||
+        absl::StartsWith(bound_ip_, "127.")) {
+      should_bind = false;
+    }
+
+    if (should_bind) {
+      bool is_ipv6 = absl::StrContains(bound_ip_, ':');
+      if (is_ipv6 && rp->ai_family == AF_INET6) {
+        struct sockaddr_in6 local_addr;
+        std::memset(&local_addr, 0, sizeof(local_addr));
+        local_addr.sin6_family = AF_INET6;
+        if (inet_pton(AF_INET6, bound_ip_.c_str(), &local_addr.sin6_addr) > 0) {
+          local_addr.sin6_port = 0;
+          if (bind(sock_fd, (struct sockaddr*)&local_addr, sizeof(local_addr)) <
+              0) {
+            LOG(WARNING) << "Client bind IPv6 failed to " << bound_ip_ << ": "
+                         << std::strerror(errno);
+          }
+        }
+      } else if (!is_ipv6 && rp->ai_family == AF_INET) {
+        struct sockaddr_in local_addr;
+        std::memset(&local_addr, 0, sizeof(local_addr));
+        local_addr.sin_family = AF_INET;
+        if (inet_pton(AF_INET, bound_ip_.c_str(), &local_addr.sin_addr) > 0) {
+          local_addr.sin_port = 0;
+          if (bind(sock_fd, (struct sockaddr*)&local_addr, sizeof(local_addr)) <
+              0) {
+            LOG(WARNING) << "Client bind IPv4 failed to " << bound_ip_ << ": "
+                         << std::strerror(errno);
+          }
+        }
+      }
+    }
 
     if (connect(sock_fd, rp->ai_addr, rp->ai_addrlen) >= 0) {
       break; /* Success */

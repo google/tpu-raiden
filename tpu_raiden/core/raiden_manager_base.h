@@ -42,7 +42,8 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   RaidenManagerBase(size_t num_layers, size_t num_shards,
                     size_t slice_byte_size,
                     std::optional<int> local_port = std::nullopt,
-                    int parallelism = 1);
+                    int parallelism = 1,
+                    std::optional<std::string> bind_ip = std::nullopt);
 
   ~RaidenManagerBase() override;
 
@@ -109,6 +110,7 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   int64_t major_dim_size_ = 0;
   std::optional<int> assigned_numa_node_ = std::nullopt;
   int local_port_cfg_ = 0;
+  std::optional<std::string> bind_ip_cfg_ = std::nullopt;
 
   void InitTransportServer();
 
