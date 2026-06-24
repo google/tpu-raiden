@@ -84,6 +84,9 @@ class WeightSynchronizerIntegrationTest(absltest.TestCase):
             f"127.0.0.1:{ws_dest1.local_port}",
             f"127.0.0.1:{ws_dest2.local_port}",
         ],
+        start_transfer_request=raiden_service_pb2.StartTransferRequest(
+            is_sender=True
+        ),
     )
     payload = req.SerializeToString()
 
@@ -140,6 +143,9 @@ class WeightSynchronizerIntegrationTest(absltest.TestCase):
     req = raiden_service_pb2.ControlRequest(
         command=raiden_service_pb2.ControlRequest.COMMAND_START_TRANSFER,
         peers=[f"127.0.0.1:{ws_source.local_port}"],
+        start_transfer_request=raiden_service_pb2.StartTransferRequest(
+            is_sender=True
+        ),
     )
     payload = req.SerializeToString()
 
