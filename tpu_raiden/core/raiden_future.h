@@ -42,6 +42,11 @@ struct RaidenFuture {
   absl::Status Await() { return future.Await(); }
 
   bool IsReady() const { return future.IsReady(); }
+
+  // Non-blocking error probe; see raiden::PjRtCopyFuture::PollError. Call after
+  // IsReady() is true to tell a successful completion from a failed one without
+  // blocking the polling thread.
+  absl::Status PollError() { return future.PollError(); }
 };
 
 }  // namespace tpu_raiden

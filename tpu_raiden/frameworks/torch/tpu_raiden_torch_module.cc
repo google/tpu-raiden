@@ -84,7 +84,19 @@ NB_MODULE(_tpu_raiden_torch, m) {
              }
            })
       .def("IsReady", &tpu_raiden::RaidenFuture::IsReady)
-      .def("is_ready", &tpu_raiden::RaidenFuture::IsReady);
+      .def("is_ready", &tpu_raiden::RaidenFuture::IsReady)
+      // Non-blocking success check; valid once is_ready() is true. True if the
+      // transfer is still pending or completed successfully, False if a ready
+      // event carries an error. Lets pollers distinguish success from failure
+      // without calling the blocking Await() (which can deadlock the live
+      // model).
+      .def("ok",
+           [](tpu_raiden::RaidenFuture& self) { return self.PollError().ok(); })
+      // Non-blocking error message ("" when ok); pair with ok() for logging.
+      .def("error_message", [](tpu_raiden::RaidenFuture& self) {
+        absl::Status status = self.PollError();
+        return status.ok() ? std::string() : std::string(status.message());
+      });
 
   // =========================================================================
   // 2. Bind KVCacheManager

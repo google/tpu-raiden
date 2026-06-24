@@ -395,6 +395,43 @@ struct PjRtCopyFuture {
     return true;
   }
 
+  // Non-blocking error probe. Returns the failure status if a *ready* event or
+  // the future already carries an error, and OkStatus otherwise (still pending
+  // or completed successfully). Unlike Await() it never blocks -- it issues no
+  // PJRT_Event_Await / BlockUntilReady -- so it is safe to call from a poll
+  // loop racing the live model. Pair it with IsReady() to distinguish a
+  // successful completion from a failed one.
+  absl::Status PollError() {
+    absl::Status status = absl::OkStatus();
+    for (const auto& b : event_bundles) {
+      if (!b || !b->c_api) continue;
+      for (PJRT_Event* e : b->events) {
+        PJRT_Event_IsReady_Args ra;
+        ra.struct_size = PJRT_Event_IsReady_Args_STRUCT_SIZE;
+        ra.extension_start = nullptr;
+        ra.event = e;
+        ra.is_ready = false;
+        PJRT_Error* rerr = b->c_api->PJRT_Event_IsReady(&ra);
+        if (rerr) {
+          status = PjrtErrorToStatusLocal(b->c_api, rerr);
+          continue;
+        }
+        if (!ra.is_ready) continue;  // pending: no error to report yet
+        PJRT_Event_Error_Args ee;
+        ee.struct_size = PJRT_Event_Error_Args_STRUCT_SIZE;
+        ee.extension_start = nullptr;
+        ee.event = e;
+        PJRT_Error* eerr = b->c_api->PJRT_Event_Error(&ee);
+        if (eerr) status = PjrtErrorToStatusLocal(b->c_api, eerr);
+      }
+    }
+    if (future.IsValid() && future.IsReady()) {
+      tsl::AsyncValue* av = future.async_value();
+      if (av && av->IsError()) status = av->GetError();
+    }
+    return status;
+  }
+
   template <typename F>
   void OnReady(F&& f) {
     if (future.IsValid()) {
