@@ -33,10 +33,10 @@ permissions:
 jobs:
   run_benchmarks:
     name: Run TPU Raiden H2H Benchmarks
-    uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@578b24891a0d77f3b3b837008b30835f670e94b6
+    uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@affd28b492f67c242afa8b119e590b25816b7b88
     with:
       registry_file: "benchmarks/benchmark_registry.pbtxt"
-      ml_actions_ref: "578b24891a0d77f3b3b837008b30835f670e94b6"
+      ml_actions_ref: "affd28b492f67c242afa8b119e590b25816b7b88"
       runner: "linux-x86-n2-32"
       publish_metrics: true
       pub_sub_gcp_project_id: "ml-oss-benchmarking-production"
