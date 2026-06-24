@@ -54,6 +54,14 @@ namespace tpu_raiden {
 int64_t SetThreadMempolicy(int mode, int node) {
   constexpr int kMpolDefault = 0;
   constexpr int kMpolBind = 2;
+#ifndef __NR_set_mempolicy
+#if defined(__x86_64__)
+#define __NR_set_mempolicy 238
+#elif defined(__aarch64__)
+#define __NR_set_mempolicy 237
+#endif
+#endif
+
 #ifdef __NR_set_mempolicy
   int64_t res;
   if (mode == kMpolDefault || node < 0) {
