@@ -560,6 +560,7 @@ absl::Status KVCacheManagerWithTransfer::RegisterActivePlan(
       total_blocks += unique_blocks_from_this_source.size();
     }
     recv_entry.total_blocks = total_blocks;
+    recv_entry.num_completed_blocks = 0;
     if (total_blocks > 0) {
       active_recv_entries_[uuid] = std::move(recv_entry);
       LOG(INFO) << "RegisterActivePlan (Receiver): Populated "
@@ -640,6 +641,8 @@ void KVCacheManagerWithTransfer::StartRead(
     RecvEntry entry;
     entry.req_id = req_id;
     entry.chip_block_ids = load_plan.h2d_local_block_ids;
+    entry.total_blocks = load_plan.num_blocks;
+    entry.num_completed_blocks = 0;
     entry.h2d_copy =
         Offsets(load_plan.h2d_local_block_ids, /*source_is_compact=*/true);
     for (size_t i = 0; i < load_plan.transport_host_block_ids.size(); ++i) {
@@ -1284,16 +1287,30 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
   CopySpec h2d_copy;
   absl::flat_hash_map<int64_t, int64_t> host_to_chip;
   bool found = false;
+  std::vector<int> accumulated_host_blocks;
 
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = active_recv_entries_.find(uuid);
     if (it != active_recv_entries_.end()) {
-      req_id = it->second.req_id;
-      h2d_copy = it->second.h2d_copy;
-      host_to_chip = it->second.host_to_chip;
-      found = true;
-      active_recv_entries_.erase(it);
+      it->second.num_completed_blocks += block_ids.size();
+      it->second.accumulated_host_block_ids.insert(
+          it->second.accumulated_host_block_ids.end(), block_ids.begin(),
+          block_ids.end());
+
+      if (it->second.num_completed_blocks >= it->second.total_blocks) {
+        req_id = it->second.req_id;
+        h2d_copy = it->second.h2d_copy;
+        host_to_chip = it->second.host_to_chip;
+        accumulated_host_blocks = it->second.accumulated_host_block_ids;
+        found = true;
+        active_recv_entries_.erase(it);
+      } else {
+        VLOG(1) << "OnBlocksReceived: Partial blocks received for uuid " << uuid
+                << ", completed: " << it->second.num_completed_blocks << " / "
+                << it->second.total_blocks;
+        return absl::OkStatus();
+      }
     }
   }
 
@@ -1304,7 +1321,8 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
 
   if (h2d_copy.src_offsets.empty()) {
     // Rebuild on-the-fly for push transfers registered via RegisterActivePlan
-    std::vector<int64_t> host_blocks(block_ids.begin(), block_ids.end());
+    std::vector<int64_t> host_blocks(accumulated_host_blocks.begin(),
+                                     accumulated_host_blocks.end());
     std::vector<int64_t> chip_blocks;
     chip_blocks.reserve(host_blocks.size());
     for (int64_t hb : host_blocks) {

@@ -95,6 +95,16 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     actual_numpy = np.asarray(dev_arr)
     np.testing.assert_array_equal(actual_numpy, expected_numpy)
 
+  def _to_loopback_endpoints(self, endpoints):
+    """Maps real detected endpoints to 127.0.0.1 for sandboxed loopback test safety."""
+    loopback_endpoints = []
+    for ep in endpoints:
+      port = ep["endpoint"].split(":")[-1]
+      loopback_endpoints.append(
+          {"endpoint": f"127.0.0.1:{port}", "shards": ep["shards"]}
+      )
+    return loopback_endpoints
+
   def test_initialization(self):
     tpu_sharding = self.setup_shardings()
     shape = (4, 128, 8, 8, 128)
@@ -151,18 +161,17 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
         unsafe_skip_buffer_lock=self.skip_lock,
     )
 
-    port = getattr(producer, "local_control_port", 0)
-    self.assertGreater(port, 0)
+    endpoints = self._to_loopback_endpoints(producer.get_local_endpoints())
+    self.assertGreater(len(endpoints), 0)
 
     req_id = "test_req_poll_jax"
     uuid = 12345
     producer.register_read(req_id, uuid, [0, 1])
 
-    remote_endpoint = f"127.0.0.1:{port}"
     consumer.start_read(
         req_id=req_id,
         uuid=uuid,
-        remote_endpoint=remote_endpoint,
+        remote_endpoint=endpoints,
         remote_block_ids=[0, 1],
         local_block_ids=[0, 1],
     )
@@ -237,18 +246,17 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
         unsafe_skip_buffer_lock=self.skip_lock,
     )
 
-    port = getattr(producer, "local_control_port", 0)
-    self.assertGreater(port, 0)
+    endpoints = self._to_loopback_endpoints(producer.get_local_endpoints())
+    self.assertGreater(len(endpoints), 0)
 
     req_id = "test_req_non_contig"
     uuid = 54321
     producer.register_read(req_id, uuid, [0, 2])
 
-    remote_endpoint = f"127.0.0.1:{port}"
     consumer.start_read(
         req_id=req_id,
         uuid=uuid,
-        remote_endpoint=remote_endpoint,
+        remote_endpoint=endpoints,
         remote_block_ids=[0, 2],
         local_block_ids=[0, 1],
     )
@@ -325,18 +333,17 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
         unsafe_skip_buffer_lock=self.skip_lock,
     )
 
-    port = getattr(producer, "local_control_port", 0)
-    self.assertGreater(port, 0)
+    endpoints = self._to_loopback_endpoints(producer.get_local_endpoints())
+    self.assertGreater(len(endpoints), 0)
 
     req_id = "test_req_reorder"
     uuid = 98765
     producer.register_read(req_id, uuid, [0, 1])
 
-    remote_endpoint = f"127.0.0.1:{port}"
     consumer.start_read(
         req_id=req_id,
         uuid=uuid,
-        remote_endpoint=remote_endpoint,
+        remote_endpoint=endpoints,
         remote_block_ids=[1, 0],
         local_block_ids=[0, 1],
     )
@@ -411,8 +418,8 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
         unsafe_skip_buffer_lock=self.skip_lock,
     )
 
-    port = getattr(producer, "local_control_port", 0)
-    self.assertGreater(port, 0)
+    endpoints = self._to_loopback_endpoints(producer.get_local_endpoints())
+    self.assertGreater(len(endpoints), 0)
 
     req_id = "test_req_large_complex"
     uuid = 13579
@@ -423,11 +430,10 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
 
     producer.register_read(req_id, uuid, remote_blocks)
 
-    remote_endpoint = f"127.0.0.1:{port}"
     consumer.start_read(
         req_id=req_id,
         uuid=uuid,
-        remote_endpoint=remote_endpoint,
+        remote_endpoint=endpoints,
         remote_block_ids=requested_remote,
         local_block_ids=local_blocks,
     )
@@ -504,18 +510,17 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
         unsafe_skip_buffer_lock=self.skip_lock,
     )
 
-    port = getattr(producer, "local_control_port", 0)
-    self.assertGreater(port, 0)
+    endpoints = self._to_loopback_endpoints(producer.get_local_endpoints())
+    self.assertGreater(len(endpoints), 0)
 
     req_id = "test_req_parallel"
     uuid = 77777
     producer.register_read(req_id, uuid, [0, 1])
 
-    remote_endpoint = f"127.0.0.1:{port}"
     consumer.start_read(
         req_id=req_id,
         uuid=uuid,
-        remote_endpoint=remote_endpoint,
+        remote_endpoint=endpoints,
         remote_block_ids=[0, 1],
         local_block_ids=[0, 1],
         parallelism=2,

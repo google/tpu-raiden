@@ -320,6 +320,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     std::vector<H2dIssueFuture> h2d_dispatch_futures;
     int32_t total_blocks = 0;
     int32_t num_completed_blocks = 0;
+    std::vector<int> accumulated_host_block_ids;
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
 
