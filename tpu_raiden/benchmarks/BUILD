@@ -12,21 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@rules_python//python:defs.bzl", "py_binary")
+
 package(default_visibility = ["//visibility:public"])
 
 exports_files(["multi_host_perf_test_oss.py"])
 
-pytype_strict_binary(
+py_binary(
     name = "multi_host_perf_test_oss",
     testonly = True,
     srcs = ["multi_host_perf_test_oss.py"],
     deps = [
-        "//net/grpc/python:use_insecure_channel_for_test",
-        "//third_party/py/absl:app",
-        "//tpu_raiden/api/jax:kv_cache_manager_jax_py",
         "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
-        "//tpu_raiden/rpc:coordination_helper",
-        "@com_github_grpc_grpc//src/python/grpcio/grpc:grpcio",
+        "@com_google_absl_py//absl:app",
         "@com_google_absl_py//absl/flags",
         "@jax//jax",
         "@pypi//numpy",
