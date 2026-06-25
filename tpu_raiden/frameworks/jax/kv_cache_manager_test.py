@@ -372,7 +372,9 @@ class KVCacheManagerTest(parameterized.TestCase):
     src_manager.d2h().Await()
 
     # Push block ID 2 (slices 4:6) to remote peer server.
-    peer = f"127.0.0.1:{port}"
+    # Connect to the peer's real advertised endpoint (its transport server
+    # binds the NIC IP, not loopback).
+    peer = dst_manager.get_local_endpoints()[0]["endpoint"]
     allocated_ids, future = src_manager.h2h_write(
         peer=peer, src_block_ids=[4, 5]
     )
@@ -447,8 +449,8 @@ class KVCacheManagerTest(parameterized.TestCase):
         unsafe_skip_buffer_lock=self.skip_lock,
     )
 
-    peer = f"127.0.0.1:{port}"
     # Pull remote block ID 1 (slices 2:4) into local host memory.
+    peer = remote_manager.get_local_endpoints()[0]["endpoint"]
     allocated_ids, future = local_manager.h2h_read(
         peer=peer, src_block_ids=[2, 3]
     )
@@ -588,7 +590,7 @@ class KVCacheManagerTest(parameterized.TestCase):
         parallelism=2,
     )
 
-    peer = f"127.0.0.1:{port}"
+    peer = remote_manager.get_local_endpoints()[0]["endpoint"]
     allocated_ids, future = local_manager.h2h_read(
         peer=peer, src_block_ids=[2, 3]
     )

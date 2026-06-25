@@ -96,14 +96,7 @@ class KVCacheManagerJaxTest(parameterized.TestCase):
     np.testing.assert_array_equal(actual_numpy, expected_numpy)
 
   def _to_loopback_endpoints(self, endpoints):
-    """Maps real detected endpoints to 127.0.0.1 for sandboxed loopback test safety."""
-    loopback_endpoints = []
-    for ep in endpoints:
-      port = ep["endpoint"].split(":")[-1]
-      loopback_endpoints.append(
-          {"endpoint": f"127.0.0.1:{port}", "shards": ep["shards"]}
-      )
-    return loopback_endpoints
+    return endpoints
 
   def test_initialization(self):
     tpu_sharding = self.setup_shardings()
