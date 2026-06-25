@@ -230,10 +230,12 @@ PjRtCopyFuture IssueD2HCopy(xla::PjRtBuffer* src_buffer, uint8_t* dst_data,
     futures.push_back(hold.CopyRawDeviceToHost(
         dst_data + chunk.dst_offset, chunk.src_offset, chunk.size_bytes));
   }
-  return PjRtCopyFuture(
+  PjRtCopyFuture out(
       xla::JoinFutures(absl::MakeSpan(futures)),
       {BufferHolder{hold.c_hold, hold.common_hold, /*ext_hold=*/nullptr,
                     std::move(user_hold)}});
+  out.is_d2h = true;
+  return out;
 }
 
 PjRtCopyFuture IssueH2DCopy(const uint8_t* src_data, size_t src_size,

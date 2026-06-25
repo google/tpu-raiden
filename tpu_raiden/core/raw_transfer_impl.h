@@ -165,7 +165,10 @@ inline absl::StatusOr<PjRtCopyFuture> transfer_d2h_core(
     holds.push_back(BufferHolder{hold.c_hold, hold.common_hold,
                                  /*ext_hold=*/nullptr, /*user_hold=*/nullptr});
   }
-  return PjRtCopyFuture(xla::JoinFutures(all_futures), std::move(holds));
+  PjRtCopyFuture out =
+      PjRtCopyFuture(xla::JoinFutures(all_futures), std::move(holds));
+  out.is_d2h = true;
+  return out;
 }
 
 // Pure H2D transfer core

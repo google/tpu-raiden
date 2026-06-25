@@ -329,6 +329,19 @@ struct PjRtEventBundle {
   }
 };
 
+inline void DisplaceCpuCache() {
+  const size_t size = 128 * 1024 * 1024;  // 128 MB
+  thread_local std::unique_ptr<char[]> dummy = []() {
+    return std::unique_ptr<char[]>(new char[size]);
+  }();
+  volatile char* p = dummy.get();
+  char sum = 0;
+  for (size_t i = 0; i < size; ++i) {
+    sum += p[i];
+  }
+  (void)sum;
+}
+
 struct PjRtCopyFuture {
   xla::Future<> future;
   BufferHolders holds;
@@ -337,6 +350,7 @@ struct PjRtCopyFuture {
   // Await use PJRT_Event_* instead of xla::Future/AsyncValue. A vector so that
   // JoinPjRtCopyFutures can aggregate bundles without re-owning/freeing events.
   std::vector<std::shared_ptr<PjRtEventBundle>> event_bundles;
+  bool is_d2h = false;
 
   PjRtCopyFuture() = default;
   PjRtCopyFuture(xla::Future<> f, BufferHolders h,
@@ -484,6 +498,9 @@ struct PjRtCopyFuture {
       if (av->IsError()) {
         status = av->GetError();
       }
+    }
+    if (status.ok() && is_d2h) {
+      DisplaceCpuCache();
     }
     return status;
   }
