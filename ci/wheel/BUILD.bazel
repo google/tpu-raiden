@@ -53,7 +53,7 @@ TORCH_REQ = select({
 # Runtime deps that live on a public index. torch_tpu is intentionally omitted
 # (private Artifact Registry) — see pyproject.toml.
 COMMON_REQUIRES = [
-    "libtpu==0.0.40",
+    "libtpu==0.0.41",
     "tpu-info==0.7.1",
     "numpy",
     "absl-py",
@@ -64,8 +64,8 @@ COMMON_REQUIRES = [
 # it can be installed alongside torch_tpu/torch without dragging jax/jaxlib
 # (e.g. sglang / vLLM). torch itself is provided by the environment (TORCH_REQ).
 JAX_REQUIRES = COMMON_REQUIRES + [
-    "jax==0.10.0",
-    "jaxlib==0.10.0",
+    "jax==0.10.1",
+    "jaxlib==0.10.1",
 ]
 
 TORCH_REQUIRES = COMMON_REQUIRES + TORCH_REQ

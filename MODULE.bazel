@@ -22,10 +22,15 @@ archive_override(
 bazel_dep(name = "jax")
 git_override(
     module_name = "jax",
-    commit = "a33ed614c58ee8a10d0b7536c50c2609c38500c1",
+    commit = "619764c15117fbefc4ba13ab941871cb514c23f6",
     patch_strip = 1,
     patches = [
-        "//:third_party/py/remove_rules_ml_toolchain.patch",
+        # rules_ml_toolchain is now provided by tpu-raiden's own MODULE.bazel,
+        # so the old remove_rules_ml_toolchain.patch is no longer applied.
+        # jax 0.10.1's pip.parse uses a local_wheels attribute (CI libtpu
+        # nightly) that the pinned rules_python (1.8.5) doesn't support; drop it
+        # so libtpu resolves from the index like every other wheel.
+        "//:third_party/py/jax_remove_local_wheels.patch",
     ],
     remote = "https://github.com/jax-ml/jax.git",
 )
@@ -33,7 +38,7 @@ git_override(
 bazel_dep(name = "xla")
 git_override(
     module_name = "xla",
-    commit = "a98e42b8b195e578a97025654f4e7b9b3fb5001a",
+    commit = "9b635916ecc6df6efee62d8e4b0c7ef87ef84d69",
     patch_strip = 1,
     patches = [
         "//:third_party/xla/future_sfinae.patch",
@@ -44,6 +49,7 @@ git_override(
 )
 
 bazel_dep(name = "rules_python", version = "1.8.5")
+
 bazel_dep(name = "torch_tpu", version = "0.1.1", dev_dependency = True)
 
 single_version_override(
