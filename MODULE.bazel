@@ -22,10 +22,15 @@ archive_override(
 bazel_dep(name = "jax")
 git_override(
     module_name = "jax",
-    commit = "a33ed614c58ee8a10d0b7536c50c2609c38500c1",
+    commit = "990e6a0b84138346e6a38785412f36356e0e5dc3",
     patch_strip = 1,
     patches = [
-        "//:third_party/py/remove_rules_ml_toolchain.patch",
+        # This patch makes two jax MODULE.bazel fixups: (1) drop
+        # `dev_dependency = True` on the pip use_extension so the `jax_pypi` hub is
+        # created when jax is a dependency (tpu-raiden imports it via use_repo);
+        # (2) remove the local_wheels attribute (CI libtpu nightly) that pinned
+        # rules_python (1.8.5) doesn't support, so libtpu resolves from the index.
+        "//:third_party/py/jax_remove_local_wheels.patch",
     ],
     remote = "https://github.com/jax-ml/jax.git",
 )
@@ -33,7 +38,7 @@ git_override(
 bazel_dep(name = "xla")
 git_override(
     module_name = "xla",
-    commit = "a98e42b8b195e578a97025654f4e7b9b3fb5001a",
+    commit = "5a9e73cbd92530cac2ac36f4736a774b2412afe2",
     patch_strip = 1,
     patches = [
         "//:third_party/xla/future_sfinae.patch",
@@ -44,6 +49,7 @@ git_override(
 )
 
 bazel_dep(name = "rules_python", version = "1.8.5")
+
 bazel_dep(name = "torch_tpu", version = "0.1.1", dev_dependency = True)
 
 single_version_override(

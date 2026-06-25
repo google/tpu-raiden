@@ -30,9 +30,9 @@ description = "High-bandwidth PJRT raw-transfer / KV-cache DMA engine for TPU (J
 # torch extensions and must match the torch_tpu build raiden was compiled
 # against (jax/jaxlib/libtpu are version-coupled too; keep them in lockstep).
 dependencies = [
-    "jax==0.10.0",
-    "jaxlib==0.10.0",
-    "libtpu==0.0.40",
+    "jax==0.10.2",
+    "jaxlib==0.10.2",
+    "libtpu==0.0.42.1",
     "tpu-info==0.7.1",
     "numpy",
     "absl-py",
