@@ -317,6 +317,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
 
   struct RecvEntry {
     std::string req_id;
+    int64_t slot_idx = -1;  // host staging slot to release on completion
     CopySpec h2d_copy;
     std::vector<int64_t> chip_block_ids;
     absl::flat_hash_map<int64_t, int64_t> host_to_chip;
@@ -326,6 +327,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     int32_t total_blocks = 0;
     int32_t num_completed_blocks = 0;
     std::vector<int> accumulated_host_block_ids;
+    std::chrono::steady_clock::time_point deadline;
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
 
