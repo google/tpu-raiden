@@ -1221,12 +1221,40 @@ void KVCacheManagerWithTransfer::StartPushInternal(
     uint64_t uuid, const std::string& remote_data_endpoint,
     const std::vector<int64_t>& src_block_ids,
     const std::vector<int64_t>& dst_block_ids) {
+  // Stage the producer's device KV into a host slot (slot.block_ids) and send
+  // those host blocks to the consumer, keeping host offsets within the staging
+  // pool. Writing D2H straight to host[src_block_id] overflows the host buffer
+  // once a device block id exceeds num_host_blocks.
+  int64_t send_slot = -1;
+  std::vector<int64_t> host_block_ids;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (static_cast<int64_t>(src_block_ids.size()) > max_blocks_ ||
+        free_slots_.empty()) {
+      auto it = send_entries_.find(uuid);
+      if (it != send_entries_.end()) {
+        done_sending_.insert(it->second->req_id);
+        ReleaseEntrySlotLocked(it->second);
+        send_entries_.erase(it);
+      }
+      return;
+    }
+    Slot slot = AcquireSlotLocked();
+    send_slot = slot.slot_idx;
+    auto it = send_entries_.find(uuid);
+    if (it != send_entries_.end()) it->second->slot_idx = send_slot;
+    host_block_ids.reserve(src_block_ids.size());
+    for (size_t k = 0; k < src_block_ids.size(); ++k) {
+      host_block_ids.push_back(slot.block_ids[k]);
+    }
+  }
+
   // Coalesce contiguous (device,host) block runs into a few large copies. With
   // per-block segments (sizes=1) a contiguous KV range becomes n device copies
   // that flood the command queue with small ops and serialize against prefill
   // GEMMs on the shared TensorCore; coalescing collapses a contiguous range to
   // one copy, matching the pre-Hybrid-Push pull path.
-  CopySpec d2h_copy = BuildCoalescedCopySpec(src_block_ids, src_block_ids);
+  CopySpec d2h_copy = BuildCoalescedCopySpec(src_block_ids, host_block_ids);
   auto future_or = D2h(d2h_copy.src_offsets, d2h_copy.dst_offsets,
                        d2h_copy.sizes, /*slot_idx=*/std::nullopt);
   if (!future_or.ok()) {
@@ -1234,6 +1262,7 @@ void KVCacheManagerWithTransfer::StartPushInternal(
     auto it = send_entries_.find(uuid);
     if (it != send_entries_.end()) {
       done_sending_.insert(it->second->req_id);
+      ReleaseEntrySlotLocked(it->second);
       send_entries_.erase(it);
     }
     ThrowStatus("Failed to issue D2H in StartPushInternal", future_or.status());
@@ -1241,18 +1270,19 @@ void KVCacheManagerWithTransfer::StartPushInternal(
 
   auto future = std::move(future_or.value());
   future.OnReady(
-      [this, uuid, remote_data_endpoint, src_block_ids,
+      [this, uuid, remote_data_endpoint, host_block_ids,
        dst_block_ids](const absl::StatusOr<raiden::BufferHolders>& s) {
         if (!s.ok()) {
           std::lock_guard<std::mutex> lock(mu_);
           auto it = send_entries_.find(uuid);
           if (it != send_entries_.end()) {
             done_sending_.insert(it->second->req_id);
+            ReleaseEntrySlotLocked(it->second);
             send_entries_.erase(it);
           }
           return;
         }
-        std::vector<int> src_ints(src_block_ids.begin(), src_block_ids.end());
+        std::vector<int> src_ints(host_block_ids.begin(), host_block_ids.end());
         std::vector<int> dst_ints(dst_block_ids.begin(), dst_block_ids.end());
         // Push across Data Plane socket!
         auto push_s = H2hWrite(remote_data_endpoint, src_ints, dst_ints, uuid);
@@ -1260,6 +1290,7 @@ void KVCacheManagerWithTransfer::StartPushInternal(
         auto it = send_entries_.find(uuid);
         if (it != send_entries_.end()) {
           done_sending_.insert(it->second->req_id);
+          ReleaseEntrySlotLocked(it->second);
           send_entries_.erase(it);
         }
       });
