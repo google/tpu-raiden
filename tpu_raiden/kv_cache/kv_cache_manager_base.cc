@@ -15,11 +15,15 @@
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#if defined(__x86_64__)
+#include <immintrin.h>
+#endif
 #include <future>  // NOLINT(build/c++11)
 #include <map>
 #include <memory>
@@ -31,6 +35,7 @@
 #include <utility>
 #include <vector>
 
+#include "cpuinfo_x86.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -82,6 +87,79 @@ absl::Status ValidateOffsetsAndSizes(const std::vector<int64_t>& src_offsets,
   }
   return absl::OkStatus();
 }
+
+inline void LocalDmaWriteBarrier() {
+#if defined(__x86_64__)
+  __asm__ __volatile__("sfence" : : : "memory");
+#elif defined(__aarch64__)
+  __asm__ __volatile__("dmb oshst" : : : "memory");
+#else
+  std::atomic_thread_fence(std::memory_order_seq_cst);
+#endif
+}
+
+#if defined(__x86_64__)
+struct CpuCacheFlushCapabilities {
+  bool has_clwb;
+  bool has_clflushopt;
+  bool has_clflush;
+
+  CpuCacheFlushCapabilities() {
+    auto info = cpu_features::GetX86Info();
+    has_clwb = info.features.clwb;
+    has_clflushopt = info.features.clflushopt;
+    has_clflush = info.features.clfsh;
+    fprintf(stderr, "RAIDEN_CPU_CAPS: clwb=%d, clflushopt=%d, clflush=%d\n",
+            has_clwb, has_clflushopt, has_clflush);
+  }
+};
+
+const CpuCacheFlushCapabilities& GetCpuCapabilities() {
+  static const CpuCacheFlushCapabilities caps;
+  return caps;
+}
+
+void FlushCpuCacheRangeNoBarrier(const void* ptr, size_t size_bytes,
+                                 const CpuCacheFlushCapabilities& caps) {
+  if (size_bytes == 0) return;
+
+  uintptr_t start = reinterpret_cast<uintptr_t>(ptr);
+  uintptr_t end = start + size_bytes;
+
+  // Align start to 64-byte boundary
+  start &= ~(uintptr_t)63;
+
+  if (caps.has_clwb) {
+    for (uintptr_t addr = start; addr < end; addr += 64) {
+      asm volatile("clwb %0" : : "m"(*reinterpret_cast<const char*>(addr)));
+    }
+  } else if (caps.has_clflushopt) {
+    for (uintptr_t addr = start; addr < end; addr += 64) {
+      asm volatile("clflushopt %0"
+                   :
+                   : "m"(*reinterpret_cast<const char*>(addr)));
+    }
+  } else if (caps.has_clflush) {
+    for (uintptr_t addr = start; addr < end; addr += 64) {
+      asm volatile("clflush %0" : : "m"(*reinterpret_cast<const char*>(addr)));
+    }
+  }
+}
+
+void FlushCpuCacheRange(const void* ptr, size_t size_bytes) {
+  const CpuCacheFlushCapabilities& caps = GetCpuCapabilities();
+  FlushCpuCacheRangeNoBarrier(ptr, size_bytes, caps);
+  LocalDmaWriteBarrier();
+}
+#else
+void FlushCpuCacheRangeNoBarrier(const void* ptr, size_t size_bytes,
+                                 const CpuCacheFlushCapabilities& caps) {
+  // No-op on non-x86 architectures.
+}
+void FlushCpuCacheRange(const void* ptr, size_t size_bytes) {
+  // No-op on non-x86 architectures.
+}
+#endif
 
 }  // namespace
 
@@ -991,6 +1069,9 @@ KVCacheManagerBase::DispatchH2dWork(
             {base_host_ptr + src_offset, dst_offset, size_to_copy});
       }
     }
+    for (const auto& copy : copies) {
+      FlushCpuCacheRange(copy.src, copy.size);
+    }
     TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture cf,
                         raiden::IssueH2dShard(shard_hold, copies));
     local_futures.push_back(std::move(cf));
@@ -1074,6 +1155,7 @@ KVCacheManagerBase::DispatchD2hWork(const std::vector<CopyWork>& works,
         copies.push_back({dst_host_ptr + dst_offset, src_offset, size_to_copy});
       }
     }
+
     TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture cf,
                         raiden::IssueD2hShard(shard_hold, copies));
     local_futures.push_back(std::move(cf));
