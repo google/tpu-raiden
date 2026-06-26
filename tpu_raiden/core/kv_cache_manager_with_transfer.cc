@@ -29,6 +29,7 @@
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -152,11 +153,17 @@ int ConnectTcp(const std::string& endpoint) {
   auto [host, port] = SplitEndpoint(endpoint);
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) {
-    throw std::runtime_error("socket() failed: " +
-                             std::string(std::strerror(errno)));
+    throw std::runtime_error(
+        absl::StrCat("socket() failed: ", std::strerror(errno)));
   }
-  int opt = 1;
-  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+
+  int fd = -1;
+  for (p = res; p != nullptr; p = p->ai_next) {
+    fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+    if (fd == -1) continue;
+
+    int opt = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
 
   sockaddr_in addr;
   std::memset(&addr, 0, sizeof(addr));
@@ -164,29 +171,34 @@ int ConnectTcp(const std::string& endpoint) {
   addr.sin_port = htons(port);
   if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
     close(fd);
-    throw std::runtime_error("invalid IPv4 endpoint host: " + host);
+    throw std::runtime_error(
+        absl::StrCat("invalid IPv4 endpoint host: ", host));
   }
   if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
     std::string err = std::strerror(errno);
     close(fd);
-    throw std::runtime_error("connect(" + endpoint + ") failed: " + err);
+    throw std::runtime_error(
+        absl::StrCat("connect(", endpoint, ") failed: ", err));
   }
+
   return fd;
 }
 
 static std::string GetPeerIp(int fd) {
-  sockaddr_in addr;
+  struct sockaddr_storage addr;
   socklen_t len = sizeof(addr);
-  if (getpeername(fd, reinterpret_cast<sockaddr*>(&addr), &len) < 0) {
+  if (getpeername(fd, reinterpret_cast<struct sockaddr*>(&addr), &len) < 0) {
     throw std::runtime_error("getpeername() failed: " +
                              std::string(std::strerror(errno)));
   }
-  char ip_buf[INET_ADDRSTRLEN];
-  if (inet_ntop(AF_INET, &addr.sin_addr, ip_buf, sizeof(ip_buf)) == nullptr) {
-    throw std::runtime_error("inet_ntop() failed: " +
-                             std::string(std::strerror(errno)));
+
+  char host[NI_MAXHOST];
+  int err = getnameinfo(reinterpret_cast<struct sockaddr*>(&addr), len,
+                        host, sizeof(host), nullptr, 0, NI_NUMERICHOST);
+  if (err != 0) {
+    throw std::runtime_error(absl::StrCat("getnameinfo() failed: ", gai_strerror(err)));
   }
-  return std::string(ip_buf);
+  return std::string(host);
 }
 static void WriteBlockIds(int fd, const std::vector<int64_t>& block_ids) {
   if (block_ids.empty()) return;
@@ -1058,37 +1070,72 @@ absl::Status KVCacheManagerWithTransfer::WaitForStagingBlockRead(
 }
 
 void KVCacheManagerWithTransfer::StartControlServer() {
-  control_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+  // Try creating IPv6 socket first for dual-stack support
+  control_fd_ = socket(AF_INET6, SOCK_STREAM, 0);
+  bool is_v6 = true;
+
   if (control_fd_ < 0) {
-    throw std::runtime_error("control socket() failed: " +
-                             std::string(std::strerror(errno)));
+    // Fallback to IPv4 if IPv6 is not supported
+    control_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+    is_v6 = false;
+    if (control_fd_ < 0) {
+      throw std::runtime_error("control socket() failed: " +
+                               std::string(std::strerror(errno)));
+    }
   }
+
   int opt = 1;
   setsockopt(control_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
   setsockopt(control_fd_, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
 
-  sockaddr_in addr;
-  std::memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = INADDR_ANY;
-  addr.sin_port = htons(local_control_port_);
+  if (is_v6) {
+    // Try to disable IPv6-only to support IPv4 connections mapped to IPv6
+    int v6only = 0;
+    setsockopt(control_fd_, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
 
-  if (bind(control_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-    std::string err = std::strerror(errno);
-    close(control_fd_);
-    control_fd_ = -1;
-    throw std::runtime_error("control bind(" +
-                             std::to_string(local_control_port_) +
-                             ") failed: " + err);
+    struct sockaddr_in6 addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin6_family = AF_INET6;
+    addr.sin6_addr = in6addr_any;
+    addr.sin6_port = htons(local_control_port_);
+
+    if (bind(control_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+      std::string err = std::strerror(errno);
+      close(control_fd_);
+      control_fd_ = -1;
+      throw std::runtime_error("control bind (IPv6) failed: " + err);
+    }
+  } else {
+    struct sockaddr_in addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(local_control_port_);
+
+    if (bind(control_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
+      std::string err = std::strerror(errno);
+      close(control_fd_);
+      control_fd_ = -1;
+      throw std::runtime_error("control bind (IPv4) failed: " + err);
+    }
   }
-  socklen_t len = sizeof(addr);
-  if (getsockname(control_fd_, reinterpret_cast<sockaddr*>(&addr), &len) < 0) {
+
+  // Get the bound port (especially useful if local_control_port_ was 0)
+  struct sockaddr_storage bound_addr;
+  socklen_t len = sizeof(bound_addr);
+  if (getsockname(control_fd_, reinterpret_cast<struct sockaddr*>(&bound_addr), &len) < 0) {
     close(control_fd_);
     control_fd_ = -1;
     throw std::runtime_error("getsockname() failed: " +
                              std::string(std::strerror(errno)));
   }
-  local_control_port_ = ntohs(addr.sin_port);
+
+  if (bound_addr.ss_family == AF_INET6) {
+    local_control_port_ = ntohs(reinterpret_cast<struct sockaddr_in6*>(&bound_addr)->sin6_port);
+  } else {
+    local_control_port_ = ntohs(reinterpret_cast<struct sockaddr_in*>(&bound_addr)->sin_port);
+  }
+
   if (listen(control_fd_, 128) < 0) {
     close(control_fd_);
     control_fd_ = -1;
@@ -1205,8 +1252,12 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
               WriteExact(fd, &response, sizeof(response)));
 
   std::string peer_ip = GetPeerIp(fd);
-  std::string remote_data_endpoint =
-      peer_ip + ":" + std::to_string(req.consumer_data_port);
+  std::string remote_data_endpoint;
+  if (peer_ip.find(':') != std::string::npos) {
+    remote_data_endpoint = absl::StrCat("[", peer_ip, "]:", req.consumer_data_port);
+  } else {
+    remote_data_endpoint = absl::StrCat(peer_ip, ":", req.consumer_data_port);
+  }
 
   VLOG(1) << "ProcessPullStream (Hybrid Bridge) successfully acknowledged "
              "consumer. Intercepting and launching StartPushInternal to "
