@@ -430,7 +430,17 @@ NB_MODULE(_tpu_raiden_torch, m) {
                  slices,
              bool on_host) {
             auto hashes = ToStdStringVector(block_hashes);
-            return self->Insert(hashes, slices, on_host);
+            auto res = self->Insert(hashes, slices, on_host);
+            std::vector<std::pair<nb::bytes,
+                                  std::vector<tpu_raiden::kv_cache::RaidenId>>>
+                py_evicted;
+            py_evicted.reserve(res.second.size());
+            for (const auto& pair : res.second) {
+              py_evicted.push_back(std::make_pair(
+                  nb::bytes(pair.first.data(), pair.first.size()),
+                  pair.second));
+            }
+            return std::make_pair(res.first, py_evicted);
           },
           nb::arg("block_hashes"), nb::arg("slices"), nb::arg("on_host"))
       .def(

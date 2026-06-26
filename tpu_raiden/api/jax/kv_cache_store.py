@@ -90,13 +90,20 @@ class KVCacheStore:
       block_hashes: list[bytes],
       slices: list[list[RaidenId]],
       on_host: bool,
-  ) -> bool:
+  ) -> tuple[bool, list[tuple[bytes, list[RaidenId]]]]:
     raw_slices = []
     for slice_list in slices:
       raw_slices.append(
           [s._impl for s in slice_list]  # pylint: disable=protected-access
       )
-    return self._impl.insert(block_hashes, raw_slices, on_host)
+    all_inserted, raw_evicted = self._impl.insert(
+        block_hashes, raw_slices, on_host
+    )
+    wrapped_evicted = []
+    for hash_val, raw_slices in raw_evicted:
+      wrapped_slices = [RaidenId(impl=rs) for rs in raw_slices]
+      wrapped_evicted.append((hash_val, wrapped_slices))
+    return all_inserted, wrapped_evicted
 
   def delete(
       self,

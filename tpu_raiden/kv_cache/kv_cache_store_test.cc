@@ -34,8 +34,9 @@ TEST(KVCacheStoreTest, BasicTests) {
       {RaidenId{"inference_server", "1", "kv_cache", 0}}};
 
   // 1. Insert
-  EXPECT_TRUE(controller.Insert(hashes, slices, true));
-  EXPECT_FALSE(controller.Insert(hashes, slices, true));  // Already exists
+  EXPECT_TRUE(controller.Insert(hashes, slices, true).first);
+  EXPECT_FALSE(
+      controller.Insert(hashes, slices, true).first);  // Already exists
 
   // 2. Lookup with a partial miss at the end
   std::vector<std::string> hashes_with_miss = {"4001", "4002", "4003"};
@@ -54,7 +55,8 @@ TEST(KVCacheStoreTest, BasicTests) {
 
   // 3. Delete
   controller.Delete(hashes, slices);
-  EXPECT_TRUE(controller.Insert(hashes, slices, true));  // Succesful again
+  EXPECT_TRUE(
+      controller.Insert(hashes, slices, true).first);  // Succesful again
 }
 
 TEST(KVCacheStoreTest, PinAndRelease) {
@@ -65,7 +67,7 @@ TEST(KVCacheStoreTest, PinAndRelease) {
       {RaidenId{"inference_server", "0", "kv_cache", 0}},
       {RaidenId{"inference_server", "1", "kv_cache", 0}}};
 
-  EXPECT_TRUE(controller.Insert(hashes, slices, true));
+  EXPECT_TRUE(controller.Insert(hashes, slices, true).first);
 
   // Pin both
   EXPECT_TRUE(controller.Pin(hashes));
@@ -102,7 +104,7 @@ TEST(KVCacheStoreTest, PartialPinRollback) {
       {RaidenId{"inference_server", "0", "kv_cache", 0}},
       {RaidenId{"inference_server", "1", "kv_cache", 0}}};
 
-  EXPECT_TRUE(controller.Insert(hashes, slices, true));
+  EXPECT_TRUE(controller.Insert(hashes, slices, true).first);
 
   // Attempt to pin a sequence with a missing hash (203)
   EXPECT_FALSE(controller.Pin({"201", "202", "203"}));
@@ -110,6 +112,38 @@ TEST(KVCacheStoreTest, PartialPinRollback) {
   // Confirm that 201 and 202 were completely reverted (pin count 0)
   EXPECT_EQ(controller.GetPinCount("201"), 0);
   EXPECT_EQ(controller.GetPinCount("202"), 0);
+}
+
+TEST(KVCacheStoreTest, EvictionTracking) {
+  KVCacheStore controller(2);
+
+  std::vector<std::string> hashes_1_2 = {"101", "102"};
+  std::vector<std::vector<RaidenId>> slices_1_2 = {
+      {RaidenId{"inference_server", "0", "kv_cache", 0}},
+      {RaidenId{"inference_server", "1", "kv_cache", 1}}};
+
+  // 1. Insert 101 and 102. No evictions should occur.
+  auto res_1_2 = controller.Insert(hashes_1_2, slices_1_2, true);
+  EXPECT_TRUE(res_1_2.first);
+  EXPECT_TRUE(res_1_2.second.empty());
+
+  // 2. Insert 103. Since capacity is 2, this must evict the LRU block (101).
+  std::vector<std::string> hash_3 = {"103"};
+  std::vector<std::vector<RaidenId>> slice_3 = {
+      {RaidenId{"inference_server", "2", "kv_cache", 2}}};
+
+  auto res_3 = controller.Insert(hash_3, slice_3, true);
+  EXPECT_TRUE(res_3.first);
+  ASSERT_EQ(res_3.second.size(), 1);
+  EXPECT_EQ(res_3.second[0].first, "101");
+  ASSERT_EQ(res_3.second[0].second.size(), 1);
+  EXPECT_EQ(res_3.second[0].second[0].job_name, "inference_server");
+  EXPECT_EQ(res_3.second[0].second[0].data_replica_idx, 0);
+
+  // 3. Verify that lookup for 101 now misses, but 102 and 103 are present.
+  EXPECT_EQ(controller.Lookup({"101"})->size(), 0);
+  EXPECT_EQ(controller.Lookup({"102"})->size(), 1);
+  EXPECT_EQ(controller.Lookup({"103"})->size(), 1);
 }
 
 }  // namespace

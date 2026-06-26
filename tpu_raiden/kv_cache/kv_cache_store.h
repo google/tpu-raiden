@@ -69,10 +69,14 @@ class KVCacheStore {
   Lookup(const std::vector<std::string>& block_hashes);
 
   // Caches sharded buffers into host-RAM/HBM backing store.
-  // Returns true if insertion is successful, false if the cache entry already
-  // exists.
-  bool Insert(const std::vector<std::string>& block_hashes,
-              const std::vector<std::vector<RaidenId>>& slices, bool on_host);
+  // Returns:
+  // - bool: whether all blocks were successfully inserted (i.e. none already
+  // existed)
+  // - std::vector<std::pair<std::string, std::vector<RaidenId>>>: list of
+  // entries evicted from the LRU cache during insertion
+  std::pair<bool, std::vector<std::pair<std::string, std::vector<RaidenId>>>>
+  Insert(const std::vector<std::string>& block_hashes,
+         const std::vector<std::vector<RaidenId>>& slices, bool on_host);
 
   // Deletes cached sharded buffers from host-RAM/HBM backing store entirely.
   void Delete(const std::vector<std::string>& block_hashes,
