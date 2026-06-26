@@ -227,6 +227,14 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   const PJRT_Api* c_api_ = nullptr;
   const PJRT_RawBuffer_Extension* extension_ = nullptr;
   size_t physical_size_ = 0;
+
+  // Per-layer on-device buffer sizes.  Populated from the actual
+  // PjRtBuffer shapes when the device-backed constructor is used.
+  // For uniform models every entry is the same; for hybrid (HMA)
+  // models entries may differ (e.g. mamba conv_state bf16 vs
+  // ssm_state f32).  DMA functions use these for per-layer offset
+  // and copy-size calculations.
+  std::vector<size_t> per_layer_physical_size_;
   int64_t staging_num_slots_ = 0;
   int64_t staging_max_major_per_slot_ = 0;
   bool is_blocked_layout_ = false;
