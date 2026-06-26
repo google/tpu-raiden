@@ -353,18 +353,34 @@ std::vector<HostNicAddress> GetLocalHostNicAddresses() {
   if (getifaddrs(&ifaddr) == 0) {
     for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
       if (ifa->ifa_addr == nullptr) continue;
-      if (ifa->ifa_addr->sa_family == AF_INET) {
+      if (ifa->ifa_addr->sa_family == AF_INET ||
+          ifa->ifa_addr->sa_family == AF_INET6) {
         if (std::strcmp(ifa->ifa_name, "lo") != 0) {
-          char host[INET_ADDRSTRLEN];
-          auto* s_in = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
-          inet_ntop(AF_INET, &s_in->sin_addr, host, INET_ADDRSTRLEN);
-          std::string ip_str(host);
-          auto it = std::find_if(
-              nics.begin(), nics.end(),
-              [&](const HostNicAddress& n) { return n.ip_address == ip_str; });
-          if (it == nics.end()) {
-            int node = GetInterfaceNumaNode(ifa->ifa_name);
-            nics.push_back({ifa->ifa_name, ip_str, node});
+          char host[INET6_ADDRSTRLEN];
+          const void* addr_ptr;
+          if (ifa->ifa_addr->sa_family == AF_INET) {
+            auto* s_in = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
+            addr_ptr = &s_in->sin_addr;
+          } else {
+            auto* s_in6 = reinterpret_cast<struct sockaddr_in6*>(ifa->ifa_addr);
+            addr_ptr = &s_in6->sin6_addr;
+          }
+          if (inet_ntop(ifa->ifa_addr->sa_family, addr_ptr, host,
+                        INET6_ADDRSTRLEN) != nullptr) {
+            std::string ip_str(host);
+            // Ignore link-local IPv6 (fe80::)
+            if (!(ifa->ifa_addr->sa_family == AF_INET6 &&
+                  ip_str.find("fe80:") == 0)) {
+              auto it = std::find_if(
+                  nics.begin(), nics.end(),
+                  [&](const HostNicAddress& n) {
+                    return n.ip_address == ip_str;
+                  });
+              if (it == nics.end()) {
+                int node = GetInterfaceNumaNode(ifa->ifa_name);
+                nics.push_back({ifa->ifa_name, ip_str, node});
+              }
+            }
           }
         }
       }
@@ -372,7 +388,9 @@ std::vector<HostNicAddress> GetLocalHostNicAddresses() {
     freeifaddrs(ifaddr);
   }
   if (nics.empty()) {
-    nics.push_back({"lo", "127.0.0.1", -1});
+    // Creating an AF_INET socket fails in IPv6-only environments.
+    // Using AF_INET6 (::1) is generally safer as a fallback.
+    nics.push_back({"lo", "::1", -1});
   }
   return nics;
 }
