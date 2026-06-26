@@ -367,12 +367,35 @@ std::vector<HostNicAddress> GetLocalHostNicAddresses() {
             nics.push_back({ifa->ifa_name, ip_str, node});
           }
         }
+      } else if (ifa->ifa_addr->sa_family == AF_INET6) {
+        if (std::strcmp(ifa->ifa_name, "lo") != 0) {
+          char host[INET6_ADDRSTRLEN];
+          auto* s_in6 = reinterpret_cast<struct sockaddr_in6*>(ifa->ifa_addr);
+          if (IN6_IS_ADDR_LINKLOCAL(&s_in6->sin6_addr)) {
+            continue;
+          }
+          inet_ntop(AF_INET6, &s_in6->sin6_addr, host, INET6_ADDRSTRLEN);
+          std::string ip_str(host);
+          auto it = std::find_if(
+              nics.begin(), nics.end(),
+              [&](const HostNicAddress& n) { return n.ip_address == ip_str; });
+          if (it == nics.end()) {
+            int node = GetInterfaceNumaNode(ifa->ifa_name);
+            nics.push_back({ifa->ifa_name, ip_str, node});
+          }
+        }
       }
     }
     freeifaddrs(ifaddr);
   }
   if (nics.empty()) {
-    nics.push_back({"lo", "127.0.0.1", -1});
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd >= 0) {
+      close(fd);
+      nics.push_back({"lo", "127.0.0.1", -1});
+    } else {
+      nics.push_back({"lo", "::1", -1});
+    }
   }
   return nics;
 }
