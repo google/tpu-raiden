@@ -33,7 +33,7 @@
 set -exu -o pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WHEEL_DIR="${KOKORO_ARTIFACTS_DIR:-${REPO_ROOT}/../../artifacts}/dist"
+WHEEL_DIR="${KOKORO_ARTIFACTS_DIR:-${HOME}/raiden_artifacts}/dist"
 
 # Dedicated raiden Python registry in the cloud-tpu-inference-test project.
 REGISTRY_URL="${RAIDEN_REGISTRY_URL:-https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/}"
@@ -50,7 +50,7 @@ if [[ "${UPLOAD_WHEEL_TO_AR}" == "true" ]]; then
       uv run --isolated \
         --with twine \
         --with keyrings.google-artifactregistry-auth \
-        twine upload --repository-url ${REGISTRY_URL} /dist/tpu_raiden-*.whl
+        twine upload --repository-url ${REGISTRY_URL} /dist/tpu_raiden_*.whl
     "
   echo "===> Upload complete."
 fi
