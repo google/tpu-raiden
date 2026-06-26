@@ -102,20 +102,7 @@ KVCacheManagerBase::KVCacheManagerBase(
   }
 
   DetectAndAssignNumaNode(layer_buffers);
-  const xla::PjRtDevice* representative_device = nullptr;
-  if (assigned_numa_node_.has_value()) {
-    for (const auto& layer : layer_buffers) {
-      for (xla::PjRtBuffer* buf : layer) {
-        if (buf && buf->device() &&
-            GetPjRtDeviceNumaNode(buf->device()) ==
-                assigned_numa_node_.value()) {
-          representative_device = buf->device();
-          break;
-        }
-      }
-      if (representative_device) break;
-    }
-  }
+
 
   xla::PjRtBuffer* first_buffer = layer_buffers[0][0];
   const xla::Shape& shape = first_buffer->on_device_shape();
@@ -159,9 +146,7 @@ KVCacheManagerBase::KVCacheManagerBase(
 
       size_t alloc_size = num_host_blocks * bytes_per_block();
       if (host_allocator) {
-        const xla::PjRtDevice* target_dev = representative_device
-                                                ? representative_device
-                                                : dst_buffer->device();
+        const xla::PjRtDevice* target_dev = dst_buffer->device();
         auto status_or_allocation = host_allocator(alloc_size, target_dev);
         if (!status_or_allocation.ok()) {
           throw std::runtime_error(absl::StrCat(
@@ -398,7 +383,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
       VLOG(1) << "H2d: Scheduling dispatch for NUMA node " << node
               << ", works count: " << works.size();
       auto future = dma_pool_->Schedule(
-          assigned_numa_node(),
+          node >= 0 ? std::make_optional(node) : std::nullopt,
           [this, works, is_partial, src_offsets_major_dim,
            dst_offsets_major_dim, copy_sizes_major_dim, slot_idx]() {
             return DispatchH2dWork(works, slot_idx, is_partial,
@@ -535,8 +520,9 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
       VLOG(1) << "DispatchD2hChunks: Scheduling dispatch for NUMA node " << node
               << ", works count: " << works.size();
       auto future = dma_pool_->Schedule(
-          assigned_numa_node(), [this, works, is_partial, src_offsets,
-                                 dst_offsets, copy_sizes, slot_idx]() {
+          node >= 0 ? std::make_optional(node) : std::nullopt,
+          [this, works, is_partial, src_offsets,
+           dst_offsets, copy_sizes, slot_idx]() {
             return DispatchD2hWork(works, slot_idx, is_partial, src_offsets,
                                    dst_offsets, copy_sizes);
           });
