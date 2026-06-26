@@ -67,8 +67,8 @@ class KVCacheStore:
 
   def lookup(
       self,
-      block_hashes: list[int],
-  ) -> list[tuple[int, list[RaidenId]]]:
+      block_hashes: list[bytes],
+  ) -> list[tuple[bytes, list[RaidenId]]]:
     """Checks the LRU directory for cached block hashes.
 
     Args:
@@ -87,7 +87,7 @@ class KVCacheStore:
 
   def insert(
       self,
-      block_hashes: list[int],
+      block_hashes: list[bytes],
       slices: list[list[RaidenId]],
       on_host: bool,
   ) -> bool:
@@ -100,7 +100,7 @@ class KVCacheStore:
 
   def delete(
       self,
-      block_hashes: list[int],
+      block_hashes: list[bytes],
       slices: list[list[RaidenId]],
   ) -> None:
     raw_slices = []
@@ -113,10 +113,10 @@ class KVCacheStore:
   def capacity(self) -> int:
     return self._impl.capacity()
 
-  def pin(self, block_hashes: list[int]) -> bool:
+  def pin(self, block_hashes: list[bytes]) -> bool:
     """Pins cached block hashes in memory, protecting them against LRU eviction while in active use."""
     return self._impl.pin(block_hashes)
 
-  def release(self, block_hashes: list[int]) -> None:
+  def release(self, block_hashes: list[bytes]) -> None:
     """Releases previously pinned block hashes, making them eligible for LRU eviction when capacity is exceeded."""
     self._impl.release(block_hashes)

@@ -14,15 +14,11 @@
 
 #include "tpu_raiden/kv_cache/kv_cache_store.h"
 
-#include <cstdint>
-#include <optional>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
 #include "absl/status/statusor.h"
-#include "tpu_raiden/core/raw_transfer_core.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
@@ -32,7 +28,7 @@ TEST(KVCacheStoreTest, BasicTests) {
   KVCacheStore controller(50);
   EXPECT_EQ(controller.capacity(), 50);
 
-  std::vector<uint64_t> hashes = {4001, 4002};
+  std::vector<std::string> hashes = {"4001", "4002"};
   std::vector<std::vector<RaidenId>> slices = {
       {RaidenId{"inference_server", "0", "kv_cache", 0}},
       {RaidenId{"inference_server", "1", "kv_cache", 0}}};
@@ -42,19 +38,19 @@ TEST(KVCacheStoreTest, BasicTests) {
   EXPECT_FALSE(controller.Insert(hashes, slices, true));  // Already exists
 
   // 2. Lookup with a partial miss at the end
-  std::vector<uint64_t> hashes_with_miss = {4001, 4002, 4003};
+  std::vector<std::string> hashes_with_miss = {"4001", "4002", "4003"};
   auto lookup_res = controller.Lookup(hashes_with_miss);
   ASSERT_TRUE(lookup_res.ok());
   EXPECT_EQ(lookup_res->size(), 2);
-  EXPECT_EQ((*lookup_res)[0].first, 4001);
+  EXPECT_EQ((*lookup_res)[0].first, "4001");
   EXPECT_EQ((*lookup_res)[0].second.size(), 1);
 
   // Lookup with an early miss
-  std::vector<uint64_t> hashes_early_miss = {4001, 4003, 4002};
+  std::vector<std::string> hashes_early_miss = {"4001", "4003", "4002"};
   auto lookup_res_early = controller.Lookup(hashes_early_miss);
   ASSERT_TRUE(lookup_res_early.ok());
   EXPECT_EQ(lookup_res_early->size(), 1);
-  EXPECT_EQ((*lookup_res_early)[0].first, 4001);
+  EXPECT_EQ((*lookup_res_early)[0].first, "4001");
 
   // 3. Delete
   controller.Delete(hashes, slices);
@@ -64,7 +60,7 @@ TEST(KVCacheStoreTest, BasicTests) {
 TEST(KVCacheStoreTest, PinAndRelease) {
   KVCacheStore controller(2);
 
-  std::vector<uint64_t> hashes = {101, 102};
+  std::vector<std::string> hashes = {"101", "102"};
   std::vector<std::vector<RaidenId>> slices = {
       {RaidenId{"inference_server", "0", "kv_cache", 0}},
       {RaidenId{"inference_server", "1", "kv_cache", 0}}};
@@ -73,35 +69,35 @@ TEST(KVCacheStoreTest, PinAndRelease) {
 
   // Pin both
   EXPECT_TRUE(controller.Pin(hashes));
-  EXPECT_EQ(controller.GetPinCount(101), 1);
-  EXPECT_EQ(controller.GetPinCount(102), 1);
+  EXPECT_EQ(controller.GetPinCount("101"), 1);
+  EXPECT_EQ(controller.GetPinCount("102"), 1);
 
   // Inserting a third element should fail to evict because both existing items
   // are pinned
-  std::vector<uint64_t> hash_3 = {103};
+  std::vector<std::string> hash_3 = {"103"};
   std::vector<std::vector<RaidenId>> slice_3 = {
       {RaidenId{"inference_server", "2", "kv_cache", 0}}};
   controller.Insert(hash_3, slice_3, true);
 
   // Release 101
-  controller.Release({101});
-  EXPECT_EQ(controller.GetPinCount(101), 0);
+  controller.Release({"101"});
+  EXPECT_EQ(controller.GetPinCount("101"), 0);
 
   // Now inserting a fourth element (104) should successfully evict 101
-  std::vector<uint64_t> hash_4 = {104};
+  std::vector<std::string> hash_4 = {"104"};
   std::vector<std::vector<RaidenId>> slice_4 = {
       {RaidenId{"inference_server", "3", "kv_cache", 0}}};
   controller.Insert(hash_4, slice_4, true);
 
   // Lookup 101 should result in an immediate miss (return size 0 before 102)
-  EXPECT_EQ(controller.Lookup({101, 102})->size(), 0);
-  EXPECT_EQ(controller.Lookup({102})->size(), 1);
+  EXPECT_EQ(controller.Lookup({"101", "102"})->size(), 0);
+  EXPECT_EQ(controller.Lookup({"102"})->size(), 1);
 }
 
 TEST(KVCacheStoreTest, PartialPinRollback) {
   KVCacheStore controller(2);
 
-  std::vector<uint64_t> hashes = {201, 202};
+  std::vector<std::string> hashes = {"201", "202"};
   std::vector<std::vector<RaidenId>> slices = {
       {RaidenId{"inference_server", "0", "kv_cache", 0}},
       {RaidenId{"inference_server", "1", "kv_cache", 0}}};
@@ -109,11 +105,11 @@ TEST(KVCacheStoreTest, PartialPinRollback) {
   EXPECT_TRUE(controller.Insert(hashes, slices, true));
 
   // Attempt to pin a sequence with a missing hash (203)
-  EXPECT_FALSE(controller.Pin({201, 202, 203}));
+  EXPECT_FALSE(controller.Pin({"201", "202", "203"}));
 
   // Confirm that 201 and 202 were completely reverted (pin count 0)
-  EXPECT_EQ(controller.GetPinCount(201), 0);
-  EXPECT_EQ(controller.GetPinCount(202), 0);
+  EXPECT_EQ(controller.GetPinCount("201"), 0);
+  EXPECT_EQ(controller.GetPinCount("202"), 0);
 }
 
 }  // namespace

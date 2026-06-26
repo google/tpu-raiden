@@ -45,6 +45,17 @@ using ::tpu_raiden::torch::WeightSynchronizer;
 namespace tpu_raiden {
 namespace kv_cache {
 namespace {
+
+std::vector<std::string> ToStdStringVector(
+    const std::vector<nb::bytes>& bytes_vec) {
+  std::vector<std::string> str_vec;
+  str_vec.reserve(bytes_vec.size());
+  for (const auto& b : bytes_vec) {
+    str_vec.push_back(std::string(b.c_str(), b.size()));
+  }
+  return str_vec;
+}
+
 class KVCacheStoreWrapper {
  public:
   explicit KVCacheStoreWrapper(size_t lru_capacity) {
@@ -59,6 +70,8 @@ class KVCacheStoreWrapper {
 }  // namespace
 }  // namespace kv_cache
 }  // namespace tpu_raiden
+
+using ::tpu_raiden::kv_cache::ToStdStringVector;
 
 NB_MODULE(_tpu_raiden_torch, m) {
   // =========================================================================
@@ -387,13 +400,23 @@ NB_MODULE(_tpu_raiden_torch, m) {
       .def(
           "lookup",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
-             const std::vector<uint64_t>& block_hashes) {
-            auto res = self->Lookup(block_hashes);
+             const std::vector<nb::bytes>& block_hashes) {
+            auto hashes = ToStdStringVector(block_hashes);
+            auto res = self->Lookup(hashes);
             if (!res.ok()) {
               throw std::runtime_error("KVCacheStore lookup failed: " +
                                        std::string(res.status().message()));
             }
-            return res.value();
+            std::vector<std::pair<nb::bytes,
+                                  std::vector<tpu_raiden::kv_cache::RaidenId>>>
+                py_res;
+            py_res.reserve(res.value().size());
+            for (const auto& pair : res.value()) {
+              py_res.push_back(std::make_pair(
+                  nb::bytes(pair.first.data(), pair.first.size()),
+                  pair.second));
+            }
+            return py_res;
           },
           nb::arg("block_hashes"),
           "Checks the LRU directory for cached block hashes. Returns a list of "
@@ -401,19 +424,23 @@ NB_MODULE(_tpu_raiden_torch, m) {
       .def(
           "insert",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
-             const std::vector<uint64_t>& block_hashes,
+             const std::vector<nb::bytes>& block_hashes,
              const std::vector<std::vector<tpu_raiden::kv_cache::RaidenId>>&
                  slices,
              bool on_host) {
-            return self->Insert(block_hashes, slices, on_host);
+            auto hashes = ToStdStringVector(block_hashes);
+            return self->Insert(hashes, slices, on_host);
           },
           nb::arg("block_hashes"), nb::arg("slices"), nb::arg("on_host"))
       .def(
           "delete",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
-             const std::vector<uint64_t>& block_hashes,
+             const std::vector<nb::bytes>& block_hashes,
              const std::vector<std::vector<tpu_raiden::kv_cache::RaidenId>>&
-                 slices) { self->Delete(block_hashes, slices); },
+                 slices) {
+            auto hashes = ToStdStringVector(block_hashes);
+            self->Delete(hashes, slices);
+          },
           nb::arg("block_hashes"), nb::arg("slices"))
       .def("capacity",
            [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
@@ -422,15 +449,17 @@ NB_MODULE(_tpu_raiden_torch, m) {
       .def(
           "pin",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
-             const std::vector<uint64_t>& block_hashes) {
-            return self->Pin(block_hashes);
+             const std::vector<nb::bytes>& block_hashes) {
+            auto hashes = ToStdStringVector(block_hashes);
+            return self->Pin(hashes);
           },
           nb::arg("block_hashes"))
       .def(
           "release",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
-             const std::vector<uint64_t>& block_hashes) {
-            self->Release(block_hashes);
+             const std::vector<nb::bytes>& block_hashes) {
+            auto hashes = ToStdStringVector(block_hashes);
+            self->Release(hashes);
           },
           nb::arg("block_hashes"));
 }

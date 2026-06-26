@@ -65,35 +65,35 @@ class KVCacheStore {
   // Checks the LRU directory for cached block hashes. Returns a list of all
   // matched replica pairs (block hash and vector of RaidenIds) encountered
   // in sequence prior to the first miss.
-  absl::StatusOr<std::vector<std::pair<int64_t, std::vector<RaidenId>>>> Lookup(
-      const std::vector<uint64_t>& block_hashes);
+  absl::StatusOr<std::vector<std::pair<std::string, std::vector<RaidenId>>>>
+  Lookup(const std::vector<std::string>& block_hashes);
 
   // Caches sharded buffers into host-RAM/HBM backing store.
   // Returns true if insertion is successful, false if the cache entry already
   // exists.
-  bool Insert(const std::vector<uint64_t>& block_hashes,
+  bool Insert(const std::vector<std::string>& block_hashes,
               const std::vector<std::vector<RaidenId>>& slices, bool on_host);
 
   // Deletes cached sharded buffers from host-RAM/HBM backing store entirely.
-  void Delete(const std::vector<uint64_t>& block_hashes,
+  void Delete(const std::vector<std::string>& block_hashes,
               const std::vector<std::vector<RaidenId>>& slices);
 
   // Pins cached block hashes in memory, protecting them against LRU eviction
   // while in active use. Returns true if all keys exist and were successfully
   // pinned.
-  bool Pin(const std::vector<uint64_t>& block_hashes);
+  bool Pin(const std::vector<std::string>& block_hashes);
 
   // Releases previously pinned block hashes, making them eligible for LRU
   // eviction when capacity is exceeded.
-  void Release(const std::vector<uint64_t>& block_hashes);
+  void Release(const std::vector<std::string>& block_hashes);
 
-  int GetPinCount(uint64_t hash) const;
+  int GetPinCount(const std::string& hash) const;
 
   size_t capacity() const;
 
  private:
   mutable absl::Mutex mutex_;
-  mutable LRUCache<uint64_t, std::vector<RaidenId>> lru_cache_
+  mutable LRUCache<std::string, std::vector<RaidenId>> lru_cache_
       ABSL_GUARDED_BY(mutex_);
 };
 

@@ -15,7 +15,7 @@
 #include "tpu_raiden/kv_cache/kv_cache_store.h"
 
 #include <cstddef>
-#include <cstdint>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -30,14 +30,14 @@ KVCacheStore::KVCacheStore(size_t capacity) : lru_cache_(capacity) {}
 
 KVCacheStore::~KVCacheStore() = default;
 
-absl::StatusOr<std::vector<std::pair<int64_t, std::vector<RaidenId>>>>
-KVCacheStore::Lookup(const std::vector<uint64_t>& block_hashes) {
+absl::StatusOr<std::vector<std::pair<std::string, std::vector<RaidenId>>>>
+KVCacheStore::Lookup(const std::vector<std::string>& block_hashes) {
   absl::MutexLock lock(mutex_);
 
-  std::vector<std::pair<int64_t, std::vector<RaidenId>>> results;
+  std::vector<std::pair<std::string, std::vector<RaidenId>>> results;
   results.reserve(block_hashes.size());
 
-  for (uint64_t hash : block_hashes) {
+  for (const std::string& hash : block_hashes) {
     std::vector<RaidenId>* existing = lru_cache_.Get(hash);
     if (!existing || existing->empty()) {
       break;
@@ -48,14 +48,14 @@ KVCacheStore::Lookup(const std::vector<uint64_t>& block_hashes) {
   return results;
 }
 
-bool KVCacheStore::Insert(const std::vector<uint64_t>& block_hashes,
+bool KVCacheStore::Insert(const std::vector<std::string>& block_hashes,
                           const std::vector<std::vector<RaidenId>>& slices,
                           bool /*on_host*/) {
   absl::MutexLock lock(mutex_);
 
   bool all_inserted = true;
   for (size_t i = 0; i < block_hashes.size(); ++i) {
-    uint64_t hash = block_hashes[i];
+    const std::string& hash = block_hashes[i];
     if (lru_cache_.Contains(hash)) {
       all_inserted = false;
     } else {
@@ -70,15 +70,15 @@ bool KVCacheStore::Insert(const std::vector<uint64_t>& block_hashes,
   return all_inserted;
 }
 
-void KVCacheStore::Delete(const std::vector<uint64_t>& block_hashes,
+void KVCacheStore::Delete(const std::vector<std::string>& block_hashes,
                           const std::vector<std::vector<RaidenId>>& slices) {
   absl::MutexLock lock(mutex_);
-  for (uint64_t hash : block_hashes) {
+  for (const std::string& hash : block_hashes) {
     lru_cache_.Erase(hash);
   }
 }
 
-bool KVCacheStore::Pin(const std::vector<uint64_t>& block_hashes) {
+bool KVCacheStore::Pin(const std::vector<std::string>& block_hashes) {
   absl::MutexLock lock(mutex_);
   for (size_t i = 0; i < block_hashes.size(); ++i) {
     if (!lru_cache_.Pin(block_hashes[i])) {
@@ -91,14 +91,14 @@ bool KVCacheStore::Pin(const std::vector<uint64_t>& block_hashes) {
   return true;
 }
 
-void KVCacheStore::Release(const std::vector<uint64_t>& block_hashes) {
+void KVCacheStore::Release(const std::vector<std::string>& block_hashes) {
   absl::MutexLock lock(mutex_);
-  for (uint64_t hash : block_hashes) {
+  for (const std::string& hash : block_hashes) {
     lru_cache_.Unpin(hash);
   }
 }
 
-int KVCacheStore::GetPinCount(uint64_t hash) const {
+int KVCacheStore::GetPinCount(const std::string& hash) const {
   absl::MutexLock lock(mutex_);
   return lru_cache_.GetPinCount(hash);
 }
