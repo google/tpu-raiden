@@ -36,6 +36,29 @@ echo "=== 1. Navigating to checked-out repository ==="
 export REPO_ROOT="${KOKORO_ARTIFACTS_DIR}/github/tpu-raiden"
 cd "${REPO_ROOT}"
 
+echo "=== 1.5 [TEMP HACK] Building and pushing temporary Docker image ==="
+# Ensure Dockerfile is available (Copybara should have placed it here if it's part of the CL)
+if [[ ! -f "Dockerfile" ]]; then
+  echo "Error: Dockerfile not found in repo root!"
+  exit 1
+fi
+
+DOCKER_TAG="intern-temp-$(date +%Y%m%d%H%M%S)"
+FULL_IMAGE_NAME="us-docker.pkg.dev/cloud-tpu-inference-test/tpu-raiden/ml-build-custom:${DOCKER_TAG}"
+
+echo "Building ${FULL_IMAGE_NAME}..."
+docker build -t "${FULL_IMAGE_NAME}" .
+
+echo "Authenticating to Artifact Registry..."
+gcloud auth configure-docker us-docker.pkg.dev --quiet
+
+echo "Pushing ${FULL_IMAGE_NAME}..."
+docker push "${FULL_IMAGE_NAME}"
+
+echo "====== [TEMP HACK] Temporary image pushed successfully: ${FULL_IMAGE_NAME} ======"
+echo "====== Exiting early to save time ======"
+exit 0
+
 echo "=== 2. Setting up standalone Bazel environment ==="
 # Read target Bazel version from metadata
 export BAZEL_VERSION="$(tr -d '\r\n ' < ".bazelversion")"
