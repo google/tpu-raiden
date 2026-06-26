@@ -48,6 +48,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+# (OSS) removed g3_multiprocessing import
 from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _kv_cache_manager
 
 _GOOGLE_PCI_VENDOR_ID = "0x1ae0"
