@@ -15,8 +15,11 @@
 #include "tpu_raiden/core/host_memory_allocator.h"
 
 #include <sys/mman.h>
+#include <unistd.h>
 
+#include <cerrno>
 #include <cstdint>
+
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -97,6 +100,16 @@ XlaHostMemoryAllocator::AllocateDmaMappedForDevice(
 
 absl::StatusOr<HostBufferAllocation> XlaHostMemoryAllocator::Allocate(
     size_t size_bytes) {
+  return AllocateInternal(size_bytes, /*shared=*/false);
+}
+
+absl::StatusOr<HostBufferAllocation> XlaHostMemoryAllocator::AllocateShared(
+    size_t size_bytes) {
+  return AllocateInternal(size_bytes, /*shared=*/true);
+}
+
+absl::StatusOr<HostBufferAllocation> XlaHostMemoryAllocator::AllocateInternal(
+    size_t size_bytes, bool shared) {
   if (size_bytes == 0) {
     HostBufferAllocation alloc;
     alloc.ptr = nullptr;
@@ -128,7 +141,7 @@ absl::StatusOr<HostBufferAllocation> XlaHostMemoryAllocator::Allocate(
   // directly to libtpu's internal host memory allocator pool. This yields
   // pre-mapped VFIO staged DMA memory (~175 GB/s H2D / ~128 GB/s D2H) rather
   // than raw unpinned OS memory (~106 GB/s), saving ~70 GB/s on MPMD workloads.
-  if (skip_dma_map && client_ != nullptr &&
+  if (!shared && skip_dma_map && client_ != nullptr &&
       client_->GetHostMemoryAllocator() != nullptr) {
     xla::HostMemoryAllocator::AllocateOptions alloc_opts;
     if (g_current_device != nullptr) {
@@ -150,9 +163,31 @@ absl::StatusOr<HostBufferAllocation> XlaHostMemoryAllocator::Allocate(
 
   size_t aligned_size = (size_bytes + 4095) & ~4095;
 
-  void* ptr = mmap(nullptr, aligned_size, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  void* ptr = nullptr;
+  int fd = -1;
+  if (shared) {
+    fd = memfd_create("raiden_shared_alloc", 0);
+    if (fd == -1) {
+      return absl::InternalError(
+          absl::StrCat("memfd_create failed: ", strerror(errno)));
+    }
+    if (ftruncate(fd, aligned_size) == -1) {
+      close(fd);
+      return absl::InternalError(
+          absl::StrCat("ftruncate failed: ", strerror(errno)));
+    }
+    ptr = mmap(nullptr, aligned_size, PROT_READ | PROT_WRITE,
+               MAP_SHARED, fd, 0);
+
+  } else {
+    ptr = mmap(nullptr, aligned_size, PROT_READ | PROT_WRITE,
+               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  }
+
   if (ptr == MAP_FAILED) {
+    if (fd != -1) {
+      close(fd);
+    }
     return absl::ResourceExhaustedError(
         absl::StrCat("mmap failed for size: ", aligned_size));
   }
@@ -165,6 +200,9 @@ absl::StatusOr<HostBufferAllocation> XlaHostMemoryAllocator::Allocate(
       dma_mapped = true;
     } else {
       munmap(ptr, aligned_size);
+      if (fd != -1) {
+        close(fd);
+      }
       return absl::InternalError(
           absl::StrCat("DmaMap failed: ", status.message()));
     }
@@ -173,18 +211,25 @@ absl::StatusOr<HostBufferAllocation> XlaHostMemoryAllocator::Allocate(
   HostBufferAllocation alloc;
   alloc.ptr = static_cast<uint8_t*>(ptr);
   alloc.size = size_bytes;
+  if (shared) {
+    alloc.fd = fd;
+  }
 
   xla::PjRtClient* client = client_;
-  alloc.owner =
-      std::shared_ptr<void>(ptr, [client, aligned_size, dma_mapped](void* p) {
+  alloc.owner = std::shared_ptr<void>(
+      ptr, [client, aligned_size, dma_mapped, fd](void* p) {
         if (dma_mapped) {
           (void)client->DmaUnmap(p);
         }
         munmap(p, aligned_size);
+        if (fd != -1) {
+          close(fd);
+        }
       });
 
   return alloc;
 }
+
 
 absl::StatusOr<HostBufferAllocation> MallocHostMemoryAllocator::Allocate(
     size_t size_bytes) {
