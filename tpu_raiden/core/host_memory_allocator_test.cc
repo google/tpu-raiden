@@ -15,7 +15,11 @@
 #include "tpu_raiden/core/host_memory_allocator.h"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <string>
+#include <vector>
 
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
@@ -23,8 +27,6 @@
 
 namespace tpu_raiden {
 namespace {
-
-using ::absl_testing::IsOk;
 
 TEST(HostMemoryAllocatorTest, FallbackAllocationWithoutClient) {
   TF_ASSERT_OK_AND_ASSIGN(auto allocator, HostMemoryAllocator::Create(nullptr));
@@ -75,6 +77,52 @@ TEST(HostMemoryAllocatorTest, AllocationWithTpuClient) {
   for (size_t i = 0; i < 4096; ++i) {
     EXPECT_EQ(alloc.ptr[i], 0xCD);
   }
+}
+
+TEST(HostMemoryAllocatorTest, FileWriteReadVerifyWithTpuClient) {
+  TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * manager,
+                          TpuPjrtManager::GetDefault());
+  ASSERT_NE(manager->client(), nullptr);
+
+  TF_ASSERT_OK_AND_ASSIGN(auto allocator,
+                          HostMemoryAllocator::Create(manager->client()));
+
+  // Allocate 10MB
+  const size_t kSize = 10 * 1024 * 1024;
+  TF_ASSERT_OK_AND_ASSIGN(HostBufferAllocation alloc,
+                          allocator->Allocate(kSize));
+  EXPECT_NE(alloc.ptr, nullptr);
+  EXPECT_EQ(alloc.size, kSize);
+  EXPECT_NE(alloc.owner, nullptr);
+
+  // Fill buffer with a pattern
+  for (size_t i = 0; i < kSize; ++i) {
+    alloc.ptr[i] = static_cast<uint8_t>(i % 256);
+  }
+
+  // Write to /tmp/
+  std::string filename = "/tmp/host_memory_allocator_test_file_10mb.bin";
+  {
+    std::ofstream ofs(filename, std::ios::binary);
+    ASSERT_TRUE(ofs.is_open());
+    ofs.write(reinterpret_cast<const char*>(alloc.ptr), kSize);
+    ASSERT_TRUE(ofs.good());
+  }
+
+  // Read back into a different buffer to verify
+  std::vector<uint8_t> read_buffer(kSize);
+  {
+    std::ifstream ifs(filename, std::ios::binary);
+    ASSERT_TRUE(ifs.is_open());
+    ifs.read(reinterpret_cast<char*>(read_buffer.data()), kSize);
+    ASSERT_TRUE(ifs.good());
+  }
+
+  // Validate contents
+  EXPECT_EQ(std::memcmp(alloc.ptr, read_buffer.data(), kSize), 0);
+
+  // Clean up
+  std::remove(filename.c_str());
 }
 
 }  // namespace
