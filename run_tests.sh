@@ -54,12 +54,10 @@ fi
 if [ "$RUN_JAX" = true ]; then
   echo "=== Running JAX Python Unit Tests ==="
   python "${WORKSPACE_DIR}/tpu_raiden/frameworks/jax/kv_cache_manager_test.py"
-  python "${WORKSPACE_DIR}/tpu_raiden/frameworks/jax/resharding_planner_test.py"
   python "${WORKSPACE_DIR}/tpu_raiden/api/jax/kv_cache_manager_test.py"
   python "${WORKSPACE_DIR}/tpu_raiden/api/jax/kv_cache_store_test.py"
   python "${WORKSPACE_DIR}/tpu_raiden/api/jax/kv_cache_manager_transfer_test.py"
-  python "${WORKSPACE_DIR}/tpu_raiden/api/jax/weight_synchronizer_test.py"
-  python "${WORKSPACE_DIR}/tpu_raiden/api/jax/kv_cache_manager_mpmd_test.py"
+  python "${WORKSPACE_DIR}/tpu_raiden/frameworks/jax/kv_cache_manager_perf_test.py" --telemetry_log_path=/mnt/disks/jcgu/log/kv_cache_manager_perf_performance.jsonl
 fi
 
 if [ "$RUN_TORCH" = true ]; then

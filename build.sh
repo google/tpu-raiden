@@ -63,6 +63,9 @@ else
   DEFAULT_BAZEL_CACHE_BASE="${HOME}/.bazel_cache"
   DEFAULT_BAZEL_OUTPUT_BASE="/tmp/tpu_raiden_bazel_output_${USER}"
 fi
+DEFAULT_BAZEL_CACHE_BASE="/mnt/disks/jcgu/bazel_cache"
+DEFAULT_BAZEL_OUTPUT_BASE="/mnt/disks/jcgu/bazel_output"
+
 BAZEL_CACHE_BASE="${BAZEL_CACHE_DIR:-${DEFAULT_BAZEL_CACHE_BASE}}"
 BAZEL_DISK_CACHE="${BAZEL_CACHE_BASE}/disk_cache"
 BAZEL_REPO_CACHE="${BAZEL_CACHE_BASE}/repo_cache"
@@ -97,11 +100,65 @@ fi
 # Default behavior based on auto-detection
 BUILD_JAX=true
 BUILD_TORCH=true
+BUILD_COMBINED=false
 
 if [ ! -f "${TORCH_TPU_MODULE_PATH}/MODULE.bazel" ]; then
   echo "torch_tpu checkout not found at ${TORCH_TPU_MODULE_PATH}. Defaulting to JAX-only build."
   BUILD_TORCH=false
 fi
+
+# --- Combined-XLA install/restore helpers (solution #3: build the JAX engine INTO
+# jaxlib's single libjax_common.so so the dual-XLA load-order requirement / LD_PRELOAD
+# is removed). See current_work/DUAL_XLA_STATUS_AND_NEXT_STEPS.md. ---
+jaxlib_dir() {
+  python3 -c "import jaxlib, os; print(os.path.dirname(jaxlib.__file__))"
+}
+
+install_combined() {
+  local jxdir combined stub engine_dst
+  jxdir="$(jaxlib_dir)"
+  combined="${WORKSPACE_DIR}/bazel-bin/tpu_raiden/combined_xla/libjax_common.so"
+  stub="${WORKSPACE_DIR}/bazel-bin/tpu_raiden/combined_xla/_tpu_raiden_jax.so"
+  engine_dst="${WORKSPACE_DIR}/tpu_raiden/frameworks/jax/_tpu_raiden_jax.so"
+  if [[ ! -f "${combined}" || ! -f "${stub}" ]]; then
+    echo "ERROR: combined artifacts not found under bazel-bin/tpu_raiden/combined_xla/." >&2
+    exit 1
+  fi
+  if ! command -v patchelf > /dev/null; then
+    echo "ERROR: patchelf required to wire the engine stub to libjax_common.so." >&2
+    exit 1
+  fi
+  echo "=== Installing combined libjax_common.so into ${jxdir} ==="
+  # Back up the stock jaxlib lib and the real engine .so ONCE (don't clobber on re-run).
+  [[ -f "${jxdir}/libjax_common.so.orig_bak" ]] || cp -p "${jxdir}/libjax_common.so" "${jxdir}/libjax_common.so.orig_bak"
+  if [[ -f "${engine_dst}" && ! -f "${engine_dst}.real_bak" ]]; then
+    cp -p "${engine_dst}" "${engine_dst}.real_bak"
+  fi
+  # Combined lib over jaxlib's; engine .so becomes the forwarding stub.
+  cp -f "${combined}" "${jxdir}/libjax_common.so"; chmod u+w "${jxdir}/libjax_common.so"
+  cp -f "${stub}" "${engine_dst}"; chmod u+w "${engine_dst}"
+  patchelf --add-needed libjax_common.so "${engine_dst}"
+  patchelf --set-rpath "${jxdir}" "${engine_dst}"
+  echo "Installed: combined libjax_common.so + engine stub (NEEDED libjax_common.so, RUNPATH ${jxdir})."
+  echo "Run disagg WITHOUT preload via: RAIDEN_LD_PRELOAD='' ..."
+}
+
+restore_combined() {
+  local jxdir engine_dst
+  jxdir="$(jaxlib_dir)"
+  engine_dst="${WORKSPACE_DIR}/tpu_raiden/frameworks/jax/_tpu_raiden_jax.so"
+  echo "=== Restoring stock jaxlib + real engine .so ==="
+  if [[ -f "${jxdir}/libjax_common.so.orig_bak" ]]; then
+    cp -f "${jxdir}/libjax_common.so.orig_bak" "${jxdir}/libjax_common.so"; chmod u+w "${jxdir}/libjax_common.so"
+    echo "Restored stock ${jxdir}/libjax_common.so"
+  else
+    echo "WARNING: no libjax_common.so.orig_bak found; nothing to restore." >&2
+  fi
+  if [[ -f "${engine_dst}.real_bak" ]]; then
+    cp -f "${engine_dst}.real_bak" "${engine_dst}"; chmod u+w "${engine_dst}"
+    echo "Restored real engine ${engine_dst}"
+  fi
+}
 
 # Parse command line arguments
 if [ "$#" -gt 0 ]; then
@@ -121,11 +178,23 @@ if [ "$#" -gt 0 ]; then
       BUILD_TORCH=true
       shift
       ;;
+    combined)
+      # Build the engine INTO a replacement jaxlib libjax_common.so (one XLA) and install it.
+      BUILD_JAX=false
+      BUILD_TORCH=false
+      BUILD_COMBINED=true
+      shift
+      ;;
+    restore-combined)
+      # Revert the combined install: put back stock jaxlib + the real engine .so.
+      restore_combined
+      exit 0
+      ;;
     -*)
       # Standard Bazel/environment flags: keep defaults and do not shift.
       ;;
     *)
-      echo "Usage: $0 [jax|torch|both] [bazel_flags...]"
+      echo "Usage: $0 [jax|torch|both|combined|restore-combined] [bazel_flags...]"
       exit 1
       ;;
   esac
@@ -214,6 +283,42 @@ if [ ${#BAZEL_TARGETS[@]} -eq 0 ]; then
 fi
 
 mkdir -p "${BAZEL_DISK_CACHE}" "${BAZEL_REPO_CACHE}" "$(dirname "${BAZEL_OUTPUT_BASE}")"
+
+if [ "${BUILD_COMBINED}" = true ]; then
+  echo "=== Building COMBINED libjax_common.so (engine built into jaxlib's single XLA) ==="
+  # These flags reproduce jaxlib's own build config so the engine links into the SAME
+  # XLA as jaxlib (one copy -> no dual-XLA static-init double-free -> no LD_PRELOAD):
+  #   --check_visibility=false                         link jaxlib's private :_jax_common_split
+  #   --extra_toolchains=...linux_x86_64               jaxlib's hermetic clang (gcc fails on
+  #                                                    XLA's LLVM-IR codegen .ll libs)
+  #   -DNB_DOMAIN=jax / -DMLIR_PYTHON_PACKAGE_PREFIX=  jax build-config parity (else jaxlib's
+  #                                                    own _stablehlo / nanobind types break)
+  COMBINED_TARGETS=(
+    "//tpu_raiden/combined_xla:libjax_common.so"
+    "//tpu_raiden/combined_xla:_tpu_raiden_jax.so"
+  )
+  "${BAZEL_BIN}" --install_base="${BAZEL_OUTPUT_BASE}/install_base" --output_base="${BAZEL_OUTPUT_BASE}" --host_jvm_args="-Xmx32g" --host_jvm_args="-Xms2g" build -c opt --check_visibility=false --verbose_failures --experimental_repo_remote_exec --incompatible_disallow_empty_glob=false \
+    --repo_env=HERMETIC_PYTHON_VERSION=${HERMETIC_PYTHON_VERSION:-3.12} \
+    --repo_env=PIP_INDEX_URL="https://pypi.org/simple" \
+    --repo_env=PIP_EXTRA_INDEX_URL="" \
+    --repo_env=PYTHON_KEYRING_BACKEND="keyring.backends.null.Keyring" \
+    --repo_env=PIP_CONFIG_FILE="/dev/null" \
+    --incompatible_enable_cc_toolchain_resolution \
+    --extra_toolchains=@rules_ml_toolchain//cc:linux_x86_64_linux_x86_64 \
+    --copt=-Wno-gnu-offsetof-extensions --copt=-Qunused-arguments --copt=-Wno-error=c23-extensions \
+    --copt=-DMLIR_PYTHON_PACKAGE_PREFIX=jaxlib.mlir. \
+    --copt=-DNB_DOMAIN=jax \
+    --copt=-DGRPC_BAZEL_BUILD --host_copt=-DGRPC_BAZEL_BUILD \
+    --define=grpc_no_ares=true --define=tsl_link_protobuf=true \
+    "${BAZEL_MODULE_FLAGS[@]}" \
+    "${COMBINED_TARGETS[@]}" \
+    --disk_cache=${BAZEL_DISK_CACHE} \
+    --repository_cache=${BAZEL_REPO_CACHE} \
+    "$@"
+  install_combined
+  echo "=== Combined build + install complete! ==="
+  exit 0
+fi
 
 echo "=== Building targets with Bazel ==="
 "${BAZEL_BIN}" --install_base="${BAZEL_OUTPUT_BASE}/install_base" --output_base="${BAZEL_OUTPUT_BASE}" --host_jvm_args="-Xmx32g" --host_jvm_args="-Xms2g" build -c opt --check_visibility=false --verbose_failures --experimental_repo_remote_exec --incompatible_disallow_empty_glob=false \

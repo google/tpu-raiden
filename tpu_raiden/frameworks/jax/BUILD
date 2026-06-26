@@ -141,6 +141,45 @@ nanobind_extension(
     ],
 )
 
+# --- #3 dual-XLA jax-fork: engine code as a plain cc_library (PyInit renamed to
+# Wrapped_PyInit so it can be aggregated into a combined libjax_common.so that shares
+# jaxlib's single XLA). No --exclude-libs: symbols must be linkable into the common lib;
+# the common lib's version script (Wrapped_PyInit_*) controls final export. ---
+cc_library(
+    name = "engine_common",
+    srcs = [
+        "nb_statusor.h",
+        "tpu_raiden_jax_module.cc",
+    ],
+    copts = [
+        "-fexceptions",
+        "-frtti",
+        "-march=x86-64-v2",
+    ],
+    features = [
+        "-use_header_modules",
+    ],
+    local_defines = [
+        "PyInit__tpu_raiden_jax=Wrapped_PyInit__tpu_raiden_jax",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":kv_cache_manager_jax",
+        ":nb_statusor",
+        ":raw_transfer_jax",
+        ":weight_synchronizer_jax",
+        "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/kv_cache:kv_cache_store",
+        "//tpu_raiden/weight_sync:weight_synchronizer_base",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:string_view",
+        "@nanobind",
+        "@rules_python//python/cc:current_py_cc_headers",
+    ],
+    alwayslink = True,
+)
+
 cc_library(
     name = "kv_cache_manager_ffi",
     srcs = [
