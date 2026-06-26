@@ -31,7 +31,8 @@ class WeightSynchronizer : public weight_sync::WeightSynchronizerBase {
   // PyTorch sharded constructor E2E
   WeightSynchronizer(const std::vector<std::vector<at::Tensor>>& device_tensors,
                      std::optional<int> local_port = std::nullopt,
-                     int parallelism = 1);
+                     int parallelism = 1,
+                     std::optional<std::string> bind_ip = std::nullopt);
 
   ~WeightSynchronizer() override;
 
@@ -39,7 +40,8 @@ class WeightSynchronizer : public weight_sync::WeightSynchronizerBase {
   // Delegated-to ctor: moves the keep-alive refs into buffer_refs_ so the
   // materialized (possibly view) device buffers survive for our lifetime.
   WeightSynchronizer(UnpackedTensors unpacked, std::optional<int> local_port,
-                     int parallelism);
+                     int parallelism,
+                     std::optional<std::string> bind_ip);
 
   std::vector<torch_tpu::DeviceBufferRef> buffer_refs_;
 };

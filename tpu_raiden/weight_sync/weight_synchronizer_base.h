@@ -49,14 +49,16 @@ class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<std::vector<const uint8_t*>> external_host_ptrs =
           std::nullopt,
       bool unsafe_skip_buffer_lock = false, int parallelism = 1,
-      std::optional<int> listener_port = std::nullopt);
+      std::optional<int> listener_port = std::nullopt,
+      std::optional<std::string> bind_ip = std::nullopt);
 
   // CPU-only constructor for remote workers and mock E2E testing
   WeightSynchronizerBase(
       size_t num_layers, size_t num_shards, size_t slice_byte_size,
       std::optional<int> local_port = std::nullopt,
       std::optional<int> host_blocks_to_allocate = std::nullopt,
-      int parallelism = 1, std::optional<int> listener_port = std::nullopt);
+      int parallelism = 1, std::optional<int> listener_port = std::nullopt,
+      std::optional<std::string> bind_ip = std::nullopt);
 
   std::optional<int> listener_port() const;
   bool is_listener_active() const;

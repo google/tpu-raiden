@@ -56,7 +56,8 @@ class WeightSynchronizer {
   WeightSynchronizer(nanobind::list jax_arrays,
                      std::optional<int> local_port = std::nullopt,
                      int parallelism = 1, bool unsafe_skip_buffer_lock = false,
-                     std::optional<int> listener_port = std::nullopt);
+                     std::optional<int> listener_port = std::nullopt,
+                     std::optional<std::string> bind_ip = std::nullopt);
 #endif
 
   ~WeightSynchronizer();
@@ -84,7 +85,8 @@ class WeightSynchronizer {
 #ifndef WITHOUT_PYTHON
   WeightSynchronizer(UnpackedWeights&& weights, std::optional<int> local_port,
                      int parallelism, bool unsafe_skip_buffer_lock,
-                     std::optional<int> listener_port);
+                     std::optional<int> listener_port,
+                     std::optional<std::string> bind_ip);
   std::optional<nanobind::list> jax_arrays_;
 #endif
   std::unique_ptr<weight_sync::WeightSynchronizerBase> impl_;

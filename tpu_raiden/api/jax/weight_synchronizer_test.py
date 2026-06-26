@@ -70,12 +70,15 @@ class WeightSynchronizerIntegrationTest(absltest.TestCase):
         local_port=0,
         unsafe_skip_buffer_lock=True,
         listener_port=0,
+        bind_ip="127.0.0.1",
     )
     ws_dest1 = WeightSynchronizer(
-        jax_arrays=dst1_arrs, local_port=0, unsafe_skip_buffer_lock=True
+        jax_arrays=dst1_arrs, local_port=0, unsafe_skip_buffer_lock=True,
+        bind_ip="127.0.0.1",
     )
     ws_dest2 = WeightSynchronizer(
-        jax_arrays=dst2_arrs, local_port=0, unsafe_skip_buffer_lock=True
+        jax_arrays=dst2_arrs, local_port=0, unsafe_skip_buffer_lock=True,
+        bind_ip="127.0.0.1",
     )
 
     req = raiden_service_pb2.ControlRequest(
@@ -131,12 +134,15 @@ class WeightSynchronizerIntegrationTest(absltest.TestCase):
         local_port=0,
         unsafe_skip_buffer_lock=True,
         listener_port=0,
+        bind_ip="127.0.0.1",
     )
     ws_dest1 = WeightSynchronizer(
-        jax_arrays=dst1_arrs, local_port=0, unsafe_skip_buffer_lock=True
+        jax_arrays=dst1_arrs, local_port=0, unsafe_skip_buffer_lock=True,
+        bind_ip="127.0.0.1",
     )
     ws_dest2 = WeightSynchronizer(
-        jax_arrays=dst2_arrs, local_port=0, unsafe_skip_buffer_lock=True
+        jax_arrays=dst2_arrs, local_port=0, unsafe_skip_buffer_lock=True,
+        bind_ip="127.0.0.1",
     )
 
     # Self-push to populate ws_source's host buffer with current device weights

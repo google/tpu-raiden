@@ -38,20 +38,23 @@ WeightSynchronizer::WeightSynchronizer(nanobind::list jax_arrays,
                                        std::optional<int> local_port,
                                        int parallelism,
                                        bool unsafe_skip_buffer_lock,
-                                       std::optional<int> listener_port)
+                                       std::optional<int> listener_port,
+                                       std::optional<std::string> bind_ip)
     : WeightSynchronizer(UnpackAndMove(std::move(jax_arrays)), local_port,
-                         parallelism, unsafe_skip_buffer_lock, listener_port) {}
+                         parallelism, unsafe_skip_buffer_lock, listener_port,
+                         bind_ip) {}
 
 WeightSynchronizer::WeightSynchronizer(UnpackedWeights&& weights,
                                        std::optional<int> local_port,
                                        int parallelism,
                                        bool unsafe_skip_buffer_lock,
-                                       std::optional<int> listener_port)
+                                       std::optional<int> listener_port,
+                                       std::optional<std::string> bind_ip)
     : jax_arrays_(std::move(weights.jax_arrays)) {
   impl_ = std::make_unique<weight_sync::WeightSynchronizerBase>(
       weights.layer_buffers, local_port,
       /*external_host_ptrs=*/std::nullopt, unsafe_skip_buffer_lock, parallelism,
-      listener_port);
+      listener_port, bind_ip);
 }
 
 #endif  // WITHOUT_PYTHON

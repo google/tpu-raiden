@@ -72,8 +72,8 @@ class WeightSynchronizerTorchTest(parameterized.TestCase):
       dst2_tensors.append(shards)
 
     # 2. Instantiate destination WeightSynchronizers on ephemeral ports!
-    ws_dest1 = WeightSynchronizer(dst1_tensors, local_port=0, parallelism=1)
-    ws_dest2 = WeightSynchronizer(dst2_tensors, local_port=0, parallelism=1)
+    ws_dest1 = WeightSynchronizer(dst1_tensors, local_port=0, parallelism=1, bind_ip="127.0.0.1")
+    ws_dest2 = WeightSynchronizer(dst2_tensors, local_port=0, parallelism=1, bind_ip="127.0.0.1")
 
     self.assertIsNotNone(ws_dest1.local_port)
     self.assertIsNotNone(ws_dest2.local_port)
@@ -96,7 +96,7 @@ class WeightSynchronizerTorchTest(parameterized.TestCase):
         _ = src_tensors[l][sh].cpu()
 
     # Recreate/Instantiate ws_source to capture filled buffers!
-    ws_source = WeightSynchronizer(src_tensors, local_port=0, parallelism=1)
+    ws_source = WeightSynchronizer(src_tensors, local_port=0, parallelism=1, bind_ip="127.0.0.1")
     self.assertIsNotNone(ws_source.local_port)
     peer_source = f"localhost:{ws_source.local_port}"
 
@@ -129,7 +129,7 @@ class WeightSynchronizerTorchTest(parameterized.TestCase):
         _ = src_tensors[l][sh].cpu()
 
     # Recreate ws_source to capture new buffers!
-    ws_source = WeightSynchronizer(src_tensors, local_port=0, parallelism=1)
+    ws_source = WeightSynchronizer(src_tensors, local_port=0, parallelism=1, bind_ip="127.0.0.1")
     self.assertIsNotNone(ws_source.local_port)
     peer_source = f"localhost:{ws_source.local_port}"
 

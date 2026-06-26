@@ -283,9 +283,10 @@ NB_MODULE(_tpu_raiden_torch, m) {
   // =========================================================================
   nb::class_<WeightSynchronizer>(m, "WeightSynchronizer")
       .def(nb::init<const std::vector<std::vector<at::Tensor>>&,
-                    std::optional<int>, int>(),
+                    std::optional<int>, int, std::optional<std::string>>(),
            nb::arg("device_tensors"), nb::arg("local_port") = nb::none(),
-           nb::arg("parallelism") = 1)
+           nb::arg("parallelism") = 1,
+           nb::arg("bind_ip") = nb::none())
       .def(
           "PushWeights",
           [](WeightSynchronizer& self, const std::vector<std::string>& peers) {

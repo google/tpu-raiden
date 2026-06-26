@@ -30,6 +30,7 @@ class WeightSynchronizer:
       device_tensors: List[List[torch.Tensor]],
       local_port: Optional[int] = None,
       parallelism: int = 1,
+      bind_ip: Optional[str] = None,
   ):
     """Instantiates the PyTorch Weight Synchronizer shims.
 
@@ -39,9 +40,10 @@ class WeightSynchronizer:
       local_port: Sockets listener port assigned for incoming pulls (inference
         mode).
       parallelism: Parallel TCP sockets workers count.
+      bind_ip: Sockets server bind IP address.
     """
     self._impl = _weight_synchronizer.WeightSynchronizer(
-        device_tensors, local_port, parallelism
+        device_tensors, local_port, parallelism, bind_ip
     )
 
   def push_weights(self, peers: List[str]) -> None:

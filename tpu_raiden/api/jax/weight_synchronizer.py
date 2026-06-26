@@ -30,6 +30,7 @@ class WeightSynchronizer:
       parallelism: int = 1,
       unsafe_skip_buffer_lock: bool = False,
       listener_port: Optional[int] = None,
+      bind_ip: Optional[str] = None,
   ):
     """Instantiates the Weight Synchronizer on a JAX weights list.
 
@@ -39,6 +40,7 @@ class WeightSynchronizer:
       parallelism: Number of parallel network stream TCP sockets workers.
       unsafe_skip_buffer_lock: Skip PJRT buffer locks during weights unpack.
       listener_port: Sockets server port for incoming C++ Listener commands.
+      bind_ip: Sockets server bind IP address.
     """
     self._impl = _weight_synchronizer.WeightSynchronizer(
         jax_arrays,
@@ -46,6 +48,7 @@ class WeightSynchronizer:
         parallelism,
         unsafe_skip_buffer_lock,
         listener_port,
+        bind_ip,
     )
 
   def pull_weights(self, source: str) -> None:
