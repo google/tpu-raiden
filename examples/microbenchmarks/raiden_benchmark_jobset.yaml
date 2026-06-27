@@ -1,0 +1,93 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: all-netdev
+spec:
+  spec:
+    devices:
+      requests:
+      - name: req-netdev
+        exactly:
+          deviceClassName: netdev.google.com
+          allocationMode: All
+---
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: raiden-perf-test
+  namespace: default
+spec:
+  failurePolicy:
+    maxRestarts: 0
+  network:
+    enableDNSHostnames: true
+  replicatedJobs:
+    - name: workers
+      replicas: 1
+      template:
+        metadata:
+          labels:
+            app: raiden-perf-test
+        spec:
+          parallelism: 2
+          completions: 2
+          backoffLimit: 0
+          template:
+            metadata:
+              labels:
+                app: raiden-perf-test
+            spec:
+              resourceClaims:
+              - name: netdev
+                resourceClaimTemplateName: all-netdev
+              dnsPolicy: ClusterFirstWithHostNet
+              nodeSelector:
+                cloud.google.com/gke-tpu-accelerator: tpu7x
+                cloud.google.com/gke-tpu-topology: 2x2x1
+                cloud.google.com/gke-accelerator-count: "4"
+              containers:
+                - name: raiden-container
+                  image: "us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest"
+                  command: ["/bin/bash", "-c"]
+                  args:
+                    - |
+                      set -e
+                      echo "=== Step 1: Installing Compilation Prerequisites ==="
+                      apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                        git \
+                        build-essential
+                      
+                      echo "=== Step 2: Cloning TPU Raiden Repository ==="
+                      mkdir -p /workspace
+                      git clone https://github.com/google/tpu-raiden.git /workspace/tpu-raiden
+                      
+                      echo "=== Step 3: Compiling TPU Raiden C++ Extensions ==="
+                      cd /workspace/tpu-raiden
+                      ./build.sh jax
+                      
+                      echo "=== TPU Raiden compiled and ready! ==="
+                      sleep infinity
+                  securityContext:
+                    privileged: true
+                    capabilities:
+                      add: ["IPC_LOCK", "SYS_NICE"]
+                  resources:
+                    claims:
+                    - name: netdev
+                    requests:
+                      memory: "550Gi"
+                      cpu: "32"
+                    limits:
+                      memory: "550Gi"
+                      cpu: "32"
+                      google.com/tpu: "4"
+                  env:
+                    - name: LD_LIBRARY_PATH
+                      value: "/usr/local/lib/python3.12/site-packages/libtpu"
+                    - name: PYTHONPATH
+                      value: "/workspace/tpu-raiden"
+                    - name: JAX_PJRT_CLIENT_CREATE_OPTIONS
+                      value: "pinned_host_allocation_mode:recycle"
+                    - name: LIBTPU_INIT_ARGS
+                      value: "--xla_tpu_use_enhanced_launch_barrier=false"
+              restartPolicy: Never

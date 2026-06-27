@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load("@rules_python//python:defs.bzl", "py_library")
 
 package(default_visibility = ["//visibility:public"])
@@ -224,23 +224,5 @@ cc_library(
         "//tpu_raiden/rpc:raiden_service_cc_proto",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
-    ],
-)
-
-cc_binary(
-    name = "h2h_benchmark_runner",
-    srcs = ["h2h_benchmark_runner.cc"],
-    deps = [
-        ":kv_cache_manager_base",
-        ":logical_block_manager",
-        "//tpu_raiden/core:tpu_utils",
-        "@com_google_absl//absl/flags:flag",
-        "@com_google_absl//absl/flags:parse",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:str_format",
-        "@com_google_absl//absl/time",
     ],
 )

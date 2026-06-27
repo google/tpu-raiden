@@ -12,4 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
 package(default_visibility = ["//visibility:public"])
+
+cc_binary(
+    name = "h2h_benchmark_runner",
+    srcs = ["h2h_benchmark_runner.cc"],
+    deps = [
+        "//tpu_raiden/core:tpu_utils",
+        "//tpu_raiden/kv_cache:kv_cache_manager_base",
+        "//tpu_raiden/kv_cache:logical_block_manager",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/time",
+    ],
+)
