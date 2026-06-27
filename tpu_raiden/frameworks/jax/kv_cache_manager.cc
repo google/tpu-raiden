@@ -206,10 +206,14 @@ void KVCacheManager::InitSubManagers(
   for (const auto& nic : host_nics) {
     if (nic.interface_name != "lo") num_ext_nics++;
   }
-  if (numa_to_shards.size() > 1 && num_ext_nics < numa_to_shards.size()) {
+  // TEMPORARY HACK: Force all shards to be collapsed under a single sub-manager
+  // instance (NUMA 0) to avoid the threading and synchronization overhead
+  // of running multiple KVCacheManagerWithTransfer instances.
+  if (true) {
     std::vector<int> all_shards;
-    for (const auto& [n, sh_list] : numa_to_shards) {
-      all_shards.insert(all_shards.end(), sh_list.begin(), sh_list.end());
+    all_shards.reserve(total_num_shards_);
+    for (int i = 0; i < static_cast<int>(total_num_shards_); ++i) {
+      all_shards.push_back(i);
     }
     numa_to_shards.clear();
     numa_to_shards[0] = std::move(all_shards);
