@@ -36,6 +36,7 @@
 #include "tpu_raiden/frameworks/jax/raw_transfer_internal.h"
 #include "tpu_raiden/frameworks/jax/weight_synchronizer.h"
 #include "tpu_raiden/kv_cache/kv_cache_store.h"
+#include "xla/pjrt/status_casters.h"
 
 namespace nb = nanobind;
 
@@ -150,17 +151,18 @@ NB_MODULE(_tpu_raiden_jax, m) {
 
       .def(
           "d2h_auto_allocate",
-          [](tpu_raiden::kv_cache::jax::KVCacheManager& self,
-             const std::vector<int64_t>& src_offsets,
-             const std::vector<int64_t>& copy_sizes)
-              -> absl::StatusOr<
-                  std::pair<std::vector<int>, tpu_raiden::RaidenFuture>> {
-            auto res = self.D2hAutoAllocate(src_offsets, copy_sizes);
-            if (!res.ok()) return res.status();
-            return std::make_pair(
-                res.value().first,
-                tpu_raiden::RaidenFuture{std::move(res.value().second)});
-          },
+          xla::ValueOrThrowWrapper(
+              [](tpu_raiden::kv_cache::jax::KVCacheManager& self,
+                 const std::vector<int64_t>& src_offsets,
+                 const std::vector<int64_t>& copy_sizes)
+                  -> absl::StatusOr<
+                      std::pair<std::vector<int>, tpu_raiden::RaidenFuture>> {
+                auto res = self.D2hAutoAllocate(src_offsets, copy_sizes);
+                if (!res.ok()) return res.status();
+                return std::make_pair(
+                    res.value().first,
+                    tpu_raiden::RaidenFuture{std::move(res.value().second)});
+              }),
           nb::arg("src_offsets_major_dim") = nb::list(),
           nb::arg("copy_sizes_major_dim") = nb::list())
 

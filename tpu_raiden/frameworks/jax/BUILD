@@ -138,6 +138,7 @@ nanobind_extension(
         "@com_google_absl//absl/strings:string_view",
         "@nanobind",
         "@rules_python//python/cc:current_py_cc_headers",
+        "@xla//xla/pjrt:status_casters",
     ],
 )
 
