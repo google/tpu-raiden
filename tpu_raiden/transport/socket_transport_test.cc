@@ -114,6 +114,63 @@ TEST(SocketTransportTest, PointToPointReadTransfer) {
             0);
 }
 
+TEST(SocketTransportTest, PointToPointIPv6WriteTransfer) {
+  int port1 = 23460;
+  int port2 = 23461;
+  std::string src_payload =
+      "Hello Distributed KV Cache Transfer via POSIX IPv6 TCP!";
+  std::vector<uint8_t> dst_payload(src_payload.size(), 0);
+
+  auto transport1 = std::make_unique<SocketTransport>(port1);
+  auto transport2 = std::make_unique<SocketTransport>(port2);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  peregrine::Request request;
+  request.op = peregrine::Op::kWrite;
+  request.laddr = reinterpret_cast<uint8_t*>(src_payload.data());
+  request.raddr = dst_payload.data();
+  request.len = src_payload.size();
+
+  std::string peer2 = absl::StrCat("[::1]:", port2);
+  auto status_or_handle = transport1->Post(peer2, {request});
+  ASSERT_TRUE(status_or_handle.ok()) << status_or_handle.status().message();
+
+  EXPECT_TRUE(PollUntilDone(transport1.get(), status_or_handle.value()));
+
+  EXPECT_EQ(
+      std::memcmp(dst_payload.data(), src_payload.data(), src_payload.size()),
+      0);
+}
+
+TEST(SocketTransportTest, PointToPointIPv6ReadTransfer) {
+  int port1 = 23462;
+  int port2 = 23463;
+  std::string remote_payload = "Remote IPv6 data sequence ready to pull!";
+  std::vector<uint8_t> local_payload(remote_payload.size(), 0);
+
+  auto transport1 = std::make_unique<SocketTransport>(port1);
+  auto transport2 = std::make_unique<SocketTransport>(port2);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  peregrine::Request request;
+  request.op = peregrine::Op::kRead;
+  request.laddr = local_payload.data();
+  request.raddr = reinterpret_cast<uint8_t*>(remote_payload.data());
+  request.len = remote_payload.size();
+
+  std::string peer2 = absl::StrCat("[::1]:", port2);
+  auto status_or_handle = transport1->Post(peer2, {request});
+  ASSERT_TRUE(status_or_handle.ok()) << status_or_handle.status().message();
+
+  EXPECT_TRUE(PollUntilDone(transport1.get(), status_or_handle.value()));
+
+  EXPECT_EQ(std::memcmp(local_payload.data(), remote_payload.data(),
+                        remote_payload.size()),
+            0);
+}
+
 }  // namespace
 }  // namespace transport
 }  // namespace tpu_raiden
