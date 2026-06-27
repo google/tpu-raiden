@@ -178,3 +178,63 @@ class KVCacheManager:
     if copy_sizes is None:
       copy_sizes = [1] * len(src_offsets)
     return self._impl.h2d(src_offsets, dst_offsets, copy_sizes)
+
+  # =========================================================================
+  # EXPERIMENTAL PHYSICAL CACHE MANAGEMENT APIs
+  # The following APIs are experimental, expose physical cache internals,
+  # and are subject to change in future releases.
+  # =========================================================================
+
+  def d2h_auto_allocate(
+      self,
+      src_offsets: List[int],
+      copy_sizes: Optional[List[int]] = None,
+  ) -> Tuple[List[int], Any]:
+    """[EXPERIMENTAL] Device-to-Host (D2H) copy transfer with automatic host block allocation.
+
+    WARNING: This API is experimental and subject to change in future releases.
+
+    Args:
+      src_offsets: Source block offsets on device.
+      copy_sizes: Optional number of contiguous blocks to copy per segment.
+
+    Returns:
+      A tuple of (allocated_physical_chunk_ids, copy_future).
+    """
+    if copy_sizes is None:
+      copy_sizes = [1] * len(src_offsets)
+    return self._impl.d2h_auto_allocate(src_offsets, copy_sizes)
+
+  def unlock_blocks(self, block_ids: List[int]) -> None:
+    """[EXPERIMENTAL] Unlocks the specified physical staging blocks on host.
+
+    WARNING: This API is experimental and subject to change in future releases.
+
+    Args:
+      block_ids: List of physical chunk/block IDs to unlock.
+    """
+    self._impl.unlock_blocks(block_ids)
+
+  def access_block(self, block_id: int) -> None:
+    """[EXPERIMENTAL] Promotes the specified block in the physical LRU.
+
+    WARNING: This API is experimental and subject to change in future releases.
+
+    Args:
+      block_id: The physical chunk/block ID to access.
+    """
+    self._impl.access_block(block_id)
+
+  def total_blocks(self) -> int:
+    """[EXPERIMENTAL] Returns the total number of blocks in the host pool.
+
+    WARNING: This API is experimental and subject to change in future releases.
+    """
+    return self._impl.total_blocks()
+
+  def num_free_blocks(self) -> int:
+    """[EXPERIMENTAL] Returns the number of currently free blocks in the host pool.
+
+    WARNING: This API is experimental and subject to change in future releases.
+    """
+    return self._impl.num_free_blocks()
