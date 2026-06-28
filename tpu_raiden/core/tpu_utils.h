@@ -74,6 +74,10 @@ std::vector<HostNicAddress> GetLocalHostNicAddresses();
 // Falls back to {"127.0.0.1"} if none exist.
 std::vector<std::string> GetLocalHostIpAddresses();
 
+// Returns the NUMA node for a given network interface name.
+// Returns -1 if the node cannot be resolved.
+int GetInterfaceNumaNode(const char* ifname);
+
 // Uses getsockname to look up the local IPv4 address and returns its
 // corresponding interface's host NIC address. Returns std::nullopt on failure
 // or if not found.
