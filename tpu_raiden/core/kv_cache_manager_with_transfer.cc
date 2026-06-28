@@ -949,6 +949,8 @@ void KVCacheManagerWithTransfer::ReleaseSlotLocked(int64_t slot_idx) {
     return;
   }
   free_slots_.push_back(all_slots_[slot_idx]);
+  // Wake any StartPushInternal blocked waiting for a free staging slot.
+  cv_.notify_all();
 }
 
 void KVCacheManagerWithTransfer::ReleaseEntrySlotLocked(
@@ -1228,9 +1230,9 @@ void KVCacheManagerWithTransfer::StartPushInternal(
   int64_t send_slot = -1;
   std::vector<int64_t> host_block_ids;
   {
-    std::lock_guard<std::mutex> lock(mu_);
-    if (static_cast<int64_t>(src_block_ids.size()) > max_blocks_ ||
-        free_slots_.empty()) {
+    std::unique_lock<std::mutex> lock(mu_);
+    // A request larger than the per-slot staging capacity can never be served.
+    if (static_cast<int64_t>(src_block_ids.size()) > max_blocks_) {
       auto it = send_entries_.find(uuid);
       if (it != send_entries_.end()) {
         done_sending_.insert(it->second->req_id);
@@ -1238,6 +1240,29 @@ void KVCacheManagerWithTransfer::StartPushInternal(
         send_entries_.erase(it);
       }
       return;
+    }
+    // ProcessPullStream has already acked the consumer, so we MUST push. If the
+    // host staging-slot pool is momentarily exhausted -- all slots held by
+    // in-flight D2H copies under concurrency (e.g. N concurrent pulls with N
+    // slots) -- BLOCK until a slot is released rather than silently dropping the
+    // push. A silent drop here leaves the consumer waiting until its 180s
+    // p2p_wait_pull_timeout (failed_recving + a hung request). In-flight D2H
+    // completions release slots and notify cv_; bounded by timeout_s_ so a
+    // genuinely stuck pool still returns instead of waiting forever.
+    if (free_slots_.empty()) {
+      bool got = cv_.wait_for(
+          lock,
+          std::chrono::milliseconds(static_cast<int64_t>(timeout_s_ * 1000.0)),
+          [this]() { return !free_slots_.empty(); });
+      if (!got) {
+        auto it = send_entries_.find(uuid);
+        if (it != send_entries_.end()) {
+          done_sending_.insert(it->second->req_id);
+          ReleaseEntrySlotLocked(it->second);
+          send_entries_.erase(it);
+        }
+        return;
+      }
     }
     Slot slot = AcquireSlotLocked();
     send_slot = slot.slot_idx;
