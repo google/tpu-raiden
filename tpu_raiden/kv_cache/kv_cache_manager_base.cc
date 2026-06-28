@@ -660,14 +660,16 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2hReadExplicit(
     const std::vector<uint8_t*>& explicit_dst_ptrs, int parallelism,
     tpu_raiden::transport::MajorOrder major_order,
     tpu_raiden::transport::BlockReceivedCallback on_block_received) {
-  absl::MutexLock lock(&server_init_mu_);
-  if (!server_) {
+  // Acquire the server pointer under a brief lock, then pull WITHOUT the lock so
+  // concurrent transfers run in parallel instead of serializing on the mutex.
+  auto* server = GetTransportServer();
+  if (!server) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
   ASSIGN_OR_RETURN(
       std::vector<int> allocated_ids,
-      server_->Pull(peer, src_block_ids, local_block_ids, explicit_dst_ptrs,
-                    parallelism, major_order, on_block_received));
+      server->Pull(peer, src_block_ids, local_block_ids, explicit_dst_ptrs,
+                   parallelism, major_order, on_block_received));
   return raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{});
 }
 

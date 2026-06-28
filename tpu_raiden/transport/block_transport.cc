@@ -78,13 +78,11 @@ std::string GetLocalAddr(int fd) {
 #define IOV_MAX UIO_MAXIOV
 #endif
 
-absl::Status WriteVExact(int fd, const std::vector<BlockChunk>& chunks) {
-  std::vector<struct iovec> iov;
-  iov.reserve(chunks.size());
-  for (const auto& chunk : chunks) {
-    iov.push_back({.iov_base = chunk.ptr, .iov_len = chunk.size});
-  }
-
+// Write a pre-built iovec list to fd, batching by IOV_MAX and handling partial
+// writes. Lets callers gather many payload buffers (e.g. every layer/shard/block
+// of a stream) into one iovec and issue a few large writev() syscalls instead of
+// one write per buffer -- the big per-connection H2H throughput win.
+absl::Status WriteIov(int fd, std::vector<struct iovec>& iov) {
   size_t iov_idx = 0;
   while (iov_idx < iov.size()) {
     size_t batch_size =
@@ -118,6 +116,15 @@ absl::Status WriteVExact(int fd, const std::vector<BlockChunk>& chunks) {
     }
   }
   return absl::OkStatus();
+}
+
+absl::Status WriteVExact(int fd, const std::vector<BlockChunk>& chunks) {
+  std::vector<struct iovec> iov;
+  iov.reserve(chunks.size());
+  for (const auto& chunk : chunks) {
+    iov.push_back({.iov_base = chunk.ptr, .iov_len = chunk.size});
+  }
+  return WriteIov(fd, iov);
 }
 
 absl::Status ReadVExact(int fd, const std::vector<BlockChunk>& chunks) {
@@ -698,34 +705,44 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
     }
   }
 
-  s = ForEachPayload(
-      major_order, block_delegate_->num_layers(), block_delegate_->num_shards(),
-      block_count, [&](size_t l, size_t sh, size_t k) -> absl::Status {
-        ABSL_DCHECK_LT(block_offset + k, src_block_ids.size());
-        const int src_id = src_block_ids[block_offset + k];
-
-        if (block_delegate_->use_block_chunks(uuid)) {
+  if (!block_delegate_->use_block_chunks(uuid)) {
+    // Non-chunked path: one WriteExact per (layer,shard,block) payload, in
+    // ForEachPayload order. The receiver reads bytes_per_block per payload in
+    // the same order (HandleCustomRequest op 1/6).
+    const size_t bytes_per_block = block_delegate_->bytes_per_block();
+    s = ForEachPayload(
+        major_order, block_delegate_->num_layers(),
+        block_delegate_->num_shards(), block_count,
+        [&](size_t l, size_t sh, size_t k) -> absl::Status {
+          ABSL_DCHECK_LT(block_offset + k, src_block_ids.size());
+          const int src_id = src_block_ids[block_offset + k];
+          const uint8_t* base_host_ptr = block_delegate_->GetHostPointer(l, sh);
+          RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, src_id, 1,
+                                             bytes_per_block));
+          return WriteExact(fd, base_host_ptr + src_id * bytes_per_block,
+                            bytes_per_block);
+        });
+  } else {
+    // Chunked path: 4-byte size prefix + chunks per (layer,shard,block). Left
+    // per-payload because GetBlockChunks pointer lifetimes are not guaranteed to
+    // outlive the callback across the whole stream.
+    s = ForEachPayload(
+        major_order, block_delegate_->num_layers(),
+        block_delegate_->num_shards(), block_count,
+        [&](size_t l, size_t sh, size_t k) -> absl::Status {
+          ABSL_DCHECK_LT(block_offset + k, src_block_ids.size());
+          const int src_id = src_block_ids[block_offset + k];
           std::vector<BlockChunk> chunks =
               block_delegate_->GetBlockChunks(l, sh, src_id, uuid, -1, peer);
           RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
-
           uint32_t total_size = 0;
           for (const auto& chunk : chunks) {
             total_size += chunk.size;
           }
-
           RETURN_IF_ERROR(WriteExact(fd, &total_size, sizeof(total_size)));
-
           return WriteVExact(fd, chunks);
-        } else {
-          size_t bytes_per_block = block_delegate_->bytes_per_block();
-          const uint8_t* base_host_ptr = block_delegate_->GetHostPointer(l, sh);
-          RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, src_id, 1,
-                                             bytes_per_block));
-          const uint8_t* src_ptr = base_host_ptr + src_id * bytes_per_block;
-          return WriteExact(fd, src_ptr, bytes_per_block);
-        }
-      });
+        });
+  }
   if (!s.ok()) {
     statuses[stream_idx] = s;
     return;

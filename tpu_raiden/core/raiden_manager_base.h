@@ -114,6 +114,13 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
 
   void InitTransportServer();
 
+  // Returns the transport server pointer (or nullptr) under a brief lock. The
+  // returned BlockTransport is created once and stable until shutdown, and its
+  // transfer methods (Push/Pull/PullBuffer/...) are internally thread-safe, so
+  // callers invoke them WITHOUT holding server_init_mu_ for the whole transfer
+  // -- holding it would serialize all concurrent transfers behind one mutex.
+  tpu_raiden::transport::BlockTransport* GetTransportServer() const;
+
   void DetectAndAssignNumaNode(
       const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers);
 

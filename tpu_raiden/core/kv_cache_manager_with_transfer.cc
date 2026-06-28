@@ -47,6 +47,7 @@
 #include <deque>
 #include <exception>
 #include <future>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -92,7 +93,13 @@ void CheckStatus(const std::string& context, const absl::Status& status) {
   }
 }
 
-void EmitTimingLog(const std::string& message) { LOG(INFO) << message; }
+void EmitTimingLog(const std::string& message) {
+  // Write directly to stderr (captured in the server logs) -- absl LOG(INFO)
+  // from the embedded engine .so is suppressed by the stderr threshold, so
+  // RAIDEN_TIMING / KVXFER timing events never reached the logs via LOG(INFO).
+  std::fprintf(stderr, "%s\n", message.c_str());
+  std::fflush(stderr);
+}
 
 template <typename T>
 T ValueOrThrow(const std::string& context, absl::StatusOr<T> value_or) {
@@ -705,6 +712,13 @@ void KVCacheManagerWithTransfer::StartRead(
   if (load_plan.num_blocks == 0) {
     std::lock_guard<std::mutex> lock(mu_);
     done_recving_.insert(req_id);
+    // KV-transfer timing: consumer done (no-op pull -- full local prefix cache,
+    // nothing transferred). Logged for completeness so every prod_start matches.
+    std::ostringstream xfer;
+    xfer << "KVXFER event=cons_done req_id=" << req_id << " uuid=" << uuid
+         << " t=" << std::fixed << std::setprecision(6)
+         << (absl::ToUnixMicros(absl::Now()) / 1e6);
+    EmitTimingLog(xfer.str());
     ReleaseSlotLocked(recv_slot);
     active_recv_entries_.erase(uuid);
     return;
@@ -1280,6 +1294,8 @@ void KVCacheManagerWithTransfer::StartPushInternal(
   // GEMMs on the shared TensorCore; coalescing collapses a contiguous range to
   // one copy, matching the pre-Hybrid-Push pull path.
   CopySpec d2h_copy = BuildCoalescedCopySpec(src_block_ids, host_block_ids);
+  // Stage timing: producer D2H dispatch start (device -> host staging).
+  auto t_d2h_start = std::chrono::steady_clock::now();
   auto future_or = D2h(d2h_copy.src_offsets, d2h_copy.dst_offsets,
                        d2h_copy.sizes, /*slot_idx=*/std::nullopt);
   if (!future_or.ok()) {
@@ -1295,8 +1311,8 @@ void KVCacheManagerWithTransfer::StartPushInternal(
 
   auto future = std::move(future_or.value());
   future.OnReady(
-      [this, uuid, remote_data_endpoint, host_block_ids,
-       dst_block_ids](const absl::StatusOr<raiden::BufferHolders>& s) {
+      [this, uuid, remote_data_endpoint, host_block_ids, dst_block_ids,
+       t_d2h_start](const absl::StatusOr<raiden::BufferHolders>& s) {
         if (!s.ok()) {
           std::lock_guard<std::mutex> lock(mu_);
           auto it = send_entries_.find(uuid);
@@ -1307,17 +1323,47 @@ void KVCacheManagerWithTransfer::StartPushInternal(
           }
           return;
         }
-        std::vector<int> src_ints(host_block_ids.begin(), host_block_ids.end());
-        std::vector<int> dst_ints(dst_block_ids.begin(), dst_block_ids.end());
-        // Push across Data Plane socket!
-        auto push_s = H2hWrite(remote_data_endpoint, src_ints, dst_ints, uuid);
-        std::lock_guard<std::mutex> lock(mu_);
-        auto it = send_entries_.find(uuid);
-        if (it != send_entries_.end()) {
-          done_sending_.insert(it->second->req_id);
-          ReleaseEntrySlotLocked(it->second);
-          send_entries_.erase(it);
-        }
+        // Stage timing: D2H complete (this OnReady fires when staging is done).
+        auto t_d2h_done = std::chrono::steady_clock::now();
+        // Run the blocking H2H push on push_pool_ instead of on the PjRt D2H
+        // completion thread. Otherwise the multi-hundred-ms push occupies the
+        // (small) PjRt callback pool and serializes concurrent requests' pushes
+        // there even though each push internally fans out across parallelism_
+        // sockets.
+        push_pool_->Schedule(
+            assigned_numa_node(),
+            [this, uuid, remote_data_endpoint, host_block_ids, dst_block_ids,
+             t_d2h_start, t_d2h_done]() {
+              std::vector<int> src_ints(host_block_ids.begin(),
+                                        host_block_ids.end());
+              std::vector<int> dst_ints(dst_block_ids.begin(),
+                                        dst_block_ids.end());
+              // Push across Data Plane socket!
+              auto push_s =
+                  H2hWrite(remote_data_endpoint, src_ints, dst_ints, uuid);
+              (void)push_s;
+              auto t_h2h_done = std::chrono::steady_clock::now();
+              {
+                std::ostringstream pt;
+                pt << "RAIDEN_TIMING event=producer_push uuid=" << uuid
+                   << " d2h_ms="
+                   << std::chrono::duration<double, std::milli>(t_d2h_done -
+                                                                t_d2h_start)
+                          .count()
+                   << " h2h_ms="
+                   << std::chrono::duration<double, std::milli>(t_h2h_done -
+                                                                t_d2h_done)
+                          .count();
+                EmitTimingLog(pt.str());
+              }
+              std::lock_guard<std::mutex> lock(mu_);
+              auto it = send_entries_.find(uuid);
+              if (it != send_entries_.end()) {
+                done_sending_.insert(it->second->req_id);
+                ReleaseEntrySlotLocked(it->second);
+                send_entries_.erase(it);
+              }
+            });
       });
 }
 
@@ -1527,6 +1573,8 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
   VLOG(1) << "OnBlocksReceived: Issuing H2D copy for req_id: " << req_id
           << ", coalesced runs count: " << h2d_copy.src_offsets.size();
 
+  // Stage timing: consumer H2D dispatch start (host staging -> device).
+  auto t_h2d_start = std::chrono::steady_clock::now();
   auto future_or = H2d(h2d_copy.src_offsets, h2d_copy.dst_offsets,
                        h2d_copy.sizes, /*slot_idx=*/std::nullopt);
   if (!future_or.ok()) {
@@ -1537,13 +1585,28 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
   }
 
   auto future = std::move(future_or.value());
-  future.OnReady([this, req_id, recv_slot](auto status_or) {
+  future.OnReady([this, req_id, recv_slot, uuid, t_h2d_start](auto status_or) {
     std::lock_guard<std::mutex> lock(mu_);
     if (status_or.ok()) {
       VLOG(1) << "OnBlocksReceived (H2D copy complete): successfully "
                  "completed receive for req_id: "
               << req_id;
       done_recving_.insert(req_id);
+      // Stage timing: consumer H2D complete.
+      auto t_h2d_done = std::chrono::steady_clock::now();
+      std::ostringstream ct;
+      ct << "RAIDEN_TIMING event=consumer_h2d uuid=" << uuid << " h2d_ms="
+         << std::chrono::duration<double, std::milli>(t_h2d_done - t_h2d_start)
+                .count();
+      EmitTimingLog(ct.str());
+      // KV-transfer timing: consumer done -- KV has landed on the device after
+      // the H2D copy. Epoch wall-clock t, comparable to the connector's
+      // `KVXFER event=prod_start`; correlate by uuid to get end-to-end xfer time.
+      std::ostringstream xfer;
+      xfer << "KVXFER event=cons_done req_id=" << req_id << " uuid=" << uuid
+           << " t=" << std::fixed << std::setprecision(6)
+           << (absl::ToUnixMicros(absl::Now()) / 1e6);
+      EmitTimingLog(xfer.str());
     } else {
       LOG(ERROR) << "OnBlocksReceived (H2D copy failed) for req_id: " << req_id
                  << ", error: " << status_or.status().ToString();

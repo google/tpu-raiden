@@ -206,15 +206,6 @@ void KVCacheManager::InitSubManagers(
   for (const auto& nic : host_nics) {
     if (nic.interface_name != "lo") num_ext_nics++;
   }
-  if (numa_to_shards.size() > 1 && num_ext_nics < numa_to_shards.size()) {
-    std::vector<int> all_shards;
-    for (const auto& [n, sh_list] : numa_to_shards) {
-      all_shards.insert(all_shards.end(), sh_list.begin(), sh_list.end());
-    }
-    numa_to_shards.clear();
-    numa_to_shards[0] = std::move(all_shards);
-  }
-
   // Allocate the per-NUMA sub-managers. With an ephemeral data-plane port
   // (local_port == 0), the first sub-manager binds a kernel-assigned base port
   // P and the rest bind the consecutive ports P+1, P+2, ... so a peer can

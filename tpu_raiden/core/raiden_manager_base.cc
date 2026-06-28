@@ -171,26 +171,34 @@ void RaidenManagerBase::SetExternalHostPointers(
   }
 }
 
+tpu_raiden::transport::BlockTransport* RaidenManagerBase::GetTransportServer()
+    const {
+  absl::MutexLock lock(&server_init_mu_);
+  return server_.get();
+}
+
 absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hWriteDirect(
     absl::string_view peer, const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, uint64_t uuid) {
   InitTransportServer();
-  absl::MutexLock lock(&server_init_mu_);
-  if (!server_) {
+  // Acquire the server pointer under a brief lock, then push WITHOUT the lock so
+  // concurrent transfers run in parallel instead of serializing on the mutex.
+  auto* server = GetTransportServer();
+  if (!server) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
-  return server_->Push(peer, src_block_ids, dst_block_ids, parallelism_,
-                       tpu_raiden::transport::MajorOrder::kLayerMajor, uuid);
+  return server->Push(peer, src_block_ids, dst_block_ids, parallelism_,
+                      tpu_raiden::transport::MajorOrder::kLayerMajor, uuid);
 }
 
 absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hReadDirect(
     absl::string_view peer, const std::vector<int>& src_block_ids) {
   InitTransportServer();
-  absl::MutexLock lock(&server_init_mu_);
-  if (!server_) {
+  auto* server = GetTransportServer();
+  if (!server) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
-  return server_->Pull(peer, src_block_ids, {}, {}, parallelism_);
+  return server->Pull(peer, src_block_ids, {}, {}, parallelism_);
 }
 
 absl::Status RaidenManagerBase::PullWeightsChunk(
