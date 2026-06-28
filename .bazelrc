@@ -1,5 +1,5 @@
 common --experimental_repo_remote_exec
 common --nocheck_visibility
-build --action_env=CC=clang
-build --action_env=CXX=clang++
-build --repo_env=CC=clang
+build --action_env=CC=clang-18
+build --action_env=CXX=clang++-18
+build --repo_env=CC=clang-18
