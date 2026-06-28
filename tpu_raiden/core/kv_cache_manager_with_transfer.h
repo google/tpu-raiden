@@ -265,6 +265,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     uint64_t uuid = 0;
     uint64_t num_blocks = 0;
     uint32_t consumer_data_port = 0;
+    uint8_t consumer_ip[16] = {0};
   };
 
   struct alignas(8) ControlResponseHeader {

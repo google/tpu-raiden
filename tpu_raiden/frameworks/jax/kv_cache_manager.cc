@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/flags/flag.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "xla/future.h"
@@ -38,6 +39,10 @@
 
 namespace nb = nanobind;
 #endif
+
+ABSL_FLAG(bool, kv_manager_force_single_numa_node, false,
+          "Force all shards to be collapsed under a single sub-manager "
+          "instance on NUMA 0.");
 
 namespace tpu_raiden {
 namespace kv_cache {
@@ -209,7 +214,7 @@ void KVCacheManager::InitSubManagers(
   // TEMPORARY HACK: Force all shards to be collapsed under a single sub-manager
   // instance (NUMA 0) to avoid the threading and synchronization overhead
   // of running multiple KVCacheManagerWithTransfer instances.
-  if (true) {
+  if (absl::GetFlag(FLAGS_kv_manager_force_single_numa_node)) {
     std::vector<int> all_shards;
     all_shards.reserve(total_num_shards_);
     for (int i = 0; i < static_cast<int>(total_num_shards_); ++i) {
