@@ -88,7 +88,7 @@ absl::Status ReadExact(int fd, void* buffer, size_t length) {
 }  // namespace
 
 SocketTransport::SocketTransport(int local_port) : local_port_(local_port) {
-  server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+  server_fd_ = socket(AF_INET6, SOCK_STREAM, 0);
   if (server_fd_ < 0) {
     LOG(FATAL) << "Failed to create server socket: " << std::strerror(errno);
   }
@@ -98,11 +98,17 @@ SocketTransport::SocketTransport(int local_port) : local_port_(local_port) {
     LOG(WARNING) << "setsockopt SO_REUSEADDR failed: " << std::strerror(errno);
   }
 
-  struct sockaddr_in serv_addr;
+  int ipv6only = 0;
+  if (setsockopt(server_fd_, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6only,
+                 sizeof(ipv6only)) < 0) {
+    LOG(WARNING) << "setsockopt IPV6_V6ONLY=0 failed: " << std::strerror(errno);
+  }
+
+  struct sockaddr_in6 serv_addr;
   std::memset(&serv_addr, 0, sizeof(serv_addr));
-  serv_addr.sin_family = AF_INET;
-  serv_addr.sin_addr.s_addr = INADDR_ANY;
-  serv_addr.sin_port = htons(local_port_);
+  serv_addr.sin6_family = AF_INET6;
+  serv_addr.sin6_addr = in6addr_any;
+  serv_addr.sin6_port = htons(local_port_);
 
   if (bind(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
            sizeof(serv_addr)) < 0) {
@@ -113,7 +119,7 @@ SocketTransport::SocketTransport(int local_port) : local_port_(local_port) {
   socklen_t len = sizeof(serv_addr);
   if (getsockname(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
                   &len) == 0) {
-    local_port_ = ntohs(serv_addr.sin_port);
+    local_port_ = ntohs(serv_addr.sin6_port);
   } else {
     LOG(WARNING) << "getsockname failed: " << std::strerror(errno);
   }
@@ -161,36 +167,60 @@ absl::StatusOr<int> SocketTransport::GetOrCreateConnection(
     }
   }
 
-  std::vector<std::string> parts = absl::StrSplit(peer_str, ':');
-  if (parts.size() != 2) {
-    return absl::InvalidArgumentError(absl::StrCat(
-        "Invalid endpoint string expected host:port, got ", peer_str));
+  std::string host;
+  int port = 0;
+  if (peer_str.empty()) {
+    return absl::InvalidArgumentError("Peer string is empty");
   }
-  std::string host = parts[0];
-  int port = std::stoi(parts[1]);
+  if (peer_str[0] == '[') {
+    size_t closing_bracket = peer_str.find(']');
+    if (closing_bracket == std::string::npos ||
+        closing_bracket + 2 >= peer_str.size() ||
+        peer_str[closing_bracket + 1] != ':') {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Invalid IPv6 endpoint: ", peer_str));
+    }
+    host = peer_str.substr(1, closing_bracket - 1);
+    if (!absl::SimpleAtoi(peer_str.substr(closing_bracket + 2), &port)) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Invalid port in endpoint: ", peer_str));
+    }
+  } else {
+    size_t last_colon = peer_str.rfind(':');
+    if (last_colon == std::string::npos || last_colon + 1 >= peer_str.size()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Invalid endpoint string: ", peer_str));
+    }
+    host = peer_str.substr(0, last_colon);
+    if (!absl::SimpleAtoi(peer_str.substr(last_colon + 1), &port)) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Invalid port in endpoint: ", peer_str));
+    }
+  }
 
-  int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+  int sock_fd = -1;
+  struct addrinfo hints;
+  struct addrinfo* res = nullptr;
+  std::memset(&hints, 0, sizeof(hints));
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+
+  std::string port_str = std::to_string(port);
+  int err = getaddrinfo(host.c_str(), port_str.c_str(), &hints, &res);
+  if (err != 0) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Failed to resolve hostname '", host, "': ", gai_strerror(err)));
+  }
+
+  sock_fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
   if (sock_fd < 0) {
+    freeaddrinfo(res);
     return absl::InternalError(
         absl::StrCat("Failed to create client socket: ", std::strerror(errno)));
   }
 
   int opt = 1;
   setsockopt(sock_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
-
-  struct addrinfo hints;
-  struct addrinfo* res;
-  std::memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_INET;
-  hints.ai_socktype = SOCK_STREAM;
-
-  std::string port_str = std::to_string(port);
-  int err = getaddrinfo(host.c_str(), port_str.c_str(), &hints, &res);
-  if (err != 0) {
-    close(sock_fd);
-    return absl::InvalidArgumentError(absl::StrCat(
-        "Failed to resolve hostname '", host, "': ", gai_strerror(err)));
-  }
 
   if (connect(sock_fd, res->ai_addr, res->ai_addrlen) < 0) {
     freeaddrinfo(res);
@@ -336,7 +366,7 @@ void SocketTransport::ListenerLoop() {
       continue;  // timeout, check stopping_ again
     }
 
-    struct sockaddr_in client_addr;
+    struct sockaddr_storage client_addr;
     socklen_t clilen = sizeof(client_addr);
     int client_fd = accept(
         server_fd_, reinterpret_cast<struct sockaddr*>(&client_addr), &clilen);
