@@ -796,7 +796,11 @@ KVCacheManagerWithTransfer::CompleteReadRaw() {
     // the timeout as a recv failure so the connector can recompute the blocks.
     for (auto it = active_recv_entries_.begin();
          it != active_recv_entries_.end();) {
-      if (it->second.deadline <= now) {
+      // Do NOT reclaim a slot while a streaming H2D is still reading from it
+      // (num_h2d_inflight > 0) -- releasing it would let another transfer reuse
+      // the staging buffer mid-copy. Those in-flight copies are bounded and will
+      // complete/error, dropping inflight to 0, after which this can reap.
+      if (it->second.deadline <= now && it->second.num_h2d_inflight == 0) {
         failed_recving_.insert(it->second.req_id);
         ReleaseSlotLocked(it->second.slot_idx);
         active_recv_entries_.erase(it++);
@@ -1515,34 +1519,67 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
   VLOG(1) << "KVCacheManagerWithTransfer::OnBlocksReceived called. uuid: "
           << uuid << ", received blocks count: " << block_ids.size();
 
+  // STREAMING H2D: issue H2D for THIS connection's blocks immediately so it
+  // overlaps the other connections' still-in-flight H2H receives (the push fans
+  // out across parallelism_ connections, each carrying a block-subset across all
+  // layers). The entry stays alive until all blocks are received AND all these
+  // per-connection H2D copies complete; MaybeFinalizeRecvLocked then fires
+  // cons_done + releases the slot exactly once. Requires the host->chip mapping
+  // (disagg push registers it); falls back to the original accumulate-then-one-
+  // H2D path when the mapping is absent.
+  bool found = false;
+  bool stream = false;
   std::string req_id;
+  CopySpec call_h2d;
+  // Fallback-path captures:
   int64_t recv_slot = -1;
   CopySpec h2d_copy;
   absl::flat_hash_map<int64_t, int64_t> host_to_chip;
-  bool found = false;
   std::vector<int> accumulated_host_blocks;
 
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = active_recv_entries_.find(uuid);
     if (it != active_recv_entries_.end()) {
-      it->second.num_completed_blocks += block_ids.size();
-      it->second.accumulated_host_block_ids.insert(
-          it->second.accumulated_host_block_ids.end(), block_ids.begin(),
-          block_ids.end());
-
-      if (it->second.num_completed_blocks >= it->second.total_blocks) {
-        req_id = it->second.req_id;
-        h2d_copy = it->second.h2d_copy;
-        host_to_chip = it->second.host_to_chip;
-        accumulated_host_blocks = it->second.accumulated_host_block_ids;
-        recv_slot = it->second.slot_idx;
-        found = true;
+      found = true;
+      RecvEntry& e = it->second;
+      e.num_completed_blocks += block_ids.size();
+      e.accumulated_host_block_ids.insert(e.accumulated_host_block_ids.end(),
+                                          block_ids.begin(), block_ids.end());
+      if (e.h2d_copy.src_offsets.empty() && !e.host_to_chip.empty()) {
+        // Streaming applies only to the rebuild-from-host_to_chip case (disagg
+        // push via RegisterActivePlan). A prebuilt h2d_copy is an authoritative
+        // whole-transfer spec (e.g. reorder mappings) that must not be sliced
+        // per-connection -- it takes the single-H2D fallback below.
+        // Streaming: build a per-connection H2D spec for just these blocks.
+        stream = true;
+        req_id = e.req_id;
+        std::vector<int64_t> host_blocks(block_ids.begin(), block_ids.end());
+        std::vector<int64_t> chip_blocks;
+        chip_blocks.reserve(host_blocks.size());
+        for (int64_t hb : host_blocks) {
+          auto m = e.host_to_chip.find(hb);
+          chip_blocks.push_back(m != e.host_to_chip.end() ? m->second : hb);
+        }
+        call_h2d = BuildCoalescedCopySpec(host_blocks, chip_blocks);
+        e.num_h2d_inflight += 1;
+        if (!e.first_h2d_started) {
+          e.first_h2d_started = true;
+          e.first_h2d_start = std::chrono::steady_clock::now();
+        }
+        if (e.num_completed_blocks >= e.total_blocks) e.all_received = true;
+      } else if (e.num_completed_blocks >= e.total_blocks) {
+        // Fallback (no host->chip map): original accumulate-then-single-H2D.
+        req_id = e.req_id;
+        h2d_copy = e.h2d_copy;
+        host_to_chip = e.host_to_chip;
+        accumulated_host_blocks = e.accumulated_host_block_ids;
+        recv_slot = e.slot_idx;
         active_recv_entries_.erase(it);
       } else {
         VLOG(1) << "OnBlocksReceived: Partial blocks received for uuid " << uuid
-                << ", completed: " << it->second.num_completed_blocks << " / "
-                << it->second.total_blocks;
+                << ", completed: " << e.num_completed_blocks << " / "
+                << e.total_blocks;
         return absl::OkStatus();
       }
     }
@@ -1553,27 +1590,48 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
     return RaidenManagerBase::OnBlocksReceived(block_ids, uuid);
   }
 
+  if (stream) {
+    auto future_or = H2d(call_h2d.src_offsets, call_h2d.dst_offsets,
+                         call_h2d.sizes, /*slot_idx=*/std::nullopt);
+    if (!future_or.ok()) {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = active_recv_entries_.find(uuid);
+      if (it != active_recv_entries_.end()) {
+        it->second.failed = true;
+        it->second.num_h2d_inflight -= 1;
+        MaybeFinalizeRecvLocked(uuid);
+      }
+      return future_or.status();
+    }
+    auto future = std::move(future_or.value());
+    future.OnReady([this, uuid](auto status_or) {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = active_recv_entries_.find(uuid);
+      if (it == active_recv_entries_.end()) return;
+      if (!status_or.ok()) {
+        LOG(ERROR) << "OnBlocksReceived (streaming H2D failed) uuid: " << uuid
+                   << ", error: " << status_or.status().ToString();
+        it->second.failed = true;
+      }
+      it->second.num_h2d_inflight -= 1;
+      MaybeFinalizeRecvLocked(uuid);
+    });
+    return absl::OkStatus();
+  }
+
+  // ---- Fallback path (no host->chip mapping): single coalesced H2D ----
   if (h2d_copy.src_offsets.empty()) {
-    // Rebuild on-the-fly for push transfers registered via RegisterActivePlan
     std::vector<int64_t> host_blocks(accumulated_host_blocks.begin(),
                                      accumulated_host_blocks.end());
     std::vector<int64_t> chip_blocks;
     chip_blocks.reserve(host_blocks.size());
     for (int64_t hb : host_blocks) {
       auto it = host_to_chip.find(hb);
-      if (it != host_to_chip.end()) {
-        chip_blocks.push_back(it->second);
-      } else {
-        chip_blocks.push_back(hb);
-      }
+      chip_blocks.push_back(it != host_to_chip.end() ? it->second : hb);
     }
     h2d_copy = BuildCoalescedCopySpec(host_blocks, chip_blocks);
   }
 
-  VLOG(1) << "OnBlocksReceived: Issuing H2D copy for req_id: " << req_id
-          << ", coalesced runs count: " << h2d_copy.src_offsets.size();
-
-  // Stage timing: consumer H2D dispatch start (host staging -> device).
   auto t_h2d_start = std::chrono::steady_clock::now();
   auto future_or = H2d(h2d_copy.src_offsets, h2d_copy.dst_offsets,
                        h2d_copy.sizes, /*slot_idx=*/std::nullopt);
@@ -1588,20 +1646,13 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
   future.OnReady([this, req_id, recv_slot, uuid, t_h2d_start](auto status_or) {
     std::lock_guard<std::mutex> lock(mu_);
     if (status_or.ok()) {
-      VLOG(1) << "OnBlocksReceived (H2D copy complete): successfully "
-                 "completed receive for req_id: "
-              << req_id;
       done_recving_.insert(req_id);
-      // Stage timing: consumer H2D complete.
       auto t_h2d_done = std::chrono::steady_clock::now();
       std::ostringstream ct;
       ct << "RAIDEN_TIMING event=consumer_h2d uuid=" << uuid << " h2d_ms="
          << std::chrono::duration<double, std::milli>(t_h2d_done - t_h2d_start)
                 .count();
       EmitTimingLog(ct.str());
-      // KV-transfer timing: consumer done -- KV has landed on the device after
-      // the H2D copy. Epoch wall-clock t, comparable to the connector's
-      // `KVXFER event=prod_start`; correlate by uuid to get end-to-end xfer time.
       std::ostringstream xfer;
       xfer << "KVXFER event=cons_done req_id=" << req_id << " uuid=" << uuid
            << " t=" << std::fixed << std::setprecision(6)
@@ -1612,12 +1663,45 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
                  << ", error: " << status_or.status().ToString();
       failed_recving_.insert(req_id);
     }
-    // The staging slot held the received KV for the H2D source; release it now
-    // that the copy has finished (success or failure).
     ReleaseSlotLocked(recv_slot);
   });
 
   return absl::OkStatus();
+}
+
+void KVCacheManagerWithTransfer::MaybeFinalizeRecvLocked(uint64_t uuid) {
+  auto it = active_recv_entries_.find(uuid);
+  if (it == active_recv_entries_.end()) return;
+  RecvEntry& e = it->second;
+  if (e.finalized) return;
+  // Finalize only once all blocks are received AND every per-connection H2D has
+  // completed (no copy is still reading the staging slot).
+  if (!e.all_received || e.num_h2d_inflight > 0) return;
+  e.finalized = true;
+  const std::string req_id = e.req_id;
+  const int64_t slot = e.slot_idx;
+  if (e.failed) {
+    failed_recving_.insert(req_id);
+  } else {
+    done_recving_.insert(req_id);
+    auto t_done = std::chrono::steady_clock::now();
+    std::ostringstream ct;
+    ct << "RAIDEN_TIMING event=consumer_h2d uuid=" << uuid << " h2d_ms="
+       << std::chrono::duration<double, std::milli>(t_done - e.first_h2d_start)
+              .count();
+    EmitTimingLog(ct.str());
+    // KV-transfer timing: consumer done -- KV has landed on the device after the
+    // last H2D. Epoch wall-clock t; correlate by uuid with prod_start.
+    std::ostringstream xfer;
+    xfer << "KVXFER event=cons_done req_id=" << req_id << " uuid=" << uuid
+         << " t=" << std::fixed << std::setprecision(6)
+         << (absl::ToUnixMicros(absl::Now()) / 1e6);
+    EmitTimingLog(xfer.str());
+  }
+  // The staging slot held the received KV for the H2D source; release it now
+  // that all copies have finished (success or failure).
+  ReleaseSlotLocked(slot);
+  active_recv_entries_.erase(it);
 }
 
 }  // namespace tpu_raiden

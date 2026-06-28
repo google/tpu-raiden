@@ -295,6 +295,11 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   void ReleaseSlotLocked(int64_t slot_idx);
   void ReleaseEntrySlotLocked(const std::shared_ptr<SendEntry>& entry);
 
+  // Finalize a streaming-H2D recv entry: when all blocks are received and all
+  // per-connection H2D copies have completed, emit cons_done timing, release the
+  // staging slot, and erase the entry -- exactly once. Caller must hold mu_.
+  void MaybeFinalizeRecvLocked(uint64_t uuid);
+
   void StartControlServer();
   void StopControlServer();
   void ControlServerLoop();
@@ -328,6 +333,17 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     int32_t num_completed_blocks = 0;
     std::vector<int> accumulated_host_block_ids;
     std::chrono::steady_clock::time_point deadline;
+    // Streaming H2D (overlap H2D with the other connections' in-flight H2H
+    // receives): each per-connection OnBlocksReceived issues H2D for its own
+    // blocks immediately. The entry stays alive until all blocks are received
+    // (all_received) AND all those H2D copies complete (num_h2d_inflight==0);
+    // finalize then fires cons_done + releases the slot, exactly once.
+    int32_t num_h2d_inflight = 0;
+    bool all_received = false;
+    bool finalized = false;
+    bool failed = false;
+    bool first_h2d_started = false;
+    std::chrono::steady_clock::time_point first_h2d_start;
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
 
