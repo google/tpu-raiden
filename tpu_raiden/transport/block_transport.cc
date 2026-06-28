@@ -339,43 +339,54 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
     uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
 
-    RETURN_IF_ERROR(ForEachPayload(
-        major_order, block_delegate_->num_layers(),
-        block_delegate_->num_shards(), header.count_or_size,
-        [&](size_t l, size_t sh, size_t k) -> absl::Status {
-          ABSL_DCHECK_LT(k, allocated_ids.size());
-          const int dst_id = allocated_ids[k];
-          if (block_delegate_->use_block_chunks(header.uuid)) {
+    if (!block_delegate_->use_block_chunks(header.uuid)) {
+      // Non-chunked: gather every (layer,shard,block) dst buffer into one iovec
+      // and readv it in few large syscalls (mirrors the sender's batched
+      // WriteIov), instead of one 64KB read() per payload. Same wire bytes/order.
+      std::vector<BlockChunk> recv_iov;
+      recv_iov.reserve(block_delegate_->num_layers() *
+                       block_delegate_->num_shards() * header.count_or_size);
+      RETURN_IF_ERROR(ForEachPayload(
+          major_order, block_delegate_->num_layers(),
+          block_delegate_->num_shards(), header.count_or_size,
+          [&](size_t l, size_t sh, size_t k) -> absl::Status {
+            ABSL_DCHECK_LT(k, allocated_ids.size());
+            const int dst_id = allocated_ids[k];
+            RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, dst_id, 1,
+                                               bytes_per_block));
+            recv_iov.push_back(
+                {.ptr = block_delegate_->GetBlockHostPointer(l, sh, dst_id),
+                 .size = bytes_per_block});
+            return absl::OkStatus();
+          }));
+      RETURN_IF_ERROR(ReadVExact(client_fd, recv_iov));
+    } else {
+      RETURN_IF_ERROR(ForEachPayload(
+          major_order, block_delegate_->num_layers(),
+          block_delegate_->num_shards(), header.count_or_size,
+          [&](size_t l, size_t sh, size_t k) -> absl::Status {
+            ABSL_DCHECK_LT(k, allocated_ids.size());
+            const int dst_id = allocated_ids[k];
             std::string local_addr = GetLocalAddr(client_fd);
             std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
                 l, sh, dst_id, header.uuid, header.remote_id, local_addr);
             RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
-
             uint32_t expected_size = 0;
             for (const auto& chunk : chunks) {
               expected_size += chunk.size;
             }
-
             uint32_t sender_size = 0;
             RETURN_IF_ERROR(
                 ReadExact(client_fd, &sender_size, sizeof(sender_size)));
-
             if (sender_size != expected_size) {
               return absl::InternalError(absl::StrCat(
                   "Block transfer size mismatch! Sender offered: ", sender_size,
                   " bytes, but Receiver expected: ", expected_size,
                   " bytes for Block ID: ", dst_id));
             }
-
             return ReadVExact(client_fd, chunks);
-          } else {
-            RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, dst_id,
-                                               1, bytes_per_block));
-            uint8_t* dest_ptr =
-                block_delegate_->GetBlockHostPointer(l, sh, dst_id);
-            return ReadExact(client_fd, dest_ptr, bytes_per_block);
-          }
-        }));
+          }));
+    }
 
     RETURN_IF_ERROR(
         block_delegate_->OnBlocksReceived(allocated_ids, header.uuid));
@@ -706,10 +717,17 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
   }
 
   if (!block_delegate_->use_block_chunks(uuid)) {
-    // Non-chunked path: one WriteExact per (layer,shard,block) payload, in
-    // ForEachPayload order. The receiver reads bytes_per_block per payload in
-    // the same order (HandleCustomRequest op 1/6).
+    // Non-chunked path: gather every (layer,shard,block) payload into one iovec
+    // and issue few large writev() syscalls (WriteIov) instead of ~512 small
+    // 64KB write()s per stream. Wire-identical (same bytes, same ForEachPayload
+    // order, just concatenated), so the receiver (HandleCustomRequest op 1/6,
+    // reads bytes_per_block per payload in order) is unchanged. The many-small-
+    // writes path is ~2x slower under disagg CPU/socket contention; batching
+    // matches iperf3's large-send efficiency.
     const size_t bytes_per_block = block_delegate_->bytes_per_block();
+    std::vector<struct iovec> payload_iov;
+    payload_iov.reserve(block_delegate_->num_layers() *
+                        block_delegate_->num_shards() * block_count);
     s = ForEachPayload(
         major_order, block_delegate_->num_layers(),
         block_delegate_->num_shards(), block_count,
@@ -719,9 +737,13 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
           const uint8_t* base_host_ptr = block_delegate_->GetHostPointer(l, sh);
           RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, src_id, 1,
                                              bytes_per_block));
-          return WriteExact(fd, base_host_ptr + src_id * bytes_per_block,
-                            bytes_per_block);
+          payload_iov.push_back(
+              {.iov_base = const_cast<uint8_t*>(base_host_ptr +
+                                                src_id * bytes_per_block),
+               .iov_len = bytes_per_block});
+          return absl::OkStatus();
         });
+    if (s.ok()) s = WriteIov(fd, payload_iov);
   } else {
     // Chunked path: 4-byte size prefix + chunks per (layer,shard,block). Left
     // per-payload because GetBlockChunks pointer lifetimes are not guaranteed to
