@@ -16,7 +16,7 @@ benchmarks {
   environment_configs {
     id: "tpu-v5e-single-node"
     runner_label: "linux-x86-ct5lp-224-8tpu"
-    container_image: "us-docker.pkg.dev/ml-oss-artifacts-transient/ml-public-testing-container/ml-build:938710265"
+    container_image: "us-docker.pkg.dev/ml-oss-artifacts-transient/ml-public-testing-container/ml-build:939225280"
     workload_action_inputs { key: "bazel_run_flags" value: "-c opt" }   
   }
 
@@ -68,7 +68,7 @@ benchmarks {
   environment_configs {
     id: "tpu-v5e-single-node"
     runner_label: "linux-x86-ct5lp-224-8tpu"
-    container_image: "us-docker.pkg.dev/ml-oss-artifacts-transient/ml-public-testing-container/ml-build:938710265"
+    container_image: "us-docker.pkg.dev/ml-oss-artifacts-transient/ml-public-testing-container/ml-build:939225280"
     workload_action_inputs { key: "bazel_run_flags" value: "-c opt" } 
   }
 
