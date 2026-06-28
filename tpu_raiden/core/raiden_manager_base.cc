@@ -17,7 +17,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -100,16 +102,78 @@ void RaidenManagerBase::InitTransportServer() {
     bind_ip = *bind_ip_cfg_;
   } else {
     std::vector<HostNicAddress> host_nics = GetLocalHostNicAddresses();
+    const char* exclude_ctrl_env = std::getenv("EXCLUDE_CONTROL_INTERFACE");
+    if (exclude_ctrl_env != nullptr && exclude_ctrl_env[0] != '\0') {
+      std::vector<HostNicAddress> filtered_nics;
+      for (const auto& nic : host_nics) {
+        if (nic.interface_name != exclude_ctrl_env) {
+          filtered_nics.push_back(nic);
+        }
+      }
+      host_nics = std::move(filtered_nics);
+    }
     if (!host_nics.empty()) {
       int target_numa = assigned_numa_node_.value_or(-1);
-      auto it = std::find_if(
-          host_nics.begin(), host_nics.end(), [&](const HostNicAddress& n) {
-            return n.numa_node == target_numa && target_numa >= 0;
-          });
+      std::cerr << "InitTransportServer: target_numa=" << target_numa
+                << std::endl;
+      for (const auto& nic : host_nics) {
+        std::cerr << "  NIC: name=" << nic.interface_name
+                  << " ip=" << nic.ip_address << " numa=" << nic.numa_node
+                  << std::endl;
+      }
+      std::vector<HostNicAddress>::const_iterator it = host_nics.end();
+      if (target_numa == 1) {
+        // Prefer secondary data plane NICs (dcn1 on Borg, ens6 on GCP VM, eth2,
+        // eth1 fallback)
+        it = std::find_if(
+            host_nics.begin(), host_nics.end(),
+            [](const HostNicAddress& n) { return n.interface_name == "dcn1"; });
+        if (it == host_nics.end()) {
+          it = std::find_if(host_nics.begin(), host_nics.end(),
+                            [](const HostNicAddress& n) {
+                              return n.interface_name == "ens6";
+                            });
+        }
+        if (it == host_nics.end()) {
+          it = std::find_if(host_nics.begin(), host_nics.end(),
+                            [](const HostNicAddress& n) {
+                              return n.interface_name == "eth2";
+                            });
+        }
+        if (it == host_nics.end()) {
+          it = std::find_if(host_nics.begin(), host_nics.end(),
+                            [](const HostNicAddress& n) {
+                              return n.interface_name == "eth1";
+                            });
+        }
+      } else {
+        // target_numa <= 0 (primary). Prefer control plane/primary NICs (eth1
+        // on Borg, ens5 on GCP VM, eth0)
+        it = std::find_if(
+            host_nics.begin(), host_nics.end(),
+            [](const HostNicAddress& n) { return n.interface_name == "eth1"; });
+        if (it == host_nics.end()) {
+          it = std::find_if(host_nics.begin(), host_nics.end(),
+                            [](const HostNicAddress& n) {
+                              return n.interface_name == "ens5";
+                            });
+        }
+        if (it == host_nics.end()) {
+          it = std::find_if(host_nics.begin(), host_nics.end(),
+                            [](const HostNicAddress& n) {
+                              return n.interface_name == "eth0";
+                            });
+        }
+      }
+
       if (it != host_nics.end()) {
         bind_ip = it->ip_address;
+        std::cerr << "InitTransportServer: Binding to NIC ("
+                  << it->interface_name << "): " << bind_ip << std::endl;
       } else {
         bind_ip = host_nics[0].ip_address;
+        std::cerr << "InitTransportServer: Fallback bind to first NIC: "
+                  << bind_ip << std::endl;
       }
     }
   }
