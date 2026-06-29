@@ -35,39 +35,6 @@ permissions:
 
 
 jobs:
-
-  debug_runner:
-    name: Debug runner JAX runtime
-    runs-on: linux-x86-n2-32
-    steps:
-      - name: Debug runner environment
-        shell: bash
-        run: |
-          set -euxo pipefail
-          hostname
-          pwd
-          whoami
-          which python || true
-          python --version || true
-          env | sort | grep -E 'PYTHON|PATH|JAX|CUDA|LD_LIBRARY|BAZEL' || true
-
-      - name: Debug JAX runtime
-        shell: bash
-        run: |
-          set -euxo pipefail
-          python -m pip show jax jaxlib || true
-          python - <<'PY'
-          import sys
-          print(sys.version)
-
-          import jax
-          import jaxlib
-          print("jax", jax.__version__)
-          print("jaxlib", jaxlib.__version__)
-
-          import jaxlib._stablehlo
-          print("stablehlo import ok")
-          PY
   run_benchmarks:
     name: Run TPU Raiden H2H Benchmarks
     uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@affd28b492f67c242afa8b119e590b25816b7b88
