@@ -143,3 +143,5 @@ raiden_version_repo(
     name = "raiden_version",
     pyproject_toml = "//:pyproject.toml",
 )
+
+module(name = "torch_tpu", version = "0.1.1")
