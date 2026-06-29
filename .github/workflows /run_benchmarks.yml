@@ -1,0 +1,79 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Run Benchmarks
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - main
+      - fix/benchmark_debug
+      - V2
+
+  schedule:
+    - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
+
+permissions:
+  contents: read
+  pull-requests: write
+
+
+
+
+
+jobs: 
+  debug_stablehlo:  
+      name: Debug stablehlo import
+      runs-on: linux-x86-ct5lp-224-8tpu
+      container:
+        image: us-docker.pkg.dev/ml-oss-artifacts-transient/ml-public-testing-container/ml-build:939285342
+      steps:
+          - name: Inspect jaxlib native deps
+            shell: bash
+            run: |
+              set -uxo pipefail
+              python --version
+              python -m pip show jax jaxlib || true
+              python - <<'PY'
+              import os, glob, subprocess, sys
+              import jaxlib
+              root = os.path.dirname(jaxlib.__file__)
+              print("jaxlib at:", root)
+              sos = glob.glob(root + "/**/*stablehlo*.so", recursive=True)
+              print("found .so:", sos)
+              for so in sos:
+                  print("=== ldd", so, "===")
+                  subprocess.run(["ldd", so])
+              print("=== try import ===")
+              try:
+                 import jax
+                 import jaxlib._stablehlo
+                 print("OK: stablehlo import succeeded")
+              except Exception as e:
+                 print("IMPORT FAILED:", repr(e))
+              PY
+
+
+  run_benchmarks:
+    name: Run TPU Raiden H2H Benchmarks
+    uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@affd28b492f67c242afa8b119e590b25816b7b88
+    with:
+      registry_file: "benchmarks/benchmark_registry.pbtxt"
+      ml_actions_ref: "affd28b492f67c242afa8b119e590b25816b7b88"
+      runner: "linux-x86-n2-32"
+      publish_metrics: true
+      pub_sub_gcp_project_id: "ml-oss-benchmarking-production"
+      pub_sub_gcp_topic_id: "public-results-prod"
