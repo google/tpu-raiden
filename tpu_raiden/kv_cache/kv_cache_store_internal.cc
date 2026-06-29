@@ -59,8 +59,7 @@ int ParsePort(absl::string_view addr) {
 KVCacheStoreInternal::KVCacheStoreInternal(int capacity,
                                            std::string global_registry_address,
                                            std::string local_address)
-    : capacity_(capacity),
-      local_address_(local_address) {
+    : capacity_(capacity) {
   if (!global_registry_address.empty()) {
     auto channel = grpc::CreateChannel(global_registry_address,
                                        grpc::InsecureChannelCredentials());
