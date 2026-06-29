@@ -693,7 +693,6 @@ cc_library(
     ],
     features = ["-use_header_modules"],
     deps = [
-        ":utils",
         "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
         "//tpu_raiden/core:raw_transfer_core",
@@ -702,7 +701,6 @@ cc_library(
         "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/types:span",
-        "@nanobind",
         "@xla//xla:future",
         "@xla//xla/tsl/platform:logging",
     ],

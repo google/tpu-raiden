@@ -79,8 +79,8 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
     self.assertIsNotNone(ws_source.local_port)
     self.assertIsNotNone(ws_dest.local_port)
 
-    peer_source = f"localhost:{ws_source.local_port}"
-    peer_dest = f"localhost:{ws_dest.local_port}"
+    peer_source = ws_source.get_local_endpoints()[0]["endpoint"]
+    peer_dest = ws_dest.get_local_endpoints()[0]["endpoint"]
 
     # Validate baseline state (destination tensors on TPU are zeroed)
     for l in range(self.num_layers):

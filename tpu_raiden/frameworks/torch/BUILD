@@ -186,6 +186,8 @@ cc_library(
         "@com_google_absl//absl/types:span",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch/c10/core:base_headers",
+        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
+        "@torch_tpu//torch_tpu/eager:device_buffer",
         "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
     alwayslink = 1,
@@ -233,6 +235,8 @@ cc_library(
         "@com_google_absl//absl/types:span",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch/c10/core:base_headers",
+        "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
+        "@torch_tpu//torch_tpu/eager:device_buffer",
         "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
@@ -253,7 +257,7 @@ cc_library(
     deps = [
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
-        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
+        "@torch_tpu//torch_tpu/eager:device_buffer",
         "@xla//xla/pjrt:pjrt_client",
     ],
 )

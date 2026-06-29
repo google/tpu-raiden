@@ -30,8 +30,10 @@ class KVCacheStoreTest(absltest.TestCase):
     ]
 
     # 1. Insert
-    self.assertTrue(controller.insert(hashes, slices, True))
-    self.assertFalse(controller.insert(hashes, slices, True))  # Already exists
+    self.assertTrue(controller.insert(hashes, slices, True)[0])
+    self.assertFalse(
+        controller.insert(hashes, slices, True)[0]
+    )  # Already exists
 
     # 2. Lookup with a partial miss at the end
     hashes_with_miss = [b"6001", b"6002", b"6003"]
@@ -50,7 +52,9 @@ class KVCacheStoreTest(absltest.TestCase):
 
     # 3. Delete
     controller.delete(hashes, slices)
-    self.assertTrue(controller.insert(hashes, slices, True))  # Successful again
+    self.assertTrue(
+        controller.insert(hashes, slices, True)[0]
+    )  # Successful again
 
   def test_pin_and_release(self):
     controller = kv_cache_store.KVCacheStore(capacity=2)
@@ -61,7 +65,7 @@ class KVCacheStoreTest(absltest.TestCase):
         [kv_cache_store.RaidenId("inference_server", "1", "kv_cache", 0)],
     ]
 
-    self.assertTrue(controller.insert(hashes, slices, True))
+    self.assertTrue(controller.insert(hashes, slices, True)[0])
 
     # Pin both
     self.assertTrue(controller.pin(hashes))
@@ -95,7 +99,7 @@ class KVCacheStoreTest(absltest.TestCase):
         [kv_cache_store.RaidenId("inference_server", "0", "kv_cache", 0)],
         [kv_cache_store.RaidenId("inference_server", "1", "kv_cache", 0)],
     ]
-    self.assertTrue(controller.insert(hashes, slices, True))
+    self.assertTrue(controller.insert(hashes, slices, True)[0])
 
     # Attempt to pin a sequence with a missing hash (8003).
     self.assertFalse(controller.pin([b"8001", b"8002", b"8003"]))
@@ -118,7 +122,7 @@ class KVCacheStoreTest(absltest.TestCase):
                 ],
             ],
             True,
-        )
+        )[0]
     )
 
     self.assertEmpty(controller.lookup([b"8001", b"8002"]))
@@ -136,7 +140,7 @@ class KVCacheStoreTest(absltest.TestCase):
         [kv_cache_store.RaidenId("inference_server", "1", "kv_cache", 0)],
     ]
 
-    self.assertTrue(controller.insert(hashes, slices, True))
+    self.assertTrue(controller.insert(hashes, slices, True)[0])
 
     lookup_res = controller.lookup(hashes)
     self.assertLen(lookup_res, 2)

@@ -197,6 +197,7 @@ TEST(WeightSynchronizerListenerTest, PushWeightsReshardedSuccess) {
   req.set_command(ControlRequest::COMMAND_START_TRANSFER);
 
   StartTransferRequest* start_req = req.mutable_start_transfer_request();
+  start_req->set_is_sender(true);
 
   // Construct precise resharding push schedules for S0 and S2 pushing to D0
   auto& push_schedules = *start_req->mutable_shard_push_schedules();

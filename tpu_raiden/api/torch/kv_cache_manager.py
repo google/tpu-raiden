@@ -34,6 +34,7 @@ import pathlib
 import sys
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import torch_tpu
 from torch_tpu import _loader as _torch_tpu_loader
 
 

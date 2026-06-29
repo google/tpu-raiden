@@ -162,41 +162,41 @@ void WeightSynchronizerListener::ConnectionWorker(int client_fd) {
 
   if (req.command() ==
       tpu_raiden::rpc::ControlRequest::COMMAND_START_TRANSFER) {
+    bool is_sender = true;
+    bool is_resharded = false;
     if (req.has_start_transfer_request()) {
-      const auto& start_req = req.start_transfer_request();
-      if (start_req.is_sender()) {
-        LOG(INFO) << "C++ Listener received START_TRANSFER (Sender)";
-        if (!start_req.shard_push_schedules().empty()) {
-          LOG(INFO) << "C++ Listener executing PushWeightsResharded";
-          absl::Status status = engine_->PushWeightsResharded(start_req);
+      is_sender = req.start_transfer_request().is_sender();
+      is_resharded =
+          !req.start_transfer_request().shard_push_schedules().empty();
+    }
+
+    if (is_sender) {
+      if (is_resharded) {
+        LOG(INFO) << "C++ Listener executing PushWeightsResharded";
+        absl::Status status =
+            engine_->PushWeightsResharded(req.start_transfer_request());
+        if (!status.ok()) {
+          resp.set_success(false);
+          resp.set_message(std::string(status.message()));
+          LOG(ERROR) << "PushWeightsResharded native execution failed: "
+                     << status;
+        }
+      } else {
+        std::vector<std::string> peers(req.peers().begin(), req.peers().end());
+        LOG(INFO) << "C++ Listener executing PushWeights to " << peers.size()
+                  << " peers";
+        if (!peers.empty()) {
+          absl::Status status = engine_->PushWeights(peers);
           if (!status.ok()) {
             resp.set_success(false);
             resp.set_message(std::string(status.message()));
-            LOG(ERROR) << "PushWeightsResharded native execution failed: "
-                       << status;
-          }
-        } else {
-          std::vector<std::string> peers(req.peers().begin(),
-                                         req.peers().end());
-          LOG(INFO) << "C++ Listener executing PushWeights to " << peers.size()
-                    << " peers";
-          if (!peers.empty()) {
-            absl::Status status = engine_->PushWeights(peers);
-            if (!status.ok()) {
-              resp.set_success(false);
-              resp.set_message(std::string(status.message()));
-              LOG(ERROR) << "PushWeights native execution failed: " << status;
-            }
+            LOG(ERROR) << "PushWeights native execution failed: " << status;
           }
         }
-      } else {
-        LOG(INFO) << "C++ Listener received START_TRANSFER (Receiver) - no-op "
-                     "for weight sync";
       }
     } else {
-      resp.set_success(false);
-      resp.set_message("Missing start_transfer_request");
-      LOG(ERROR) << "Missing start_transfer_request in START_TRANSFER command";
+      LOG(INFO) << "C++ Listener received START_TRANSFER (Receiver) - no-op "
+                   "for weight sync";
     }
   } else if (req.command() ==
              tpu_raiden::rpc::ControlRequest::COMMAND_SHUTDOWN) {
