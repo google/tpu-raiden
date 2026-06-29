@@ -47,7 +47,6 @@
 #include <cstring>
 #include <deque>
 #include <exception>
-#include <future>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -64,6 +63,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -71,9 +71,11 @@
 #include "absl/strings/str_cat.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/errors.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/metrics_collector.h"
+#include "tpu_raiden/core/raiden_manager_base.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
@@ -1106,8 +1108,19 @@ absl::Status KVCacheManagerWithTransfer::WaitForStagingBlockRead(
   {
     std::lock_guard<std::mutex> lock(mu_);
     for (const auto& [u, e] : send_entries_) {
+      // block_id here is a HOST-staging block id (the sender's src_ints), but
+      // registered_block_set holds DEVICE block ids. In disagg those id spaces
+      // overlap and device blocks are reused across concurrent requests, so a
+      // naive match can hit the WRONG (registered-but-not-yet-pushed) entry
+      // whose d2h_layer_futures is still empty -- which used to throw a bogus
+      // "Layer index exceeds d2h futures size" and hang the transfer. Only
+      // accept an entry that has actually issued this layer's D2H future;
+      // otherwise treat as not-applicable. The layer-chaining (SendNextLayer)
+      // already gates each layer's D2H before its push, so skipping the wait
+      // here is safe.
       if (e->registered_block_set.find(block_id) !=
-          e->registered_block_set.end()) {
+              e->registered_block_set.end() &&
+          layer_idx < e->d2h_layer_futures.size()) {
         entry = e;
         break;
       }
@@ -1115,10 +1128,6 @@ absl::Status KVCacheManagerWithTransfer::WaitForStagingBlockRead(
   }
   if (!entry) {
     return absl::OkStatus();
-  }
-  if (layer_idx >= entry->d2h_layer_futures.size()) {
-    return absl::OutOfRangeError(
-        "Layer index exceeds d2h futures size in WaitForStagingBlockRead");
   }
   return entry->d2h_layer_futures[layer_idx].Await();
 }

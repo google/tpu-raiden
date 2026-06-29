@@ -608,6 +608,110 @@ class KVCacheManagerTest(parameterized.TestCase):
       ref_np = np.asarray(ref_arrs[i])
       np.testing.assert_array_equal(tpu_dst_np[0:2], ref_np[2:4])
 
+  def test_layer_index_id_space_collision_regression(self):
+    """Regression for the WaitForStagingBlockRead host/device id-space bug.
+
+    The layer-by-layer push (StartPushInternal -> SendNextLayer -> H2hWrite)
+    makes the sender call WaitForBlockRead(layer, shard, src_id) with a
+    host-staging block ID. However, WaitForStagingBlockRead searched
+    send_entries_ for an entry whose registered_block_set (device block IDs)
+    contained it.
+
+    In disaggregated execution, host-staging slots start at block ID 0, and
+    device blocks are reused across concurrent requests, causing the ID spaces
+    to overlap. This led to a bug where a registered-but-not-yet-pulled request
+    whose device blocks numerically collided with an active push's host-staging
+    blocks was incorrectly matched. Since its d2h_layer_futures was empty, it
+    threw "Layer index exceeds d2h futures size", failing the transfer (observed
+    as a 27/30 disagg hang).
+
+    This test deterministically forces that collision: an idle request
+    registered on device blocks {0, 1, 2, 3} (matching all host-staging IDs)
+    must not break a concurrent transfer whose push stages into those host
+    blocks.
+    """
+    tpu_sharding = self.setup_shardings()
+    n_layers = 2
+    # 8 device blocks so the active transfer (block 5 -> 6) lies OUTSIDE the
+    # host-staging range {0,1,2,3}; the only block_id collision is via the idle
+    # entry, making the repro deterministic.
+    shape = (8, 128, 8, 8, 128)
+    src_refs, src_caches, dst_caches = [], [], []
+    for i in range(n_layers):
+      base = jnp.arange(np.prod(shape), dtype=jnp.float32).reshape(shape) + i
+      src_refs.append(np.asarray(base))
+      src_caches.append(jax.device_put(base, tpu_sharding))
+      dst_caches.append(
+          jax.device_put(jnp.zeros(shape, dtype=jnp.float32), tpu_sharding)
+      )
+    jax.block_until_ready(src_caches)
+    jax.block_until_ready(dst_caches)
+
+    # Disagg-style managers: control server + host staging slots (2 slots x 2
+    # blocks => host-staging block ids {0,1,2,3}) + the layer-by-layer push path.
+    producer = _kv_cache_manager.KVCacheManager(
+        kv_caches=src_caches,
+        local_control_port=0,
+        max_blocks=2,
+        num_slots=2,
+        unsafe_skip_buffer_lock=self.skip_lock,
+        parallelism=1,
+    )
+    consumer = _kv_cache_manager.KVCacheManager(
+        kv_caches=dst_caches,
+        local_control_port=0,
+        max_blocks=2,
+        num_slots=2,
+        unsafe_skip_buffer_lock=self.skip_lock,
+        parallelism=1,
+    )
+    time.sleep(0.05)
+    endpoints = producer.get_local_endpoints()
+    self.assertGreater(len(endpoints), 0)
+
+    # IDLE request on the producer: registered on DEVICE blocks {0,1,2,3} -- equal
+    # to every host-staging block id -- and NEVER pulled, so its d2h_layer_futures
+    # stays empty. This is the entry the buggy lookup wrongly matched.
+    producer.notify_for_read("idle_req", 999, [0, 1, 2, 3])
+
+    # ACTIVE request: producer registers DEVICE block 5; consumer pulls it into
+    # local block 6. Block 5 is NOT in the idle entry's set, so the only block_id
+    # collision is via the active push's HOST-staging ids (0/1) hitting the idle.
+    req_id = "active_req"
+    uuid = 12345
+    producer.notify_for_read(req_id, uuid, [5])
+    consumer.start_read(
+        req_id=req_id,
+        uuid=uuid,
+        remote_endpoint=endpoints,
+        remote_block_ids=[5],
+        local_block_ids=[6],
+        parallelism=1,
+    )
+
+    done = False
+    for _ in range(200):
+      _, done_recving, failed_recving = consumer.complete_read()
+      if req_id in failed_recving:
+        self.fail(
+            "active_req in failed_recving -- WaitForStagingBlockRead matched an"
+            " unrelated registered-but-unpushed entry (host/device id-space"
+            " collision regression)"
+        )
+      if req_id in done_recving:
+        done = True
+        break
+      time.sleep(0.05)
+    self.assertTrue(
+        done,
+        "active_req never completed -- likely the layer-index collision hang",
+    )
+
+    # Block 5's data must have landed in consumer local block 6.
+    for i in range(n_layers):
+      out = np.asarray(dst_caches[i])
+      np.testing.assert_array_equal(out[6], src_refs[i][5])
+
 
 if __name__ == "__main__":
   absltest.main()
