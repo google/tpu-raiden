@@ -215,4 +215,12 @@ class KVCacheManager:
     """
     self._impl.unlock_blocks(block_ids)
 
+  def dump_metrics_to_string(self) -> str:
+    """[EXPERIMENTAL] Dumps the metrics collector telemetry as a JSON string.
 
+    WARNING: This API is experimental and subject to change in future releases.
+
+    Returns:
+      A JSON string representing the collected telemetry metrics.
+    """
+    return self._impl.dump_metrics_to_string()

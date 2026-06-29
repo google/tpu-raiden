@@ -56,6 +56,8 @@
 
 namespace tpu_raiden {
 
+class MetricsCollector;
+
 struct EndpointDescriptor {
   std::string endpoint;
   std::vector<int64_t> shards;
@@ -156,7 +158,8 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
       bool unsafe_skip_buffer_lock, int parallelism,
       HostBufferAllocator host_allocator, int64_t node_id = 0,
       int64_t local_control_port = -1, int64_t max_blocks = 0,
-      int64_t num_slots = 0, double timeout_s = 120.0);
+      int64_t num_slots = 0, double timeout_s = 120.0,
+      std::shared_ptr<MetricsCollector> metrics_collector = nullptr);
 
   KVCacheManagerWithTransfer(
       const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
@@ -166,14 +169,20 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
       int parallelism, HostBufferAllocator host_allocator, int64_t node_id = 0,
       int64_t local_control_port = -1, int64_t max_blocks = 0,
       int64_t num_slots = 0, double timeout_s = 120.0,
-      std::optional<int> assigned_numa_node = std::nullopt);
+      std::optional<int> assigned_numa_node = std::nullopt,
+      std::shared_ptr<MetricsCollector> metrics_collector = nullptr);
 
   // Metadata-based constructor for FFI / CPU-only testing
   KVCacheManagerWithTransfer(
       size_t num_layers, size_t num_shards, size_t slice_byte_size,
       std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
       int parallelism = 1, int64_t node_id = 0, int64_t local_control_port = -1,
-      int64_t max_blocks = 0, int64_t num_slots = 0, double timeout_s = 120.0);
+      int64_t max_blocks = 0, int64_t num_slots = 0, double timeout_s = 120.0,
+      std::shared_ptr<MetricsCollector> metrics_collector = nullptr);
+
+  void SetMetricsCollector(std::shared_ptr<MetricsCollector> collector) {
+    metrics_collector_ = std::move(collector);
+  }
 
   virtual ~KVCacheManagerWithTransfer();
 
@@ -334,6 +343,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     int32_t num_completed_blocks = 0;
     int32_t num_completed_layers = 0;
     bool network_completed = false;
+    bool h2d_started = false;
     std::vector<int> accumulated_host_block_ids;
     std::chrono::steady_clock::time_point deadline;
     std::vector<raiden::PjRtCopyFuture> h2d_futures;
@@ -391,6 +401,8 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
 
   std::vector<kv_cache::KVCacheHostSpan> LayerSpans(int64_t slot_idx,
                                                     int64_t num_blocks);
+
+  std::shared_ptr<MetricsCollector> metrics_collector_ = nullptr;
 };
 
 }  // namespace tpu_raiden

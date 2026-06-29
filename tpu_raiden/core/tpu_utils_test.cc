@@ -122,6 +122,7 @@ TEST(TpuUtilsTest, GetInterfaceNumaNodeTest) {
   EXPECT_EQ(GetInterfaceNumaNode("ens5"), 0);
   EXPECT_EQ(GetInterfaceNumaNode("dcn1"), 1);
   EXPECT_EQ(GetInterfaceNumaNode("ens6"), 1);
+  EXPECT_EQ(GetInterfaceNumaNode("eth2"), 1);
   EXPECT_EQ(GetInterfaceNumaNode("unknown_interface"), -1);
 }
 

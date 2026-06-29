@@ -348,7 +348,7 @@ int GetInterfaceNumaNode(const char* ifname) {
     absl::string_view name(ifname);
     if (name == "eth0" || name == "eth1" || name == "ens5") {
       node = 0;
-    } else if (name == "dcn1" || name == "ens6") {
+    } else if (name == "dcn1" || name == "ens6" || name == "eth2") {
       node = 1;
     }
   }

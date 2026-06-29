@@ -35,6 +35,8 @@ class PjRtBuffer;
 }  // namespace xla
 
 namespace tpu_raiden {
+class MetricsCollector;
+
 namespace kv_cache {
 namespace jax {
 
@@ -126,6 +128,8 @@ class KVCacheManager {
              std::vector<std::string>>
   CompleteReadRaw();
 
+  std::string DumpMetricsToString() const;
+
   absl::StatusOr<raiden::PjRtCopyFuture> H2d(
       const std::vector<int64_t>& src_offsets_major_dim = {},
       const std::vector<int64_t>& dst_offsets_major_dim = {},
@@ -195,6 +199,7 @@ class KVCacheManager {
   std::map<std::string, int> done_sending_counts_;
   std::map<std::string, int> done_recving_counts_;
   std::set<std::string> failed_recving_set_;
+  std::shared_ptr<MetricsCollector> metrics_collector_;
 };
 
 }  // namespace jax

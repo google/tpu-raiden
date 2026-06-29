@@ -19,19 +19,24 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
+#include <thread>  // NOLINT(build/c++11)
 #include <utility>
 #include <vector>
 
-#include "absl/flags/flag.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
-#include "xla/future.h"
+#include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/logging.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
+#include "tpu_raiden/core/metrics_collector.h"  // IWYU pragma: keep
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
@@ -40,10 +45,6 @@
 
 namespace nb = nanobind;
 #endif
-
-ABSL_FLAG(bool, kv_manager_force_single_numa_node, true,
-          "Force all shards to be collapsed under a single sub-manager "
-          "instance on NUMA 0.");
 
 namespace tpu_raiden {
 namespace kv_cache {
@@ -170,6 +171,11 @@ KVCacheManager::KVCacheManager(UnpackedCache&& cache, int64_t node_id,
                                int64_t num_slots, double timeout_s,
                                bool unsafe_skip_buffer_lock, int parallelism)
     : device_arrays_(std::move(cache.device_arrays)) {
+  const char* enable_metrics_env = std::getenv("ENABLE_RAIDEN_METRICS");
+  if (enable_metrics_env != nullptr &&
+      std::strcmp(enable_metrics_env, "true") == 0) {
+    metrics_collector_ = std::make_shared<MetricsCollector>();
+  }
   InitSubManagers(cache.layer_buffers, std::nullopt, std::nullopt,
                   unsafe_skip_buffer_lock, parallelism, node_id,
                   local_control_port, max_blocks, num_slots, timeout_s);
@@ -235,7 +241,17 @@ void KVCacheManager::InitSubManagers(
   // TEMPORARY HACK: Force all shards to be collapsed under a single sub-manager
   // instance (NUMA 0) to avoid the threading and synchronization overhead
   // of running multiple KVCacheManagerWithTransfer instances.
-  if (absl::GetFlag(FLAGS_kv_manager_force_single_numa_node)) {
+  // This hack can be disabled via the DISABLE_SINGLE_NUMA env var.
+  bool disable_single_numa = false;
+  const char* disable_single_numa_env = std::getenv("DISABLE_SINGLE_NUMA");
+  if (disable_single_numa_env != nullptr) {
+    if (std::strcmp(disable_single_numa_env, "true") == 0 ||
+        std::strcmp(disable_single_numa_env, "1") == 0) {
+      disable_single_numa = true;
+    }
+  }
+
+  if (!disable_single_numa) {
     std::vector<int> all_shards;
     all_shards.reserve(total_num_shards_);
     for (int i = 0; i < static_cast<int>(total_num_shards_); ++i) {
@@ -306,6 +322,9 @@ void KVCacheManager::InitSubManagers(
             sub_buffers, sub_port, host_blocks_to_allocate,
             unsafe_skip_buffer_lock, parallelism, host_alloc, node_id + sub_idx,
             sub_ctrl_port, max_blocks, num_slots, timeout_s);
+        if (metrics_collector_) {
+          sub_mgr->SetMetricsCollector(metrics_collector_);
+        }
       } catch (const std::exception& e) {
         // A consecutive (or requested) port was unavailable. Retry the whole
         // allocation from a fresh ephemeral base; for fixed ports, propagate.
@@ -706,6 +725,13 @@ KVCacheManager::H2hRead(
   raiden::PjRtCopyFuture composite =
       raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
   return std::make_pair(std::move(all_ids), std::move(composite));
+}
+
+std::string KVCacheManager::DumpMetricsToString() const {
+  if (metrics_collector_) {
+    return metrics_collector_->DumpMetricsToString();
+  }
+  return "[]";
 }
 
 }  // namespace jax

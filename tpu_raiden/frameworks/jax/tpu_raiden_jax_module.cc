@@ -265,7 +265,9 @@ NB_MODULE(_tpu_raiden_jax, m) {
              auto [done_sending, done_recving, failed_recving] =
                  self.CompleteReadRaw();
              return nb::make_tuple(done_sending, done_recving, failed_recving);
-           });
+           })
+      .def("dump_metrics_to_string",
+           &tpu_raiden::kv_cache::jax::KVCacheManager::DumpMetricsToString);
 
   // =========================================================================
   // 2. Bind WeightSynchronizer

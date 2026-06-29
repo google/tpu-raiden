@@ -17,18 +17,21 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
 #include <thread>  // NOLINT
+#include <utility>
 #include <vector>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
 #include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "tpu_raiden/core/tpu_utils.h"
@@ -101,6 +104,16 @@ void RaidenManagerBase::InitTransportServer() {
     bind_ip = *bind_ip_cfg_;
   } else {
     std::vector<HostNicAddress> host_nics = GetLocalHostNicAddresses();
+    const char* exclude_ctrl_env = std::getenv("EXCLUDE_CONTROL_INTERFACE");
+    if (exclude_ctrl_env != nullptr && exclude_ctrl_env[0] != '\0') {
+      std::vector<HostNicAddress> filtered_nics;
+      for (const auto& nic : host_nics) {
+        if (nic.interface_name != exclude_ctrl_env) {
+          filtered_nics.push_back(nic);
+        }
+      }
+      host_nics = std::move(filtered_nics);
+    }
     if (!host_nics.empty()) {
       int target_numa = assigned_numa_node_.value_or(-1);
       std::cerr << "InitTransportServer: target_numa=" << target_numa
@@ -112,8 +125,8 @@ void RaidenManagerBase::InitTransportServer() {
       }
       std::vector<HostNicAddress>::const_iterator it = host_nics.end();
       if (target_numa == 1) {
-        // Prefer secondary data plane NICs (dcn1 on Borg, ens6 on GCP VM, eth1
-        // fallback)
+        // Prefer secondary data plane NICs (dcn1 on Borg, ens6 on GCP VM, eth2,
+        // eth1 fallback)
         it = std::find_if(
             host_nics.begin(), host_nics.end(),
             [](const HostNicAddress& n) { return n.interface_name == "dcn1"; });
@@ -121,6 +134,12 @@ void RaidenManagerBase::InitTransportServer() {
           it = std::find_if(host_nics.begin(), host_nics.end(),
                             [](const HostNicAddress& n) {
                               return n.interface_name == "ens6";
+                            });
+        }
+        if (it == host_nics.end()) {
+          it = std::find_if(host_nics.begin(), host_nics.end(),
+                            [](const HostNicAddress& n) {
+                              return n.interface_name == "eth2";
                             });
         }
         if (it == host_nics.end()) {

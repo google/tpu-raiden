@@ -73,6 +73,7 @@
 #include "absl/time/time.h"
 #include "xla/tsl/platform/errors.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
+#include "tpu_raiden/core/metrics_collector.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
@@ -412,7 +413,7 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     bool unsafe_skip_buffer_lock, int parallelism,
     HostBufferAllocator host_allocator, int64_t node_id,
     int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
-    double timeout_s)
+    double timeout_s, std::shared_ptr<MetricsCollector> metrics_collector)
     : KVCacheManagerBase(
           layer_buffers, local_port,
           host_blocks_to_allocate.value_or(num_slots * max_blocks),
@@ -423,7 +424,8 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
       max_blocks_(max_blocks),
       num_slots_(num_slots),
       timeout_s_(timeout_s),
-      unsafe_skip_buffer_lock_(unsafe_skip_buffer_lock) {
+      unsafe_skip_buffer_lock_(unsafe_skip_buffer_lock),
+      metrics_collector_(std::move(metrics_collector)) {
   if (local_control_port_ >= 0) {
     if (max_blocks_ <= 0) {
       throw std::invalid_argument("max_blocks must be positive");
@@ -455,7 +457,8 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     std::optional<int> host_blocks_to_allocate, bool unsafe_skip_buffer_lock,
     int parallelism, HostBufferAllocator host_allocator, int64_t node_id,
     int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
-    double timeout_s, std::optional<int> assigned_numa_node)
+    double timeout_s, std::optional<int> assigned_numa_node,
+    std::shared_ptr<MetricsCollector> metrics_collector)
     : KVCacheManagerBase(
           layer_buffers, local_port,
           host_blocks_to_allocate.value_or(num_slots * max_blocks),
@@ -466,7 +469,8 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
       max_blocks_(max_blocks),
       num_slots_(num_slots),
       timeout_s_(timeout_s),
-      unsafe_skip_buffer_lock_(unsafe_skip_buffer_lock) {
+      unsafe_skip_buffer_lock_(unsafe_skip_buffer_lock),
+      metrics_collector_(std::move(metrics_collector)) {
   if (num_layers() == 0 || num_shards() == 0) {
     return;
   }
@@ -498,7 +502,8 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     int parallelism, int64_t node_id, int64_t local_control_port,
-    int64_t max_blocks, int64_t num_slots, double timeout_s)
+    int64_t max_blocks, int64_t num_slots, double timeout_s,
+    std::shared_ptr<MetricsCollector> metrics_collector)
     : KVCacheManagerBase(
           num_layers, num_shards, slice_byte_size, local_port,
           host_blocks_to_allocate.value_or(num_slots * max_blocks), parallelism,
@@ -509,7 +514,8 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
       max_blocks_(max_blocks),
       num_slots_(num_slots),
       timeout_s_(timeout_s),
-      unsafe_skip_buffer_lock_(false) {
+      unsafe_skip_buffer_lock_(false),
+      metrics_collector_(std::move(metrics_collector)) {
   if (local_control_port_ >= 0) {
     if (max_blocks_ <= 0) {
       throw std::invalid_argument("max_blocks must be positive");
@@ -747,6 +753,13 @@ void KVCacheManagerWithTransfer::StartRead(
     }
     entry.h2d_dispatch_futures.reserve(load_plan.h2d_local_block_ids.size());
     active_recv_entries_[uuid] = std::move(entry);
+  }
+
+  if (metrics_collector_) {
+    uint64_t total_bytes = static_cast<uint64_t>(load_plan.num_blocks) *
+                           num_layers() * num_shards_ * slice_byte_size_;
+    metrics_collector_->RecordStart(uuid, req_id, load_plan.num_blocks,
+                                    total_bytes);
   }
 
   if (load_plan.num_blocks == 0) {
@@ -1609,6 +1622,11 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
     auto it = active_recv_entries_.find(uuid);
     if (it != active_recv_entries_.end()) {
       it->second.num_completed_blocks += block_ids.size();
+      if (it->second.num_completed_blocks == block_ids.size()) {
+        if (metrics_collector_) {
+          metrics_collector_->RecordFirstPacket(uuid);
+        }
+      }
       it->second.accumulated_host_block_ids.insert(
           it->second.accumulated_host_block_ids.end(), block_ids.begin(),
           block_ids.end());
@@ -1618,7 +1636,13 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
         it->second.network_completed = true;
         req_id = it->second.req_id;
         recv_slot = it->second.slot_idx;
+        if (metrics_collector_) {
+          metrics_collector_->RecordLastPacket(uuid);
+        }
         if (it->second.num_completed_layers == num_layers()) {
+          if (metrics_collector_) {
+            metrics_collector_->RecordEnd(uuid);
+          }
           found = true;
           active_recv_entries_.erase(it);
         }
@@ -1653,6 +1677,7 @@ absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,
   CopySpec h2d_copy;
   std::string req_id;
   int64_t recv_slot;
+  bool trigger_enqueue = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = active_recv_entries_.find(uuid);
@@ -1663,6 +1688,13 @@ absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,
     h2d_copy = entry.h2d_copy;
     req_id = entry.req_id;
     recv_slot = entry.slot_idx;
+    if (!entry.h2d_started) {
+      entry.h2d_started = true;
+      trigger_enqueue = true;
+    }
+  }
+  if (trigger_enqueue && metrics_collector_) {
+    metrics_collector_->RecordH2dEnqueue(uuid);
   }
 
   LOG(INFO) << "OnLayerReceived (H2D copy start) layer " << layer_idx
@@ -1681,7 +1713,8 @@ absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,
   }
 
   auto future = future_or.value();
-  future.OnReady([this, uuid, layer_idx, recv_slot, req_id](auto status_or) {
+  future.OnReady([this, uuid, layer_idx, recv_slot, req_id,
+                  metrics_collector = metrics_collector_](auto status_or) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = active_recv_entries_.find(uuid);
     if (it == active_recv_entries_.end()) {
@@ -1694,8 +1727,14 @@ absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,
                 << ", numa=" << assigned_numa_node().value_or(-1);
       entry.num_completed_layers++;
       if (entry.num_completed_layers == num_layers()) {
+        if (metrics_collector) {
+          metrics_collector->RecordH2dComplete(uuid);
+        }
         if (entry.network_completed) {
           LOG(INFO) << "All layers H2D copy complete: req_id=" << req_id;
+          if (metrics_collector) {
+            metrics_collector->RecordEnd(uuid);
+          }
           done_recving_.insert(req_id);
           ReleaseSlotLocked(recv_slot);
           active_recv_entries_.erase(uuid);
