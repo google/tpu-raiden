@@ -17,6 +17,8 @@
 #include <sys/mman.h>
 
 #include <cstdint>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -122,7 +124,25 @@ absl::StatusOr<HostBufferAllocation> XlaHostMemoryAllocator::Allocate(
       (std::getenv("PJRT_LOCAL_PROCESS_RANK") != nullptr ||
        std::getenv("RANK") != nullptr || std::getenv("LOCAL_RANK") != nullptr);
 
-  const bool skip_dma_map = (is_tpuv7 && is_multi_process);
+  // EXPERIMENT (RAIDEN_FORCE_DMAMAP=1): force the mmap+DmaMap staging path even on
+  // multi-process TPUv7, bypassing the libtpu-host-pool hybrid path. The hybrid
+  // memory is device-DMA-optimized (fast D2H/H2D) but CPU reads of it (the H2H
+  // writev) appear ~2x slower in disagg vs the isolated mmap+DmaMap path. This
+  // tests whether the hybrid allocator is the source of the disagg H2H regression.
+  const bool force_dmamap = (std::getenv("RAIDEN_FORCE_DMAMAP") != nullptr);
+  const bool skip_dma_map = (is_tpuv7 && is_multi_process) && !force_dmamap;
+  {
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      std::fprintf(stderr,
+                   "RAIDEN_ALLOC is_tpuv7=%d is_multi_process=%d "
+                   "force_dmamap=%d skip_dma_map=%d (path=%s)\n",
+                   is_tpuv7, is_multi_process, force_dmamap, skip_dma_map,
+                   skip_dma_map ? "hybrid-libtpu-pool" : "mmap+DmaMap");
+      std::fflush(stderr);
+    }
+  }
 
   // HYBRID PATH: When skipping DmaMap on multi-process TPUv7 pods, delegate
   // directly to libtpu's internal host memory allocator pool. This yields

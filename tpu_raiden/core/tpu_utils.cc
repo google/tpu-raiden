@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstddef>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -418,6 +419,16 @@ std::optional<HostNicAddress> GetSocketLocalNic(int fd) {
 
 int ApplySocketAffinityAndBinding(int fd, bool pin_thread) {
   if (!pin_thread) {
+    return 0;
+  }
+  // EXPERIMENT (RAIDEN_NO_PIN=1): skip NUMA pinning of the transfer threads.
+  // Pinning all transfer threads to the NIC's single NUMA node is good in
+  // isolation, but in disagg they then contend with vLLM's busy-polling
+  // XLA/libtpu threads on that node (iperf3, which spreads across all cores,
+  // hits 174 Gbps with vLLM loaded; the pinned engine only ~70). Unpinning lets
+  // the OS spread the threads like iperf3.
+  static const bool no_pin = (std::getenv("RAIDEN_NO_PIN") != nullptr);
+  if (no_pin) {
     return 0;
   }
   auto nic_opt = GetSocketLocalNic(fd);
