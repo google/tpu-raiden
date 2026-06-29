@@ -114,6 +114,122 @@ TEST(KVCacheManagerTest, H2hReadExplicitAcceptsParallelism) {
               testing::HasSubstr("Failed to connect to peer"));
 }
 
+// Subclass that sets per_layer_physical_size_ to simulate the device-backed
+// constructor path where layers have different on-device buffer sizes.
+class TestKVCacheManagerHeterogeneous : public KVCacheManagerBase {
+ public:
+  TestKVCacheManagerHeterogeneous(size_t num_layers, size_t num_shards,
+                                  size_t slice_byte_size,
+                                  std::optional<int> host_blocks,
+                                  const std::vector<size_t>& per_layer_sizes)
+      : KVCacheManagerBase(num_layers, num_shards, slice_byte_size,
+                           /*local_port=*/std::nullopt, host_blocks) {
+    per_layer_physical_size_ = per_layer_sizes;
+    buffer_holds_.resize(num_layers);
+    for (size_t l = 0; l < num_layers; ++l) {
+      buffer_holds_[l].resize(num_shards);
+    }
+  }
+};
+
+TEST(KVCacheManagerPerLayerTest, BytesPerBlockReturnsMaxSliceSize) {
+  // Simulate conv (small) and ssm (large) alternating, like a mamba group.
+  // bytes_per_block() should return slice_byte_size_ (the max) since it's
+  // used for host buffer allocation which must fit the largest layer.
+  size_t num_blocks = 126;
+  size_t conv_total = num_blocks * 48 * 1024;       // 48 KiB/block
+  size_t ssm_total = num_blocks * 2 * 1024 * 1024;  // 2 MiB/block
+  size_t max_slice = ssm_total / num_blocks;        // 2 MiB
+
+  TestKVCacheManagerHeterogeneous manager(
+      /*num_layers=*/4, /*num_shards=*/1,
+      /*slice_byte_size=*/max_slice,
+      /*host_blocks=*/8,
+      /*per_layer_sizes=*/{conv_total, ssm_total, conv_total, ssm_total});
+
+  EXPECT_EQ(manager.bytes_per_block(), max_slice);
+}
+
+TEST(KVCacheManagerPerLayerTest, EmptyPerLayerFallsBackToUniform) {
+  // When per_layer_physical_size_ is empty (CPU-only path), all DMA code
+  // falls back to using slice_byte_size_ uniformly.
+  TestKVCacheManager manager(/*num_layers=*/3, /*num_shards=*/1,
+                             /*slice_byte_size=*/256);
+
+  EXPECT_EQ(manager.bytes_per_block(), 256u);
+}
+
+TEST(KVCacheManagerPerLayerTest, D2hDirectFailsWithLayerCountMismatch) {
+  size_t num_blocks = 10;
+  size_t conv_total = num_blocks * 100;
+  size_t ssm_total = num_blocks * 1000;
+
+  TestKVCacheManagerHeterogeneous manager(
+      /*num_layers=*/2, /*num_shards=*/1,
+      /*slice_byte_size=*/1000,
+      /*host_blocks=*/static_cast<int>(num_blocks),
+      /*per_layer_sizes=*/{conv_total, ssm_total});
+
+  // Pass wrong number of device buffers (3 instead of 2).
+  std::vector<uint8_t*> device_buffers = {nullptr, nullptr, nullptr};
+  std::vector<int64_t> src_offsets = {0};
+  std::vector<int64_t> dst_offsets = {0};
+  std::vector<int64_t> sizes = {1};
+
+  auto status = manager.D2hDirect(nullptr, device_buffers, src_offsets,
+                                  dst_offsets, sizes);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(status.message(), testing::HasSubstr("must match layer count"));
+}
+
+TEST(KVCacheManagerPerLayerTest, H2dDirectFailsWithLayerCountMismatch) {
+  size_t num_blocks = 10;
+  size_t conv_total = num_blocks * 100;
+  size_t ssm_total = num_blocks * 1000;
+
+  TestKVCacheManagerHeterogeneous manager(
+      /*num_layers=*/2, /*num_shards=*/1,
+      /*slice_byte_size=*/1000,
+      /*host_blocks=*/static_cast<int>(num_blocks),
+      /*per_layer_sizes=*/{conv_total, ssm_total});
+
+  // Pass wrong number of device buffers (1 instead of 2).
+  std::vector<uint8_t*> device_buffers = {nullptr};
+  std::vector<int64_t> src_offsets = {0};
+  std::vector<int64_t> dst_offsets = {0};
+  std::vector<int64_t> sizes = {1};
+
+  auto status = manager.H2dDirect(nullptr, device_buffers, src_offsets,
+                                  dst_offsets, sizes);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(status.message(), testing::HasSubstr("must match layer count"));
+}
+
+TEST(KVCacheManagerPerLayerTest, UniformPerLayerMatchesOriginal) {
+  // When all per-layer sizes are identical, behavior should match the
+  // original uniform code path exactly.
+  size_t slice = 512;
+  size_t num_blocks = 10;
+  size_t total = num_blocks * slice;
+
+  TestKVCacheManagerHeterogeneous manager_heterogeneous(
+      /*num_layers=*/3, /*num_shards=*/1,
+      /*slice_byte_size=*/slice,
+      /*host_blocks=*/static_cast<int>(num_blocks),
+      /*per_layer_sizes=*/{total, total, total});
+
+  TestKVCacheManager manager_uniform(
+      /*num_layers=*/3, /*num_shards=*/1,
+      /*slice_byte_size=*/slice);
+
+  // Both should report the same bytes_per_block.
+  EXPECT_EQ(manager_heterogeneous.bytes_per_block(),
+            manager_uniform.bytes_per_block());
+  EXPECT_EQ(manager_heterogeneous.num_layers(), manager_uniform.num_layers());
+}
+
 }  // namespace
 }  // namespace kv_cache
 }  // namespace tpu_raiden
