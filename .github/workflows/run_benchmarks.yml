@@ -34,7 +34,39 @@ permissions:
 
 
 
-jobs:
+jobs: 
+  debug_stablehlo:  
+      name: Debug stablehlo import
+      runs-on: linux-x86-ct5lp-224-8tpu
+      container:
+        image: us-docker.pkg.dev/ml-oss-artifacts-transient/ml-public-testing-container/ml-build:939285342
+      steps:
+          - name: Inspect jaxlib native deps
+            shell: bash
+            run: |
+              set -uxo pipefail
+              python --version
+              python -m pip show jax jaxlib || true
+              python - <<'PY'
+              import os, glob, subprocess, sys
+              import jaxlib
+              root = os.path.dirname(jaxlib.__file__)
+              print("jaxlib at:", root)
+              sos = glob.glob(root + "/**/*stablehlo*.so", recursive=True)
+              print("found .so:", sos)
+              for so in sos:
+                  print("=== ldd", so, "===")
+                  subprocess.run(["ldd", so])
+              print("=== try import ===")
+              try:
+                 import jax
+                 import jaxlib._stablehlo
+                 print("OK: stablehlo import succeeded")
+              except Exception as e:
+                 print("IMPORT FAILED:", repr(e))
+              PY
+
+
   run_benchmarks:
     name: Run TPU Raiden H2H Benchmarks
     uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@affd28b492f67c242afa8b119e590b25816b7b88
