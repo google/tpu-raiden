@@ -1,0 +1,106 @@
+# proto-file: https://github.com/google-ml-infra/actions/blob/main/benchmarking/proto/benchmark_registry.proto
+# proto-message: BenchmarkSuite
+
+benchmarks {
+  name: "tpu_raiden_h2d_d2h_perf_test_fp32"
+  description: "FP32 Performance Test for TPU Raiden local H2D and D2H offloading/reloading"
+  owner: "raiden-dev"
+
+  workload {
+    action: "./ml_actions/actions/workload_executors/bazel"
+    action_inputs { key: "target" value: "//tpu_raiden/benchmarks:multi_host_perf_test_oss" }
+    # Flags passed to the test runner (avoid hardcoding role/peer for multi-host dynamic execution)
+    action_inputs { key: "runtime_flags" value: "--num_blocks=512 --num_layers=8 --parallelism=1 --dtype=float32 --warmup=5 --iters=100" }
+  }
+
+  environment_configs {
+    id: "tpu-v5e-single-node"
+    runner_label: "linux-x86-ct5lp-224-8tpu"
+    container_image: "us-docker.pkg.dev/ml-oss-artifacts-transient/ml-public-testing-container/ml-build:939285342"
+    workload_action_inputs { key: "bazel_run_flags" value: "-c opt" }   
+  }
+
+  metrics {
+    name: "d2h_time_sec"
+    unit: "s"
+    stats {
+      stat: MEAN
+    }
+  }
+
+  metrics {
+    name: "h2d_time_sec"
+    unit: "s"
+    stats {
+      stat: MEAN
+    }
+  }
+
+  metrics {
+    name: "d2h_throughput_gbps"
+    unit: "Gbps"
+    stats {
+      stat: MEAN
+    }
+  }
+
+  metrics {
+    name: "h2d_throughput_gbps"
+    unit: "Gbps"
+    stats {
+      stat: MEAN
+    }
+  }
+}
+
+benchmarks {
+  name: "tpu_raiden_h2d_d2h_perf_test_bf16"
+  description: "BF16 Performance Test for TPU Raiden local H2D and D2H offloading/reloading"
+  owner: "raiden-dev"
+
+  workload {
+    action: "./ml_actions/actions/workload_executors/bazel"
+    action_inputs { key: "target" value: "//tpu_raiden/benchmarks:multi_host_perf_test_oss" }
+    # Flags passed to the test runner (avoid hardcoding role/peer for multi-host dynamic execution)
+    action_inputs { key: "runtime_flags" value: "--num_blocks=512 --num_layers=8 --parallelism=1 --dtype=bfloat16 --warmup=5 --iters=100" }
+  }
+
+  environment_configs {
+    id: "tpu-v5e-single-node"
+    runner_label: "linux-x86-ct5lp-224-8tpu"
+    container_image: "us-docker.pkg.dev/ml-oss-artifacts-transient/ml-public-testing-container/ml-build:939285342"
+    workload_action_inputs { key: "bazel_run_flags" value: "-c opt" } 
+  }
+
+  metrics {
+    name: "d2h_time_sec"
+    unit: "s"
+    stats {
+      stat: MEAN
+    }
+  }
+
+  metrics {
+    name: "h2d_time_sec"
+    unit: "s"
+    stats {
+      stat: MEAN
+    }
+  }
+
+  metrics {
+    name: "d2h_throughput_gbps"
+    unit: "Gbps"
+    stats {
+      stat: MEAN
+    }
+  }
+
+  metrics {
+    name: "h2d_throughput_gbps"
+    unit: "Gbps"
+    stats {
+      stat: MEAN
+    }
+  }
+}
