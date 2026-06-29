@@ -22,6 +22,7 @@ on:
       - main
       - fix/benchmark_debug
       - V2
+      - V3
 
   schedule:
     - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
