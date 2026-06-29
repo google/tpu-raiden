@@ -30,3 +30,13 @@ py_binary(
         "@pypi//numpy",
     ],
 )
+
+py_binary(
+    name = "debug_stablehlo",
+    testonly = True,
+    srcs = ["debug_stablehlo.py"],
+    deps = [
+        "@jax//jax",
+        # "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
+    ],
+)
