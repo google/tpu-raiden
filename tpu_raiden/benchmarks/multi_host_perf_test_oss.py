@@ -135,6 +135,17 @@ def verify_device_cache(tpu_cache) -> bool:
   )
   return True
 
+def summarize(values):
+  a = np.array(values, dtype=float)
+  return {
+      'min':    float(a.min()),
+      'p50':    float(np.median(a)),
+      'mean':   float(a.mean()),
+      'p90':    float(np.percentile(a, 90)),
+      'p99':    float(np.percentile(a, 99)),
+      'max':    float(a.max()),   
+      'stddev': float(a.std(ddof=1)) if len(a) > 1 else 0.0,
+  }
 
 def main(_):
   process_id = jax.process_index()
@@ -159,11 +170,13 @@ def main(_):
   target_dtype = dtype_map.get(_DTYPE.value, jnp.float32)
   print(f'[Process {process_id}] Selected benchmark data type: {_DTYPE.value}')
 
-  base = jnp.arange(np.prod(cache_shape), dtype=target_dtype).reshape(
-      cache_shape
-  )
-  tpu_cache = jax.device_put(base, tpu_sharding)
-  jax.block_until_ready(tpu_cache)
+  caches = []
+  for _ in range(_NUM_LAYERS.value):
+    base = jnp.arange(np.prod(cache_shape), dtype=target_dtype).reshape(
+        cache_shape
+    )
+    caches.append(jax.device_put(base, tpu_sharding))
+  jax.block_until_ready(caches)
 
   num_processes = jax.process_count()
   local_blocks = (
@@ -178,7 +191,7 @@ def main(_):
       f' buffers for {half_blocks} blocks...'
   )
   manager = kv_cache_manager.KVCacheManager(
-      device_arrays=[tpu_cache],
+      device_arrays=caches, 
       host_blocks_to_allocate=half_blocks,
       unsafe_skip_buffer_lock=True,
       parallelism=_PARALLELISM.value,
@@ -274,7 +287,7 @@ def main(_):
   print(f'[Process {process_id}] H2D Individual times: {h2d_times}')
 
   # 5. Step C: Verify on device that blocks 256:512 match blocks 0:256
-  success = verify_device_cache(tpu_cache)
+  success = all(verify_device_cache(c) for c in caches)
   if not success:
     sys.exit(1)
 
@@ -289,9 +302,15 @@ def main(_):
     # Save raw times to artifacts directory for detailed analysis
     artifact_dir = os.environ.get('WORKLOAD_ARTIFACTS_DIR')
     if artifact_dir:
+      d2h_gbps_all = [(transferred_bytes_total * 8) / (t * 1e9) for t in d2h_times]
+      h2d_gbps_all = [(transferred_bytes_total * 8) / (t * 1e9) for t in h2d_times]
       raw_results = {
           'd2h_times_sec': d2h_times,
           'h2d_times_sec': h2d_times,
+          'd2h_gbps_all': d2h_gbps_all,           
+          'h2d_gbps_all': h2d_gbps_all,
+          'd2h_gbps_summary': summarize(d2h_gbps_all),   # ← min/p50/mean/p90/p99/max/stddev
+          'h2d_gbps_summary': summarize(h2d_gbps_all),
           'd2h_time_mean': d2h_time_mean,
           'h2d_time_mean': h2d_time_mean,
           'transferred_bytes_total': transferred_bytes_total,
