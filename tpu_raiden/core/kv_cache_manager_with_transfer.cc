@@ -84,6 +84,21 @@
 namespace tpu_raiden {
 namespace {
 
+bool EncodeIp(const std::string& ip_str, uint8_t* dst) {
+  if (inet_pton(AF_INET6, ip_str.c_str(), dst) > 0) {
+    return true;
+  }
+  struct in_addr ipv4_addr;
+  if (inet_pton(AF_INET, ip_str.c_str(), &ipv4_addr) > 0) {
+    std::memset(dst, 0, 10);
+    dst[10] = 0xff;
+    dst[11] = 0xff;
+    std::memcpy(dst + 12, &ipv4_addr, 4);
+    return true;
+  }
+  return false;
+}
+
 constexpr absl::Duration kPendingWorkTimeout = absl::Seconds(30);
 
 [[noreturn]] void ThrowStatus(const std::string& context,
@@ -669,11 +684,14 @@ KVCacheManagerWithTransfer::get_local_endpoints() const {
   }
   int64_t port =
       local_control_port_ > 0 ? local_control_port_ : local_port().value_or(0);
-  std::string ip = local_ip();
-  std::string endpoint = absl::StrContains(ip, ':')
-                             ? absl::StrCat("[", ip, "]:", port)
-                             : absl::StrCat(ip, ":", port);
-  return {{endpoint, all_shards}};
+  std::vector<EndpointDescriptor> eps;
+  for (const auto& ip : local_ips()) {
+    std::string endpoint = absl::StrContains(ip, ':')
+                               ? absl::StrCat("[", ip, "]:", port)
+                               : absl::StrCat(ip, ":", port);
+    eps.push_back({endpoint, all_shards});
+  }
+  return eps;
 }
 
 bool KVCacheManagerWithTransfer::EncodeIpToIpv6Bytes(const std::string& ip,
@@ -717,10 +735,9 @@ void KVCacheManagerWithTransfer::StartRead(
   // / single endpoint. Multi-endpoint routing across sockets is orchestrated by
   // the JAX facade.
   if (remote_descriptors.size() != 1) {
-    LOG(WARNING) << "KVCacheManagerWithTransfer::StartRead expected 1 remote "
-                    "descriptor, got "
-                 << remote_descriptors.size()
-                 << ". Picking the first endpoint.";
+    VLOG(1) << "KVCacheManagerWithTransfer::StartRead received "
+            << remote_descriptors.size()
+            << " descriptors, selecting first endpoint.";
   }
   StartRead(req_id, uuid, remote_descriptors[0].endpoint, remote_block_ids,
             local_block_ids, parallelism, local_host_block_ids);
@@ -821,14 +838,19 @@ void KVCacheManagerWithTransfer::StartRead(
       stream_request.magic = kControlMagic;
       stream_request.op = kOpPullStream;
       stream_request.uuid = uuid;
+      stream_request.ep_idx = 0;
       stream_request.num_blocks = static_cast<uint64_t>(load_plan.num_blocks);
       stream_request.consumer_data_port =
           static_cast<uint32_t>(local_data_port_);
-      std::string bound_ip = local_ip();
-      // If IPv4 then send convert to IPv4-mapped IPv6;
-      // On parse failure the helper zeroes consumer_ip and the producer falls
-      // back to getpeername()
-      EncodeIpToIpv6Bytes(bound_ip, stream_request.consumer_ip);
+
+      std::vector<std::string> ips = local_ips();
+      stream_request.num_ips =
+          std::min(ips.size(), static_cast<size_t>(kMaxNics));
+      for (size_t i = 0; i < stream_request.num_ips; ++i) {
+        if (!EncodeIp(ips[i], stream_request.consumer_ips[i])) {
+          std::memset(stream_request.consumer_ips[i], 0, 16);
+        }
+      }
       CheckStatus(
           "control pull stream write",
           WriteExact(control_fd, &stream_request, sizeof(stream_request)));
@@ -884,7 +906,8 @@ KVCacheManagerWithTransfer::CompleteReadRaw() {
     for (auto it = active_recv_entries_.begin();
          it != active_recv_entries_.end();) {
       auto& entry = it->second;
-      if (entry.num_completed_layers == num_layers()) {
+      if (entry.network_completed ||
+          entry.num_completed_layers == num_layers()) {
         bool all_h2d_done = true;
         for (auto& f : entry.h2d_futures) {
           if (!f.IsReady()) {
@@ -1316,48 +1339,85 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
   CheckStatus("control stream response header write",
               WriteExact(fd, &response, sizeof(response)));
 
-  bool ip_is_empty = true;
-  for (int i = 0; i < 16; ++i) {
-    if (req.consumer_ip[i] != 0) {
-      ip_is_empty = false;
-      break;
+  std::vector<std::string> peer_ips;
+  if (req.num_ips > 0) {
+    for (uint32_t i = 0;
+         i < std::min(req.num_ips, static_cast<uint32_t>(kMaxNics)); ++i) {
+      char ip_str[INET6_ADDRSTRLEN];
+      bool is_ipv4_mapped = true;
+      for (int j = 0; j < 10; ++j) {
+        if (req.consumer_ips[i][j] != 0) {
+          is_ipv4_mapped = false;
+          break;
+        }
+      }
+      if (req.consumer_ips[i][10] != 0xff || req.consumer_ips[i][11] != 0xff) {
+        is_ipv4_mapped = false;
+      }
+
+      if (is_ipv4_mapped) {
+        struct in_addr ipv4_addr;
+        std::memcpy(&ipv4_addr, req.consumer_ips[i] + 12, 4);
+        if (inet_ntop(AF_INET, &ipv4_addr, ip_str, sizeof(ip_str)) != nullptr) {
+          peer_ips.push_back(ip_str);
+        }
+      } else {
+        if (inet_ntop(AF_INET6, req.consumer_ips[i], ip_str, sizeof(ip_str)) !=
+            nullptr) {
+          peer_ips.push_back(ip_str);
+        }
+      }
     }
   }
 
-  std::string peer_ip;
-  if (!ip_is_empty) {
-    char ip_str[INET6_ADDRSTRLEN];
-    if (inet_ntop(AF_INET6, req.consumer_ip, ip_str, sizeof(ip_str)) !=
-        nullptr) {
-      peer_ip = ip_str;
-    }
-  }
-  if (peer_ip.empty()) {
-    peer_ip = GetPeerIp(fd);
+  if (peer_ips.empty() && req.num_ips == 0) {
+    LOG(WARNING) << "No consumer IPs specified in ControlRequestHeader.";
   }
 
-  std::string remote_data_endpoint;
-  if (absl::StrContains(peer_ip, ':')) {
-    remote_data_endpoint =
-        "[" + peer_ip + "]:" + std::to_string(req.consumer_data_port);
-  } else {
-    remote_data_endpoint =
-        peer_ip + ":" + std::to_string(req.consumer_data_port);
+  if (peer_ips.empty()) {
+    std::string peer_ip = GetPeerIp(fd);
+    if (!peer_ip.empty()) {
+      peer_ips.push_back(peer_ip);
+    }
+  }
+
+  std::vector<std::string> remote_data_endpoints;
+  for (const auto& peer_ip : peer_ips) {
+    if (absl::StrContains(peer_ip, ':')) {
+      remote_data_endpoints.push_back(
+          "[" + peer_ip + "]:" + std::to_string(req.consumer_data_port));
+    } else {
+      remote_data_endpoints.push_back(peer_ip + ":" +
+                                      std::to_string(req.consumer_data_port));
+    }
   }
 
   VLOG(1) << "ProcessPullStream (Hybrid Bridge) successfully acknowledged "
              "consumer. Intercepting and launching StartPushInternal to "
-          << remote_data_endpoint;
+          << (remote_data_endpoints.empty() ? "" : remote_data_endpoints[0])
+          << (remote_data_endpoints.size() > 1 ? " and others" : "");
 
-  // Intercept and Execute Hybrid Push on behalf of remote consumer!
-  std::thread([this, uuid = req.uuid, remote_data_endpoint, src_block_ids,
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = send_entries_.find(req.uuid);
+    if (it != send_entries_.end()) {
+      if (it->second->pull_started) {
+        VLOG(1) << "StartPushInternal already running for UUID: " << req.uuid;
+        return;
+      }
+      it->second->pull_started = true;
+    }
+  }
+
+  std::thread([this, uuid = req.uuid, remote_data_endpoints, src_block_ids,
                dst_block_ids]() {
-    StartPushInternal(uuid, remote_data_endpoint, src_block_ids, dst_block_ids);
+    StartPushInternal(uuid, remote_data_endpoints, src_block_ids,
+                      dst_block_ids);
   }).detach();
 }
 
 void KVCacheManagerWithTransfer::StartPushInternal(
-    uint64_t uuid, const std::string& remote_data_endpoint,
+    uint64_t uuid, const std::vector<std::string>& remote_data_endpoints,
     const std::vector<int64_t>& src_block_ids,
     const std::vector<int64_t>& dst_block_ids) {
   // Stage the producer's device KV into a host slot (slot.block_ids) and send
@@ -1432,7 +1492,7 @@ void KVCacheManagerWithTransfer::StartPushInternal(
     entry->d2h_layer_futures.push_back(std::move(future_or.value()));
   }
 
-  entry->remote_data_endpoint = remote_data_endpoint;
+  entry->remote_data_endpoints = remote_data_endpoints;
   entry->src_ints.assign(host_block_ids.begin(), host_block_ids.end());
   entry->dst_ints.assign(dst_block_ids.begin(), dst_block_ids.end());
   entry->remaining_h2h_layers.store(num_layers());
@@ -1484,9 +1544,8 @@ void KVCacheManagerWithTransfer::SendNextLayer(uint64_t uuid, size_t l) {
       LOG(INFO) << "StartPushInternal (H2H start layer " << l
                 << "): uuid=" << uuid
                 << ", numa=" << assigned_numa_node().value_or(-1);
-
       H2hWriteDirectAsync(
-          entry->remote_data_endpoint, entry->src_ints, entry->dst_ints, uuid,
+          entry->remote_data_endpoints, entry->src_ints, entry->dst_ints, uuid,
           l, [this, uuid, l](absl::StatusOr<std::vector<int>> push_res) {
             std::shared_ptr<SendEntry> entry;
             {
@@ -1502,9 +1561,12 @@ void KVCacheManagerWithTransfer::SendNextLayer(uint64_t uuid, size_t l) {
               LOG(ERROR) << "H2hWrite failed for layer " << l << ": "
                          << push_res.status().ToString();
               std::lock_guard<std::mutex> lock(mu_);
-              done_sending_.insert(entry->req_id);
-              ReleaseEntrySlotLocked(entry);
-              send_entries_.erase(uuid);
+              auto it = send_entries_.find(uuid);
+              if (it != send_entries_.end()) {
+                done_sending_.insert(entry->req_id);
+                ReleaseEntrySlotLocked(entry);
+                send_entries_.erase(it);
+              }
               return;
             }
 
@@ -1516,9 +1578,12 @@ void KVCacheManagerWithTransfer::SendNextLayer(uint64_t uuid, size_t l) {
               LOG(INFO) << "StartPushInternal (All H2H complete): uuid="
                         << uuid;
               std::lock_guard<std::mutex> lock(mu_);
-              done_sending_.insert(entry->req_id);
-              ReleaseEntrySlotLocked(entry);
-              send_entries_.erase(uuid);
+              auto it = send_entries_.find(uuid);
+              if (it != send_entries_.end()) {
+                done_sending_.insert(entry->req_id);
+                ReleaseEntrySlotLocked(entry);
+                send_entries_.erase(it);
+              }
             }
           });
 
@@ -1568,6 +1633,7 @@ void KVCacheManagerWithTransfer::AckRemote(const std::string& remote_endpoint,
   stream_request.magic = kControlMagic;
   stream_request.op = kOpPullStream;
   stream_request.uuid = uuid;
+  stream_request.ep_idx = 0;
   stream_request.num_blocks = 0;
   CheckStatus("control pull stream write (empty)",
               WriteExact(control_fd, &stream_request, sizeof(stream_request)));
@@ -1796,15 +1862,13 @@ absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,
         if (metrics_collector) {
           metrics_collector->RecordH2dComplete(uuid);
         }
-        if (entry.network_completed) {
-          LOG(INFO) << "All layers H2D copy complete: req_id=" << req_id;
-          if (metrics_collector) {
-            metrics_collector->RecordEnd(uuid);
-          }
-          done_recving_.insert(req_id);
-          ReleaseSlotLocked(recv_slot);
-          active_recv_entries_.erase(uuid);
+        LOG(INFO) << "All layers H2D copy complete: req_id=" << req_id;
+        if (metrics_collector) {
+          metrics_collector->RecordEnd(uuid);
         }
+        done_recving_.insert(req_id);
+        ReleaseSlotLocked(recv_slot);
+        active_recv_entries_.erase(uuid);
       }
     } else {
       LOG(ERROR) << "OnLayerReceived (H2D copy failed) layer " << layer_idx

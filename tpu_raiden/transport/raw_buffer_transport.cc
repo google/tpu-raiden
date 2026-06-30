@@ -104,40 +104,39 @@ absl::Status RawBufferTransport::ReadExact(int fd, void* buffer,
   return absl::OkStatus();
 }
 
-RawBufferTransport::RawBufferTransport(RawBufferTransportDelegate* delegate,
-                                       int local_port, bool enable_conn_pool,
-                                       std::optional<std::string> bind_ip)
+RawBufferTransport::RawBufferTransport(
+    RawBufferTransportDelegate* delegate, int local_port, bool enable_conn_pool,
+    const std::vector<std::string>& local_ips)
     : raw_delegate_(delegate),
       local_port_(local_port),
-      bound_ip_(bind_ip.value_or("127.0.0.1")),
+      bound_ip_(local_ips.empty() ? "127.0.0.1" : local_ips[0]),
+      local_ips_(local_ips),
       pooling_enabled_(enable_conn_pool) {
-  // 1. Setup server_fd_
-  bool bind_specified = bind_ip.has_value();
-  bool is_ipv4 = bind_specified && (absl::StrContains(*bind_ip, '.'));
-  server_fd_ = socket(is_ipv4 ? AF_INET : AF_INET6, SOCK_STREAM, 0);
+  // 1. Setup server_fd_ (Always use IPv6 wildcard to listen on all interfaces)
+  server_fd_ = socket(AF_INET6, SOCK_STREAM, 0);
   if (server_fd_ < 0) {
-    throw std::runtime_error("Failed to create server socket: " +
-                             std::string(std::strerror(errno)));
-  }
-  int opt = 1;
-  if (setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-    throw std::runtime_error("Failed to set SO_REUSEADDR: " +
-                             std::string(std::strerror(errno)));
-  }
-
-  if (is_ipv4) {
+    // Fallback to IPv4 wildcard if IPv6 is not supported
+    server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd_ < 0) {
+      throw std::runtime_error("Failed to create server socket: " +
+                               std::string(std::strerror(errno)));
+    }
+    int opt = 1;
+    if (setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) <
+        0) {
+      throw std::runtime_error("Failed to set SO_REUSEADDR: " +
+                               std::string(std::strerror(errno)));
+    }
     struct sockaddr_in serv_addr;
     std::memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin_family = AF_INET;
+    serv_addr.sin_addr.s_addr = INADDR_ANY;
     serv_addr.sin_port = htons(local_port_);
-    if (inet_pton(AF_INET, bound_ip_.c_str(), &serv_addr.sin_addr) <= 0) {
-      serv_addr.sin_addr.s_addr = INADDR_ANY;
-    }
     if (bind(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
              sizeof(serv_addr)) < 0) {
-      throw std::runtime_error("Failed to bind IPv4 server socket to " +
-                               bound_ip_ + ":" + std::to_string(local_port_) +
-                               ": " + std::strerror(errno));
+      throw std::runtime_error(
+          "Failed to bind IPv4 server socket to wildcard:" +
+          std::to_string(local_port_) + ": " + std::strerror(errno));
     }
     socklen_t addr_len = sizeof(serv_addr);
     if (getsockname(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
@@ -145,24 +144,27 @@ RawBufferTransport::RawBufferTransport(RawBufferTransportDelegate* delegate,
       local_port_ = ntohs(serv_addr.sin_port);
     }
   } else {
+    int opt = 1;
+    if (setsockopt(server_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) <
+        0) {
+      throw std::runtime_error("Failed to set SO_REUSEADDR: " +
+                               std::string(std::strerror(errno)));
+    }
+    int v6only = 0;
+    if (setsockopt(server_fd_, IPPROTO_IPV6, IPV6_V6ONLY, &v6only,
+                   sizeof(v6only)) < 0) {
+      LOG(WARNING) << "Failed to set IPV6_V6ONLY=0: " << std::strerror(errno);
+    }
     struct sockaddr_in6 serv_addr;
     std::memset(&serv_addr, 0, sizeof(serv_addr));
     serv_addr.sin6_family = AF_INET6;
     serv_addr.sin6_addr = in6addr_any;
     serv_addr.sin6_port = htons(local_port_);
-
-    // If a specific IPv6 address was requested, try to parse and bind to it
-    if (bind_specified && !is_ipv4) {
-      if (inet_pton(AF_INET6, bound_ip_.c_str(), &serv_addr.sin6_addr) <= 0) {
-        serv_addr.sin6_addr = in6addr_any;
-      }
-    }
-
     if (bind(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
              sizeof(serv_addr)) < 0) {
-      throw std::runtime_error("Failed to bind IPv6 server socket to " +
-                               bound_ip_ + ":" + std::to_string(local_port_) +
-                               ": " + std::strerror(errno));
+      throw std::runtime_error(
+          "Failed to bind IPv6 server socket to wildcard:" +
+          std::to_string(local_port_) + ": " + std::strerror(errno));
     }
     socklen_t addr_len = sizeof(serv_addr);
     if (getsockname(server_fd_, reinterpret_cast<struct sockaddr*>(&serv_addr),
@@ -204,7 +206,13 @@ RawBufferTransport::~RawBufferTransport() {
   }
 }
 
-absl::StatusOr<int> RawBufferTransport::ConnectToPeer(absl::string_view peer) {
+static std::string GetPoolKey(absl::string_view peer,
+                              absl::string_view local_ip) {
+  return absl::StrCat(local_ip, "->", peer);
+}
+
+absl::StatusOr<int> RawBufferTransport::ConnectToPeer(
+    absl::string_view peer, absl::string_view local_ip) {
   std::string host;
   std::string port_str;
 
@@ -255,24 +263,21 @@ absl::StatusOr<int> RawBufferTransport::ConnectToPeer(absl::string_view peer) {
     setsockopt(sock_fd, SOL_SOCKET, SO_SNDBUF, &buf_opt, sizeof(buf_opt));
     setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, &buf_opt, sizeof(buf_opt));
 
-    bool should_bind = true;
-    if (bound_ip_ == "127.0.0.1" || bound_ip_ == "::1" ||
-        bound_ip_ == "0.0.0.0" || bound_ip_ == "::" ||
-        absl::StartsWith(bound_ip_, "127.")) {
-      should_bind = false;
-    }
+    bool should_bind =
+        !local_ip.empty() && local_ip != "0.0.0.0" && local_ip != "::";
 
     if (should_bind) {
-      bool is_ipv6 = absl::StrContains(bound_ip_, ':');
+      bool is_ipv6 = absl::StrContains(local_ip, ':');
       if (is_ipv6 && rp->ai_family == AF_INET6) {
         struct sockaddr_in6 local_addr;
         std::memset(&local_addr, 0, sizeof(local_addr));
         local_addr.sin6_family = AF_INET6;
-        if (inet_pton(AF_INET6, bound_ip_.c_str(), &local_addr.sin6_addr) > 0) {
+        if (inet_pton(AF_INET6, std::string(local_ip).c_str(),
+                      &local_addr.sin6_addr) > 0) {
           local_addr.sin6_port = 0;
           if (bind(sock_fd, (struct sockaddr*)&local_addr, sizeof(local_addr)) <
               0) {
-            LOG(WARNING) << "Client bind IPv6 failed to " << bound_ip_ << ": "
+            LOG(WARNING) << "Client bind IPv6 failed to " << local_ip << ": "
                          << std::strerror(errno);
           }
         }
@@ -280,11 +285,12 @@ absl::StatusOr<int> RawBufferTransport::ConnectToPeer(absl::string_view peer) {
         struct sockaddr_in local_addr;
         std::memset(&local_addr, 0, sizeof(local_addr));
         local_addr.sin_family = AF_INET;
-        if (inet_pton(AF_INET, bound_ip_.c_str(), &local_addr.sin_addr) > 0) {
+        if (inet_pton(AF_INET, std::string(local_ip).c_str(),
+                      &local_addr.sin_addr) > 0) {
           local_addr.sin_port = 0;
           if (bind(sock_fd, (struct sockaddr*)&local_addr, sizeof(local_addr)) <
               0) {
-            LOG(WARNING) << "Client bind IPv4 failed to " << bound_ip_ << ": "
+            LOG(WARNING) << "Client bind IPv4 failed to " << local_ip << ": "
                          << std::strerror(errno);
           }
         }
@@ -311,10 +317,11 @@ absl::StatusOr<int> RawBufferTransport::ConnectToPeer(absl::string_view peer) {
 }
 
 absl::StatusOr<int> RawBufferTransport::AcquireConnection(
-    absl::string_view peer) {
+    absl::string_view peer, absl::string_view local_ip) {
   if (pooling_enabled_) {
     absl::MutexLock lock( pool_mu_ );
-    auto it = conn_pool_.find(peer);
+    std::string key = GetPoolKey(peer, local_ip);
+    auto it = conn_pool_.find(key);
     if (it != conn_pool_.end()) {
       while (!it->second.empty()) {
         int fd = it->second.back();
@@ -332,10 +339,11 @@ absl::StatusOr<int> RawBufferTransport::AcquireConnection(
       }
     }
   }
-  return ConnectToPeer(peer);
+  return ConnectToPeer(peer, local_ip);
 }
 
-void RawBufferTransport::ReleaseConnection(absl::string_view peer, int fd) {
+void RawBufferTransport::ReleaseConnection(absl::string_view peer, int fd,
+                                           absl::string_view local_ip) {
   if (fd < 0) return;
   absl::MutexLock lock( pool_mu_ );
   if (!pooling_enabled_ || stopping_) {
@@ -343,9 +351,10 @@ void RawBufferTransport::ReleaseConnection(absl::string_view peer, int fd) {
     close(fd);
     return;
   }
-  auto it = conn_pool_.find(peer);
+  std::string key = GetPoolKey(peer, local_ip);
+  auto it = conn_pool_.find(key);
   if (it == conn_pool_.end()) {
-    it = conn_pool_.emplace(std::string(peer), std::vector<int>{}).first;
+    it = conn_pool_.emplace(key, std::vector<int>{}).first;
   }
   it->second.push_back(fd);
 }

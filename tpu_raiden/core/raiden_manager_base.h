@@ -50,18 +50,36 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
 
   // Direct C++ H2H network write (Push)
   absl::StatusOr<std::vector<int>> H2hWriteDirect(
-      absl::string_view peer, const std::vector<int>& src_block_ids,
+      const std::vector<std::string>& peers,
+      const std::vector<int>& src_block_ids,
       const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
       int layer_idx = -1);
 
   void H2hWriteDirectAsync(
-      absl::string_view peer, const std::vector<int>& src_block_ids,
+      const std::vector<std::string>& peers,
+      const std::vector<int>& src_block_ids,
       const std::vector<int>& dst_block_ids, uint64_t uuid, int layer_idx,
       std::function<void(absl::StatusOr<std::vector<int>>)> on_complete);
 
   // Direct C++ H2H network read (Pull)
   absl::StatusOr<std::vector<int>> H2hReadDirect(
-      absl::string_view peer, const std::vector<int>& src_block_ids);
+      const std::vector<std::string>& peers,
+      const std::vector<int>& src_block_ids);
+
+  // Backward-compatible overloads
+  absl::StatusOr<std::vector<int>> H2hWriteDirect(
+      absl::string_view peer, const std::vector<int>& src_block_ids,
+      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
+      int layer_idx = -1) {
+    return H2hWriteDirect(std::vector<std::string>{std::string(peer)},
+                          src_block_ids, dst_block_ids, uuid, layer_idx);
+  }
+
+  absl::StatusOr<std::vector<int>> H2hReadDirect(
+      absl::string_view peer, const std::vector<int>& src_block_ids) {
+    return H2hReadDirect(std::vector<std::string>{std::string(peer)},
+                         src_block_ids);
+  }
 
   absl::Status PullWeightsChunk(absl::string_view source, size_t src_shard_idx,
                                 size_t src_offset_bytes, size_t dst_shard_idx,
@@ -122,7 +140,6 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   std::vector<std::string> local_ips_;
 
   void InitTransportServer();
-  void ResolveLocalIpsLocked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(server_init_mu_);
   virtual std::vector<HostNicAddress> GetHostNics() const;
 
   void DetectAndAssignNumaNode(

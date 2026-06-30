@@ -417,18 +417,6 @@ NicClassification ClassifyNic(absl::string_view bdf, int mtu) {
   return NicClassification::kControlPlane;
 }
 
-std::string ClassificationToString(NicClassification classification) {
-  switch (classification) {
-    case NicClassification::kDataPlane:
-      return "Data Interface";
-    case NicClassification::kControlPlane:
-      return "Control/Fallback Interface";
-    case NicClassification::kUnknown:
-      return "Unknown Interface";
-  }
-  return "Unknown Interface";
-}
-
 }  // namespace
 
 namespace internal {
@@ -511,14 +499,6 @@ std::vector<HostNicAddress> GetLocalHostNicAddressesInternal(
     } else {
       nics.push_back({"lo", "::1", -1, NicClassification::kControlPlane});
     }
-  }
-  for (const auto& nic : nics) {
-    std::string bdf = GetInterfaceBdf(nic.interface_name, sysfs_root);
-    int mtu = GetInterfaceMtu(nic.interface_name, sysfs_root);
-    LOG(INFO) << "Detected interface: " << nic.interface_name
-              << ", BDF: " << (bdf.empty() ? "None" : bdf) << ", MTU: " << mtu
-              << ", NUMA: " << nic.numa_node << ", Classification: "
-              << ClassificationToString(nic.classification);
   }
   return nics;
 }

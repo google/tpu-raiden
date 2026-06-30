@@ -185,7 +185,15 @@ Tested on v7x two-node cluster, block size 2MB.
 
 ### End-to-End (E2E) KV Cache Transfer Bandwidth (Device-to-Device over NIC)**
 
-We measured the end-to-end performance of transfers originating and terminating on the accelerator devices (e.g., using JAX). This includes the overhead of copying data between the device and the host, as well as the network transport between sender and receiver, which is effectively the `start_send` until the blocks are received. We evaluated the impact of NUMA awareness by comparing the default behavior (single NUMA node restriction enabled, which restricts transfers to a single NUMA node/NIC) against disabling this restriction (allowing multi-NIC utilization: `DISABLE_SINGLE_NUMA=1`).
+We measured the end-to-end performance of transfers originating and terminating on the accelerator devices (e.g., using JAX). This includes the overhead of copying data between the device and the host, as well as the network transport between sender and receiver, which is effectively the `start_send` until the blocks are received. We evaluated the impact of NUMA awareness by comparing the default behavior (multi-NIC enabled) against restricting transfers to a single NUMA node/NIC (`DISABLE_MULTI_NUMA=1`).
+
+#### System & Host Network Tuning Prerequisites
+
+Achieving peak throughput relies on host-level networking optimizations:
+
+- Enabling multi-queue packet steering (e.g. configuring 16 queues on high-speed data interfaces) to distribute RX/TX interrupt handling across CPU cores.
+- Tuning host TCP socket memory buffers (increasing send/receive buffer maximums and window sizes).
+- Ensuring MTU and Reverse Path Filtering (`rp_filter`) are appropriately configured for multi-interface striping.
 
 #### Performance Results (Gbps)
 
