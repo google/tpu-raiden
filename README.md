@@ -57,23 +57,17 @@ sudo apt-get install -y patchelf
 
 If you are a Googler, you can install the pre-built `tpu_raiden` wheel directly from our Google Artifact Registry.
 
-1. Authenticate with gcloud:
-   ```bash
-   gcloud auth login
-   ```
-2. Install the Artifact Registry keyring helper to enable authenticated pip downloads:
+1. Install the Artifact Registry keyring helper to enable authenticated pip downloads:
    ```bash
    pip install keyrings.google-artifactregistry-auth
    ```
-3. Install the framework-specific wheel:
+2. Install the framework-specific wheel:
    * **For JAX version:**
      ```bash
      pip install tpu-raiden-jax --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/
      ```
    * **For PyTorch version:**
-     ```bash
-     pip install tpu-raiden-torch --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/
-     ```
+     Torch specific wheel will be published soon.
 
 ### Option 2: Building from source
 
