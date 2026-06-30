@@ -14,6 +14,16 @@
 
 #include "tpu_raiden/core/tpu_utils.h"
 
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
+#include <algorithm>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <string>
 #include <vector>
 
 #include "xla/pjrt/pjrt_client.h"
@@ -124,6 +134,120 @@ TEST(TpuUtilsTest, GetInterfaceNumaNodeTest) {
   EXPECT_EQ(GetInterfaceNumaNode("ens6"), 1);
   EXPECT_EQ(GetInterfaceNumaNode("eth2"), 1);
   EXPECT_EQ(GetInterfaceNumaNode("unknown_interface"), -1);
+}
+
+// Helper to create a mock sockaddr_in
+sockaddr_in CreateSockAddr(const std::string& ip) {
+  sockaddr_in addr;
+  std::memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
+  return addr;
+}
+
+TEST(TpuUtilsTest, GetLocalHostNicAddresses_MultiNic_Classification) {
+  namespace fs = std::filesystem;
+  std::string temp_dir_str = testing::TempDir();
+  fs::path sysfs = fs::path(temp_dir_str) / "mock_sysfs";
+  fs::remove_all(sysfs);  // Clean up if left over
+
+  // Create directory structure
+  fs::create_directories(sysfs / "class/net/eth0");
+  fs::create_directories(sysfs / "class/net/eth1");
+  fs::create_directories(sysfs / "class/net/eth2");
+  fs::create_directories(sysfs / "devices/system/node/node0");
+  fs::create_directories(sysfs / "devices/system/node/node1");
+  fs::create_directories(sysfs / "devices/pci0000:00/0000:00:01.0");
+  fs::create_directories(sysfs / "devices/pci0000:00/0000:00:02.0");
+
+  // Create BDF symlinks
+  fs::create_directory_symlink("../../../devices/pci0000:00/0000:00:01.0",
+                               sysfs / "class/net/eth1/device");
+  fs::create_directory_symlink("../../../devices/pci0000:00/0000:00:02.0",
+                               sysfs / "class/net/eth2/device");
+
+  // Write NUMA nodes
+  {
+    std::ofstream f(sysfs / "devices/pci0000:00/0000:00:01.0/numa_node");
+    f << "-1\n";
+  }
+  {
+    std::ofstream f(sysfs / "devices/pci0000:00/0000:00:02.0/numa_node");
+    f << "-1\n";
+  }
+
+  // Write MTUs
+  {
+    std::ofstream f(sysfs / "class/net/eth0/mtu");
+    f << "1500\n";
+  }
+  {
+    std::ofstream f(sysfs / "class/net/eth1/mtu");
+    f << "9000\n";
+  }
+  {
+    std::ofstream f(sysfs / "class/net/eth2/mtu");
+    f << "9000\n";
+  }
+
+  // Construct mock ifaddrs
+  sockaddr_in addr_lo = CreateSockAddr("127.0.0.1");
+  sockaddr_in addr_eth0 = CreateSockAddr("10.0.0.1");
+  sockaddr_in addr_eth1 = CreateSockAddr("10.0.0.2");
+  sockaddr_in addr_eth2 = CreateSockAddr("10.0.0.3");
+
+  ifaddrs ifa_eth2 = {nullptr, const_cast<char*>("eth2"),
+                      0,       reinterpret_cast<sockaddr*>(&addr_eth2),
+                      nullptr, {nullptr},
+                      nullptr};
+  ifaddrs ifa_eth1 = {&ifa_eth2, const_cast<char*>("eth1"),
+                      0,         reinterpret_cast<sockaddr*>(&addr_eth1),
+                      nullptr,   {nullptr},
+                      nullptr};
+  ifaddrs ifa_eth0 = {&ifa_eth1, const_cast<char*>("eth0"),
+                      0,         reinterpret_cast<sockaddr*>(&addr_eth0),
+                      nullptr,   {nullptr},
+                      nullptr};
+  ifaddrs ifa_lo = {&ifa_eth0, const_cast<char*>("lo"),
+                    0,         reinterpret_cast<sockaddr*>(&addr_lo),
+                    nullptr,   {nullptr},
+                    nullptr};
+
+  // Call the internal function
+  auto nics =
+      internal::GetLocalHostNicAddressesInternal(&ifa_lo, sysfs.string());
+
+  // We expect 3 NICs (lo is filtered)
+  ASSERT_EQ(nics.size(), 3);
+
+  // eth0: Control
+  auto it_eth0 = std::find_if(
+      nics.begin(), nics.end(),
+      [](const HostNicAddress& n) { return n.interface_name == "eth0"; });
+  ASSERT_NE(it_eth0, nics.end());
+  EXPECT_EQ(it_eth0->ip_address, "10.0.0.1");
+  EXPECT_EQ(it_eth0->classification, NicClassification::kControlPlane);
+
+  // eth1: Data, NUMA 0 (heuristic)
+  auto it_eth1 = std::find_if(
+      nics.begin(), nics.end(),
+      [](const HostNicAddress& n) { return n.interface_name == "eth1"; });
+  ASSERT_NE(it_eth1, nics.end());
+  EXPECT_EQ(it_eth1->ip_address, "10.0.0.2");
+  EXPECT_EQ(it_eth1->classification, NicClassification::kDataPlane);
+  EXPECT_EQ(it_eth1->numa_node, 0);
+
+  // eth2: Data, NUMA 1 (heuristic)
+  auto it_eth2 = std::find_if(
+      nics.begin(), nics.end(),
+      [](const HostNicAddress& n) { return n.interface_name == "eth2"; });
+  ASSERT_NE(it_eth2, nics.end());
+  EXPECT_EQ(it_eth2->ip_address, "10.0.0.3");
+  EXPECT_EQ(it_eth2->classification, NicClassification::kDataPlane);
+  EXPECT_EQ(it_eth2->numa_node, 1);
+
+  // Clean up
+  fs::remove_all(sysfs);
 }
 
 }  // namespace

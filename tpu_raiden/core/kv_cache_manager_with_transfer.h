@@ -247,7 +247,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     bool slot_released = false;
     std::chrono::steady_clock::time_point deadline;
     std::vector<raiden::PjRtCopyFuture> d2h_layer_futures;
-    std::string remote_data_endpoint;
+    std::vector<std::string> remote_data_endpoints;
     std::vector<int> src_ints;
     std::vector<int> dst_ints;
     std::atomic<size_t> remaining_h2h_layers{0};
@@ -273,6 +273,8 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     uint64_t num_blocks = 0;
   };
 
+  static constexpr int kMaxNics = 8;
+
   struct alignas(8) ControlRequestHeader {
     uint32_t magic = 0x52414944;  // "RAID"
     uint32_t op = 0;
@@ -280,6 +282,8 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     uint64_t num_blocks = 0;
     uint32_t consumer_data_port = 0;
     uint8_t consumer_ip[16] = {0};
+    uint32_t num_ips = 0;
+    uint8_t consumer_ips[kMaxNics][16] = {{0}};
   };
 
   struct alignas(8) ControlResponseHeader {
@@ -351,7 +355,8 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
 
-  void StartPushInternal(uint64_t uuid, const std::string& remote_data_endpoint,
+  void StartPushInternal(uint64_t uuid,
+                         const std::vector<std::string>& remote_data_endpoints,
                          const std::vector<int64_t>& src_block_ids,
                          const std::vector<int64_t>& dst_block_ids);
   void SendNextLayer(uint64_t uuid, size_t l);

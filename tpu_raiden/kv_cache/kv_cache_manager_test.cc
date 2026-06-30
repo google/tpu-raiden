@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <vector>
 
@@ -37,10 +38,42 @@ class TestKVCacheManager : public KVCacheManagerBase {
       buffer_holds_[l].resize(num_shards);
     }
   }
+
+  size_t dma_pool_size() const { return dma_pool_->size(); }
+  size_t push_pool_size() const { return push_pool_->size(); }
+  size_t pull_pool_size() const { return pull_pool_->size(); }
 };
 
 TEST(KVCacheManagerTest, CompilesAndLinksSuccessfully) {
   EXPECT_TRUE(true);
+}
+
+TEST(KVCacheManagerTest, RespectsThreadPoolSizeEnvVar) {
+  const char* original_env = std::getenv("RAIDEN_THREAD_POOL_SIZE");
+  setenv("RAIDEN_THREAD_POOL_SIZE", "8", 1);
+  TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
+                             /*slice_byte_size=*/128);
+  EXPECT_EQ(manager.dma_pool_size(), 8);
+  EXPECT_EQ(manager.push_pool_size(), 8);
+  EXPECT_EQ(manager.pull_pool_size(), 8);
+  if (original_env) {
+    setenv("RAIDEN_THREAD_POOL_SIZE", original_env, 1);
+  } else {
+    unsetenv("RAIDEN_THREAD_POOL_SIZE");
+  }
+}
+
+TEST(KVCacheManagerTest, RespectsThreadPoolSizeEnvVarDefault) {
+  const char* original_env = std::getenv("RAIDEN_THREAD_POOL_SIZE");
+  unsetenv("RAIDEN_THREAD_POOL_SIZE");
+  TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
+                             /*slice_byte_size=*/128);
+  EXPECT_EQ(manager.dma_pool_size(), 4);
+  EXPECT_EQ(manager.push_pool_size(), 4);
+  EXPECT_EQ(manager.pull_pool_size(), 4);
+  if (original_env) {
+    setenv("RAIDEN_THREAD_POOL_SIZE", original_env, 1);
+  }
 }
 
 TEST(KVCacheManagerTest, D2hFailsWithMismatchedCopySpecLengths) {

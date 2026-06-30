@@ -64,6 +64,22 @@ class TestRaidenManager : public RaidenManagerBase {
     }
     return ids;
   }
+
+  void SetMockNics(const std::vector<HostNicAddress>& nics) {
+    mock_nics_ = nics;
+  }
+
+  std::vector<HostNicAddress> GetHostNics() const override {
+    if (mock_nics_.has_value()) {
+      return *mock_nics_;
+    }
+    return RaidenManagerBase::GetHostNics();
+  }
+
+  void SetAssignedNumaNode(int node) { assigned_numa_node_ = node; }
+
+ private:
+  std::optional<std::vector<HostNicAddress>> mock_nics_;
 };
 
 TEST(RaidenManagerBaseTest, LifecycleAndConfig) {
@@ -192,6 +208,73 @@ TEST(RaidenManagerBaseTest, E2eLoopbackTransferH2h) {
         << "Mismatch at index " << i << ", expected 0x3C, got "
         << static_cast<int>(send_alloc.ptr[i]);
   }
+}
+
+TEST(RaidenManagerBaseTest, IpCollectionNumaLocalData) {
+  TestRaidenManager manager(/*num_layers=*/1, /*num_shards=*/1,
+                            /*slice_byte_size=*/1024);
+  manager.SetAssignedNumaNode(1);
+
+  std::vector<HostNicAddress> mock_nics = {
+      {"eth0", "10.0.0.1", 0, NicClassification::kControlPlane},
+      {"eth1", "10.0.0.2", 0, NicClassification::kDataPlane},
+      {"eth2", "10.0.0.3", 1, NicClassification::kControlPlane},
+      {"eth3", "10.0.0.4", 1, NicClassification::kDataPlane},
+      {"eth4", "10.0.0.5", 1, NicClassification::kDataPlane},
+  };
+  manager.SetMockNics(mock_nics);
+
+  auto ips = manager.local_ips();
+
+  ASSERT_EQ(ips.size(), 2);
+  EXPECT_EQ(ips[0], "10.0.0.4");
+  EXPECT_EQ(ips[1], "10.0.0.5");
+}
+
+TEST(RaidenManagerBaseTest, IpCollectionFallbackToNumaLocalAny) {
+  TestRaidenManager manager(/*num_layers=*/1, /*num_shards=*/1,
+                            /*slice_byte_size=*/1024);
+  manager.SetAssignedNumaNode(1);
+
+  std::vector<HostNicAddress> mock_nics = {
+      {"eth0", "10.0.0.1", 0, NicClassification::kControlPlane},
+      {"eth1", "10.0.0.2", 0, NicClassification::kDataPlane},
+      {"eth2", "10.0.0.3", 1, NicClassification::kControlPlane},
+  };
+  manager.SetMockNics(mock_nics);
+
+  auto ips = manager.local_ips();
+
+  ASSERT_EQ(ips.size(), 1);
+  EXPECT_EQ(ips[0], "10.0.0.3");
+}
+
+TEST(RaidenManagerBaseTest, IpCollectionFallbackToFirstNic) {
+  TestRaidenManager manager(/*num_layers=*/1, /*num_shards=*/1,
+                            /*slice_byte_size=*/1024);
+  manager.SetAssignedNumaNode(1);
+
+  std::vector<HostNicAddress> mock_nics = {
+      {"eth0", "10.0.0.1", 0, NicClassification::kControlPlane},
+      {"eth1", "10.0.0.2", 0, NicClassification::kDataPlane},
+  };
+  manager.SetMockNics(mock_nics);
+
+  auto ips = manager.local_ips();
+
+  ASSERT_EQ(ips.size(), 1);
+  EXPECT_EQ(ips[0], "10.0.0.1");
+}
+
+TEST(RaidenManagerBaseTest, IpCollectionFallbackToLoopback) {
+  TestRaidenManager manager(/*num_layers=*/1, /*num_shards=*/1,
+                            /*slice_byte_size=*/1024);
+  manager.SetMockNics({});
+
+  auto ips = manager.local_ips();
+
+  ASSERT_EQ(ips.size(), 1);
+  EXPECT_EQ(ips[0], "127.0.0.1");
 }
 
 }  // namespace

@@ -126,5 +126,57 @@ TEST(MetricsCollectorTest, AsynchronousNicBandwidthTracking) {
   std::filesystem::remove_all(mock_sysfs);
 }
 
+TEST(MetricsCollectorTest, MonitoredNonEthInterface) {
+  // 1. Create a temporary directory for mock sysfs
+  std::string mock_sysfs = "/tmp/mock_sysfs_non_eth";
+  std::filesystem::create_directories(mock_sysfs + "/ib0/statistics");
+
+  // Write initial stats: rx=1000, tx=2000
+  {
+    std::ofstream rx(mock_sysfs + "/ib0/statistics/rx_bytes");
+    rx << 1000;
+    std::ofstream tx(mock_sysfs + "/ib0/statistics/tx_bytes");
+    tx << 2000;
+  }
+
+  // 2. Start collector pointing to mock sysfs
+  MetricsCollector collector(mock_sysfs);
+  uint64_t uuid = 999;
+
+  collector.RecordStart(uuid, "req_async", 1, 1000000);  // 1MB
+
+  // Simulating transfer time
+  absl::SleepFor(absl::Milliseconds(10));
+
+  // Write final stats: rx=2001000 (2MB transferred), tx=4000
+  {
+    std::ofstream rx(mock_sysfs + "/ib0/statistics/rx_bytes");
+    rx << 2001000;
+    std::ofstream tx(mock_sysfs + "/ib0/statistics/tx_bytes");
+    tx << 4000;
+  }
+
+  collector.RecordEnd(uuid);
+
+  absl::SleepFor(absl::Milliseconds(20));
+
+  std::string test_path = "/tmp/test_raiden_metrics_non_eth.json";
+  collector.WriteJsonReport(test_path);
+
+  std::ifstream f(test_path);
+  ASSERT_TRUE(f.is_open());
+  std::stringstream ss;
+  ss << f.rdbuf();
+  std::string content = ss.str();
+
+  EXPECT_TRUE(absl::StrContains(content, R"("uuid": 999)"));
+  EXPECT_TRUE(absl::StrContains(content, R"("req_id": "req_async")"));
+  EXPECT_TRUE(absl::StrContains(content, "nic_wire_bandwidth_gbps"));
+  EXPECT_TRUE(absl::StrContains(content, "ib0_rx"));
+
+  // Cleanup
+  std::filesystem::remove_all(mock_sysfs);
+}
+
 }  // namespace
 }  // namespace tpu_raiden

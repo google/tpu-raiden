@@ -39,6 +39,25 @@ namespace {
 
 using ::absl_testing::IsOk;
 
+class TestKVCacheManagerWithTransfer : public KVCacheManagerWithTransfer {
+ public:
+  using KVCacheManagerWithTransfer::KVCacheManagerWithTransfer;
+
+  void SetMockLocalIps(const std::vector<std::string>& ips) {
+    mock_local_ips_ = ips;
+  }
+
+  std::vector<std::string> local_ips() const override {
+    if (mock_local_ips_.has_value()) {
+      return *mock_local_ips_;
+    }
+    return KVCacheManagerWithTransfer::local_ips();
+  }
+
+ private:
+  std::optional<std::vector<std::string>> mock_local_ips_;
+};
+
 TEST(KVCacheManagerWithTransferTest, LocalOrchestratedTransfer) {
   TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
                           TpuPjrtManager::GetDefault());
@@ -424,6 +443,86 @@ TEST(KVCacheManagerBaseTest, E2eRemoteD2DBlockWriteConcurrent) {
     EXPECT_EQ(read_data[i * floats_per_block + 1], i + 2.0f);
     EXPECT_EQ(read_data[i * floats_per_block + 2], i + 3.0f);
     EXPECT_EQ(read_data[i * floats_per_block + 3], i + 4.0f);
+  }
+}
+
+TEST(KVCacheManagerWithTransferTest, MultiIpOrchestratedTransfer) {
+  TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
+                          TpuPjrtManager::GetDefault());
+
+  std::vector<int64_t> shape_dims = {2, 32, 32};
+  int64_t elements_per_slice = 32 * 32;
+  int64_t total_elements = 2 * elements_per_slice;
+
+  std::vector<float> host_data(total_elements);
+  for (int i = 0; i < total_elements; ++i) {
+    host_data[i] = static_cast<float>(i);
+  }
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<xla::PjRtBuffer> buffer,
+      pjrt_manager->BufferFromHost(host_data.data(), xla::F32, shape_dims));
+
+  ASSERT_THAT(buffer->GetReadyFuture().Await(), IsOk());
+
+  std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers = {{buffer.get()}};
+
+  auto engine = std::make_unique<TestKVCacheManagerWithTransfer>(
+      layer_buffers,
+      /*local_port=*/std::nullopt,
+      /*host_blocks_to_allocate=*/std::nullopt,
+      /*unsafe_skip_buffer_lock=*/true,
+      /*parallelism=*/2,
+      /*host_allocator=*/nullptr,
+      /*node_id=*/0,
+      /*local_control_port=*/0,
+      /*max_blocks=*/2,
+      /*num_slots=*/2,
+      /*timeout_s=*/10.0);
+
+  engine->SetMockLocalIps({"127.0.0.1", "127.0.0.2"});
+
+  ASSERT_THAT(engine->ConfigureHostStagingSlots(2, 2), IsOk());
+
+  uint64_t uuid = 12347;
+  std::string req_id = "multi_ip_test_req";
+  engine->NotifyForRead(req_id, uuid, /*block_ids=*/{0});
+
+  int port = engine->local_control_port();
+  ASSERT_GT(port, 0);
+  std::string remote_endpoint = "127.0.0.1:" + std::to_string(port);
+
+  engine->StartRead(req_id, uuid, remote_endpoint,
+                    /*remote_block_ids=*/{0},
+                    /*local_block_ids=*/{1},
+                    /*parallelism=*/2);
+
+  bool done = false;
+  for (int i = 0; i < 100; ++i) {
+    auto [done_sending, done_recving, failed_recving] =
+        engine->CompleteReadRaw();
+    if (std::find(failed_recving.begin(), failed_recving.end(), req_id) !=
+        failed_recving.end()) {
+      FAIL() << "Transfer failed";
+    }
+    if (std::find(done_recving.begin(), done_recving.end(), req_id) !=
+        done_recving.end()) {
+      done = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  ASSERT_TRUE(done) << "Transfer timed out";
+
+  TF_ASSERT_OK_AND_ASSIGN(auto literal, buffer->ToLiteral().Await());
+  auto read_back = literal->data<float>();
+  ASSERT_EQ(read_back.size(), total_elements);
+
+  for (int i = 0; i < elements_per_slice; ++i) {
+    EXPECT_EQ(read_back[i], static_cast<float>(i));
+  }
+  for (int i = 0; i < elements_per_slice; ++i) {
+    EXPECT_EQ(read_back[elements_per_slice + i], static_cast<float>(i));
   }
 }
 

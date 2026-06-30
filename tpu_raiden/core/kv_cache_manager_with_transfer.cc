@@ -793,10 +793,26 @@ void KVCacheManagerWithTransfer::StartRead(
       stream_request.num_blocks = static_cast<uint64_t>(load_plan.num_blocks);
       stream_request.consumer_data_port =
           static_cast<uint32_t>(local_data_port_);
-      std::string bound_ip = local_ip();
-      if (inet_pton(AF_INET6, bound_ip.c_str(), stream_request.consumer_ip) <=
-          0) {
-        std::memset(stream_request.consumer_ip, 0, 16);
+      std::vector<std::string> ips = local_ips();
+      stream_request.num_ips = std::min(static_cast<uint32_t>(ips.size()),
+                                        static_cast<uint32_t>(kMaxNics));
+      for (uint32_t i = 0; i < stream_request.num_ips; ++i) {
+        if (inet_pton(AF_INET6, ips[i].c_str(),
+                      stream_request.consumer_ips[i]) <= 0) {
+          struct in_addr ipv4_addr;
+          if (inet_pton(AF_INET, ips[i].c_str(), &ipv4_addr) > 0) {
+            std::memset(stream_request.consumer_ips[i], 0, 10);
+            stream_request.consumer_ips[i][10] = 0xff;
+            stream_request.consumer_ips[i][11] = 0xff;
+            std::memcpy(stream_request.consumer_ips[i] + 12, &ipv4_addr, 4);
+          } else {
+            std::memset(stream_request.consumer_ips[i], 0, 16);
+          }
+        }
+      }
+      if (stream_request.num_ips > 0) {
+        std::memcpy(stream_request.consumer_ip, stream_request.consumer_ips[0],
+                    16);
       }
       CheckStatus(
           "control pull stream write",
@@ -1285,48 +1301,105 @@ void KVCacheManagerWithTransfer::ProcessPullStream(
   CheckStatus("control stream response header write",
               WriteExact(fd, &response, sizeof(response)));
 
-  bool ip_is_empty = true;
-  for (int i = 0; i < 16; ++i) {
-    if (req.consumer_ip[i] != 0) {
-      ip_is_empty = false;
-      break;
+  std::vector<std::string> peer_ips;
+  if (req.num_ips > 0) {
+    for (uint32_t i = 0;
+         i < std::min(req.num_ips, static_cast<uint32_t>(kMaxNics)); ++i) {
+      char ip_str[INET6_ADDRSTRLEN];
+      bool is_ipv4_mapped = true;
+      for (int j = 0; j < 10; ++j) {
+        if (req.consumer_ips[i][j] != 0) {
+          is_ipv4_mapped = false;
+          break;
+        }
+      }
+      if (req.consumer_ips[i][10] != 0xff || req.consumer_ips[i][11] != 0xff) {
+        is_ipv4_mapped = false;
+      }
+
+      if (is_ipv4_mapped) {
+        struct in_addr ipv4_addr;
+        std::memcpy(&ipv4_addr, req.consumer_ips[i] + 12, 4);
+        if (inet_ntop(AF_INET, &ipv4_addr, ip_str, sizeof(ip_str)) != nullptr) {
+          peer_ips.push_back(ip_str);
+        }
+      } else {
+        if (inet_ntop(AF_INET6, req.consumer_ips[i], ip_str, sizeof(ip_str)) !=
+            nullptr) {
+          peer_ips.push_back(ip_str);
+        }
+      }
     }
   }
 
-  std::string peer_ip;
-  if (!ip_is_empty) {
-    char ip_str[INET6_ADDRSTRLEN];
-    if (inet_ntop(AF_INET6, req.consumer_ip, ip_str, sizeof(ip_str)) !=
-        nullptr) {
-      peer_ip = ip_str;
+  if (peer_ips.empty()) {
+    bool ip_is_empty = true;
+    for (int i = 0; i < 16; ++i) {
+      if (req.consumer_ip[i] != 0) {
+        ip_is_empty = false;
+        break;
+      }
+    }
+    if (!ip_is_empty) {
+      char ip_str[INET6_ADDRSTRLEN];
+      bool is_ipv4_mapped = true;
+      for (int j = 0; j < 10; ++j) {
+        if (req.consumer_ip[j] != 0) {
+          is_ipv4_mapped = false;
+          break;
+        }
+      }
+      if (req.consumer_ip[10] != 0xff || req.consumer_ip[11] != 0xff) {
+        is_ipv4_mapped = false;
+      }
+
+      if (is_ipv4_mapped) {
+        struct in_addr ipv4_addr;
+        std::memcpy(&ipv4_addr, req.consumer_ip + 12, 4);
+        if (inet_ntop(AF_INET, &ipv4_addr, ip_str, sizeof(ip_str)) != nullptr) {
+          peer_ips.push_back(ip_str);
+        }
+      } else {
+        if (inet_ntop(AF_INET6, req.consumer_ip, ip_str, sizeof(ip_str)) !=
+            nullptr) {
+          peer_ips.push_back(ip_str);
+        }
+      }
     }
   }
-  if (peer_ip.empty()) {
-    peer_ip = GetPeerIp(fd);
+
+  if (peer_ips.empty()) {
+    std::string peer_ip = GetPeerIp(fd);
+    if (!peer_ip.empty()) {
+      peer_ips.push_back(peer_ip);
+    }
   }
 
-  std::string remote_data_endpoint;
-  if (absl::StrContains(peer_ip, ':')) {
-    remote_data_endpoint =
-        "[" + peer_ip + "]:" + std::to_string(req.consumer_data_port);
-  } else {
-    remote_data_endpoint =
-        peer_ip + ":" + std::to_string(req.consumer_data_port);
+  std::vector<std::string> remote_data_endpoints;
+  for (const auto& peer_ip : peer_ips) {
+    if (absl::StrContains(peer_ip, ':')) {
+      remote_data_endpoints.push_back(
+          "[" + peer_ip + "]:" + std::to_string(req.consumer_data_port));
+    } else {
+      remote_data_endpoints.push_back(peer_ip + ":" +
+                                      std::to_string(req.consumer_data_port));
+    }
   }
 
   VLOG(1) << "ProcessPullStream (Hybrid Bridge) successfully acknowledged "
              "consumer. Intercepting and launching StartPushInternal to "
-          << remote_data_endpoint;
+          << (remote_data_endpoints.empty() ? "" : remote_data_endpoints[0])
+          << (remote_data_endpoints.size() > 1 ? " and others" : "");
 
-  // Intercept and Execute Hybrid Push on behalf of remote consumer!
-  std::thread([this, uuid = req.uuid, remote_data_endpoint, src_block_ids,
+  std::thread([this, uuid = req.uuid, remote_data_endpoints, src_block_ids,
                dst_block_ids]() {
-    StartPushInternal(uuid, remote_data_endpoint, src_block_ids, dst_block_ids);
+    StartPushInternal(uuid, remote_data_endpoints, src_block_ids,
+                      dst_block_ids);
   }).detach();
 }
 
 void KVCacheManagerWithTransfer::StartPushInternal(
-    uint64_t uuid, const std::string& remote_data_endpoint,
+    uint64_t uuid, const std::vector<std::string>& remote_data_endpoints,
     const std::vector<int64_t>& src_block_ids,
     const std::vector<int64_t>& dst_block_ids) {
   // Stage the producer's device KV into a host slot (slot.block_ids) and send
@@ -1401,7 +1474,7 @@ void KVCacheManagerWithTransfer::StartPushInternal(
     entry->d2h_layer_futures.push_back(std::move(future_or.value()));
   }
 
-  entry->remote_data_endpoint = remote_data_endpoint;
+  entry->remote_data_endpoints = remote_data_endpoints;
   entry->src_ints.assign(host_block_ids.begin(), host_block_ids.end());
   entry->dst_ints.assign(dst_block_ids.begin(), dst_block_ids.end());
   entry->remaining_h2h_layers.store(num_layers());
@@ -1453,9 +1526,8 @@ void KVCacheManagerWithTransfer::SendNextLayer(uint64_t uuid, size_t l) {
       LOG(INFO) << "StartPushInternal (H2H start layer " << l
                 << "): uuid=" << uuid
                 << ", numa=" << assigned_numa_node().value_or(-1);
-
       H2hWriteDirectAsync(
-          entry->remote_data_endpoint, entry->src_ints, entry->dst_ints, uuid,
+          entry->remote_data_endpoints, entry->src_ints, entry->dst_ints, uuid,
           l, [this, uuid, l](absl::StatusOr<std::vector<int>> push_res) {
             std::shared_ptr<SendEntry> entry;
             {

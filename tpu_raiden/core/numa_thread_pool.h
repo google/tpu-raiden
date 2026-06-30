@@ -38,6 +38,9 @@ class NumaThreadPool {
   explicit NumaThreadPool(size_t threads);
   ~NumaThreadPool();
 
+  // Returns the number of threads in the pool.
+  size_t size() const { return workers.size(); }
+
   // Schedule a task, optionally targeting a specific NUMA node.
   // The pool automatically handles pinning the worker thread to the target node
   // before executing the task.
