@@ -28,6 +28,7 @@ py_binary(
         "@com_google_absl_py//absl/flags",
         "@jax//jax",
         "@pypi//numpy",
+        "@pypi//libtpu",
     ],
 )
 
