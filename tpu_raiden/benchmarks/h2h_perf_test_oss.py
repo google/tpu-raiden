@@ -14,20 +14,21 @@
 
 """Single-host cross-NUMA OSS H2H (host-to-host) KV-cache transfer benchmark.
 
-Runs BOTH roles on ONE machine, each pinned to a different NUMA node via
-numactl, so the host-to-host transfer crosses the inter-socket interconnect
-(UPI / Infinity Fabric). Measures cross-NUMA bandwidth (Gbps) and verifies data
-integrity. Loopback traffic does NOT egress a physical NIC, so the number
-reflects cross-socket memory bandwidth + kernel net-stack, not wire bandwidth.
+Runs BOTH roles on ONE machine, each pinned to a different NUMA node, so the
+host-to-host transfer crosses the inter-socket interconnect (UPI / Infinity
+Fabric). Measures cross-NUMA bandwidth (Gbps) and verifies data integrity.
+
+NOTE: loopback traffic does NOT egress a physical NIC, so the number reflects
+cross-socket memory bandwidth + kernel net-stack, not wire bandwidth (B-tier).
 
 Roles (--role):
-  launch   : (default) spawn sender (NUMA A) + receiver (NUMA B) as subprocesses
-             over loopback, wait, propagate the receiver's exit code.
+  launch   : (default) spawn sender (NUMA A) + receiver (NUMA B), supervise, exit.
   sender   : hold source KV cache, register reads round-by-round.
   receiver : pull the cache via start_read, time warmup+iters, verify, emit metrics.
 
-API calls into _tpu_raiden_jax are marked `# VERIFY` — confirm against OSS binding.
+Calls into _tpu_raiden_jax are marked `# VERIFY` — confirm names against OSS binding.
 """
+
 import ctypes
 import json
 import os
@@ -52,7 +53,7 @@ _ROLE = flags.DEFINE_enum('role', 'launch', ['launch', 'sender', 'receiver'],
 _RENDEZVOUS = flags.DEFINE_string('rendezvous', '',
                                   'Shared dir for s.json/r.json (set by launcher).')
 _BIND_NUMA = flags.DEFINE_integer('bind_numa', -1,
-                                  'Bind this process to NUMA node (cpu+mem). -1 = no bind.')
+                                  'Bind this process to NUMA node (cpu+mem). -1 = none.')
 _NUM_BLOCKS = flags.DEFINE_integer('num_blocks', 4096, 'Cache blocks to transfer.')
 _BLOCK_SIZE = flags.DEFINE_integer('block_size', 2, 'Middle cache dim.')
 _NUM_LAYERS = flags.DEFINE_integer('num_layers', 8, 'Number of cache arrays (layers).')
@@ -63,12 +64,14 @@ _WARMUP = flags.DEFINE_integer('warmup', 3, 'Warmup transfers (not timed).')
 _ITERS = flags.DEFINE_integer('iters', 20, 'Timed transfers.')
 _SENDER_NUMA = flags.DEFINE_integer('sender_numa', 0, 'NUMA node for sender.')
 _RECEIVER_NUMA = flags.DEFINE_integer('receiver_numa', 1, 'NUMA node for receiver.')
+_LAUNCH_TIMEOUT_S = flags.DEFINE_integer('launch_timeout_s', 1200,
+                                         'Hard cap on the whole single-host run.')
 
 _DTYPE_MAP = {'float32': jnp.float32, 'bfloat16': jnp.bfloat16, 'float16': jnp.float16}
 _ITEMSIZE = {'float32': 4, 'bfloat16': 2, 'float16': 2}
 
 
-# ---------------- helpers ----------------
+# ---------------- generic helpers ----------------
 def summarize(values):
   a = np.array(values, dtype=float)
   return {'min': float(a.min()), 'p50': float(np.median(a)), 'mean': float(a.mean()),
@@ -101,10 +104,8 @@ def _cpus_of_node(node):
 
 
 def bind_to_numa(node):
-  """numactl-free NUMA bind: CPU affinity + memory bind via set_mempolicy.
-
-  Big KV buffers are allocated AFTER this call, so they land on `node`; that is
-  what crosses the inter-socket link during the transfer."""
+  """numactl-free NUMA bind: CPU affinity + set_mempolicy(MPOL_BIND). Big KV
+  buffers are allocated AFTER this, so they land on `node` (cross-socket)."""
   if node is None or node < 0:
     return
   cpus = _cpus_of_node(node)
@@ -128,6 +129,48 @@ def bind_to_numa(node):
     print(f'WARNING: NUMA membind unavailable: {e}', file=sys.stderr)
 
 
+def _wait_until(cond, timeout, what):
+  t0 = time.time()
+  while not cond():
+    if time.time() - t0 > timeout:
+      raise TimeoutError(f'timed out after {timeout}s waiting for {what}')
+    time.sleep(0.005)
+
+
+# ---------------- endpoint resolution (IPv4 + IPv6) ----------------
+def _primary_endpoint(port):
+  """Self-probed primary IP, IPv4 first then IPv6, formatted correctly."""
+  for family, probe in ((socket.AF_INET, ('8.8.8.8', 80)),
+                        (socket.AF_INET6, ('2001:4860:4860::8888', 80))):
+    s = socket.socket(family, socket.SOCK_DGRAM)
+    try:
+      s.connect(probe)  # no packet sent; just resolves the egress local addr
+      ip = s.getsockname()[0]
+      return f'[{ip}]:{port}' if family == socket.AF_INET6 else f'{ip}:{port}'
+    except OSError:
+      continue
+    finally:
+      s.close()
+  return f'127.0.0.1:{port}'
+
+
+def _resolve_endpoints(manager):
+  """Authoritative endpoints the manager is actually listening on (handles
+  IPv4/IPv6/multi-NIC). Falls back to a self-probed primary endpoint."""
+  try:
+    eps = manager.get_local_endpoints()  # VERIFY: return type (list[str] or list[dict])
+    out = []
+    for e in eps:
+      out.append(e if isinstance(e, str) else e.get('endpoint', str(e)))
+    out = [e for e in out if e]
+    if out:
+      return out
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    print(f'WARNING: get_local_endpoints unavailable ({e}); probing.', file=sys.stderr)
+  return [_primary_endpoint(manager.local_control_port)]  # VERIFY: property name
+
+
+# ---------------- cache helpers ----------------
 def cache_shape():
   return (_NUM_BLOCKS.value, 32, _BLOCK_SIZE.value, 8, 128)
 
@@ -189,21 +232,19 @@ def run_sender():
 
   base_uuid = uuid.uuid4().int & 0xFFFFFFFF
   block_ids = list(range(_NUM_BLOCKS.value))
-  port = manager.local_control_port                   # VERIFY: property name
-  host_ip = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET6)[0][4][0]
-  endpoint = f'[{host_ip}]:{port}'                    # VERIFY: endpoint format (mirror internal)
-  print(f'[sender] endpoint={endpoint}, blocks={len(block_ids)}')
+  endpoints = _resolve_endpoints(manager)             # IPv4/IPv6/multi-NIC, authoritative
+  print(f'[sender] endpoints={endpoints}, blocks={len(block_ids)}')
 
-  _write_json(s_path, {'endpoint': endpoint, 'uuid': base_uuid,
+  _write_json(s_path, {'endpoints': endpoints, 'uuid': base_uuid,
                        'block_ids': block_ids, 'reg_round': -1})
   total_rounds = _WARMUP.value + _ITERS.value
   for i in range(total_rounds):
     req_id = f'h2h_{base_uuid}_{i}'
     manager.register_read(req_id, base_uuid, block_ids)              # VERIFY
-    _write_json(s_path, {'endpoint': endpoint, 'uuid': base_uuid,
+    _write_json(s_path, {'endpoints': endpoints, 'uuid': base_uuid,
                          'block_ids': block_ids, 'reg_round': i})
-    while (_read_json(r_path) or {}).get('recv_round', -1) < i:      # wait round done
-      time.sleep(0.005)
+    _wait_until(lambda i=i: (_read_json(r_path) or {}).get('recv_round', -1) >= i,
+                timeout=300, what=f'receiver round {i}')
   print('[sender] all rounds consumed; exiting.')
   os._exit(0)  # kill hanging C++ transfer threads
 
@@ -214,10 +255,10 @@ def run_receiver():
   rv = _RENDEZVOUS.value
   s_path, r_path = os.path.join(rv, 's.json'), os.path.join(rv, 'r.json')
 
-  while _read_json(s_path) is None:
-    time.sleep(0.05)
+  _wait_until(lambda: _read_json(s_path) is not None, timeout=120, what='sender rendezvous')
   meta = _read_json(s_path)
-  endpoint, base_uuid, block_ids = meta['endpoint'], meta['uuid'], meta['block_ids']
+  endpoints, base_uuid, block_ids = meta['endpoints'], meta['uuid'], meta['block_ids']
+  endpoint = endpoints[0]                              # single-host: first endpoint
   print(f'[receiver] peer endpoint={endpoint}, blocks={len(block_ids)}')
 
   device_arrs = make_caches(fill=False)
@@ -230,8 +271,8 @@ def run_receiver():
 
   def one_read(i):
     req_id = f'h2h_{base_uuid}_{i}'
-    while (_read_json(s_path) or {}).get('reg_round', -1) < i:       # wait sender registered i
-      time.sleep(0.002)
+    _wait_until(lambda i=i: (_read_json(s_path) or {}).get('reg_round', -1) >= i,
+                timeout=300, what=f'sender register round {i}')
     t0 = time.perf_counter()
     manager.start_read(req_id=req_id, uuid=base_uuid,               # VERIFY
                        remote_endpoint=endpoint,
@@ -291,6 +332,36 @@ def _emit_metrics(times, gbps_all, total_bytes, med_gbps):
 
 
 # ---------------- launcher (single-host cross-NUMA driver) ----------------
+def _kill(p):
+  if p.poll() is None:
+    p.terminate()
+    try:
+      p.wait(10)
+    except subprocess.TimeoutExpired:
+      p.kill()
+
+
+def _supervise(sp, rp, timeout_s):
+  """Never hang: react when either child finishes/dies; hard timeout backstop."""
+  start = time.time()
+  while True:
+    rrc = rp.poll()
+    if rrc is not None:                       # receiver done -> it carries the result
+      _kill(sp)
+      return rrc
+    src = sp.poll()
+    if src is not None and src != 0:          # sender died early -> fail fast
+      print(f'[launch] sender exited {src} before receiver; aborting.', file=sys.stderr)
+      _kill(rp)
+      return src
+    if time.time() - start > timeout_s:       # backstop: never wait for hours
+      print(f'[launch] timeout {timeout_s}s; killing both.', file=sys.stderr)
+      _kill(sp)
+      _kill(rp)
+      return 1
+    time.sleep(0.5)
+
+
 def run_launcher():
   nodes = numa_nodes()
   if len(nodes) < 2:
@@ -302,7 +373,7 @@ def run_launcher():
                 f'--parallelism={_PARALLELISM.value}', f'--dtype={_DTYPE.value}',
                 f'--warmup={_WARMUP.value}', f'--iters={_ITERS.value}']
 
-  # REQUIRED: propagate bazel runfiles sys.path to children, else they can't import absl/jax.
+  # REQUIRED: propagate bazel runfiles sys.path, else children can't import absl/jax.
   env = dict(os.environ)
   pp = os.pathsep.join(p for p in sys.path if p)
   env['PYTHONPATH'] = pp + (os.pathsep + env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
@@ -315,8 +386,7 @@ def run_launcher():
 
   sp = spawn('sender', _SENDER_NUMA.value)
   rp = spawn('receiver', _RECEIVER_NUMA.value)
-  rc = rp.wait()       # receiver carries the result + exit code
-  sp.wait()
+  rc = _supervise(sp, rp, timeout_s=_LAUNCH_TIMEOUT_S.value)
   shutil.rmtree(rv, ignore_errors=True)
   if rc != 0:
     sys.exit(rc)
