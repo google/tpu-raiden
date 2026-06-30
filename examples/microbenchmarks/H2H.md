@@ -153,6 +153,18 @@ bazel run -c opt //examples/microbenchmarks:h2h_benchmark_runner -- \
     --num_blocks=64
 ```
 
+### Reference Result
+
+Tested on v7x two-node cluster, block size 2MB.
+
+| Parallelism (P) | Single-NIC | Multi-NIC | Speedup |
+| :---: | :---: | :---: | :---: | :---: |
+| **1** | 31.72 | 58.62 | **1.85x** |
+| **2** | 59.92 | 113.58 | **1.90x** |
+| **4** | 101.98 | 201.29 | **1.97x** |
+| **8** | 159.46 | 323.90 | **2.03x** |
+| **16** | 170.50 | 314.83 | **1.85x** |
+
 ---
 
 ## Key Flags Reference
@@ -168,3 +180,21 @@ bazel run -c opt //examples/microbenchmarks:h2h_benchmark_runner -- \
 | `--parallelism` | `1` | Number of parallel connection streams per NIC. |
 | `--num_blocks` | `64` | Total number of blocks to transfer during the test. |
 | `--numa_node` | `-1` | Hard pin to a specific NUMA node (overrides automatic mapping if >= 0). |
+
+---
+
+### End-to-End (E2E) KV Cache Transfer Bandwidth (Device-to-Device over NIC)**
+
+We measured the end-to-end performance of transfers originating and terminating on the accelerator devices (e.g., using JAX). This includes the overhead of copying data between the device and the host, as well as the network transport between sender and receiver, which is effectively the `start_send` until the blocks are received. We evaluated the impact of NUMA awareness by comparing the default behavior (single NUMA node restriction enabled, which restricts transfers to a single NUMA node/NIC) against disabling this restriction (allowing multi-NIC utilization: `DISABLE_SINGLE_NUMA=1`).
+
+#### Performance Results (Gbps)
+
+The test used a **16 MB block size** (aggregate over 32 layers, 1024 blocks total) on 2-node Ironwood GKE cluster.
+
+| Parallelism (P) | Single-NIC (NUMA Restricted) | Multi-NIC (NUMA Unrestricted) |
+| :---: | :---: | :---: |
+| **1** | 22.24 | 46.52 |
+| **2** | 43.19 | 92.18 |
+| **4** | 84.56 | 163.30 |
+| **8** | 148.45 | 300.11 |
+| **16** | 186.87 | 369.19 |
