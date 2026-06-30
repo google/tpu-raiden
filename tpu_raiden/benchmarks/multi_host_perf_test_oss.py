@@ -47,6 +47,10 @@ _NUMA_PIN = flags.DEFINE_bool(
 )
 _NUMA_NODE = flags.DEFINE_integer('numa_node', 0, 'NUMA node to pin to when --numa_pin.')
 
+_LOCK_BUFFERS = flags.DEFINE_bool(
+    'lock_buffers', False,
+    'Lock/pin host buffers (unsafe_skip_buffer_lock=False) so the kernel cannot '
+    'migrate them off their NUMA-local node — aims for a stable FAST peak.')
 
 # ---------------- NUMA pinning (numactl-free) ----------------
 def _cpus_of_node(node):
@@ -256,7 +260,7 @@ def main(_):
   manager = kv_cache_manager.KVCacheManager(
       device_arrays=caches,
       host_blocks_to_allocate=half_blocks,
-      unsafe_skip_buffer_lock=True,
+      unsafe_skip_buffer_lock=not _LOCK_BUFFERS.value,  # lock_buffers=true 
       parallelism=_PARALLELISM.value,
   )
 
