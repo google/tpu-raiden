@@ -73,4 +73,5 @@ Logs land in `tmp/<timestamp>/` (`router.log`, `prefill.log`, `decode.log`,
 
 - Model defaults to `Qwen/Qwen3-8B` (set `MODEL` consistently across
   `prefill.sh` / `decode.sh` / `bm.sh` to change it).
-```
+- For a multi-machine version (one server per VM, two chips), see
+  [`../multihost_disagg/`](../multihost_disagg/).
