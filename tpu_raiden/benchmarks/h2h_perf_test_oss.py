@@ -28,7 +28,7 @@ Roles (--role):
 
 API calls into _tpu_raiden_jax are marked `# VERIFY` — confirm against OSS binding.
 """
-
+import ctypes
 import json
 import os
 import shutil
@@ -48,9 +48,11 @@ import numpy as np
 from tpu_raiden.frameworks.jax import _tpu_raiden_jax as kv_cache_manager
 
 _ROLE = flags.DEFINE_enum('role', 'launch', ['launch', 'sender', 'receiver'],
-                          'Process role. launch = single-host driver.')
+                          'Process role. "launch" = single-host driver.')
 _RENDEZVOUS = flags.DEFINE_string('rendezvous', '',
                                   'Shared dir for s.json/r.json (set by launcher).')
+_BIND_NUMA = flags.DEFINE_integer('bind_numa', -1,
+                                  'Bind this process to NUMA node (cpu+mem). -1 = no bind.')
 _NUM_BLOCKS = flags.DEFINE_integer('num_blocks', 4096, 'Cache blocks to transfer.')
 _BLOCK_SIZE = flags.DEFINE_integer('block_size', 2, 'Middle cache dim.')
 _NUM_LAYERS = flags.DEFINE_integer('num_layers', 8, 'Number of cache arrays (layers).')
@@ -66,7 +68,7 @@ _DTYPE_MAP = {'float32': jnp.float32, 'bfloat16': jnp.bfloat16, 'float16': jnp.f
 _ITEMSIZE = {'float32': 4, 'bfloat16': 2, 'float16': 2}
 
 
-# ---------- helpers ----------
+# ---------------- helpers ----------------
 def summarize(values):
   a = np.array(values, dtype=float)
   return {'min': float(a.min()), 'p50': float(np.median(a)), 'mean': float(a.mean()),
@@ -81,6 +83,49 @@ def numa_nodes():
                   if n.startswith('node') and n[4:].isdigit())
   except OSError:
     return []
+
+
+def _cpus_of_node(node):
+  try:
+    spec = open(f'/sys/devices/system/node/node{node}/cpulist').read().strip()
+  except OSError:
+    return set()
+  cpus = set()
+  for part in spec.split(','):
+    if '-' in part:
+      a, b = part.split('-')
+      cpus.update(range(int(a), int(b) + 1))
+    elif part:
+      cpus.add(int(part))
+  return cpus
+
+
+def bind_to_numa(node):
+  """numactl-free NUMA bind: CPU affinity + memory bind via set_mempolicy.
+
+  Big KV buffers are allocated AFTER this call, so they land on `node`; that is
+  what crosses the inter-socket link during the transfer."""
+  if node is None or node < 0:
+    return
+  cpus = _cpus_of_node(node)
+  if cpus:
+    try:
+      os.sched_setaffinity(0, cpus)
+    except OSError as e:
+      print(f'WARNING: sched_setaffinity failed: {e}', file=sys.stderr)
+  try:
+    libc = ctypes.CDLL('libc.so.6', use_errno=True)
+    MPOL_BIND, SYS_set_mempolicy = 2, 238  # SYS_set_mempolicy=238 on x86_64
+    nodemask = ctypes.c_ulong(1 << node)
+    rc = libc.syscall(SYS_set_mempolicy, MPOL_BIND,
+                      ctypes.byref(nodemask), ctypes.c_ulong(64))
+    if rc != 0:
+      print(f'WARNING: set_mempolicy errno={ctypes.get_errno()} '
+            '-> not membound (degrades toward A-tier)', file=sys.stderr)
+    else:
+      print(f'[bind] process pinned to NUMA node {node} (cpu+mem).')
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    print(f'WARNING: NUMA membind unavailable: {e}', file=sys.stderr)
 
 
 def cache_shape():
@@ -98,18 +143,18 @@ def cpu_sharding():
   return jax.sharding.NamedSharding(mesh, spec)
 
 
+def _layer_base(layer):
+  """Deterministic float32 source for a layer (identical on both roles)."""
+  return (np.arange(np.prod(cache_shape()), dtype=np.float32).reshape(cache_shape())
+          + float(layer * 1000.0))
+
+
 def make_caches(fill):
-  """Deterministic per-layer arrays. Both roles regenerate identically, so the
-  dtype truncation is identical on both sides -> exact equality regardless of dtype."""
-  sh, dt = cpu_sharding(), _DTYPE_MAP.get(_DTYPE.value, jnp.float32)
+  sh = cpu_sharding()
+  dt = _DTYPE_MAP.get(_DTYPE.value, jnp.float32)
   arrs = []
   for layer in range(_NUM_LAYERS.value):
-    if fill:
-      base = (np.arange(np.prod(cache_shape()), dtype=np.float32).reshape(cache_shape())
-              + float(layer * 1000.0))
-      base = jnp.asarray(base, dtype=dt)
-    else:
-      base = jnp.zeros(cache_shape(), dtype=dt)
+    base = jnp.asarray(_layer_base(layer), dtype=dt) if fill else jnp.zeros(cache_shape(), dtype=dt)
     arrs.append(jax.device_put(base, sh))
   jax.block_until_ready(arrs)
   return arrs
@@ -130,43 +175,50 @@ def _read_json(path):
     return None
 
 
-# ---------- sender ----------
+# ---------------- sender ----------------
 def run_sender():
+  bind_to_numa(_BIND_NUMA.value)
   rv = _RENDEZVOUS.value
   s_path, r_path = os.path.join(rv, 's.json'), os.path.join(rv, 'r.json')
+
   arrs = make_caches(fill=True)
   manager = kv_cache_manager.KVCacheManager(          # VERIFY: transfer ctor signature
       kv_caches=arrs, local_control_port=0,
       max_blocks=_NUM_BLOCKS.value, num_slots=_PARALLELISM.value,
       unsafe_skip_buffer_lock=True)
+
   base_uuid = uuid.uuid4().int & 0xFFFFFFFF
   block_ids = list(range(_NUM_BLOCKS.value))
-  port = manager.local_control_port                    # VERIFY: property name
+  port = manager.local_control_port                   # VERIFY: property name
   host_ip = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET6)[0][4][0]
-  endpoint = f'[{host_ip}]:{port}'                     # VERIFY: endpoint format (mirror internal)
+  endpoint = f'[{host_ip}]:{port}'                    # VERIFY: endpoint format (mirror internal)
+  print(f'[sender] endpoint={endpoint}, blocks={len(block_ids)}')
 
   _write_json(s_path, {'endpoint': endpoint, 'uuid': base_uuid,
                        'block_ids': block_ids, 'reg_round': -1})
   total_rounds = _WARMUP.value + _ITERS.value
   for i in range(total_rounds):
     req_id = f'h2h_{base_uuid}_{i}'
-    manager.register_read(req_id, base_uuid, block_ids)             # VERIFY
+    manager.register_read(req_id, base_uuid, block_ids)              # VERIFY
     _write_json(s_path, {'endpoint': endpoint, 'uuid': base_uuid,
                          'block_ids': block_ids, 'reg_round': i})
-    while (_read_json(r_path) or {}).get('recv_round', -1) < i:     # wait round done
+    while (_read_json(r_path) or {}).get('recv_round', -1) < i:      # wait round done
       time.sleep(0.005)
-  print('[sender] all rounds consumed by receiver; exiting.')
+  print('[sender] all rounds consumed; exiting.')
   os._exit(0)  # kill hanging C++ transfer threads
 
 
-# ---------- receiver ----------
+# ---------------- receiver ----------------
 def run_receiver():
+  bind_to_numa(_BIND_NUMA.value)
   rv = _RENDEZVOUS.value
   s_path, r_path = os.path.join(rv, 's.json'), os.path.join(rv, 'r.json')
+
   while _read_json(s_path) is None:
     time.sleep(0.05)
   meta = _read_json(s_path)
   endpoint, base_uuid, block_ids = meta['endpoint'], meta['uuid'], meta['block_ids']
+  print(f'[receiver] peer endpoint={endpoint}, blocks={len(block_ids)}')
 
   device_arrs = make_caches(fill=False)
   manager = kv_cache_manager.KVCacheManager(          # VERIFY
@@ -178,21 +230,21 @@ def run_receiver():
 
   def one_read(i):
     req_id = f'h2h_{base_uuid}_{i}'
-    while (_read_json(s_path) or {}).get('reg_round', -1) < i:      # wait sender registered i
+    while (_read_json(s_path) or {}).get('reg_round', -1) < i:       # wait sender registered i
       time.sleep(0.002)
     t0 = time.perf_counter()
-    manager.start_read(req_id=req_id, uuid=base_uuid,              # VERIFY
+    manager.start_read(req_id=req_id, uuid=base_uuid,               # VERIFY
                        remote_endpoint=endpoint,
                        remote_block_ids=block_ids, local_block_ids=block_ids)
     while True:
-      _, done, failed = manager.poll_stats()                       # VERIFY
+      _, done, failed = manager.poll_stats()                        # VERIFY
       if req_id in done:
         break
       if req_id in failed:
         raise RuntimeError(f'H2H transfer failed: {req_id}')
       time.sleep(0.001)
     dt = time.perf_counter() - t0
-    _write_json(r_path, {'recv_round': i})                         # signal round done
+    _write_json(r_path, {'recv_round': i})                          # signal round done
     return dt
 
   for i in range(_WARMUP.value):
@@ -203,13 +255,13 @@ def run_receiver():
   med_gbps = float(np.median(gbps_all))
   print(f'[receiver] cross-NUMA H2H median {med_gbps:.3f} Gbps over {_ITERS.value} iters')
 
-  # data integrity: regenerate expected (same dtype) and compare exactly
-  expected = make_caches(fill=True)
-  ok = all(np.array_equal(np.asarray(d), np.asarray(e))
-           for d, e in zip(device_arrs, expected))
-  if not ok:
-    print('[receiver] DATA VERIFICATION FAILED', file=sys.stderr)
-    sys.exit(1)
+  # data integrity: regenerate expected per-layer (same dtype) and compare exactly
+  dt = _DTYPE_MAP.get(_DTYPE.value, jnp.float32)
+  for layer, d in enumerate(device_arrs):
+    exp = np.asarray(jnp.asarray(_layer_base(layer), dtype=dt))
+    if not np.array_equal(np.asarray(d), exp):
+      print(f'[receiver] DATA VERIFICATION FAILED on layer {layer}', file=sys.stderr)
+      sys.exit(1)
   print('[receiver] data verified, 0% corruption.')
 
   _emit_metrics(times, gbps_all, total_bytes, med_gbps)
@@ -220,10 +272,10 @@ def _emit_metrics(times, gbps_all, total_bytes, med_gbps):
   if tb:
     try:
       try:
-        import tensorboardX
+        import tensorboardX  # pylint: disable=g-import-not-at-top
         w = tensorboardX.SummaryWriter(log_dir=tb)
       except ImportError:
-        import torch.utils.tensorboard as tut
+        import torch.utils.tensorboard as tut  # pylint: disable=g-import-not-at-top
         w = tut.SummaryWriter(log_dir=tb)
       w.add_scalar('h2h_throughput_gbps', med_gbps, global_step=0)
       w.add_scalar('h2h_time_sec', float(np.median(times)), global_step=0)
@@ -238,13 +290,11 @@ def _emit_metrics(times, gbps_all, total_bytes, med_gbps):
         'transferred_bytes_total': total_bytes})
 
 
-# ---------- launcher (single-host cross-NUMA driver) ----------
+# ---------------- launcher (single-host cross-NUMA driver) ----------------
 def run_launcher():
   nodes = numa_nodes()
-  use_numa = len(nodes) >= 2 and shutil.which('numactl') is not None
-  if not use_numa:
-    print(f'WARNING: cross-NUMA unavailable (nodes={nodes}, '
-          f'numactl={shutil.which("numactl")}). Falling back to loopback (A-tier).')
+  if len(nodes) < 2:
+    print(f'WARNING: <2 NUMA nodes ({nodes}); transfer will be intra-socket (A-tier).')
 
   rv = tempfile.mkdtemp(prefix='h2h_rv_')
   pass_flags = [f'--rendezvous={rv}', f'--num_blocks={_NUM_BLOCKS.value}',
@@ -252,16 +302,20 @@ def run_launcher():
                 f'--parallelism={_PARALLELISM.value}', f'--dtype={_DTYPE.value}',
                 f'--warmup={_WARMUP.value}', f'--iters={_ITERS.value}']
 
+  # REQUIRED: propagate bazel runfiles sys.path to children, else they can't import absl/jax.
+  env = dict(os.environ)
+  pp = os.pathsep.join(p for p in sys.path if p)
+  env['PYTHONPATH'] = pp + (os.pathsep + env['PYTHONPATH'] if env.get('PYTHONPATH') else '')
+
   def spawn(role, node):
-    cmd = [sys.executable, sys.argv[0], f'--role={role}'] + pass_flags
-    if use_numa:
-      cmd = ['numactl', f'--cpunodebind={node}', f'--membind={node}'] + cmd
+    bind = node if len(nodes) >= 2 else -1
+    cmd = [sys.executable, sys.argv[0], f'--role={role}', f'--bind_numa={bind}'] + pass_flags
     print('[launch] ' + ' '.join(cmd))
-    return subprocess.Popen(cmd)
+    return subprocess.Popen(cmd, env=env)
 
   sp = spawn('sender', _SENDER_NUMA.value)
   rp = spawn('receiver', _RECEIVER_NUMA.value)
-  rc = rp.wait()              # receiver carries the result + exit code
+  rc = rp.wait()       # receiver carries the result + exit code
   sp.wait()
   shutil.rmtree(rv, ignore_errors=True)
   if rc != 0:
