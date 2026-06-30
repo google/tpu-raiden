@@ -216,6 +216,8 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
 
   virtual std::vector<EndpointDescriptor> get_local_endpoints() const;
 
+  static bool EncodeIpToIpv6Bytes(const std::string& ip, uint8_t out[16]);
+
   virtual void StartRead(
       const std::string& req_id, uint64_t uuid,
       const std::vector<EndpointDescriptor>& remote_descriptors,

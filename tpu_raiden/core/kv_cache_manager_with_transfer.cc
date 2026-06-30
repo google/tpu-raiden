@@ -658,6 +658,19 @@ KVCacheManagerWithTransfer::get_local_endpoints() const {
   return {{endpoint, all_shards}};
 }
 
+bool KVCacheManagerWithTransfer::EncodeIpToIpv6Bytes(const std::string& ip,
+                                                    uint8_t out[16]) {
+  // An IPv4 address must be sent as IPv4-mapped IPv6 ("::ffff:a.b.c.d") --
+  // inet_pton(AF_INET6, "<ipv4>") fails on a bare IPv4 string. If it still
+  // fails to parse, zero the field.
+  const std::string mapped = absl::StrContains(ip, ':') ? ip : "::ffff:" + ip;
+  if (inet_pton(AF_INET6, mapped.c_str(), out) <= 0) {
+    std::memset(out, 0, 16);
+    return false;
+  }
+  return true;
+}
+
 void KVCacheManagerWithTransfer::StartRead(
     const std::string& req_id, uint64_t uuid,
     const std::vector<std::string>& remote_endpoints,
@@ -794,10 +807,10 @@ void KVCacheManagerWithTransfer::StartRead(
       stream_request.consumer_data_port =
           static_cast<uint32_t>(local_data_port_);
       std::string bound_ip = local_ip();
-      if (inet_pton(AF_INET6, bound_ip.c_str(), stream_request.consumer_ip) <=
-          0) {
-        std::memset(stream_request.consumer_ip, 0, 16);
-      }
+      // If IPv4 then send convert to IPv4-mapped IPv6;
+      // On parse failure the helper zeroes consumer_ip and the producer falls
+      // back to getpeername()
+      EncodeIpToIpv6Bytes(bound_ip, stream_request.consumer_ip);
       CheckStatus(
           "control pull stream write",
           WriteExact(control_fd, &stream_request, sizeof(stream_request)));

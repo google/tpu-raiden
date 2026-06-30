@@ -512,6 +512,24 @@ cc_test(
     ],
 )
 
+# Hardware-free unit test for the ip wire-encoding.
+cc_test(
+    name = "kv_cache_manager_with_transfer_ip_test",
+    srcs = ["kv_cache_manager_with_transfer_ip_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = [
+        "-use_header_modules",
+        "-layering_check",
+    ],
+    deps = [
+        ":kv_cache_manager_with_transfer",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_test(
     name = "kv_cache_manager_perf_test",
     timeout = "long",
