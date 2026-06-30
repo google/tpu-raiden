@@ -30,6 +30,7 @@ _BLOCK_SIZE = flags.DEFINE_integer('block_size', 2, 'Size of cache blocks.')
 _NUM_LAYERS = flags.DEFINE_integer(
     'num_layers', 1, 'Number of transformer layers.'
 )
+_PARALLELISM = flags.DEFINE_integer('parallelism', 1, 'Concurrent transfer streams.')
 _DTYPE = flags.DEFINE_string(
     'dtype',
     'float32',
@@ -180,6 +181,7 @@ def main(_):
       device_arrays=[tpu_cache],
       host_blocks_to_allocate=half_blocks,
       unsafe_skip_buffer_lock=True,
+      parallelism=_PARALLELISM.value,
   )
 
   # Calculate data sizes for throughput
@@ -188,7 +190,9 @@ def main(_):
   elements_per_block = np.prod(cache_shape[1:])
   dtype_itemsize = jnp.dtype(target_dtype).itemsize
   bytes_per_block = elements_per_block * dtype_itemsize
-  transferred_bytes_total = half_blocks * bytes_per_block
+  num_layers = len(caches)
+  num_shards = len(caches[0].addressable_shards)
+  transferred_bytes_total = num_layers * num_shards * half_blocks * bytes_per_block
 
   # 3. Step A: Pull blocks 0:64 from device to internal host blocks 0:64 (D2H)
   print(
