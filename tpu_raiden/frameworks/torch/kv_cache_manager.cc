@@ -22,8 +22,11 @@
 
 #include "ATen/core/TensorBody.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "absl/status/statusor.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
+#include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/utils.h"
+#include "tpu_raiden/frameworks/torch/torch_tpu_utils.h"
 #include "tpu_raiden/frameworks/torch/torch_utils.h"
 #include "tpu_raiden/kv_cache/kv_cache_listener.h"
 
@@ -68,7 +71,11 @@ KVCacheManager::KVCacheManager(
                      host_blocks_to_allocate, unsafe_skip_buffer_lock,
                      parallelism, /*node_id=*/0, /*local_control_port=*/-1,
                      /*max_blocks=*/0, /*num_slots=*/0, /*timeout_s=*/120.0,
-                     /*kv_caches=*/{}) {}
+                     /*kv_caches=*/{}) {
+  // Retain the live device tensors so D2h can re-resolve the current KV buffer
+  // for the readiness await (see KVCacheManager::D2h).
+  device_tensors_ = device_tensors;
+}
 
 KVCacheManager::KVCacheManager(UnpackedLayers unpacked,
                                std::optional<int> local_port,
@@ -108,6 +115,36 @@ KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
 }
 
 KVCacheManager::~KVCacheManager() = default;
+
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManager::D2h(
+    const std::vector<int64_t>& src_offsets_major_dim,
+    const std::vector<int64_t>& dst_offsets_major_dim,
+    const std::vector<int64_t>& copy_sizes_major_dim,
+    std::optional<int64_t> slot_idx, std::optional<size_t> layer_idx,
+    std::optional<size_t> shard_idx, bool wait_ready) {
+  if (wait_ready && !device_tensors_.empty()) {
+    // Re-resolve each involved layer/shard's LIVE buffer and block on its
+    // readiness so the base copy below reads the forward's settled write. The
+    // owning DeviceBufferRef is held only for the (synchronous) await.
+    const size_t l_end = layer_idx ? *layer_idx + 1 : device_tensors_.size();
+    for (size_t l = layer_idx.value_or(0);
+         l < l_end && l < device_tensors_.size(); ++l) {
+      const auto& shards = device_tensors_[l];
+      const size_t s_end = shard_idx ? *shard_idx + 1 : shards.size();
+      for (size_t s = shard_idx.value_or(0); s < s_end && s < shards.size();
+           ++s) {
+        UnpackedTensor unpacked = UnpackTorchTensor(shards[s]);
+        if (absl::Status st = raiden::AwaitBufferReady(unpacked.buffer);
+            !st.ok()) {
+          return st;
+        }
+      }
+    }
+  }
+  return KVCacheManagerBase::D2h(src_offsets_major_dim, dst_offsets_major_dim,
+                                 copy_sizes_major_dim, slot_idx, layer_idx,
+                                 shard_idx, /*wait_ready=*/false);
+}
 
 std::optional<int> KVCacheManager::listener_port() const {
   if (listener_) {

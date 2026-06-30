@@ -558,7 +558,14 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2h(
     const std::vector<int64_t>& dst_offsets_major_dim,
     const std::vector<int64_t>& copy_sizes_major_dim,
     std::optional<int64_t> slot_idx, std::optional<size_t> layer_idx,
-    std::optional<size_t> shard_idx) {
+    std::optional<size_t> shard_idx, bool wait_ready) {
+  if (wait_ready) {
+    return absl::UnimplementedError(
+        "D2h(wait_ready=true) requires a manager that can resolve the live "
+        "source buffers; the base manager only holds registration-time buffer "
+        "handles, which the forward's donation retires. Use a framework "
+        "manager that overrides D2h (e.g. the torch KVCacheManager).");
+  }
   ASSIGN_OR_RETURN(
       auto logical_futures,
       DispatchD2hChunks(src_offsets_major_dim, dst_offsets_major_dim,

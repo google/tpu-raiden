@@ -60,6 +60,21 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
 
   const std::vector<at::Tensor>& kv_caches() const { return kv_caches_; }
 
+  // Overrides the base D2h: when wait_ready is set, resolves each involved
+  // layer/shard's LIVE KV buffer and blocks on its readiness before the copy,
+  // so the store reads the forward's settled in-place write rather than a block
+  // mid-write. The await runs on the caller's thread; for off-thread ordering
+  // use PrepareD2hReadyEvents + RaidenReadyEvents::Await on a worker, then call
+  // D2h with wait_ready=false (copy only).
+  absl::StatusOr<raiden::PjRtCopyFuture> D2h(
+      const std::vector<int64_t>& src_offsets_major_dim = {},
+      const std::vector<int64_t>& dst_offsets_major_dim = {},
+      const std::vector<int64_t>& copy_sizes_major_dim = {},
+      std::optional<int64_t> slot_idx = std::nullopt,
+      std::optional<size_t> layer_idx = std::nullopt,
+      std::optional<size_t> shard_idx = std::nullopt,
+      bool wait_ready = false) override;
+
   std::optional<int> listener_port() const;
   bool is_listener_active() const;
 
@@ -86,6 +101,12 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
                  std::vector<at::Tensor> kv_caches);
 
   std::vector<at::Tensor> kv_caches_;
+  // Live device tensors (layer x shard) retained so D2h can re-resolve the
+  // current (post-donation) KV buffer for the readiness await. Populated for
+  // the offload (sharded) ctor; the registration-time holds in the base read
+  // the same in-place HBM, but their handles are retired each forward step so
+  // only a freshly-resolved buffer yields a valid ready event.
+  std::vector<std::vector<at::Tensor>> device_tensors_;
   // Keep-alives for the materialized device buffers backing the manager.
   std::vector<torch_tpu::DeviceBufferRef> buffer_refs_;
   std::unique_ptr<tpu_raiden::kv_cache::KVCacheListener> listener_;

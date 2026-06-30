@@ -16,6 +16,7 @@
 #define THIRD_PARTY_TPU_RAIDEN_RAIDEN_LIB_RAW_TRANSFER_RAW_TRANSFER_CORE_H_
 
 #include <cstdint>
+#include <cstdlib>
 #include <iterator>
 #include <memory>
 #include <optional>
@@ -90,6 +91,38 @@ inline const PJRT_RawBuffer_Extension* GetRawBufferExtension(
   if (!capi_client) return nullptr;
   return capi_client->FindExtension<PJRT_RawBuffer_Extension>(
       PJRT_Extension_Type::PJRT_Extension_Type_RawBuffer);
+}
+
+// Block until `buffer`'s producing computation (e.g. the forward's in-place KV
+// write) has completed, so a subsequent raw read sees settled bytes. Routes
+// through the stable PJRT C ABI (PJRT_Buffer_ReadyEvent + PJRT_Event_Await)
+// rather than xla::Future, whose C++ ABI mismatches when raiden and torch_tpu
+// are independent XLA builds. C-API (TPU) buffers only; common (in-process)
+// buffers return Ok (their ordering comes from materialization).
+inline absl::Status AwaitBufferReady(xla::PjRtBuffer* buffer) {
+  auto* capi = dynamic_cast<xla::PjRtCApiBuffer*>(buffer);
+  if (capi == nullptr) return absl::OkStatus();
+  const PJRT_Api* api = capi->pjrt_c_api();
+  PJRT_Buffer_ReadyEvent_Args re;
+  re.struct_size = PJRT_Buffer_ReadyEvent_Args_STRUCT_SIZE;
+  re.extension_start = nullptr;
+  re.buffer = capi->c_buffer();
+  if (PJRT_Error* err = api->PJRT_Buffer_ReadyEvent(&re)) {
+    return PjrtErrorToStatusLocal(api, err);
+  }
+  PJRT_Event* ev = re.event;
+  PJRT_Event_Await_Args aw;
+  aw.struct_size = PJRT_Event_Await_Args_STRUCT_SIZE;
+  aw.extension_start = nullptr;
+  aw.event = ev;
+  PJRT_Error* aerr = api->PJRT_Event_Await(&aw);
+  PJRT_Event_Destroy_Args de;
+  de.struct_size = PJRT_Event_Destroy_Args_STRUCT_SIZE;
+  de.extension_start = nullptr;
+  de.event = ev;
+  api->PJRT_Event_Destroy(&de);
+  if (aerr) return PjrtErrorToStatusLocal(api, aerr);
+  return absl::OkStatus();
 }
 
 inline int64_t GetMajorSliceByteSize(const xla::PjRtBuffer* buffer) {

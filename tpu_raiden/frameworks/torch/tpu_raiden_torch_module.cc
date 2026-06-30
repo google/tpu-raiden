@@ -152,10 +152,12 @@ NB_MODULE(_tpu_raiden_torch, m) {
           [](KVCacheManager& self,
              const std::vector<int64_t>& src_offsets_major_dim,
              const std::vector<int64_t>& dst_offsets_major_dim,
-             const std::vector<int64_t>& copy_sizes_major_dim) {
-            auto status_or =
-                self.D2h(src_offsets_major_dim, dst_offsets_major_dim,
-                         copy_sizes_major_dim);
+             const std::vector<int64_t>& copy_sizes_major_dim, bool wait_ready) {
+            auto status_or = self.D2h(
+                src_offsets_major_dim, dst_offsets_major_dim,
+                copy_sizes_major_dim, /*slot_idx=*/std::nullopt,
+                /*layer_idx=*/std::nullopt, /*shard_idx=*/std::nullopt,
+                wait_ready);
             if (!status_or.ok()) {
               throw std::runtime_error(
                   "KVCacheManager D2h failed: " +
@@ -165,7 +167,8 @@ NB_MODULE(_tpu_raiden_torch, m) {
           },
           nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
           nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
-          nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{})
+          nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{},
+          nb::arg("wait_ready") = false)
       .def(
           "D2hAutoAllocate",
           [](KVCacheManager& self,

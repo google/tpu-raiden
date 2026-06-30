@@ -121,14 +121,20 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<size_t> layer_idx = std::nullopt,
       std::optional<size_t> shard_idx = std::nullopt);
 
-  // Async on-chip D2H offloads E2E
+  // Async on-chip D2H offloads E2E. `wait_ready`, when set, orders the store
+  // copy after the live source buffers' producing computation; honored only by
+  // overrides that can resolve those buffers (the torch KVCacheManager). The
+  // base cannot -- its registration-time holds carry a handle the forward's
+  // donation retires -- so it returns UnimplementedError rather than silently
+  // skipping the ordering.
   virtual absl::StatusOr<raiden::PjRtCopyFuture> D2h(
       const std::vector<int64_t>& src_offsets_major_dim = {},
       const std::vector<int64_t>& dst_offsets_major_dim = {},
       const std::vector<int64_t>& copy_sizes_major_dim = {},
       std::optional<int64_t> slot_idx = std::nullopt,
       std::optional<size_t> layer_idx = std::nullopt,
-      std::optional<size_t> shard_idx = std::nullopt);
+      std::optional<size_t> shard_idx = std::nullopt,
+      bool wait_ready = false);
 
   // Auto-allocating offloads E2E
   virtual absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
