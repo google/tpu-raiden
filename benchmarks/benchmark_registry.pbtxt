@@ -2,30 +2,30 @@
 # proto-message: BenchmarkSuite
 
 
-benchmarks {
-  name: "tpu_raiden_debug_stablehlo"
-  description: "DEBUG: reproduce + dump the jaxlib._stablehlo import failure in the bazel-built jaxlib"
-  owner: "raiden-dev"
-
-  workload {
-    action: "./ml_actions/actions/workload_executors/bazel"
-    action_inputs { key: "target" value: "//tpu_raiden/benchmarks:debug_stablehlo" }
-    action_inputs { key: "runtime_flags" value: "" }
-  }
-
-  environment_configs {
-    id: "tpu-v5e-single-node"
-    runner_label: "linux-x86-ct5lp-224-8tpu"
-    container_image: "us-docker.pkg.dev/ml-oss-artifacts-transient/ml-public-testing-container/ml-build:939285342"
-    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss" }
-  }
-
-  metrics {
-    name: "d2h_time_sec"
-    unit: "s"
-    stats { stat: MEAN }
-  }
-}
+#benchmarks {
+# name: "tpu_raiden_debug_stablehlo"
+# description: "DEBUG: reproduce + dump the jaxlib._stablehlo import failure in the bazel-built jaxlib"
+#  owner: "raiden-dev"
+#
+#  workload {
+#    action: "./ml_actions/actions/workload_executors/bazel"
+#    action_inputs { key: "target" value: "//tpu_raiden/benchmarks:debug_stablehlo" }
+#    action_inputs { key: "runtime_flags" value: "" }
+#  }
+#
+#  environment_configs {
+#    id: "tpu-v5e-single-node"
+#    runner_label: "linux-x86-ct5lp-224-8tpu"
+#    container_image: "us-docker.pkg.dev/ml-oss-artifacts-transient/ml-public-testing-container/ml-build:939285342"
+#    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss" }
+#  }
+#
+#  metrics {
+#    name: "d2h_time_sec"
+#    unit: "s"
+#    stats { stat: MEAN }
+#  }
+#}
 
 benchmarks {
   name: "tpu_raiden_h2d_d2h_perf_test_fp32"
