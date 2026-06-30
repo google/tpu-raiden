@@ -20,13 +20,13 @@ Fabric). Measures cross-NUMA bandwidth (Gbps) and verifies data integrity.
 
 NOTE: loopback traffic does NOT egress a physical NIC, so the number reflects
 cross-socket memory bandwidth + kernel net-stack, not wire bandwidth (B-tier).
+If the container's cpuset only covers one NUMA node, binding degrades to A-tier
+(intra-node loopback) automatically.
 
 Roles (--role):
   launch   : (default) spawn sender (NUMA A) + receiver (NUMA B), supervise, exit.
-  sender   : hold source KV cache, register reads round-by-round.
+  sender   : hold source KV cache, notify reads round-by-round.
   receiver : pull the cache via start_read, time warmup+iters, verify, emit metrics.
-
-Calls into _tpu_raiden_jax are marked `# VERIFY` — confirm names against OSS binding.
 """
 
 import ctypes
@@ -104,12 +104,19 @@ def _cpus_of_node(node):
 
 
 def bind_to_numa(node):
-  """numactl-free NUMA bind: CPU affinity + set_mempolicy(MPOL_BIND). Big KV
-  buffers are allocated AFTER this, so they land on `node` (cross-socket)."""
+  """numactl-free NUMA bind: CPU affinity (intersection with allowed cores) +
+  set_mempolicy(MPOL_BIND). Degrades gracefully if the container's cpuset has no
+  cores on `node` (e.g. cgroup pinned to one socket)."""
   if node is None or node < 0:
     return
-  cpus = _cpus_of_node(node)
-  if cpus:
+  want = _cpus_of_node(node)
+  allowed = os.sched_getaffinity(0)
+  cpus = want & allowed
+  if not cpus:
+    print(f'WARNING: no allowed cores on NUMA node {node} '
+          f'(want={len(want)}, allowed={len(allowed)}); container likely pinned '
+          'to one node -> B-tier degrades to A-tier.', file=sys.stderr)
+  else:
     try:
       os.sched_setaffinity(0, cpus)
     except OSError as e:
@@ -121,10 +128,9 @@ def bind_to_numa(node):
     rc = libc.syscall(SYS_set_mempolicy, MPOL_BIND,
                       ctypes.byref(nodemask), ctypes.c_ulong(64))
     if rc != 0:
-      print(f'WARNING: set_mempolicy errno={ctypes.get_errno()} '
-            '-> not membound (degrades toward A-tier)', file=sys.stderr)
+      print(f'WARNING: set_mempolicy errno={ctypes.get_errno()}', file=sys.stderr)
     else:
-      print(f'[bind] process pinned to NUMA node {node} (cpu+mem).')
+      print(f'[bind] process pinned to NUMA node {node} (mem; cpus={len(cpus)}).')
   except Exception as e:  # pylint: disable=broad-exception-caught
     print(f'WARNING: NUMA membind unavailable: {e}', file=sys.stderr)
 
@@ -155,10 +161,10 @@ def _primary_endpoint(port):
 
 
 def _resolve_endpoints(manager):
-  """Authoritative endpoints the manager is actually listening on (handles
-  IPv4/IPv6/multi-NIC). Falls back to a self-probed primary endpoint."""
+  """Authoritative endpoints the manager bound to (get_local_endpoints returns
+  a list of {'endpoint': str, 'shards': [...]}); falls back to a self-probe."""
   try:
-    eps = manager.get_local_endpoints()  # VERIFY: return type (list[str] or list[dict])
+    eps = manager.get_local_endpoints()
     out = []
     for e in eps:
       out.append(e if isinstance(e, str) else e.get('endpoint', str(e)))
@@ -167,7 +173,7 @@ def _resolve_endpoints(manager):
       return out
   except Exception as e:  # pylint: disable=broad-exception-caught
     print(f'WARNING: get_local_endpoints unavailable ({e}); probing.', file=sys.stderr)
-  return [_primary_endpoint(manager.local_control_port)]  # VERIFY: property name
+  return [_primary_endpoint(manager.local_control_port)]
 
 
 # ---------------- cache helpers ----------------
@@ -225,14 +231,14 @@ def run_sender():
   s_path, r_path = os.path.join(rv, 's.json'), os.path.join(rv, 'r.json')
 
   arrs = make_caches(fill=True)
-  manager = kv_cache_manager.KVCacheManager(          # VERIFY: transfer ctor signature
+  manager = kv_cache_manager.KVCacheManager(
       kv_caches=arrs, local_control_port=0,
       max_blocks=_NUM_BLOCKS.value, num_slots=_PARALLELISM.value,
       unsafe_skip_buffer_lock=True)
 
   base_uuid = uuid.uuid4().int & 0xFFFFFFFF
   block_ids = list(range(_NUM_BLOCKS.value))
-  endpoints = _resolve_endpoints(manager)             # IPv4/IPv6/multi-NIC, authoritative
+  endpoints = _resolve_endpoints(manager)
   print(f'[sender] endpoints={endpoints}, blocks={len(block_ids)}')
 
   _write_json(s_path, {'endpoints': endpoints, 'uuid': base_uuid,
@@ -240,7 +246,7 @@ def run_sender():
   total_rounds = _WARMUP.value + _ITERS.value
   for i in range(total_rounds):
     req_id = f'h2h_{base_uuid}_{i}'
-    manager.register_read(req_id, base_uuid, block_ids)              # VERIFY
+    manager.notify_for_read(req_id, base_uuid, block_ids)            # OSS API
     _write_json(s_path, {'endpoints': endpoints, 'uuid': base_uuid,
                          'block_ids': block_ids, 'reg_round': i})
     _wait_until(lambda i=i: (_read_json(r_path) or {}).get('recv_round', -1) >= i,
@@ -258,11 +264,11 @@ def run_receiver():
   _wait_until(lambda: _read_json(s_path) is not None, timeout=120, what='sender rendezvous')
   meta = _read_json(s_path)
   endpoints, base_uuid, block_ids = meta['endpoints'], meta['uuid'], meta['block_ids']
-  endpoint = endpoints[0]                              # single-host: first endpoint
+  endpoint = endpoints[0]
   print(f'[receiver] peer endpoint={endpoint}, blocks={len(block_ids)}')
 
   device_arrs = make_caches(fill=False)
-  manager = kv_cache_manager.KVCacheManager(          # VERIFY
+  manager = kv_cache_manager.KVCacheManager(
       kv_caches=device_arrs, local_control_port=0,
       max_blocks=_NUM_BLOCKS.value, num_slots=_PARALLELISM.value,
       unsafe_skip_buffer_lock=True)
@@ -274,18 +280,19 @@ def run_receiver():
     _wait_until(lambda i=i: (_read_json(s_path) or {}).get('reg_round', -1) >= i,
                 timeout=300, what=f'sender register round {i}')
     t0 = time.perf_counter()
-    manager.start_read(req_id=req_id, uuid=base_uuid,               # VERIFY
+    manager.start_read(req_id=req_id, uuid=base_uuid,               # OSS API
                        remote_endpoint=endpoint,
-                       remote_block_ids=block_ids, local_block_ids=block_ids)
+                       remote_block_ids=block_ids, local_block_ids=block_ids,
+                       parallelism=_PARALLELISM.value)              # TCP streams
     while True:
-      _, done, failed = manager.poll_stats()                        # VERIFY
+      _done_send, done, failed = manager.complete_read()           # OSS API (poll)
       if req_id in done:
         break
       if req_id in failed:
         raise RuntimeError(f'H2H transfer failed: {req_id}')
       time.sleep(0.001)
     dt = time.perf_counter() - t0
-    _write_json(r_path, {'recv_round': i})                          # signal round done
+    _write_json(r_path, {'recv_round': i})
     return dt
 
   for i in range(_WARMUP.value):
