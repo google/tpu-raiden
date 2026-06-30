@@ -28,6 +28,27 @@
 #}
 
 benchmarks {
+  name: "tpu_raiden_h2h_single_host_xnuma"
+  description: "Single-host cross-NUMA H2H KV-cache transfer (loopback, B-tier)."
+  owner: "raiden-dev"
+
+  workload {
+    action: "./ml_actions/actions/workload_executors/bazel"
+    action_inputs { key: "target" value: "//tpu_raiden/benchmarks:h2h_perf_test_oss" }
+    action_inputs { key: "runtime_flags" value: "--num_blocks=4096 --num_layers=8 --parallelism=8 --dtype=bfloat16 --warmup=3 --iters=20" }
+  }
+
+  environment_configs {
+    id: "tpu-v5e-single-node"
+    runner_label: "linux-x86-ct5lp-224-8tpu"
+    container_image: "us-docker.pkg.dev/ml-oss-artifacts-transient/ml-public-testing-container/ml-build:939285342"
+    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss" }
+  }
+
+  metrics { name: "h2h_throughput_gbps" unit: "Gbps" stats { stat: MEAN } }
+}
+
+benchmarks {
   name: "tpu_raiden_h2d_d2h_perf_test_fp32"
   description: "FP32 Performance Test for TPU Raiden local H2D and D2H offloading/reloading"
   owner: "raiden-dev"
