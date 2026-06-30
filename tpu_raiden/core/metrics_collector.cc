@@ -126,7 +126,11 @@ absl::flat_hash_map<std::string, NicBytes> MetricsCollector::SnapshotAllNics() {
   }
   for (const auto& entry : std::filesystem::directory_iterator(sysfs_dir_)) {
     std::string iface = entry.path().filename().string();
-    if (absl::StartsWith(iface, "eth")) {
+    // Physical NICs: eth* (classic) or predictable names ens*/enp*/eno* (the
+    // GCP TPU VMs name the primary NIC ens5, which the old eth-only filter
+    // missed -> empty nic_wire_bandwidth_gbps). Skip loopback / docker / virtual.
+    if (absl::StartsWith(iface, "eth") || absl::StartsWith(iface, "ens") ||
+        absl::StartsWith(iface, "enp") || absl::StartsWith(iface, "eno")) {
       snapshot[iface] = ReadNicStats(sysfs_dir_, iface);
     }
   }

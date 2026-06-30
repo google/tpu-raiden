@@ -44,9 +44,11 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <exception>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -97,7 +99,40 @@ void CheckStatus(const std::string& context, const absl::Status& status) {
   }
 }
 
-void EmitTimingLog(const std::string& message) { LOG(INFO) << message; }
+void EmitTimingLog(const std::string& message) {
+  // Write directly to stderr (captured in the server logs) -- absl LOG(INFO)
+  // from the embedded engine .so is suppressed by the stderr threshold, so
+  // RAIDEN_TIMING / KVXFER timing events never reached the logs via LOG(INFO).
+  std::fprintf(stderr, "%s\n", message.c_str());
+  std::fflush(stderr);
+}
+
+// Per-operation block-count/size logging (RAIDEN_BLOCKS), opt-in via the
+// RAIDEN_LOG_BLOCKS env var so it does not flood normal runs.
+bool BlockLogEnabled() {
+  static const bool enabled = std::getenv("RAIDEN_LOG_BLOCKS") != nullptr;
+  return enabled;
+}
+
+// Emit the consumer-side completion timing for a finished recv. h2d_ms is the
+// wall time from the first layer's H2D launch to this finalize; cons_done is an
+// epoch-wall-clock marker correlated by uuid with the connector's prod_start /
+// cons_pull_issue.
+void EmitConsumerDone(uint64_t uuid, const std::string& req_id,
+                      std::chrono::steady_clock::time_point first_h2d_start) {
+  const auto t_done = std::chrono::steady_clock::now();
+  std::ostringstream ct;
+  ct << "RAIDEN_TIMING event=consumer_h2d uuid=" << uuid << " req_id=" << req_id
+     << " h2d_ms="
+     << std::chrono::duration<double, std::milli>(t_done - first_h2d_start)
+            .count();
+  EmitTimingLog(ct.str());
+  std::ostringstream xfer;
+  xfer << "KVXFER event=cons_done req_id=" << req_id << " uuid=" << uuid
+       << " t=" << std::fixed << std::setprecision(6)
+       << (absl::ToUnixMicros(absl::Now()) / 1e6);
+  EmitTimingLog(xfer.str());
+}
 
 template <typename T>
 T ValueOrThrow(const std::string& context, absl::StatusOr<T> value_or) {
@@ -1376,6 +1411,18 @@ void KVCacheManagerWithTransfer::StartPushInternal(
     return;
   }
 
+  // Producer push timing. push_start anchors the layer-chained D2H->H2H push;
+  // the prod_push epoch lets the connector measure cons_pull_issue -> prod_push
+  // (connection-init + producer pull processing, out of the transfer proper).
+  entry->push_start = std::chrono::steady_clock::now();
+  {
+    std::ostringstream xfer;
+    xfer << "KVXFER event=prod_push req_id=" << entry->req_id
+         << " uuid=" << uuid << " t=" << std::fixed << std::setprecision(6)
+         << (absl::ToUnixMicros(absl::Now()) / 1e6);
+    EmitTimingLog(xfer.str());
+  }
+
   CopySpec d2h_copy = BuildCoalescedCopySpec(src_block_ids, host_block_ids);
   entry->d2h_layer_futures.reserve(num_layers());
 
@@ -1384,6 +1431,16 @@ void KVCacheManagerWithTransfer::StartPushInternal(
     LOG(INFO) << "StartPushInternal (D2H start) layer " << l
               << ": uuid=" << uuid
               << ", numa=" << assigned_numa_node().value_or(-1);
+    if (BlockLogEnabled()) {
+      std::ostringstream bl;
+      bl << "RAIDEN_BLOCKS op=d2h uuid=" << uuid << " layer=" << l
+         << " num_blocks=" << src_block_ids.size()
+         << " segments=" << d2h_copy.sizes.size() << " shards=" << num_shards_
+         << " bytes_per_block_layer=" << (num_shards_ * slice_byte_size_)
+         << " bytes=" << (static_cast<int64_t>(src_block_ids.size()) *
+                          num_shards_ * slice_byte_size_);
+      EmitTimingLog(bl.str());
+    }
     auto future_or =
         D2h(d2h_copy.src_offsets, d2h_copy.dst_offsets, d2h_copy.sizes,
             /*slot_idx=*/std::nullopt, /*layer_idx=*/l);
@@ -1405,6 +1462,7 @@ void KVCacheManagerWithTransfer::StartPushInternal(
   entry->src_ints.assign(host_block_ids.begin(), host_block_ids.end());
   entry->dst_ints.assign(dst_block_ids.begin(), dst_block_ids.end());
   entry->remaining_h2h_layers.store(num_layers());
+  entry->remaining_d2h_layers.store(num_layers());
 
   SendNextLayer(uuid, 0);
 }
@@ -1422,7 +1480,7 @@ void KVCacheManagerWithTransfer::SendNextLayer(uint64_t uuid, size_t l) {
 
   if (l >= num_layers()) {
     // Reached end of layer loop. Background asynchronous transfers will clean
-    // up when remaining_h2h_layers reaches 0.
+    // up (and emit producer_push) when remaining_h2h_layers reaches 0.
     return;
   }
 
@@ -1440,6 +1498,19 @@ void KVCacheManagerWithTransfer::SendNextLayer(uint64_t uuid, size_t l) {
       return;
     }
 
+    // This layer's D2H just completed. When the last of the num_layers() D2H
+    // copies finishes, stamp all_d2h_done -- the producer-internal "all D2H
+    // done" signal (collected inside tpu-raiden, independent of the H2H/H2D
+    // stages that overlap it).
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = send_entries_.find(uuid);
+      if (it != send_entries_.end() &&
+          it->second->remaining_d2h_layers.fetch_sub(1) == 1) {
+        it->second->all_d2h_done = std::chrono::steady_clock::now();
+      }
+    }
+
     push_pool_->Schedule([this, uuid, l]() {
       std::shared_ptr<SendEntry> entry;
       {
@@ -1449,6 +1520,10 @@ void KVCacheManagerWithTransfer::SendNextLayer(uint64_t uuid, size_t l) {
           return;
         }
         entry = it->second;
+        // First H2H push of the chain: marks the end of the D2H pipeline fill.
+        if (l == 0) {
+          entry->first_h2h_start = std::chrono::steady_clock::now();
+        }
       }
       LOG(INFO) << "StartPushInternal (H2H start layer " << l
                 << "): uuid=" << uuid
@@ -1484,6 +1559,23 @@ void KVCacheManagerWithTransfer::SendNextLayer(uint64_t uuid, size_t l) {
             if (entry->remaining_h2h_layers.fetch_sub(1) == 1) {
               LOG(INFO) << "StartPushInternal (All H2H complete): uuid="
                         << uuid;
+              // All H2H pushes done: emit the per-request producer_push
+              // breakdown for the pipelined transport. d2h_fill = fill before
+              // the first push; d2h_all = when ALL D2H copies finished (the
+              // producer-internal "all D2H done"); h2h = the overlapped H2H
+              // phase; total = full producer-side push wall time.
+              const auto all_h2h_done = std::chrono::steady_clock::now();
+              std::ostringstream pt;
+              pt << "RAIDEN_TIMING event=producer_push uuid=" << uuid
+                 << " req_id=" << entry->req_id
+                 << " blocks=" << entry->num_blocks << " d2h_fill_ms="
+                 << DurationMs(entry->push_start, entry->first_h2h_start)
+                 << " d2h_all_ms="
+                 << DurationMs(entry->push_start, entry->all_d2h_done)
+                 << " h2h_ms="
+                 << DurationMs(entry->first_h2h_start, all_h2h_done)
+                 << " total_ms=" << DurationMs(entry->push_start, all_h2h_done);
+              EmitTimingLog(pt.str());
               std::lock_guard<std::mutex> lock(mu_);
               done_sending_.insert(entry->req_id);
               ReleaseEntrySlotLocked(entry);
@@ -1651,6 +1743,7 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
   absl::flat_hash_map<int64_t, int64_t> host_to_chip;
   bool found = false;
   std::vector<int> accumulated_host_blocks;
+  std::chrono::steady_clock::time_point first_h2d_start;
 
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -1671,6 +1764,7 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
         it->second.network_completed = true;
         req_id = it->second.req_id;
         recv_slot = it->second.slot_idx;
+        first_h2d_start = it->second.first_h2d_start;
         if (metrics_collector_) {
           metrics_collector_->RecordLastPacket(uuid);
         }
@@ -1697,6 +1791,7 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
 
   {
     std::lock_guard<std::mutex> lock(mu_);
+    EmitConsumerDone(uuid, req_id, first_h2d_start);
     done_recving_.insert(req_id);
     ReleaseSlotLocked(recv_slot);
   }
@@ -1725,6 +1820,7 @@ absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,
     recv_slot = entry.slot_idx;
     if (!entry.h2d_started) {
       entry.h2d_started = true;
+      entry.first_h2d_start = std::chrono::steady_clock::now();
       trigger_enqueue = true;
     }
   }
@@ -1735,6 +1831,18 @@ absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,
   LOG(INFO) << "OnLayerReceived (H2D copy start) layer " << layer_idx
             << ": req_id=" << req_id << ", uuid=" << uuid
             << ", numa=" << assigned_numa_node().value_or(-1);
+
+  if (BlockLogEnabled()) {
+    int64_t h2d_blocks = 0;
+    for (int64_t s : h2d_copy.sizes) h2d_blocks += s;
+    std::ostringstream bl;
+    bl << "RAIDEN_BLOCKS op=h2d uuid=" << uuid << " layer=" << layer_idx
+       << " num_blocks=" << h2d_blocks
+       << " segments=" << h2d_copy.sizes.size() << " shards=" << num_shards_
+       << " bytes_per_block_layer=" << (num_shards_ * slice_byte_size_)
+       << " bytes=" << (h2d_blocks * num_shards_ * slice_byte_size_);
+    EmitTimingLog(bl.str());
+  }
 
   auto future_or =
       H2d(h2d_copy.src_offsets, h2d_copy.dst_offsets, h2d_copy.sizes,
@@ -1770,6 +1878,7 @@ absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,
           if (metrics_collector) {
             metrics_collector->RecordEnd(uuid);
           }
+          EmitConsumerDone(uuid, req_id, entry.first_h2d_start);
           done_recving_.insert(req_id);
           ReleaseSlotLocked(recv_slot);
           active_recv_entries_.erase(uuid);

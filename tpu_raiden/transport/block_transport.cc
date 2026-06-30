@@ -25,6 +25,8 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <limits>
@@ -921,6 +923,11 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
     target_layers = {layer_idx};
   }
 
+  // H2H block-count/size diagnostic (opt-in via RAIDEN_LOG_BLOCKS): one
+  // RAIDEN_H2H_PAYLOAD line per (layer, shard, block) unit actually written on
+  // this stream, plus a per-stream RAIDEN_BLOCKS summary below.
+  static const bool kLogBlocks = std::getenv("RAIDEN_LOG_BLOCKS") != nullptr;
+  size_t stream_bytes = 0;
   s = ForEachPayload(
       major_order, target_layers, block_delegate_->num_shards(), block_count,
       [&](size_t l, size_t sh, size_t k) -> absl::Status {
@@ -937,6 +944,18 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
           for (const auto& chunk : chunks) {
             total_size += chunk.size;
           }
+          stream_bytes += total_size;
+
+          if (kLogBlocks) {
+            std::fprintf(stderr,
+                         "RAIDEN_H2H_PAYLOAD uuid=%llu stream=%d/%d layer=%zu "
+                         "shard=%zu block_k=%zu src_block=%d num_chunks=%zu "
+                         "bytes=%u\n",
+                         static_cast<unsigned long long>(uuid), stream_idx,
+                         parallelism, l, sh, k, src_id, chunks.size(),
+                         total_size);
+            std::fflush(stderr);
+          }
 
           RETURN_IF_ERROR(WriteExact(fd, &total_size, sizeof(total_size)));
 
@@ -948,12 +967,35 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
                                              bytes_per_block));
           RETURN_IF_ERROR(block_delegate_->WaitForBlockRead(l, sh, src_id));
           const uint8_t* src_ptr = base_host_ptr + src_id * bytes_per_block;
+          stream_bytes += bytes_per_block;
+
+          if (kLogBlocks) {
+            std::fprintf(stderr,
+                         "RAIDEN_H2H_PAYLOAD uuid=%llu stream=%d/%d layer=%zu "
+                         "shard=%zu block_k=%zu src_block=%d num_chunks=1 "
+                         "bytes=%zu\n",
+                         static_cast<unsigned long long>(uuid), stream_idx,
+                         parallelism, l, sh, k, src_id, bytes_per_block);
+            std::fflush(stderr);
+          }
+
           return WriteExact(fd, src_ptr, bytes_per_block);
         }
       });
   if (!s.ok()) {
     statuses[stream_idx] = s;
     return;
+  }
+
+  // Per-stream H2H block-count/size summary.
+  if (kLogBlocks) {
+    std::fprintf(stderr,
+                 "RAIDEN_BLOCKS op=h2h uuid=%llu layer=%d stream=%d/%d "
+                 "num_blocks=%zu layers=%zu shards=%zu bytes=%zu\n",
+                 static_cast<unsigned long long>(uuid), layer_idx, stream_idx,
+                 parallelism, block_count, target_layers.size(),
+                 block_delegate_->num_shards(), stream_bytes);
+    std::fflush(stderr);
   }
 
   uint8_t ack = 0;

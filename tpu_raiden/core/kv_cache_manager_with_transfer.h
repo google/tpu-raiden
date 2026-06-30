@@ -241,6 +241,18 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     std::chrono::steady_clock::time_point d2h_issue_start;
     std::chrono::steady_clock::time_point d2h_issue_done;
     std::chrono::steady_clock::time_point d2h_done;
+    // Pipelined push timing (RAIDEN_TIMING event=producer_push). push_start at
+    // StartPushInternal entry; first_h2h_start when layer 0's H2H push begins;
+    // all_d2h_done stamped (via remaining_d2h_layers) when the LAST layer's D2H
+    // completes -- the producer-internal "all D2H done" signal.
+    //   d2h_fill_ms = first_h2h_start - push_start (issue all D2H + wait layer-0)
+    //   d2h_all_ms  = all_d2h_done   - push_start  (all D2H copies complete)
+    //   h2h_ms      = all_h2h_done   - first_h2h_start (overlapped H2H phase)
+    //   total_ms    = all_h2h_done   - push_start
+    std::chrono::steady_clock::time_point push_start;
+    std::chrono::steady_clock::time_point first_h2h_start;
+    std::chrono::steady_clock::time_point all_d2h_done;
+    std::atomic<size_t> remaining_d2h_layers{0};
     bool stage_done = false;
     bool failed = false;
     bool pull_started = false;
@@ -345,6 +357,9 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     int32_t num_completed_layers = 0;
     bool network_completed = false;
     bool h2d_started = false;
+    // Consumer H2D timing (RAIDEN_TIMING event=consumer_h2d): stamped on the
+    // first OnLayerReceived; h2d_ms = finalize - first_h2d_start.
+    std::chrono::steady_clock::time_point first_h2d_start;
     std::vector<int> accumulated_host_block_ids;
     std::chrono::steady_clock::time_point deadline;
     std::vector<raiden::PjRtCopyFuture> h2d_futures;
