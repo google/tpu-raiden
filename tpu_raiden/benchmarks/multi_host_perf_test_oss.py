@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ctypes
 import os
 import sys
 import time
@@ -38,6 +39,60 @@ _DTYPE = flags.DEFINE_string(
 )
 _WARMUP = flags.DEFINE_integer('warmup', 5, 'Number of warmup iterations.')
 _ITERS = flags.DEFINE_integer('iters', 20, 'Number of benchmark iterations.')
+_NUMA_PIN = flags.DEFINE_bool(
+    'numa_pin', False,
+    'Pin the whole process (cpu+mem) to a single NUMA node before allocating '
+    'host buffers. Use to test whether the per-iter distribution is NUMA-driven '
+    '(kernel page/thread migration across sockets).'
+)
+_NUMA_NODE = flags.DEFINE_integer('numa_node', 0, 'NUMA node to pin to when --numa_pin.')
+
+
+# ---------------- NUMA pinning (numactl-free) ----------------
+def _cpus_of_node(node):
+  try:
+    spec = open(f'/sys/devices/system/node/node{node}/cpulist').read().strip()
+  except OSError:
+    return set()
+  cpus = set()
+  for part in spec.split(','):
+    if '-' in part:
+      a, b = part.split('-')
+      cpus.update(range(int(a), int(b) + 1))
+    elif part:
+      cpus.add(int(part))
+  return cpus
+
+
+def bind_to_numa(node):
+  """CPU affinity (intersection with allowed cores) + set_mempolicy(MPOL_BIND).
+  Pins the process to one NUMA node so host buffers stay put (no kernel auto-NUMA
+  migration). Degrades gracefully if the cpuset has no cores on `node`."""
+  want = _cpus_of_node(node)
+  allowed = os.sched_getaffinity(0)
+  cpus = want & allowed
+  if not cpus:
+    print(f'WARNING: no allowed cores on NUMA node {node} '
+          f'(want={len(want)}, allowed={len(allowed)}); pin has no CPU effect.',
+          file=sys.stderr)
+  else:
+    try:
+      os.sched_setaffinity(0, cpus)
+    except OSError as e:
+      print(f'WARNING: sched_setaffinity failed: {e}', file=sys.stderr)
+  try:
+    libc = ctypes.CDLL('libc.so.6', use_errno=True)
+    MPOL_BIND, SYS_set_mempolicy = 2, 238  # SYS_set_mempolicy=238 on x86_64
+    nodemask = ctypes.c_ulong(1 << node)
+    rc = libc.syscall(SYS_set_mempolicy, MPOL_BIND,
+                      ctypes.byref(nodemask), ctypes.c_ulong(64))
+    if rc != 0:
+      print(f'WARNING: set_mempolicy errno={ctypes.get_errno()} '
+            '(not membound)', file=sys.stderr)
+    else:
+      print(f'[numa] process pinned to NUMA node {node} (mem; cpus={len(cpus)}).')
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    print(f'WARNING: NUMA membind unavailable: {e}', file=sys.stderr)
 
 
 def write_tensorboard_metrics(
@@ -135,6 +190,7 @@ def verify_device_cache(tpu_cache) -> bool:
   )
   return True
 
+
 def summarize(values):
   a = np.array(values, dtype=float)
   return {
@@ -143,12 +199,19 @@ def summarize(values):
       'mean':   float(a.mean()),
       'p90':    float(np.percentile(a, 90)),
       'p99':    float(np.percentile(a, 99)),
-      'max':    float(a.max()),   
+      'max':    float(a.max()),
       'stddev': float(a.std(ddof=1)) if len(a) > 1 else 0.0,
   }
 
+
 def main(_):
   process_id = jax.process_index()
+
+  # --- NUMA pinning toggle (do this BEFORE allocating host buffers) ---
+  if _NUMA_PIN.value:
+    bind_to_numa(_NUMA_NODE.value)
+  else:
+    print('[numa] pinning disabled (--numa_pin=false).')
 
   devices = jax.devices('tpu')
   tpu_sharding, _ = setup_distributed_mesh(devices)
@@ -191,15 +254,13 @@ def main(_):
       f' buffers for {half_blocks} blocks...'
   )
   manager = kv_cache_manager.KVCacheManager(
-      device_arrays=caches, 
+      device_arrays=caches,
       host_blocks_to_allocate=half_blocks,
       unsafe_skip_buffer_lock=True,
       parallelism=_PARALLELISM.value,
   )
 
   # Calculate data sizes for throughput
-  # cache_shape: (num_blocks, head_count, 1, head_dim) -> (num_blocks, 32, 1, 8, 128)
-  # Elements per block: 32 * 1 * 8 * 128
   elements_per_block = np.prod(cache_shape[1:])
   dtype_itemsize = jnp.dtype(target_dtype).itemsize
   bytes_per_block = elements_per_block * dtype_itemsize
@@ -207,7 +268,7 @@ def main(_):
   num_shards = len(caches[0].addressable_shards)
   transferred_bytes_total = num_layers * num_shards * half_blocks * bytes_per_block
 
-  # 3. Step A: Pull blocks 0:64 from device to internal host blocks 0:64 (D2H)
+  # 3. Step A: D2H
   print(
       f'[Process {process_id}] Executing D2H offloading (Local Blocks'
       f' 0..{half_blocks} -> Host)...'
@@ -216,7 +277,6 @@ def main(_):
   dst_offsets = list(range(0, half_blocks))
   sizes = [1] * len(src_offsets)
 
-  # Warmup
   for i in range(_WARMUP.value):
     manager.d2h(
         src_offsets_major_dim=src_offsets,
@@ -224,7 +284,6 @@ def main(_):
         copy_sizes_major_dim=sizes,
     ).Await()
 
-  # Benchmark Loop
   d2h_total_time = 0.0
   d2h_times = []
   for _ in range(_ITERS.value):
@@ -246,8 +305,7 @@ def main(_):
   )
   print(f'[Process {process_id}] D2H Individual times: {d2h_times}')
 
-  # 4. Step B: Push blocks from internal host blocks 0:64 to local TPU blocks
-  # 64:128 (H2D)
+  # 4. Step B: H2D
   print(
       f'[Process {process_id}] Executing H2D reloading (Host -> Local TPU'
       f' Blocks {half_blocks}..{local_blocks})...'
@@ -256,7 +314,6 @@ def main(_):
   dst_offsets = list(range(half_blocks, local_blocks))
   sizes = [1] * len(src_offsets)
 
-  # Warmup
   for i in range(_WARMUP.value):
     manager.h2d(
         src_offsets_major_dim=src_offsets,
@@ -264,7 +321,6 @@ def main(_):
         copy_sizes_major_dim=sizes,
     ).Await()
 
-  # Benchmark Loop
   h2d_total_time = 0.0
   h2d_times = []
   for _ in range(_ITERS.value):
@@ -286,7 +342,7 @@ def main(_):
   )
   print(f'[Process {process_id}] H2D Individual times: {h2d_times}')
 
-  # 5. Step C: Verify on device that blocks 256:512 match blocks 0:256
+  # 5. Step C: Verify
   success = all(verify_device_cache(c) for c in caches)
   if not success:
     sys.exit(1)
@@ -299,17 +355,18 @@ def main(_):
   if jax.process_index() == 0:
     write_tensorboard_metrics(d2h_time_mean, h2d_time_mean, d2h_gbps, h2d_gbps)
 
-    # Save raw times to artifacts directory for detailed analysis
     artifact_dir = os.environ.get('WORKLOAD_ARTIFACTS_DIR')
     if artifact_dir:
       d2h_gbps_all = [(transferred_bytes_total * 8) / (t * 1e9) for t in d2h_times]
       h2d_gbps_all = [(transferred_bytes_total * 8) / (t * 1e9) for t in h2d_times]
       raw_results = {
+          'numa_pin': bool(_NUMA_PIN.value),
+          'numa_node': int(_NUMA_NODE.value) if _NUMA_PIN.value else None,
           'd2h_times_sec': d2h_times,
           'h2d_times_sec': h2d_times,
-          'd2h_gbps_all': d2h_gbps_all,           
+          'd2h_gbps_all': d2h_gbps_all,
           'h2d_gbps_all': h2d_gbps_all,
-          'd2h_gbps_summary': summarize(d2h_gbps_all),   # ← min/p50/mean/p90/p99/max/stddev
+          'd2h_gbps_summary': summarize(d2h_gbps_all),
           'h2d_gbps_summary': summarize(h2d_gbps_all),
           'd2h_time_mean': d2h_time_mean,
           'h2d_time_mean': h2d_time_mean,
