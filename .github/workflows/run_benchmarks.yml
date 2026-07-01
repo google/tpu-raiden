@@ -19,7 +19,7 @@ on:
 
   push:
     branches:
-      - V4
+      - V5
 
   schedule:
     - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
