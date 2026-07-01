@@ -37,11 +37,7 @@ SUPPORTED_DTYPES = {
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("locality", "default", "Locality under benchmark")
-flags.DEFINE_string(
-    "telemetry_log_path",
-    "/tmp/kv_cache_manager_perf_performance.jsonl",
-    "Path to record benchmark telemetry",
-)
+
 flags.DEFINE_integer("benchmark_runs", None, "Number of benchmark runs")
 flags.DEFINE_string(
     "telemetry_log_path",
