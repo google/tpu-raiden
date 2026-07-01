@@ -12,35 +12,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_python//python:defs.bzl", "py_binary")
 
-package(default_visibility = ["//visibility:public"])
+load("@rules_python//python:defs.bzl", "py_binary", "py_library")
 
-exports_files(["multi_host_perf_test_oss.py"])
 
-py_binary(
-    name = "multi_host_perf_test_oss",
+py_library(
+    name = "perf_core",
     testonly = True,
-    srcs = ["multi_host_perf_test_oss.py"],
+    srcs = ["perf_core.py"],
     deps = [
         "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
-        "@com_google_absl_py//absl:app",
-        "@com_google_absl_py//absl/flags",
         "@jax//jax",
         "@pypi//numpy",
         "@pypi//libtpu",
     ],
 )
 
+
 py_binary(
-    name = "h2h_perf_test_oss",
+    name = "multi_host_perf_test_oss",
     testonly = True,
-    srcs = ["h2h_perf_test_oss.py"],
+    srcs = ["multi_host_perf_test_oss.py"],
     deps = [
-        "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
+        ":perf_core",
         "@com_google_absl_py//absl:app",
         "@com_google_absl_py//absl/flags",
-        "@jax//jax",
-        "@pypi//numpy",
+    ],
+)
+
+py_binary(
+    name = "h2d_d2h_benchmark_gating",
+    testonly = True,
+    srcs = ["h2d_d2h_benchmark_gating.py"],
+    data = ["gating_baselines.json"],
+    deps = [
+        ":perf_core",
+        "@com_google_absl_py//absl:app",
+        "@com_google_absl_py//absl/flags",
     ],
 )
