@@ -158,7 +158,8 @@ NB_MODULE(_tpu_raiden_torch, m) {
           },
           nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
           nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
-          nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{})
+          nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{},
+          nb::call_guard<nb::gil_scoped_release>())
       .def(
           "D2h",
           [](KVCacheManager& self,
@@ -177,7 +178,8 @@ NB_MODULE(_tpu_raiden_torch, m) {
           },
           nb::arg("src_offsets_major_dim") = std::vector<int64_t>{},
           nb::arg("dst_offsets_major_dim") = std::vector<int64_t>{},
-          nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{})
+          nb::arg("copy_sizes_major_dim") = std::vector<int64_t>{},
+          nb::call_guard<nb::gil_scoped_release>())
       .def(
           "D2hAutoAllocate",
           [](KVCacheManager& self,
