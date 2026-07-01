@@ -30,7 +30,7 @@
 
 import os
 import sys
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
 import torch
 import torch_tpu  # noqa: F401  # Load torch shared libraries before the extension.
@@ -71,34 +71,63 @@ class KVCacheManager:
   def __init__(
       self,
       kv_caches: List[Any],
-      node_id: int,
       local_control_port: int,
-      max_blocks: int,
-      num_slots: int,
+      max_blocks: Optional[int] = None,
+      num_slots: Optional[int] = None,
       timeout_s: float = 120.0,
       unsafe_skip_buffer_lock: bool = True,
+      host_blocks_to_allocate: Optional[int] = None,
+      parallelism: int = 1,
+      node_id: int = 0,
   ):
     """Instantiates the TransferEngine-based KVCacheManager.
 
+    Two modes, selected by which sizing arg is given:
+      * Local offload (``host_blocks_to_allocate`` set): device<->host DMA into a
+        raiden-owned host pool. ``kv_caches`` is the per-layer / per-shard nesting
+        ``List[List[Tensor]]``.
+      * Distributed (``max_blocks`` + ``num_slots`` set): cross-node disaggregated
+        transfer over a TCP control plane. ``kv_caches`` is a flat ``List[Tensor]``.
+
     Args:
-      kv_caches: List of device-placed contiguous Tensors representing the
-        sharded KV caches.
-      node_id: Worker or Shard ID (e.g., Tensor Parallel rank).
-      local_control_port: TCP socket server port for control plane coordination.
-      max_blocks: Maximum number of blocks in the host pool.
-      num_slots: Number of transfer slots to allocate.
-      timeout_s: Timeout in seconds for transfer operations.
+      kv_caches: Device-placed KV cache tensors. Local-offload mode expects the
+        ``List[List[Tensor]]`` (outer=layer, inner=shard) nesting; distributed
+        mode expects a flat ``List[Tensor]``.
+      local_control_port: TCP socket server port for control plane coordination. A
+        value <= 0 opens no listener in local-offload mode.
+      max_blocks: Maximum number of blocks in the host pool (distributed mode).
+      num_slots: Number of transfer slots to allocate (distributed mode).
+      timeout_s: Timeout in seconds for transfer operations (distributed mode).
       unsafe_skip_buffer_lock: Skip dynamic safety locking.
+      host_blocks_to_allocate: Total blocks to allocate in the host pool; setting
+        this selects local-offload mode.
+      parallelism: Transfer channel parallelism (local-offload mode).
+      node_id: Worker or Shard ID (e.g., Tensor Parallel rank). Only the torch
+        distributed constructor takes this (the jax one does not).
     """
-    self._impl = _impl.KVCacheManager(
-        kv_caches=kv_caches,
-        node_id=node_id,
-        local_control_port=local_control_port,
-        max_blocks=max_blocks,
-        num_slots=num_slots,
-        timeout_s=timeout_s,
-        unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
-    )
+    if host_blocks_to_allocate is not None:
+      self._impl = _impl.KVCacheManager(
+          kv_caches,
+          local_control_port if local_control_port > 0 else None,
+          host_blocks_to_allocate,
+          unsafe_skip_buffer_lock,
+          parallelism,
+      )
+    else:
+      if max_blocks is None or num_slots is None:
+        raise ValueError(
+            "Must specify either (max_blocks, num_slots) or"
+            " host_blocks_to_allocate."
+        )
+      self._impl = _impl.KVCacheManager(
+          kv_caches=kv_caches,
+          node_id=node_id,
+          local_control_port=local_control_port,
+          max_blocks=max_blocks,
+          num_slots=num_slots,
+          timeout_s=timeout_s,
+          unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
+      )
 
   @property
   def node_id(self) -> int:
