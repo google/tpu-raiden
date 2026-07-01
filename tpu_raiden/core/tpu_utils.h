@@ -20,7 +20,10 @@
 #include <string>
 #include <vector>
 
+#include "absl/strings/string_view.h"
 #include "xla/pjrt/pjrt_client.h"
+
+struct ifaddrs;
 
 namespace tpu_raiden {
 
@@ -60,15 +63,28 @@ int GetPjRtDeviceNumaNode(const xla::PjRtDevice* device);
 // Prints the detected TPU hardware topology to std::cout.
 void PrintTpuHardwareTopology();
 
+enum class NicClassification {
+  kUnknown,
+  kControlPlane,
+  kDataPlane,
+};
+
 struct HostNicAddress {
   std::string interface_name;  // e.g. "eth0"
   std::string ip_address;      // e.g. "10.128.0.10"
   int numa_node = -1;          // e.g. 0 from sysfs
+  NicClassification classification = NicClassification::kUnknown;
 };
 
-// Returns non-loopback IPv4 network interfaces on this host enriched with NUMA
-// node.
-std::vector<HostNicAddress> GetLocalHostNicAddresses();
+// Returns non-loopback network interfaces on this host enriched with NUMA
+// node and classification.
+std::vector<HostNicAddress> GetLocalHostNicAddresses(
+    absl::string_view sysfs_root = "/sys");
+
+namespace internal {
+std::vector<HostNicAddress> GetLocalHostNicAddressesInternal(
+    struct ifaddrs* ifaddr, absl::string_view sysfs_root);
+}  // namespace internal
 
 // Returns non-loopback IPv4 addresses discovered on this host.
 // Falls back to {"127.0.0.1"} if none exist.
@@ -76,7 +92,8 @@ std::vector<std::string> GetLocalHostIpAddresses();
 
 // Returns the NUMA node for a given network interface name.
 // Returns -1 if the node cannot be resolved.
-int GetInterfaceNumaNode(const char* ifname);
+int GetInterfaceNumaNode(const char* ifname,
+                         absl::string_view sysfs_root = "/sys");
 
 // Uses getsockname to look up the local IPv4 address and returns its
 // corresponding interface's host NIC address. Returns std::nullopt on failure

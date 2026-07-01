@@ -17,6 +17,7 @@
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <ifaddrs.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <sched.h>
@@ -26,6 +27,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -37,6 +39,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -336,9 +339,9 @@ void PrintTpuHardwareTopology() {
   }
 }
 
-int GetInterfaceNumaNode(const char* ifname) {
+int GetInterfaceNumaNode(const char* ifname, absl::string_view sysfs_root) {
   std::string path =
-      absl::StrCat("/sys/class/net/", ifname, "/device/numa_node");
+      absl::StrCat(sysfs_root, "/class/net/", ifname, "/device/numa_node");
   std::ifstream f(path);
   int node = -1;
   if (f.is_open()) {
@@ -355,57 +358,181 @@ int GetInterfaceNumaNode(const char* ifname) {
   return node;
 }
 
-std::vector<HostNicAddress> GetLocalHostNicAddresses() {
+namespace {
+
+int GetInterfaceMtu(absl::string_view ifname, absl::string_view sysfs_root) {
+  std::string path = absl::StrCat(sysfs_root, "/class/net/", ifname, "/mtu");
+  std::ifstream f(path);
+  int mtu = -1;
+  if (f.is_open()) {
+    f >> mtu;
+  }
+  return mtu;
+}
+
+std::string GetInterfaceBdf(absl::string_view ifname,
+                            absl::string_view sysfs_root) {
+  std::string device_path =
+      absl::StrCat(sysfs_root, "/class/net/", ifname, "/device");
+  char buf[PATH_MAX];
+  ssize_t len = readlink(device_path.c_str(), buf, sizeof(buf) - 1);
+  if (len != -1) {
+    buf[len] = '\0';
+    std::string rel_path(buf);
+    size_t last_slash = rel_path.find_last_of('/');
+    if (last_slash != std::string::npos) {
+      return rel_path.substr(last_slash + 1);
+    }
+    return rel_path;
+  }
+  return "";
+}
+
+int GetTotalNumaNodes(absl::string_view sysfs_root) {
+  std::string node_dir = absl::StrCat(sysfs_root, "/devices/system/node");
+  DIR* dir = opendir(node_dir.c_str());
+  if (dir == nullptr) return 1;
+  struct dirent* entry;
+  int count = 0;
+  while ((entry = readdir(dir)) != nullptr) {
+    if (entry->d_type == DT_DIR && absl::StartsWith(entry->d_name, "node")) {
+      std::string name = entry->d_name;
+      if (name.size() > 4 &&
+          std::all_of(name.begin() + 4, name.end(), ::isdigit)) {
+        count++;
+      }
+    }
+  }
+  closedir(dir);
+  return count > 0 ? count : 1;
+}
+
+NicClassification ClassifyNic(absl::string_view bdf, int mtu) {
+  if (bdf.empty()) {
+    return NicClassification::kControlPlane;
+  }
+  if (mtu > 1500) {
+    return NicClassification::kDataPlane;
+  }
+  return NicClassification::kControlPlane;
+}
+
+std::string ClassificationToString(NicClassification classification) {
+  switch (classification) {
+    case NicClassification::kDataPlane:
+      return "Data Interface";
+    case NicClassification::kControlPlane:
+      return "Control/Fallback Interface";
+    case NicClassification::kUnknown:
+      return "Unknown Interface";
+  }
+  return "Unknown Interface";
+}
+
+}  // namespace
+
+namespace internal {
+std::vector<HostNicAddress> GetLocalHostNicAddressesInternal(
+    struct ifaddrs* ifaddr, absl::string_view sysfs_root) {
   std::vector<HostNicAddress> nics;
-  struct ifaddrs *ifaddr, *ifa;
-  if (getifaddrs(&ifaddr) == 0) {
-    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
-      if (ifa->ifa_addr == nullptr) continue;
-      if (ifa->ifa_addr->sa_family == AF_INET) {
-        if (std::strcmp(ifa->ifa_name, "lo") != 0) {
-          char host[INET_ADDRSTRLEN];
-          auto* s_in = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
-          inet_ntop(AF_INET, &s_in->sin_addr, host, INET_ADDRSTRLEN);
-          std::string ip_str(host);
-          auto it = std::find_if(
-              nics.begin(), nics.end(),
-              [&](const HostNicAddress& n) { return n.ip_address == ip_str; });
-          if (it == nics.end()) {
-            int node = GetInterfaceNumaNode(ifa->ifa_name);
-            nics.push_back({ifa->ifa_name, ip_str, node});
-          }
+  struct ifaddrs* ifa;
+  for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+    if (ifa->ifa_addr == nullptr) continue;
+    if (ifa->ifa_addr->sa_family == AF_INET) {
+      if (std::strcmp(ifa->ifa_name, "lo") != 0) {
+        char host[INET_ADDRSTRLEN];
+        auto* s_in = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
+        inet_ntop(AF_INET, &s_in->sin_addr, host, INET_ADDRSTRLEN);
+        std::string ip_str(host);
+        auto it = std::find_if(
+            nics.begin(), nics.end(),
+            [&](const HostNicAddress& n) { return n.ip_address == ip_str; });
+        if (it == nics.end()) {
+          int node = GetInterfaceNumaNode(ifa->ifa_name, sysfs_root);
+          int mtu = GetInterfaceMtu(ifa->ifa_name, sysfs_root);
+          std::string bdf = GetInterfaceBdf(ifa->ifa_name, sysfs_root);
+          NicClassification classification = ClassifyNic(bdf, mtu);
+          nics.push_back({ifa->ifa_name, ip_str, node, classification});
         }
-      } else if (ifa->ifa_addr->sa_family == AF_INET6) {
-        if (std::strcmp(ifa->ifa_name, "lo") != 0) {
-          char host[INET6_ADDRSTRLEN];
-          auto* s_in6 = reinterpret_cast<struct sockaddr_in6*>(ifa->ifa_addr);
-          if (IN6_IS_ADDR_LINKLOCAL(&s_in6->sin6_addr)) {
-            continue;
-          }
-          inet_ntop(AF_INET6, &s_in6->sin6_addr, host, INET6_ADDRSTRLEN);
-          std::string ip_str(host);
-          auto it = std::find_if(
-              nics.begin(), nics.end(),
-              [&](const HostNicAddress& n) { return n.ip_address == ip_str; });
-          if (it == nics.end()) {
-            int node = GetInterfaceNumaNode(ifa->ifa_name);
-            nics.push_back({ifa->ifa_name, ip_str, node});
-          }
+      }
+    } else if (ifa->ifa_addr->sa_family == AF_INET6) {
+      if (std::strcmp(ifa->ifa_name, "lo") != 0) {
+        char host[INET6_ADDRSTRLEN];
+        auto* s_in6 = reinterpret_cast<struct sockaddr_in6*>(ifa->ifa_addr);
+        if (IN6_IS_ADDR_LINKLOCAL(&s_in6->sin6_addr)) {
+          continue;
+        }
+        inet_ntop(AF_INET6, &s_in6->sin6_addr, host, INET6_ADDRSTRLEN);
+        std::string ip_str(host);
+        auto it = std::find_if(
+            nics.begin(), nics.end(),
+            [&](const HostNicAddress& n) { return n.ip_address == ip_str; });
+        if (it == nics.end()) {
+          int node = GetInterfaceNumaNode(ifa->ifa_name, sysfs_root);
+          int mtu = GetInterfaceMtu(ifa->ifa_name, sysfs_root);
+          std::string bdf = GetInterfaceBdf(ifa->ifa_name, sysfs_root);
+          NicClassification classification = ClassifyNic(bdf, mtu);
+          nics.push_back({ifa->ifa_name, ip_str, node, classification});
         }
       }
     }
-    freeifaddrs(ifaddr);
   }
+
+  // Second pass: apply BDF heuristic for NUMA assignment if NUMA is -1
+  struct NicWithBdf {
+    size_t index;
+    std::string bdf;
+  };
+  std::vector<NicWithBdf> pending_nics;
+  for (size_t i = 0; i < nics.size(); ++i) {
+    if (nics[i].numa_node == -1) {
+      std::string bdf = GetInterfaceBdf(nics[i].interface_name, sysfs_root);
+      if (!bdf.empty()) {
+        pending_nics.push_back({i, bdf});
+      }
+    }
+  }
+
+  if (!pending_nics.empty()) {
+    std::sort(
+        pending_nics.begin(), pending_nics.end(),
+        [](const NicWithBdf& a, const NicWithBdf& b) { return a.bdf < b.bdf; });
+    int total_nodes = GetTotalNumaNodes(sysfs_root);
+    for (size_t i = 0; i < pending_nics.size(); ++i) {
+      nics[pending_nics[i].index].numa_node = i % total_nodes;
+    }
+  }
+
   if (nics.empty()) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd >= 0) {
       close(fd);
-      nics.push_back({"lo", "127.0.0.1", -1});
+      nics.push_back({"lo", "127.0.0.1", -1, NicClassification::kControlPlane});
     } else {
-      nics.push_back({"lo", "::1", -1});
+      nics.push_back({"lo", "::1", -1, NicClassification::kControlPlane});
     }
   }
+  for (const auto& nic : nics) {
+    std::string bdf = GetInterfaceBdf(nic.interface_name, sysfs_root);
+    int mtu = GetInterfaceMtu(nic.interface_name, sysfs_root);
+    LOG(INFO) << "Detected interface: " << nic.interface_name
+              << ", BDF: " << (bdf.empty() ? "None" : bdf) << ", MTU: " << mtu
+              << ", NUMA: " << nic.numa_node << ", Classification: "
+              << ClassificationToString(nic.classification);
+  }
   return nics;
+}
+}  // namespace internal
+
+std::vector<HostNicAddress> GetLocalHostNicAddresses(
+    absl::string_view sysfs_root) {
+  struct ifaddrs* ifaddr;
+  if (getifaddrs(&ifaddr) == 0) {
+    auto nics = internal::GetLocalHostNicAddressesInternal(ifaddr, sysfs_root);
+    freeifaddrs(ifaddr);
+    return nics;
+  }
+  return internal::GetLocalHostNicAddressesInternal(nullptr, sysfs_root);
 }
 
 std::vector<std::string> GetLocalHostIpAddresses() {

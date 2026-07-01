@@ -43,6 +43,7 @@
 #include "absl/strings/str_format.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "tpu_raiden/core/tpu_utils.h"
 
 namespace tpu_raiden {
 
@@ -70,6 +71,27 @@ MetricsCollector::MetricsCollector(std::string sysfs_dir)
     : sysfs_dir_(std::move(sysfs_dir)) {
   for (size_t i = 0; i < kMaxMetrics; ++i) {
     metrics_valid_[i].store(false, std::memory_order_relaxed);
+  }
+
+  // Dynamically discover interfaces to monitor, avoiding hardcoded names.
+  if (sysfs_dir_ == "/sys/class/net") {
+    // In production, use the robust network discovery utility.
+    for (const auto& nic : GetLocalHostNicAddresses()) {
+      if (nic.interface_name != "lo") {
+        monitored_interfaces_.push_back(nic.interface_name);
+      }
+    }
+  } else {
+    // In hermetic/unit tests, fallback to scanning the mock sysfs directory.
+    if (std::filesystem::exists(sysfs_dir_)) {
+      for (const auto& entry :
+           std::filesystem::directory_iterator(sysfs_dir_)) {
+        std::string iface = entry.path().filename().string();
+        if (iface != "lo") {
+          monitored_interfaces_.push_back(iface);
+        }
+      }
+    }
   }
 }
 
@@ -121,19 +143,8 @@ void MetricsCollector::RecordEnd(uint64_t uuid) {
 
 absl::flat_hash_map<std::string, NicBytes> MetricsCollector::SnapshotAllNics() {
   absl::flat_hash_map<std::string, NicBytes> snapshot;
-  if (!std::filesystem::exists(sysfs_dir_)) {
-    return snapshot;
-  }
-  for (const auto& entry : std::filesystem::directory_iterator(sysfs_dir_)) {
-    std::string iface = entry.path().filename().string();
-    // Physical NICs: eth* (classic) or predictable names ens*/enp*/eno* (the
-    // GCP TPU VMs name the primary NIC ens5, which the old eth-only filter
-    // missed -> empty nic_wire_bandwidth_gbps). Skip loopback / docker /
-    // virtual.
-    if (absl::StartsWith(iface, "eth") || absl::StartsWith(iface, "ens") ||
-        absl::StartsWith(iface, "enp") || absl::StartsWith(iface, "eno")) {
-      snapshot[iface] = ReadNicStats(sysfs_dir_, iface);
-    }
+  for (const auto& iface : monitored_interfaces_) {
+    snapshot[iface] = ReadNicStats(sysfs_dir_, iface);
   }
   return snapshot;
 }

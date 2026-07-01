@@ -96,89 +96,80 @@ RaidenManagerBase::~RaidenManagerBase() {
   }
 }
 
-void RaidenManagerBase::InitTransportServer() {
-  absl::MutexLock lock(server_init_mu_);
-  if (server_) return;
-  std::string bind_ip = "127.0.0.1";
-  if (bind_ip_cfg_.has_value()) {
-    bind_ip = *bind_ip_cfg_;
+std::vector<HostNicAddress> RaidenManagerBase::GetHostNics() const {
+  return GetLocalHostNicAddresses();
+}
+
+void RaidenManagerBase::ResolveLocalIpsLocked() {
+  if (!local_ips_.empty()) return;
+
+  std::vector<std::string> collected_ips;
+  if (bind_ip_cfg_.has_value() && !bind_ip_cfg_->empty()) {
+    collected_ips = {*bind_ip_cfg_};
   } else {
-    std::vector<HostNicAddress> host_nics = GetLocalHostNicAddresses();
-    const char* exclude_ctrl_env = std::getenv("EXCLUDE_CONTROL_INTERFACE");
-    if (exclude_ctrl_env != nullptr && exclude_ctrl_env[0] != '\0') {
-      std::vector<HostNicAddress> filtered_nics;
-      for (const auto& nic : host_nics) {
-        if (nic.interface_name != exclude_ctrl_env) {
-          filtered_nics.push_back(nic);
-        }
+    std::vector<HostNicAddress> host_nics = GetHostNics();
+    std::vector<HostNicAddress> data_nics;
+    std::vector<HostNicAddress> ctrl_nics;
+    for (const auto& nic : host_nics) {
+      if (nic.classification == NicClassification::kDataPlane) {
+        data_nics.push_back(nic);
+      } else if (nic.classification == NicClassification::kControlPlane) {
+        ctrl_nics.push_back(nic);
       }
-      host_nics = std::move(filtered_nics);
     }
+    if (!data_nics.empty()) {
+      host_nics = std::move(data_nics);
+    } else if (!ctrl_nics.empty()) {
+      host_nics = std::move(ctrl_nics);
+    }
+
     if (!host_nics.empty()) {
       int target_numa = assigned_numa_node_.value_or(-1);
       std::cerr << "InitTransportServer: target_numa=" << target_numa
                 << std::endl;
-      for (const auto& nic : host_nics) {
-        std::cerr << "  NIC: name=" << nic.interface_name
-                  << " ip=" << nic.ip_address << " numa=" << nic.numa_node
-                  << std::endl;
-      }
-      std::vector<HostNicAddress>::const_iterator it = host_nics.end();
-      if (target_numa == 1) {
-        // Prefer secondary data plane NICs (dcn1 on Borg, ens6 on GCP VM, eth2,
-        // eth1 fallback)
-        it = std::find_if(
-            host_nics.begin(), host_nics.end(),
-            [](const HostNicAddress& n) { return n.interface_name == "dcn1"; });
-        if (it == host_nics.end()) {
-          it = std::find_if(host_nics.begin(), host_nics.end(),
-                            [](const HostNicAddress& n) {
-                              return n.interface_name == "ens6";
-                            });
-        }
-        if (it == host_nics.end()) {
-          it = std::find_if(host_nics.begin(), host_nics.end(),
-                            [](const HostNicAddress& n) {
-                              return n.interface_name == "eth2";
-                            });
-        }
-        if (it == host_nics.end()) {
-          it = std::find_if(host_nics.begin(), host_nics.end(),
-                            [](const HostNicAddress& n) {
-                              return n.interface_name == "eth1";
-                            });
-        }
-      } else {
-        // target_numa <= 0 (primary). Prefer control plane/primary NICs (eth1
-        // on Borg, ens5 on GCP VM, eth0)
-        it = std::find_if(
-            host_nics.begin(), host_nics.end(),
-            [](const HostNicAddress& n) { return n.interface_name == "eth1"; });
-        if (it == host_nics.end()) {
-          it = std::find_if(host_nics.begin(), host_nics.end(),
-                            [](const HostNicAddress& n) {
-                              return n.interface_name == "ens5";
-                            });
-        }
-        if (it == host_nics.end()) {
-          it = std::find_if(host_nics.begin(), host_nics.end(),
-                            [](const HostNicAddress& n) {
-                              return n.interface_name == "eth0";
-                            });
+
+      // 1. Collect all NUMA-local Data NICs
+      if (target_numa >= 0) {
+        for (const auto& nic : host_nics) {
+          if (nic.numa_node == target_numa &&
+              nic.classification == NicClassification::kDataPlane) {
+            collected_ips.push_back(nic.ip_address);
+          }
         }
       }
 
-      if (it != host_nics.end()) {
-        bind_ip = it->ip_address;
-        std::cerr << "InitTransportServer: Binding to NIC ("
-                  << it->interface_name << "): " << bind_ip << std::endl;
-      } else {
-        bind_ip = host_nics[0].ip_address;
-        std::cerr << "InitTransportServer: Fallback bind to first NIC: "
-                  << bind_ip << std::endl;
+      // 2. Fallback: Collect all NUMA-local NICs
+      if (collected_ips.empty() && target_numa >= 0) {
+        for (const auto& nic : host_nics) {
+          if (nic.numa_node == target_numa) {
+            collected_ips.push_back(nic.ip_address);
+          }
+        }
+      }
+
+      // 3. Ultimate Fallback: Use the first NIC on the host
+      if (collected_ips.empty()) {
+        collected_ips.push_back(host_nics[0].ip_address);
       }
     }
   }
+
+  if (collected_ips.empty()) {
+    collected_ips.push_back("127.0.0.1");
+  }
+
+  local_ips_ = std::move(collected_ips);
+
+  for (const auto& ip : local_ips_) {
+    std::cerr << "InitTransportServer: Local IP: " << ip << std::endl;
+  }
+}
+
+void RaidenManagerBase::InitTransportServer() {
+  absl::MutexLock lock(server_init_mu_);
+  if (server_) return;
+  ResolveLocalIpsLocked();
+  std::string bind_ip = local_ips_[0];
   server_ = std::make_unique<tpu_raiden::transport::BlockTransport>(
       this, local_port_cfg_, true, bind_ip, parallelism_);
 }
@@ -195,6 +186,12 @@ std::string RaidenManagerBase::local_ip() const {
   absl::MutexLock lock(server_init_mu_);
   if (server_) return server_->bound_ip();
   return "127.0.0.1";
+}
+
+std::vector<std::string> RaidenManagerBase::local_ips() const {
+  absl::MutexLock lock(server_init_mu_);
+  const_cast<RaidenManagerBase*>(this)->ResolveLocalIpsLocked();
+  return local_ips_;
 }
 
 uint8_t* RaidenManagerBase::GetHostPointer(size_t layer_idx, size_t shard_idx) {

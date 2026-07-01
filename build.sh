@@ -232,9 +232,9 @@ echo "=== Building targets with Bazel ==="
 
 
 echo "=== Copying generated protobuf Python modules ==="
-cp -f "${WORKSPACE_DIR}/bazel-bin/rpc/raiden_service_pb2.py" "${WORKSPACE_DIR}/rpc/" 2>/dev/null || true
-cp -f "${WORKSPACE_DIR}/bazel-bin/rpc/coordination_pb2.py" "${WORKSPACE_DIR}/rpc/" 2>/dev/null || true
-cp -f "${WORKSPACE_DIR}/bazel-bin/rpc/coordination_pb2_grpc.py" "${WORKSPACE_DIR}/rpc/" 2>/dev/null || true
+cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/rpc/raiden_service_pb2.py" "${WORKSPACE_DIR}/tpu_raiden/rpc/" 2>/dev/null || true
+cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/rpc/coordination_pb2.py" "${WORKSPACE_DIR}/tpu_raiden/rpc/" 2>/dev/null || true
+cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/rpc/coordination_pb2_grpc.py" "${WORKSPACE_DIR}/tpu_raiden/rpc/" 2>/dev/null || true
 
 echo "=== Copying compiled shared libraries to source directory ==="
 if [ "$BUILD_JAX" = true ]; then

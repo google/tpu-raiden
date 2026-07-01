@@ -382,6 +382,7 @@ cc_test(
         ":raiden_manager_base",
         ":raw_transfer_core",
         ":tpu_pjrt_manager",
+        ":tpu_utils",
         "//tpu_raiden/transport:block_transport",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -618,6 +619,7 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":tpu_utils",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",

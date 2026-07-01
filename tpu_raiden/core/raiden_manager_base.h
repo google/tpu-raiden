@@ -33,6 +33,7 @@
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/semaphore.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
+#include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/transport/block_transport.h"
 
 namespace tpu_raiden {
@@ -72,6 +73,7 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
 
   virtual std::optional<int> local_port() const;
   virtual std::string local_ip() const;
+  virtual std::vector<std::string> local_ips() const;
   std::optional<int> assigned_numa_node() const { return assigned_numa_node_; }
 
   uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) override;
@@ -117,8 +119,11 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   std::optional<int> assigned_numa_node_ = std::nullopt;
   int local_port_cfg_ = 0;
   std::optional<std::string> bind_ip_cfg_ = std::nullopt;
+  std::vector<std::string> local_ips_;
 
   void InitTransportServer();
+  void ResolveLocalIpsLocked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(server_init_mu_);
+  virtual std::vector<HostNicAddress> GetHostNics() const;
 
   void DetectAndAssignNumaNode(
       const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers);

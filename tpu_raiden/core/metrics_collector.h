@@ -33,6 +33,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/time/time.h"
@@ -104,6 +105,7 @@ class MetricsCollector {
   absl::flat_hash_map<std::string, NicBytes> SnapshotAllNics();
 
   std::string sysfs_dir_;
+  std::vector<std::string> monitored_interfaces_;
 
   static constexpr size_t kMaxMetrics = 1024;
   std::atomic<bool> metrics_valid_[kMaxMetrics];
