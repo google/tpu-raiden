@@ -1,0 +1,45 @@
+# Copyright 2026 Google LLC.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: H2H Compare (C++ vs Python)
+
+on:
+  workflow_dispatch:      # run on demand from the Actions tab
+
+jobs:
+  h2h_compare:
+    name: H2H cross-socket C++ vs Python
+    runs-on: linux-x86-ct5lp-224-8tpu     # same TPU box the benchmarks use (2 NUMA nodes)
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-transient/ml-public-testing-container/ml-build:939285342
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build both binaries
+        run: |
+          bazel build -c opt --config=oss \
+            //examples/microbenchmarks:h2h_benchmark_runner \
+            //tpu_raiden/benchmarks:h2h_perf_test_oss
+
+      - name: Run C++ vs Python sweep
+        run: |
+          bash tpu_raiden/benchmarks/run_h2h_compare.sh | tee h2h_compare.txt
+
+      - name: Upload comparison table
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h2h_compare
+          path: h2h_compare.txt
