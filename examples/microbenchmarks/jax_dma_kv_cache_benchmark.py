@@ -43,6 +43,11 @@ flags.DEFINE_string(
     "Path to record benchmark telemetry",
 )
 flags.DEFINE_integer("benchmark_runs", None, "Number of benchmark runs")
+flags.DEFINE_string(
+    "telemetry_log_path",
+    os.path.join(os.environ.get("WORKLOAD_ARTIFACTS_DIR", "/tmp"), "dma.jsonl"),
+    "Path to record benchmark telemetry",
+)
 
 
 def calculate_stats_and_ci(times):
