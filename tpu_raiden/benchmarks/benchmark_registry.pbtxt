@@ -11,3 +11,27 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+benchmarks {
+  name: "h2d_d2h_gating"
+  description: "Perf gate: 5 stable configs, fail if median Gbps drops >3% vs gating_baselines.json"
+  owner: "raiden-dev"
+
+  workload {
+    action: "./ml_actions/actions/workload_executors/bazel"
+    action_inputs { key: "target" value: "//tpu_raiden/benchmarks:h2d_d2h_benchmark_gating" }
+    action_inputs { key: "runtime_flags" value: "" }
+  }
+
+  environment_configs {
+    id: "tpu-v5e-single-node"
+    runner_label: "linux-x86-ct5lp-224-8tpu"
+    container_image: "us-docker.pkg.dev/ml-oss-artifacts-transient/ml-public-testing-container/ml-build:939285342"
+    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss" }
+  }
+
+  metrics {
+    name: "d2h_time_sec"
+    unit: "s"
+    stats { stat: MEAN }
+  }
