@@ -35,3 +35,4 @@ benchmarks {
     unit: "s"
     stats { stat: MEAN }
   }
+}
