@@ -16,7 +16,9 @@ name: H2H Compare (C++ vs Python)
 
 on:
   workflow_dispatch:      # run on demand from the Actions tab
-
+  push:
+    branches:
+      - v6p
 jobs:
   h2h_compare:
     name: H2H cross-socket C++ vs Python
