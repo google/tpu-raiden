@@ -51,3 +51,17 @@ py_binary(
         "@com_google_absl_py//absl/flags",
     ],
 )
+
+py_binary(
+    name = "h2h_perf_test_oss",
+    testonly = True,
+    srcs = ["h2h_perf_test_oss.py"],
+    deps = [
+        "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
+        "@com_google_absl_py//absl:app",
+        "@com_google_absl_py//absl/flags",
+        "@jax//jax",
+        "@pypi//numpy",
+        "@pypi//libtpu",
+    ],
+)
