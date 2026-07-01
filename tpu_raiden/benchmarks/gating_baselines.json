@@ -1,0 +1,12 @@
+{
+  "threshold": 0.03,
+  "iters": 20,
+  "warmup": 3,
+  "configs": [
+    {"dtype": "int32",   "num_layers": 8,  "shape": [8, 128, 1024, 128], "shard_axis": 2, "baseline_d2h": 928.2, "baseline_h2d": 892.7},
+    {"dtype": "int32",   "num_layers": 4,  "shape": [8, 128, 1024, 128], "shard_axis": 2, "baseline_d2h": 920.5, "baseline_h2d": 884.7},
+    {"dtype": "int32",   "num_layers": 2,  "shape": [8, 128, 1024, 128], "shard_axis": 2, "baseline_d2h": 897.2, "baseline_h2d": 867.7},
+    {"dtype": "float32", "num_layers": 1,  "shape": [8, 128, 1024, 128], "shard_axis": 2, "baseline_d2h": 858.1, "baseline_h2d": 827.4},
+    {"dtype": "float32", "num_layers": 64, "shape": [16, 128, 8, 2, 128], "shard_axis": 2, "baseline_d2h": 814.5, "baseline_h2d": 800.2}
+  ]
+}
