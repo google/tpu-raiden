@@ -13,46 +13,42 @@
 # limitations under the License.
 
 import ctypes
+import gc
+import json
 import os
 import sys
 import time
-import json
+
 from absl import app
 from absl import flags
 import jax
 import jax.numpy as jnp
 import numpy as np
+
 from tpu_raiden.frameworks.jax import _tpu_raiden_jax as kv_cache_manager
 
-_NUM_BLOCKS = flags.DEFINE_integer(
-    'num_blocks', 512, 'Number of global cache blocks to allocate.'
-)
-_BLOCK_SIZE = flags.DEFINE_integer('block_size', 2, 'Size of cache blocks.')
-_NUM_LAYERS = flags.DEFINE_integer(
-    'num_layers', 1, 'Number of transformer layers.'
-)
-_PARALLELISM = flags.DEFINE_integer('parallelism', 1, 'Concurrent transfer streams.')
-_DTYPE = flags.DEFINE_string(
-    'dtype',
-    'float32',
-    'Dataset type for the KV cache array: float32, bfloat16, float16.',
-)
-_WARMUP = flags.DEFINE_integer('warmup', 5, 'Number of warmup iterations.')
-_ITERS = flags.DEFINE_integer('iters', 20, 'Number of benchmark iterations.')
-_NUMA_PIN = flags.DEFINE_bool(
-    'numa_pin', False,
-    'Pin the whole process (cpu+mem) to a single NUMA node before allocating '
-    'host buffers. Use to test whether the per-iter distribution is NUMA-driven '
-    '(kernel page/thread migration across sockets).'
-)
+# --- flags (dtype/layers match the DMA benchmark's @parameterized groups) ---
+_CACHE_SHAPE = flags.DEFINE_string(
+    'cache_shape', '16,128,8,2,128',
+    'Per-layer shape "num_blocks,d1,...". dim0 = num_blocks (major dim copied). '
+    'DMA test_kv_cache uses 16,128,8,2,128; large-shape uses 8,128,1024,128.')
+_SHARD_AXIS = flags.DEFINE_integer('shard_axis', 2, 'Array axis sharded across devices.')
+_NUM_LAYERS = flags.DEFINE_integer('num_layers', 64, 'Number of cache arrays (layers).')
+_DTYPE = flags.DEFINE_string('dtype', 'float32',
+                             'float32 | bfloat16 | float16 | int32 | float8_e4m3fn.')
+_ITERS = flags.DEFINE_integer('iters', 10, 'Timed iterations (DMA benchmark_runs default 10).')
+_WARMUP = flags.DEFINE_integer('warmup', 3, 'Warmup iterations (not timed).')
+_LOCK_BUFFERS = flags.DEFINE_bool('lock_buffers', True,
+    'Lock host buffers (unsafe_skip_buffer_lock=False). DMA uses locked (True here).')
+_NUMA_PIN = flags.DEFINE_bool('numa_pin', False, 'Pin process to one NUMA node (experiment).')
 _NUMA_NODE = flags.DEFINE_integer('numa_node', 0, 'NUMA node to pin to when --numa_pin.')
 
-_LOCK_BUFFERS = flags.DEFINE_bool(
-    'lock_buffers', False,
-    'Lock/pin host buffers (unsafe_skip_buffer_lock=False) so the kernel cannot '
-    'migrate them off their NUMA-local node — aims for a stable FAST peak.')
+_DTYPE_MAP = {'float32': jnp.float32, 'bfloat16': jnp.bfloat16, 'float16': jnp.float16,
+              'int32': jnp.int32, 'float8_e4m3fn': jnp.float8_e4m3fn}
+_ITEMSIZE = {'float32': 4, 'bfloat16': 2, 'float16': 2, 'int32': 4, 'float8_e4m3fn': 1}
 
-# ---------------- NUMA pinning (numactl-free) ----------------
+
+# ---------------- NUMA (optional experiment knob) ----------------
 def _cpus_of_node(node):
   try:
     spec = open(f'/sys/devices/system/node/node{node}/cpulist').read().strip()
@@ -61,328 +57,184 @@ def _cpus_of_node(node):
   cpus = set()
   for part in spec.split(','):
     if '-' in part:
-      a, b = part.split('-')
-      cpus.update(range(int(a), int(b) + 1))
+      a, b = part.split('-'); cpus.update(range(int(a), int(b) + 1))
     elif part:
       cpus.add(int(part))
   return cpus
 
 
 def bind_to_numa(node):
-  """CPU affinity (intersection with allowed cores) + set_mempolicy(MPOL_BIND).
-  Pins the process to one NUMA node so host buffers stay put (no kernel auto-NUMA
-  migration). Degrades gracefully if the cpuset has no cores on `node`."""
   want = _cpus_of_node(node)
   allowed = os.sched_getaffinity(0)
   cpus = want & allowed
-  if not cpus:
-    print(f'WARNING: no allowed cores on NUMA node {node} '
-          f'(want={len(want)}, allowed={len(allowed)}); pin has no CPU effect.',
-          file=sys.stderr)
-  else:
+  if cpus:
     try:
       os.sched_setaffinity(0, cpus)
     except OSError as e:
       print(f'WARNING: sched_setaffinity failed: {e}', file=sys.stderr)
+  else:
+    print(f'WARNING: no allowed cores on NUMA node {node}.', file=sys.stderr)
   try:
     libc = ctypes.CDLL('libc.so.6', use_errno=True)
-    MPOL_BIND, SYS_set_mempolicy = 2, 238  # SYS_set_mempolicy=238 on x86_64
     nodemask = ctypes.c_ulong(1 << node)
-    rc = libc.syscall(SYS_set_mempolicy, MPOL_BIND,
-                      ctypes.byref(nodemask), ctypes.c_ulong(64))
-    if rc != 0:
-      print(f'WARNING: set_mempolicy errno={ctypes.get_errno()} '
-            '(not membound)', file=sys.stderr)
+    if libc.syscall(238, 2, ctypes.byref(nodemask), ctypes.c_ulong(64)) == 0:  # set_mempolicy(MPOL_BIND)
+      print(f'[numa] pinned to node {node} (mem; cpus={len(cpus)}).')
     else:
-      print(f'[numa] process pinned to NUMA node {node} (mem; cpus={len(cpus)}).')
+      print(f'WARNING: set_mempolicy errno={ctypes.get_errno()}', file=sys.stderr)
   except Exception as e:  # pylint: disable=broad-exception-caught
     print(f'WARNING: NUMA membind unavailable: {e}', file=sys.stderr)
 
 
-def write_tensorboard_metrics(
-    d2h_time_sec: float,
-    h2d_time_sec: float,
-    d2h_gbps: float,
-    h2d_gbps: float,
-):
-  """Logs local copy CPU-TPU transfer metrics to Tensorboard event logs for BAP."""
-  tblog_dir = os.environ.get('TENSORBOARD_OUTPUT_DIR')
-  if not tblog_dir:
-    print('TENSORBOARD_OUTPUT_DIR is not set. Skipping TensorBoard logging.')
-    return
-
-  print(f'Writing metrics to TensorBoard directory: {tblog_dir}')
-  try:
-    try:
-      # pylint: disable=g-import-not-at-top
-      import tensorboardX  # pytype: disable=import-error
-
-      writer = tensorboardX.SummaryWriter(log_dir=tblog_dir)
-    except ImportError:
-      # pylint: disable=g-import-not-at-top
-      import torch.utils.tensorboard  # pytype: disable=import-error
-
-      writer = torch.utils.tensorboard.SummaryWriter(log_dir=tblog_dir)
-
-    # Log averages
-    writer.add_scalar('d2h_time_sec', d2h_time_sec, global_step=0)
-    writer.add_scalar('h2d_time_sec', h2d_time_sec, global_step=0)
-    writer.add_scalar('d2h_throughput_gbps', d2h_gbps, global_step=0)
-    writer.add_scalar('h2d_throughput_gbps', h2d_gbps, global_step=0)
-    writer.close()
-    print('Successfully wrote performance metrics to TensorBoard logs.')
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    print(f'WARNING: Failed to write TensorBoard logs: {e}', file=sys.stderr)
-
-
-def setup_distributed_mesh(devices):
-  """Sets up a global JAX Mesh sharding the block count across processes."""
-  process_id = jax.process_index()
-  num_processes = jax.process_count()
-  num_local_devices = len(jax.local_devices())
-
-  print(
-      'Initializing JAX Distributed Mesh on Process'
-      f' {process_id}/{num_processes}'
-  )
-  print(f'Local addressable devices seen: {jax.local_devices()}')
-  print(f'Global cluster devices seen: {devices}')
-
-  # Reshape mesh to (num_processes, num_local_devices)
-  devices_array = np.array(devices).reshape((num_processes, num_local_devices))
-  mesh = jax.sharding.Mesh(devices_array, ('host', 'device'))
-
-  # Shard the first dimension (num_blocks) across the host axis!
-  spec = jax.sharding.PartitionSpec('host', None, None, None, None)
-  tpu_sharding = jax.sharding.NamedSharding(mesh, spec)
-  host_sharding = jax.sharding.NamedSharding(
-      mesh, spec, memory_kind='pinned_host'
-  )
-
-  return tpu_sharding, host_sharding
-
-
-def verify_device_cache(tpu_cache) -> bool:
-  """Verifies local sharded tpu cache destination blocks match source blocks."""
-  process_id = jax.process_index()
-  print(
-      f'[Process {process_id}] Verifying local sharded cache device'
-      ' consistency...'
-  )
-  try:
-    for s in tpu_cache.addressable_shards:
-      # s.data is a process-local JAX array representing the blocks held by this
-      # shard
-      local_tpu_data = np.asarray(s.data)
-      local_blocks = local_tpu_data.shape[
-          0
-      ]  # Total blocks held locally by this shard
-      half = local_blocks // 2  # Half the blocks
-
-      # Verify destination half matches source half
-      np.testing.assert_array_equal(
-          local_tpu_data[half:local_blocks],
-          local_tpu_data[0:half],
-      )
-  except AssertionError as exc:
-    print(f'[Process {process_id}] Verification FAILED!')
-    print(exc)
-    return False
-  print(
-      f'[Process {process_id}] Device consistency verified successfully! 0%'
-      ' corruption.'
-  )
-  return True
-
-
 def summarize(values):
   a = np.array(values, dtype=float)
-  return {
-      'min':    float(a.min()),
-      'p50':    float(np.median(a)),
-      'mean':   float(a.mean()),
-      'p90':    float(np.percentile(a, 90)),
-      'p99':    float(np.percentile(a, 99)),
-      'max':    float(a.max()),
-      'stddev': float(a.std(ddof=1)) if len(a) > 1 else 0.0,
-  }
+  return {'min': float(a.min()), 'p50': float(np.median(a)), 'mean': float(a.mean()),
+          'p90': float(np.percentile(a, 90)), 'p99': float(np.percentile(a, 99)),
+          'max': float(a.max()), 'stddev': float(a.std(ddof=1)) if len(a) > 1 else 0.0}
+
+
+# ---------------- per-device placement (ported from the DMA benchmark) ----------------
+def create_sharded_array(shape, sharding, dtype, is_host=False, is_random=False):
+  """Places each shard on its own device (pinned_host if is_host) -> NUMA-local per chip."""
+  mesh, spec = sharding.mesh, sharding.spec
+  devices = list(mesh.devices.flat)
+  shard_shape = list(shape)
+  shard_axis = None
+  for i, axis in enumerate(spec):
+    if axis is not None:
+      shard_axis = i; break
+  if shard_axis is not None:
+    shard_shape[shard_axis] = shape[shard_axis] // len(devices)
+
+  shards = []
+  for idx, device in enumerate(devices):
+    sd = (jax.sharding.SingleDeviceSharding(device, memory_kind='pinned_host')
+          if is_host else jax.sharding.SingleDeviceSharding(device))
+    if is_random:
+      shard_np = np.random.uniform(0, 1, shard_shape).astype(np.float32)
+    elif dtype == jnp.int32:
+      start = idx * int(np.prod(shard_shape))
+      shard_np = (np.arange(np.prod(shard_shape), dtype=np.int32) + start).reshape(shard_shape)
+    else:
+      shard_np = np.zeros(shard_shape, dtype=np.float32)
+    shards.append(jax.device_put(shard_np, sd).astype(dtype))
+  return jax.make_array_from_single_device_arrays(shape, sharding, shards)
+
+
+def write_tensorboard_metrics(d2h_time, h2d_time, d2h_gbps, h2d_gbps):
+  tblog_dir = os.environ.get('TENSORBOARD_OUTPUT_DIR')
+  if not tblog_dir:
+    print('TENSORBOARD_OUTPUT_DIR not set. Skipping TB.')
+    return
+  try:
+    try:
+      import tensorboardX  # pylint: disable=g-import-not-at-top
+      w = tensorboardX.SummaryWriter(log_dir=tblog_dir)
+    except ImportError:
+      import torch.utils.tensorboard as tut  # pylint: disable=g-import-not-at-top
+      w = tut.SummaryWriter(log_dir=tblog_dir)
+    w.add_scalar('d2h_time_sec', d2h_time, global_step=0)
+    w.add_scalar('h2d_time_sec', h2d_time, global_step=0)
+    w.add_scalar('d2h_throughput_gbps', d2h_gbps, global_step=0)
+    w.add_scalar('h2d_throughput_gbps', h2d_gbps, global_step=0)
+    w.close()
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    print(f'WARNING: TB write failed: {e}', file=sys.stderr)
 
 
 def main(_):
-  process_id = jax.process_index()
-
-  # --- NUMA pinning toggle (do this BEFORE allocating host buffers) ---
   if _NUMA_PIN.value:
     bind_to_numa(_NUMA_NODE.value)
   else:
-    print('[numa] pinning disabled (--numa_pin=false).')
+    print('[numa] pinning disabled.')
 
   devices = jax.devices('tpu')
-  tpu_sharding, _ = setup_distributed_mesh(devices)
+  if not devices:
+    raise RuntimeError('No TPU devices found.')
+  num_devices = len(devices)
+  print(f'Found {num_devices} TPU devices.')
 
-  # Physical sharding shape: (num_blocks, head_count, 1, head_dim)
-  cache_shape = (_NUM_BLOCKS.value, 32, 1, 8, 128)
-  print(f'[Process {process_id}] Configured Cache Global Shape: {cache_shape}')
+  shape = tuple(int(x) for x in _CACHE_SHAPE.value.split(','))
+  num_blocks = shape[0]                      # major dim copied
+  dt = _DTYPE_MAP.get(_DTYPE.value, jnp.float32)
+  itemsize = _ITEMSIZE.get(_DTYPE.value, 4)
+  print(f'shape={shape}, num_blocks={num_blocks}, layers={_NUM_LAYERS.value}, dtype={_DTYPE.value}')
 
-  # 1. Create a single large device array and initialize it with unique values
-  print(
-      f'[Process {process_id}] Initializing device cache with reference'
-      ' sequence...'
-  )
-  dtype_map = {
-      'float32': jnp.float32,
-      'bfloat16': jnp.bfloat16,
-      'float16': jnp.float16,
-  }
-  target_dtype = dtype_map.get(_DTYPE.value, jnp.float32)
-  print(f'[Process {process_id}] Selected benchmark data type: {_DTYPE.value}')
+  # mesh (1, num_devices) ("data","model"); shard `shard_axis` across the device axis
+  mesh = jax.sharding.Mesh(np.array(devices).reshape(1, num_devices), ('data', 'model'))
+  spec = jax.sharding.PartitionSpec(
+      *[('model' if i == _SHARD_AXIS.value else None) for i in range(len(shape))])
+  tpu_sharding = jax.sharding.NamedSharding(mesh, spec)
 
-  caches = []
-  for _ in range(_NUM_LAYERS.value):
-    base = jnp.arange(np.prod(cache_shape), dtype=target_dtype).reshape(
-        cache_shape
-    )
-    caches.append(jax.device_put(base, tpu_sharding))
-  jax.block_until_ready(caches)
+  # per-device sharded TPU source arrays
+  src_arrs = [create_sharded_array(shape, tpu_sharding, dt, is_host=False,
+                                   is_random=(dt != jnp.int32))
+              for _ in range(_NUM_LAYERS.value)]
+  jax.block_until_ready(src_arrs)
 
-  num_processes = jax.process_count()
-  local_blocks = (
-      _NUM_BLOCKS.value // num_processes
-  )  # 512 // 4 = 128 blocks locally
-  half_blocks = local_blocks // 2  # 128 // 2 = 64 blocks
+  # invalidate device shadow copies before each measured d2h (like the DMA benchmark)
+  mutate = jax.jit(lambda x: x + jnp.array(1 if x.dtype == jnp.int32 else 0.01, dtype=x.dtype))
 
-  # 2. Create a kv cache manager and let it allocate internal host buffers for
-  # local blocks / 2
-  print(
-      f'[Process {process_id}] Instantiating KVCacheManager with internal host'
-      f' buffers for {half_blocks} blocks...'
-  )
   manager = kv_cache_manager.KVCacheManager(
-      device_arrays=caches,
-      host_blocks_to_allocate=half_blocks,
-      unsafe_skip_buffer_lock=not _LOCK_BUFFERS.value,  # lock_buffers=true 
-      parallelism=_PARALLELISM.value,
-  )
+      device_arrays=src_arrs,
+      host_blocks_to_allocate=num_blocks,
+      unsafe_skip_buffer_lock=not _LOCK_BUFFERS.value)
 
-  # Calculate data sizes for throughput
-  elements_per_block = np.prod(cache_shape[1:])
-  dtype_itemsize = jnp.dtype(target_dtype).itemsize
-  bytes_per_block = elements_per_block * dtype_itemsize
-  num_layers = len(caches)
-  num_shards = len(caches[0].addressable_shards)
-  transferred_bytes_total = num_layers * num_shards * half_blocks * bytes_per_block
+  # full-major-dim copy (matches DMA: offsets=[0], sizes=[num_blocks])
+  offsets, sizes = [0], [num_blocks]
+  total_bytes = _NUM_LAYERS.value * int(np.prod(shape)) * itemsize
 
-  # 3. Step A: D2H
-  print(
-      f'[Process {process_id}] Executing D2H offloading (Local Blocks'
-      f' 0..{half_blocks} -> Host)...'
-  )
-  src_offsets = list(range(0, half_blocks))
-  dst_offsets = list(range(0, half_blocks))
-  sizes = [1] * len(src_offsets)
+  def once():
+    nonlocal src_arrs
+    src_arrs = [mutate(a) for a in src_arrs]
+    jax.block_until_ready(src_arrs)
+    gc.disable()
+    t0 = time.perf_counter()
+    manager.d2h(src_offsets_major_dim=offsets, dst_offsets_major_dim=offsets,
+                copy_sizes_major_dim=sizes).Await()
+    d2h = time.perf_counter() - t0
+    gc.enable(); gc.collect()
+    gc.disable()
+    t0 = time.perf_counter()
+    manager.h2d(src_offsets_major_dim=offsets, dst_offsets_major_dim=offsets,
+                copy_sizes_major_dim=sizes).Await()
+    h2d = time.perf_counter() - t0
+    gc.enable(); gc.collect()
+    return d2h, h2d
 
-  for i in range(_WARMUP.value):
-    manager.d2h(
-        src_offsets_major_dim=src_offsets,
-        dst_offsets_major_dim=dst_offsets,
-        copy_sizes_major_dim=sizes,
-    ).Await()
-
-  d2h_total_time = 0.0
-  d2h_times = []
+  for _ in range(_WARMUP.value):
+    once()
+  d2h_times, h2d_times = [], []
   for _ in range(_ITERS.value):
-    start_time = time.perf_counter()
-    manager.d2h(
-        src_offsets_major_dim=src_offsets,
-        dst_offsets_major_dim=dst_offsets,
-        copy_sizes_major_dim=sizes,
-    ).Await()
-    elapsed = time.perf_counter() - start_time
-    d2h_times.append(elapsed)
-    d2h_total_time += elapsed
+    d, h = once()
+    d2h_times.append(d); h2d_times.append(h)
 
-  d2h_time_mean = d2h_total_time / _ITERS.value
-  d2h_gbps = (transferred_bytes_total * 8) / (d2h_time_mean * 1e9)
-  print(
-      f'[Process {process_id}] D2H complete. Avg Time:'
-      f' {d2h_time_mean:.6f}s. Throughput: {d2h_gbps:.3f} Gbps'
-  )
-  print(f'[Process {process_id}] D2H Individual times: {d2h_times}')
+  d2h_gbps_all = [(total_bytes * 8) / (t * 1e9) for t in d2h_times]
+  h2d_gbps_all = [(total_bytes * 8) / (t * 1e9) for t in h2d_times]
+  d2h_med_t, h2d_med_t = float(np.median(d2h_times)), float(np.median(h2d_times))
+  d2h_gbps = (total_bytes * 8) / (d2h_med_t * 1e9)
+  h2d_gbps = (total_bytes * 8) / (h2d_med_t * 1e9)
+  print(f'D2H median {d2h_med_t*1000:.3f} ms -> {d2h_gbps:.3f} Gbps')
+  print(f'H2D median {h2d_med_t*1000:.3f} ms -> {h2d_gbps:.3f} Gbps')
 
-  # 4. Step B: H2D
-  print(
-      f'[Process {process_id}] Executing H2D reloading (Host -> Local TPU'
-      f' Blocks {half_blocks}..{local_blocks})...'
-  )
-  src_offsets = list(range(0, half_blocks))
-  dst_offsets = list(range(half_blocks, local_blocks))
-  sizes = [1] * len(src_offsets)
+  write_tensorboard_metrics(d2h_med_t, h2d_med_t, d2h_gbps, h2d_gbps)
 
-  for i in range(_WARMUP.value):
-    manager.h2d(
-        src_offsets_major_dim=src_offsets,
-        dst_offsets_major_dim=dst_offsets,
-        copy_sizes_major_dim=sizes,
-    ).Await()
-
-  h2d_total_time = 0.0
-  h2d_times = []
-  for _ in range(_ITERS.value):
-    start_time = time.perf_counter()
-    manager.h2d(
-        src_offsets_major_dim=src_offsets,
-        dst_offsets_major_dim=dst_offsets,
-        copy_sizes_major_dim=sizes,
-    ).Await()
-    elapsed = time.perf_counter() - start_time
-    h2d_times.append(elapsed)
-    h2d_total_time += elapsed
-
-  h2d_time_mean = h2d_total_time / _ITERS.value
-  h2d_gbps = (transferred_bytes_total * 8) / (h2d_time_mean * 1e9)
-  print(
-      f'[Process {process_id}] H2D complete. Avg Time:'
-      f' {h2d_time_mean:.6f}s. Throughput: {h2d_gbps:.3f} Gbps'
-  )
-  print(f'[Process {process_id}] H2D Individual times: {h2d_times}')
-
-  # 5. Step C: Verify
-  success = all(verify_device_cache(c) for c in caches)
-  if not success:
-    sys.exit(1)
-
-  print(
-      f'[Process {process_id}] E2E Device-to-Device multihost verification'
-      ' completed successfully!'
-  )
-
-  if jax.process_index() == 0:
-    write_tensorboard_metrics(d2h_time_mean, h2d_time_mean, d2h_gbps, h2d_gbps)
-
-    artifact_dir = os.environ.get('WORKLOAD_ARTIFACTS_DIR')
-    if artifact_dir:
-      d2h_gbps_all = [(transferred_bytes_total * 8) / (t * 1e9) for t in d2h_times]
-      h2d_gbps_all = [(transferred_bytes_total * 8) / (t * 1e9) for t in h2d_times]
-      raw_results = {
-          'numa_pin': bool(_NUMA_PIN.value),
-          'numa_node': int(_NUMA_NODE.value) if _NUMA_PIN.value else None,
-          'd2h_times_sec': d2h_times,
-          'h2d_times_sec': h2d_times,
-          'd2h_gbps_all': d2h_gbps_all,
-          'h2d_gbps_all': h2d_gbps_all,
-          'd2h_gbps_summary': summarize(d2h_gbps_all),
-          'h2d_gbps_summary': summarize(h2d_gbps_all),
-          'd2h_time_mean': d2h_time_mean,
-          'h2d_time_mean': h2d_time_mean,
-          'transferred_bytes_total': transferred_bytes_total,
-      }
-      result_path = os.path.join(artifact_dir, 'raw_perf_results.json')
-      try:
-        with open(result_path, 'w') as f:
-          json.dump(raw_results, f, indent=2)
-        print(f'Saved raw performance results to {result_path}')
-      except Exception as e:  # pylint: disable=broad-exception-caught
-        print(f'WARNING: Failed to write raw results artifact: {e}', file=sys.stderr)
+  art = os.environ.get('WORKLOAD_ARTIFACTS_DIR')
+  if art:
+    _write = {
+        'shape': list(shape), 'num_layers': _NUM_LAYERS.value, 'dtype': _DTYPE.value,
+        'lock_buffers': bool(_LOCK_BUFFERS.value), 'numa_pin': bool(_NUMA_PIN.value),
+        'transferred_bytes_total': total_bytes,
+        'd2h_times_sec': d2h_times, 'h2d_times_sec': h2d_times,
+        'd2h_gbps_all': d2h_gbps_all, 'h2d_gbps_all': h2d_gbps_all,
+        'd2h_gbps_summary': summarize(d2h_gbps_all),
+        'h2d_gbps_summary': summarize(h2d_gbps_all),
+    }
+    try:
+      with open(os.path.join(art, 'raw_perf_results.json'), 'w') as f:
+        json.dump(_write, f, indent=2)
+      print('Saved raw_perf_results.json')
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      print(f'WARNING: artifact write failed: {e}', file=sys.stderr)
 
 
 if __name__ == '__main__':
