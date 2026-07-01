@@ -37,7 +37,7 @@ jobs:
     name: Run TPU Raiden H2H Benchmarks
     uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@affd28b492f67c242afa8b119e590b25816b7b88
     with:
-      registry_file: "benchmarks/benchmark_registry.pbtxt"
+      registry_file: "tpu_raiden/benchmarks/benchmark_registry.pbtxt"
       ml_actions_ref: "affd28b492f67c242afa8b119e590b25816b7b88"
       runner: "linux-x86-n2-32"
       publish_metrics: false
