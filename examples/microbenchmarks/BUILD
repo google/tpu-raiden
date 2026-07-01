@@ -11,6 +11,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+load("@rules_python//python:defs.bzl", "py_test")
+
+py_test(
+    name = "jax_dma_kv_cache_benchmark",
+    testonly = True,
+    srcs = ["jax_dma_kv_cache_benchmark.py"],
+    deps = [
+        "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
+        "@com_google_absl_py//absl/flags",
+        "@com_google_absl_py//absl/testing:absltest",       # VERIFY label
+        "@com_google_absl_py//absl/testing:parameterized",  # VERIFY label
+        "@jax//jax",
+        "@pypi//numpy",
+        "@pypi//libtpu",
+    ],
+)
 
 load("@rules_cc//cc:defs.bzl", "cc_binary")
 
@@ -32,3 +48,4 @@ cc_binary(
         "@com_google_absl//absl/time",
     ],
 )
+
