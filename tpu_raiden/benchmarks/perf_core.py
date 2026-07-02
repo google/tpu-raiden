@@ -124,14 +124,14 @@ def verify_roundtrip(manager, dev_arrs, num_blocks):
   half = num_blocks // 2
   if half == 0:
     return  # major dim too small to split into src/dst halves; skip check
-  src = list(range(half))               # source blocks [0:half]
-  dst = list(range(half, 2 * half))     # destination blocks [half:2*half]
-  sizes = [1] * half                    # one block per offset
-  # Round-trip: device source-half -> host, then host -> device destination-half.
-  manager.d2h(src_offsets_major_dim=src, dst_offsets_major_dim=src,
-              copy_sizes_major_dim=sizes).Await()
-  manager.h2d(src_offsets_major_dim=src, dst_offsets_major_dim=dst,
-              copy_sizes_major_dim=sizes).Await()
+  # ONE bulk descriptor (copy_sizes=[half]) -- matches once()'s
+  # offsets=[0], sizes=[num_blocks], so verify exercises the SAME bulk-copy path
+  # that the timed/recorded copy uses, not a per-block scatter/gather.
+  # d2h: device blocks [0:half] -> host [0:half]; h2d: host [0:half] -> device [half:2*half].
+  manager.d2h(src_offsets_major_dim=[0], dst_offsets_major_dim=[0],
+              copy_sizes_major_dim=[half]).Await()
+  manager.h2d(src_offsets_major_dim=[0], dst_offsets_major_dim=[half],
+              copy_sizes_major_dim=[half]).Await()
   # Read the raw shard buffers (like V2), not an XLA slice, so we observe the
   # bytes the manager actually wrote and never a cached/stale view.
   for li, a in enumerate(dev_arrs):
