@@ -400,6 +400,63 @@ TEST(RawBufferTransportTest, E2EPullCommandAndBufferTransfer) {
   EXPECT_EQ(e2e_pull_buf[255], 0x77);
 }
 
+class TestRawBufferTransport : public RawBufferTransport {
+ public:
+  using RawBufferTransport::AcquireConnection;
+  using RawBufferTransport::RawBufferTransport;
+  using RawBufferTransport::ReleaseConnection;
+};
+
+TEST(RawBufferTransportTest, MultiIpPoolingIsolation) {
+  size_t size = 1024;
+  RawMockDelegate delegate1(size);
+  RawMockDelegate delegate2(size);
+
+  RawBufferTransport transport1(&delegate1, 0);
+  TestRawBufferTransport transport2(&delegate2, 0);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::string peer1 = "127.0.0.1:" + std::to_string(transport1.local_port());
+
+  // 1. Acquire connection with local_ip = "127.0.0.1"
+  auto fd1_or = transport2.AcquireConnection(peer1, "127.0.0.1");
+  ASSERT_TRUE(fd1_or.ok()) << fd1_or.status().message();
+  int fd1 = fd1_or.value();
+
+  // Release it. It should be pooled under "127.0.0.1->peer1".
+  transport2.ReleaseConnection(peer1, fd1, "127.0.0.1");
+
+  // 2. Acquire connection with local_ip = "127.0.0.2"
+  // This should NOT reuse fd1 because it's a different local IP.
+  auto fd2_or = transport2.AcquireConnection(peer1, "127.0.0.2");
+  ASSERT_TRUE(fd2_or.ok()) << fd2_or.status().message();
+  int fd2 = fd2_or.value();
+
+  EXPECT_NE(fd1, fd2);
+
+  // Release it. It should be pooled under "127.0.0.2->peer1".
+  transport2.ReleaseConnection(peer1, fd2, "127.0.0.2");
+
+  // 3. Acquire connection with local_ip = "127.0.0.1" again.
+  // This SHOULD reuse fd1.
+  auto fd3_or = transport2.AcquireConnection(peer1, "127.0.0.1");
+  ASSERT_TRUE(fd3_or.ok()) << fd3_or.status().message();
+  int fd3 = fd3_or.value();
+
+  EXPECT_EQ(fd1, fd3);
+  transport2.ReleaseConnection(peer1, fd3, "127.0.0.1");
+
+  // 4. Acquire connection with local_ip = "127.0.0.2" again.
+  // This SHOULD reuse fd2.
+  auto fd4_or = transport2.AcquireConnection(peer1, "127.0.0.2");
+  ASSERT_TRUE(fd4_or.ok()) << fd4_or.status().message();
+  int fd4 = fd4_or.value();
+
+  EXPECT_EQ(fd2, fd4);
+  transport2.ReleaseConnection(peer1, fd4, "127.0.0.2");
+}
+
 // Force warnings check
 }  // namespace
 }  // namespace transport

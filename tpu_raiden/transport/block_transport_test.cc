@@ -14,6 +14,7 @@
 
 #include "tpu_raiden/transport/block_transport.h"
 
+#include <algorithm>
 #include <chrono>  // NOLINT
 #include <cstddef>
 #include <cstdint>
@@ -24,8 +25,10 @@
 #include <vector>
 
 #include <gtest/gtest.h>
+#include "absl/base/thread_annotations.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 
 namespace tpu_raiden {
@@ -381,6 +384,74 @@ TEST(BlockTransportTest, WriteBlockDirectCorrectness) {
   EXPECT_EQ(delegate2.received_size_bytes(), size);
 }
 
+class MockBlockTransport : public BlockTransport {
+ public:
+  struct CallRecord {
+    std::string peer;
+    std::string local_ip;
+  };
+
+  MockBlockTransport(BlockTransportDelegate* delegate, int local_port,
+                     const std::vector<std::string>& local_ips)
+      : BlockTransport(delegate, local_port, true, local_ips) {}
+
+  absl::StatusOr<int> AcquireConnection(absl::string_view peer,
+                                        absl::string_view local_ip) override {
+    absl::MutexLock lock(mock_mu_);
+    acquire_calls_.push_back({std::string(peer), std::string(local_ip)});
+    return absl::InternalError("mock_connection_halt");
+  }
+
+  std::vector<CallRecord> acquire_calls() {
+    absl::MutexLock lock(mock_mu_);
+    return acquire_calls_;
+  }
+
+ private:
+  absl::Mutex mock_mu_;
+  std::vector<CallRecord> acquire_calls_ ABSL_GUARDED_BY(mock_mu_);
+};
+
+TEST(BlockTransportTest, RoundRobinDistribution) {
+  constexpr size_t kSliceSize = 16;
+  MockDelegate delegate(kSliceSize);
+
+  std::vector<std::string> local_ips = {"10.0.0.1", "10.0.0.2"};
+  std::vector<std::string> peers = {"10.0.0.3:1234", "10.0.0.4:1234",
+                                    "10.0.0.5:1234"};
+
+  MockBlockTransport transport(&delegate, 0, local_ips);
+
+  std::vector<int> src_blocks = {0, 1, 2, 3, 4, 5};
+  auto res = transport.Push(peers, src_blocks, {}, /*parallelism=*/6);
+
+  EXPECT_FALSE(res.ok());
+  EXPECT_EQ(res.status().message(), "mock_connection_halt");
+
+  auto calls = transport.acquire_calls();
+  ASSERT_EQ(calls.size(), 6);
+
+  std::vector<MockBlockTransport::CallRecord> expected = {
+      {"10.0.0.3:1234", "10.0.0.1"}, {"10.0.0.4:1234", "10.0.0.2"},
+      {"10.0.0.5:1234", "10.0.0.1"}, {"10.0.0.3:1234", "10.0.0.2"},
+      {"10.0.0.4:1234", "10.0.0.1"}, {"10.0.0.5:1234", "10.0.0.2"}};
+
+  auto compare = [](const MockBlockTransport::CallRecord& a,
+                    const MockBlockTransport::CallRecord& b) {
+    if (a.peer != b.peer) return a.peer < b.peer;
+    return a.local_ip < b.local_ip;
+  };
+
+  std::sort(calls.begin(), calls.end(), compare);
+  std::sort(expected.begin(), expected.end(), compare);
+
+  for (size_t i = 0; i < 6; ++i) {
+    EXPECT_EQ(calls[i].peer, expected[i].peer);
+    EXPECT_EQ(calls[i].local_ip, expected[i].local_ip);
+  }
+}
+
+// Force warnings check
 }  // namespace
 }  // namespace transport
 }  // namespace tpu_raiden
