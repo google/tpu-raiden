@@ -15,6 +15,8 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_TRANSPORT_RAW_BUFFER_TRANSPORT_H_
 #define THIRD_PARTY_TPU_RAIDEN_TRANSPORT_RAW_BUFFER_TRANSPORT_H_
 
+#include <sys/uio.h>
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -30,6 +32,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -134,6 +137,8 @@ class RawBufferTransport {
   // Shared socket IO helpers.
   static absl::Status WriteExact(int fd, const void* buffer, size_t length);
   static absl::Status ReadExact(int fd, void* buffer, size_t length);
+  static absl::Status WriteVExact(int fd, absl::Span<const struct iovec> iov);
+  static absl::Status ReadVExact(int fd, absl::Span<const struct iovec> iov);
 
  protected:
   absl::StatusOr<int> ConnectToPeer(absl::string_view peer);

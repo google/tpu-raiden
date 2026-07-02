@@ -22,7 +22,6 @@
 #include <unistd.h>
 
 #include <algorithm>
-#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -82,88 +81,13 @@ std::string GetLocalAddr(int fd) {
 #define IOV_MAX UIO_MAXIOV
 #endif
 
-absl::Status WriteVExact(int fd, const std::vector<BlockChunk>& chunks) {
+std::vector<struct iovec> ToIovec(const std::vector<BlockChunk>& chunks) {
   std::vector<struct iovec> iov;
   iov.reserve(chunks.size());
   for (const auto& chunk : chunks) {
     iov.push_back({.iov_base = chunk.ptr, .iov_len = chunk.size});
   }
-
-  size_t iov_idx = 0;
-  while (iov_idx < iov.size()) {
-    size_t batch_size =
-        std::min(iov.size() - iov_idx, static_cast<size_t>(IOV_MAX));
-
-    size_t batch_remaining = batch_size;
-    while (batch_remaining > 0) {
-      ssize_t written = writev(fd, &iov[iov_idx], batch_remaining);
-      if (written < 0) {
-        if (errno == EINTR) continue;
-        return absl::InternalError(
-            absl::StrCat("Socket writev failed: ", std::strerror(errno)));
-      }
-      if (written == 0) {
-        return absl::InternalError("Socket closed unexpectedly during writev");
-      }
-
-      size_t remaining = written;
-      while (remaining > 0 && batch_remaining > 0) {
-        if (remaining >= iov[iov_idx].iov_len) {
-          remaining -= iov[iov_idx].iov_len;
-          iov_idx++;
-          batch_remaining--;
-        } else {
-          iov[iov_idx].iov_base =
-              static_cast<char*>(iov[iov_idx].iov_base) + remaining;
-          iov[iov_idx].iov_len -= remaining;
-          remaining = 0;
-        }
-      }
-    }
-  }
-  return absl::OkStatus();
-}
-
-absl::Status ReadVExact(int fd, const std::vector<BlockChunk>& chunks) {
-  std::vector<struct iovec> iov;
-  iov.reserve(chunks.size());
-  for (const auto& chunk : chunks) {
-    iov.push_back({.iov_base = chunk.ptr, .iov_len = chunk.size});
-  }
-
-  size_t iov_idx = 0;
-  while (iov_idx < iov.size()) {
-    size_t batch_size =
-        std::min(iov.size() - iov_idx, static_cast<size_t>(IOV_MAX));
-
-    size_t batch_remaining = batch_size;
-    while (batch_remaining > 0) {
-      ssize_t bytes_read = readv(fd, &iov[iov_idx], batch_remaining);
-      if (bytes_read < 0) {
-        if (errno == EINTR) continue;
-        return absl::InternalError(
-            absl::StrCat("Socket readv failed: ", std::strerror(errno)));
-      }
-      if (bytes_read == 0) {
-        return absl::InternalError("Socket closed unexpectedly during readv");
-      }
-
-      size_t remaining = bytes_read;
-      while (remaining > 0 && batch_remaining > 0) {
-        if (remaining >= iov[iov_idx].iov_len) {
-          remaining -= iov[iov_idx].iov_len;
-          iov_idx++;
-          batch_remaining--;
-        } else {
-          iov[iov_idx].iov_base =
-              static_cast<char*>(iov[iov_idx].iov_base) + remaining;
-          iov[iov_idx].iov_len -= remaining;
-          remaining = 0;
-        }
-      }
-    }
-  }
-  return absl::OkStatus();
+  return iov;
 }
 
 absl::Status ValidateChunks(BlockTransportDelegate* delegate, size_t l,
@@ -398,7 +322,8 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
                   " bytes for Block ID: ", dst_id));
             }
 
-            RETURN_IF_ERROR(ReadVExact(client_fd, chunks));
+            RETURN_IF_ERROR(
+                RawBufferTransport::ReadVExact(client_fd, ToIovec(chunks)));
           } else {
             RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, dst_id,
                                                1, bytes_per_block));
@@ -500,7 +425,8 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
                   " bytes for Block ID: ", dst_id));
             }
 
-            RETURN_IF_ERROR(ReadVExact(client_fd, chunks));
+            RETURN_IF_ERROR(
+                RawBufferTransport::ReadVExact(client_fd, ToIovec(chunks)));
           } else {
             RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, dst_id,
                                                1, bytes_per_block));
@@ -599,7 +525,7 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
             RETURN_IF_ERROR(
                 WriteExact(client_fd, &total_size, sizeof(total_size)));
 
-            return WriteVExact(client_fd, chunks);
+            return RawBufferTransport::WriteVExact(client_fd, ToIovec(chunks));
           } else {
             RETURN_IF_ERROR(ValidateBlockRange(block_delegate_, l, sh, read_id,
                                                1, bytes_per_block));
@@ -961,7 +887,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
           }
 
           RETURN_IF_ERROR(WriteExact(fd, &total_size, sizeof(total_size)));
-          return WriteVExact(fd, chunks);
+          return RawBufferTransport::WriteVExact(fd, ToIovec(chunks));
         } else {
           size_t bytes_per_block = block_delegate_->bytes_per_block();
           const uint8_t* base_host_ptr = block_delegate_->GetHostPointer(l, sh);
@@ -1157,7 +1083,8 @@ void BlockTransport::H2hReadWorker(
                   " bytes for Block ID: ", dst_id));
             }
 
-            RETURN_IF_ERROR(ReadVExact(fd, chunks));
+            RETURN_IF_ERROR(
+                RawBufferTransport::ReadVExact(fd, ToIovec(chunks)));
 
             if (on_block_received != nullptr) {
               RETURN_IF_ERROR(on_block_received(l, sh, dst_id, expected_size));
