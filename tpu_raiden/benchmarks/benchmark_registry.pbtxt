@@ -27,7 +27,7 @@ benchmarks {
     id: "tpu-v5e-single-node"
     runner_label: "linux-x86-ct5lp-224-8tpu"
     container_image: "us-central1-docker.pkg.dev/wyzhang-dev/quickstart-docker-repo/ml-build:939285342"
-    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss" }
+    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci" }
   }
 
   metrics {
