@@ -109,7 +109,40 @@ def create_sharded_array(shape, sharding, dtype, is_host=False, is_random=False)
   return jax.make_array_from_single_device_arrays(shape, sharding, shards)
 
 
-def measure(shape, num_layers, dtype, shard_axis=2, iters=20, warmup=3, lock_buffers=True):
+def verify_roundtrip(manager, dev_arrs, num_blocks):
+  """One-shot d2h->h2d data-integrity check (ported from V2 verify_device_cache).
+
+  Uses the SAME manager + d2h/h2d as the benchmark, but with disjoint offsets
+  and OUTSIDE the timed loop, so it changes neither the measured Gbps nor the
+  recorded baselines. It pulls the source-half blocks [0:half] down to host,
+  pushes them back up to the *distinct* destination half [half:2*half] on device,
+  then asserts the destination now equals the source. The destination half
+  starts with different values (see create_sharded_array init), so a no-op,
+  misaligned, or corrupting transfer leaves the two halves unequal and fails.
+  Raises AssertionError on mismatch -> the gate exits non-zero.
+  """
+  half = num_blocks // 2
+  if half == 0:
+    return  # major dim too small to split into src/dst halves; skip check
+  src = list(range(half))               # source blocks [0:half]
+  dst = list(range(half, 2 * half))     # destination blocks [half:2*half]
+  sizes = [1] * half                    # one block per offset
+  # Round-trip: device source-half -> host, then host -> device destination-half.
+  manager.d2h(src_offsets_major_dim=src, dst_offsets_major_dim=src,
+              copy_sizes_major_dim=sizes).Await()
+  manager.h2d(src_offsets_major_dim=src, dst_offsets_major_dim=dst,
+              copy_sizes_major_dim=sizes).Await()
+  # Read the raw shard buffers (like V2), not an XLA slice, so we observe the
+  # bytes the manager actually wrote and never a cached/stale view.
+  for li, a in enumerate(dev_arrs):
+    for s in a.addressable_shards:
+      d = np.asarray(s.data)
+      np.testing.assert_array_equal(
+          d[half:2 * half], d[0:half],
+          err_msg=f'CORRUPTION: layer {li} d2h/h2d round-trip mismatch')
+
+def measure(shape, num_layers, dtype, shard_axis=2, iters=20, warmup=3,
+            lock_buffers=True, verify=True):  # verify: run one integrity check before timing
   """Runs the d2h/h2d transfer benchmark for one config and returns a result dict.
 
   `shape` may be a "a,b,c" string (flag) or a list/tuple (json). Pure compute +
@@ -145,6 +178,12 @@ def measure(shape, num_layers, dtype, shard_axis=2, iters=20, warmup=3, lock_buf
       device_arrays=src_arrs,
       host_blocks_to_allocate=num_blocks,
       unsafe_skip_buffer_lock=not lock_buffers)
+
+  # Verify the transfer is byte-correct BEFORE timing (and before any mutate), so
+  # src_arrs still holds the known init values and the timed loop below is
+  # untouched. A corrupt/no-op transfer raises here and fails the gate.
+  if verify:
+    verify_roundtrip(manager, src_arrs, num_blocks)
 
   offsets, sizes = [0], [num_blocks]        # full-major-dim copy
   total_bytes = num_layers * int(np.prod(shape)) * itemsize
