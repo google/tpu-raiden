@@ -30,9 +30,9 @@ py_library(
 
 
 py_binary(
-    name = "multi_host_perf_test_oss",
+    name = "h2d_d2h_perf_test",
     testonly = True,
-    srcs = ["multi_host_perf_test_oss.py"],
+    srcs = ["h2d_d2h_perf_test.py"],
     deps = [
         ":perf_core",
         "@com_google_absl_py//absl:app",
