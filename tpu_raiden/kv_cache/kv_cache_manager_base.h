@@ -100,13 +100,6 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   ~KVCacheManagerBase() override;
 
-  xla::Future<> RemoteD2DBlockWrite(const BlockMetadata& src,
-                                    const BlockMetadata& dst,
-                                    size_t size_bytes);
-
-  xla::Future<> RemoteD2DBlockReceive(int block_id,
-                                      raiden::BufferHoldAndAlias hold,
-                                      size_t size_bytes);
 
   void SetBlockReadinessCallback(BlockReadinessCallback callback);
   absl::Status WaitForBlockRead(size_t layer_idx, size_t shard_idx,
@@ -280,8 +273,6 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<size_t> shard_idx = std::nullopt, int64_t device_id = -1);
 
  private:
-  xla::Future<> DoD2DTransfer(const BlockMetadata& src,
-                              const BlockMetadata& dst, size_t size_bytes);
 
   HostBufferAllocator host_allocator_ = nullptr;
   std::unique_ptr<xla::Semaphore> semaphore_;

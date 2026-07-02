@@ -344,42 +344,6 @@ TEST(BlockTransportTest, PullSupportsBlockMajorOrder) {
             }));
 }
 
-TEST(BlockTransportTest, WriteBlockDirectCorrectness) {
-  size_t size = 1024;
-  MockDelegate delegate1(size);
-  MockDelegate delegate2(size);
-
-  std::vector<uint8_t> src_data(size);
-  for (size_t i = 0; i < size; ++i) {
-    src_data[i] = static_cast<uint8_t>(i % 256);
-  }
-  std::memset(delegate2.data(), 0x00, size);
-
-  BlockTransport transport1(&delegate1, 0);
-  BlockTransport transport2(&delegate2, 0);
-
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-  std::string peer2 = "localhost:" + std::to_string(transport2.local_port());
-
-  // Write block 0 directly from src_data to transport2
-  auto write_res = transport1.WriteBlockDirect(peer2, /*remote_block_id=*/0,
-                                               src_data.data(), size);
-  ASSERT_TRUE(write_res.ok()) << write_res.message();
-
-  // Verify the data was received correctly in delegate2
-  for (size_t i = 0; i < size; ++i) {
-    EXPECT_EQ(delegate2.data()[i], src_data[i]);
-  }
-
-  // Verify OnDataReceived was called
-  EXPECT_TRUE(delegate2.on_data_received_called());
-
-  // Verify OnSingleBlockReceived was called with correct arguments
-  EXPECT_TRUE(delegate2.on_single_block_received_called());
-  EXPECT_EQ(delegate2.received_block_id(), 0);
-  EXPECT_EQ(delegate2.received_size_bytes(), size);
-}
 
 }  // namespace
 }  // namespace transport

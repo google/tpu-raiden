@@ -461,8 +461,7 @@ absl::Status RawBufferTransport::ProcessSingleRequest(int client_fd) {
     }
     uint8_t* src_ptr = base_host_ptr + src_offset;
     RETURN_IF_ERROR(WriteExact(client_fd, src_ptr, size_bytes));
-  } else if (header.op == 7) {
-    return ProcessCommandRequest(client_fd, header);
+
   } else {
     return HandleCustomRequest(client_fd, header);
   }
@@ -621,139 +620,6 @@ absl::Status RawBufferTransport::PushBuffer(
   }
 
   ok_to_pool = true;
-  return absl::OkStatus();
-}
-
-absl::Status RawBufferTransport::RegisterCommand(uint32_t command_id,
-                                                 CommandCallback callback) {
-  absl::MutexLock lock( cmd_mu_ );
-  auto [it, inserted] =
-      registered_commands_.try_emplace(command_id, std::move(callback));
-  if (!inserted) {
-    return absl::AlreadyExistsError(
-        absl::StrCat("Command ID ", command_id, " is already registered"));
-  }
-  return absl::OkStatus();
-}
-
-absl::StatusOr<RawBufferTransport::ConnectionCloser>
-RawBufferTransport::IssueCommand(absl::string_view peer, uint32_t command_id,
-                                 absl::string_view command_meta) {
-  if (peer.empty()) {
-    return absl::InvalidArgumentError(
-        "Destination peer address cannot be empty");
-  }
-
-  TF_ASSIGN_OR_RETURN(const int fd, AcquireConnection(std::string(peer)));
-  auto fd_cleaner = absl::MakeCleanup([&] {
-    shutdown(fd, SHUT_RDWR);
-    close(fd);
-  });
-
-  PacketHeader header = {
-      .op = 7,
-      .local_id = command_id,
-      .count_or_size = static_cast<uint32_t>(command_meta.size()),
-  };
-
-  RETURN_IF_ERROR(WriteExact(fd, &header, sizeof(header)));
-  if (!command_meta.empty()) {
-    RETURN_IF_ERROR(WriteExact(fd, command_meta.data(), command_meta.size()));
-  }
-
-  uint8_t ack = 0;
-  RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
-  if (ack != 1) {
-    return absl::InternalError("IssueCommand verification failed");
-  }
-
-  std::move(fd_cleaner).Cancel();
-
-  ConnectionCloser closer;
-  closer.fd = fd;
-  closer.close_fn = [this, peer = std::string(peer), fd](bool ok_to_pool) {
-    if (ok_to_pool) {
-      ReleaseConnection(peer, fd);
-    } else {
-      shutdown(fd, SHUT_RDWR);
-      close(fd);
-    }
-  };
-  return closer;
-}
-
-absl::Status RawBufferTransport::ProcessCommandRequest(
-    int client_fd, const PacketHeader& header) {
-  uint32_t command_id = header.local_id;
-  uint32_t size_bytes = header.count_or_size;
-
-  std::string command_meta;
-  if (size_bytes > 0) {
-    command_meta.resize(size_bytes);
-    RETURN_IF_ERROR(ReadExact(client_fd, &command_meta[0], size_bytes));
-  }
-
-  uint8_t ack = 1;
-  RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
-
-  CommandCallback callback;
-  {
-    absl::MutexLock lock( cmd_mu_ );
-    if (auto it = registered_commands_.find(command_id);
-        it != registered_commands_.end()) {
-      callback = it->second;
-    }
-  }
-
-  if (callback != nullptr) {
-    ConnectionCloser closer;
-    closer.fd = client_fd;
-    closer.close_fn = [client_fd](bool ok_to_pool) {
-      // B's listener thread loop in ConnectionWorker owns the FD and polls it.
-      // We only call shutdown() here to signal EOF/termination to both sides.
-      // The ConnectionWorker thread will break its poll loop and perform the
-      // final close() to avoid double-close race conditions.
-      shutdown(client_fd, SHUT_RDWR);
-    };
-    RETURN_IF_ERROR(callback(std::move(closer), command_meta));
-  }
-
-  return absl::OkStatus();
-}
-
-absl::Status RawBufferTransport::Send(const SendSpec& spec) {
-  if (spec.fd < 0) {
-    return absl::InvalidArgumentError("fd must be specified and >= 0");
-  }
-
-  // Write payload data for each slice sequentially directly to socket.
-  for (const auto& slice : spec.slices) {
-    if (slice.size_bytes > 0) {
-      RETURN_IF_ERROR(WriteExact(spec.fd, slice.data_ptr, slice.size_bytes));
-    }
-  }
-
-  return absl::OkStatus();
-}
-
-absl::Status RawBufferTransport::Receive(const ReceiveSpec& spec) {
-  if (spec.fd < 0) {
-    return absl::InvalidArgumentError("fd must be specified and >= 0");
-  }
-
-  // Receive payloads sequentially directly into caller-allocated buffers.
-  for (size_t i = 0; i < spec.slices.size(); ++i) {
-    const auto& slice = spec.slices[i];
-    uint8_t* ptr = slice.data_ptr;
-    if (slice.size_bytes > 0) {
-      if (ptr == nullptr) {
-        return absl::InternalError(
-            absl::StrCat("Caller provided null data_ptr for slice index ", i));
-      }
-      RETURN_IF_ERROR(ReadExact(spec.fd, ptr, slice.size_bytes));
-    }
-  }
-
   return absl::OkStatus();
 }
 

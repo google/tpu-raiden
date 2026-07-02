@@ -535,24 +535,6 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
             return WriteExact(client_fd, src_ptr, bytes_per_block);
           }
         }));
-  } else if (header.op == 4) {  // Single Block Push (Direct)
-    int dst_id = static_cast<int>(header.remote_id);
-    size_t size_bytes = header.count_or_size;
-    uint16_t buf_id = header.buffer_id;
-
-    uint8_t ack = 1;
-    RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
-
-    RETURN_IF_ERROR(
-        ValidateBlockRange(block_delegate_, buf_id, 0, dst_id, 1, size_bytes));
-    uint8_t* dest_ptr = block_delegate_->GetBlockHostPointer(buf_id, 0, dst_id);
-    if (dest_ptr == nullptr)
-      return absl::InvalidArgumentError("Null block pointer");
-    RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, size_bytes));
-
-    RETURN_IF_ERROR(block_delegate_->OnSingleBlockReceived(dst_id, size_bytes));
-    ack = 1;
-    RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
   } else {
     return absl::UnimplementedError(
         absl::StrCat("Unsupported block transport op: ", header.op));
@@ -650,48 +632,6 @@ void BlockTransport::Push(
     scheduler_cv_.SignalAll();
     block_offset += block_count;
   }
-}
-
-absl::Status BlockTransport::WriteBlockDirect(absl::string_view peer,
-                                              int remote_block_id,
-                                              const uint8_t* data_ptr,
-                                              size_t size_bytes) {
-  TF_ASSIGN_OR_RETURN(int fd, AcquireConnection(peer));
-  ApplySocketAffinityAndBinding(fd);
-  bool ok_to_pool = false;
-  auto fd_cleaner = absl::MakeCleanup([&] {
-    if (ok_to_pool) {
-      ReleaseConnection(peer, fd);
-    } else {
-      shutdown(fd, SHUT_RDWR);
-      close(fd);
-    }
-  });
-
-  PacketHeader header = {};
-  header.op = 4;
-  header.buffer_id = 0;
-  header.remote_id = static_cast<uint32_t>(remote_block_id);
-  header.count_or_size = static_cast<uint32_t>(size_bytes);
-
-  RETURN_IF_ERROR(WriteExact(fd, &header, sizeof(header)));
-
-  uint8_t ack = 0;
-  RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
-  if (ack != 1) {
-    return absl::InternalError("WriteBlockDirect handshake failed");
-  }
-
-  RETURN_IF_ERROR(WriteExact(fd, data_ptr, size_bytes));
-
-  ack = 0;
-  RETURN_IF_ERROR(ReadExact(fd, &ack, 1));
-  if (ack != 1) {
-    return absl::InternalError("WriteBlockDirect completion ack failed");
-  }
-
-  ok_to_pool = true;
-  return absl::OkStatus();
 }
 
 absl::StatusOr<std::vector<int>> BlockTransport::Pull(
