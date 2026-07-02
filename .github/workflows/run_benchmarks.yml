@@ -19,7 +19,6 @@ on:
 
   push:
     branches:
-      - V6
 
   schedule:
     - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
@@ -34,7 +33,7 @@ permissions:
 
 jobs: 
   run_benchmarks:
-    name: Run TPU Raiden H2H Benchmarks
+    name: Run TPU Raiden H2D D2H Benchmarks
     uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@affd28b492f67c242afa8b119e590b25816b7b88
     with:
       registry_file: "tpu_raiden/benchmarks/benchmark_registry.pbtxt"
