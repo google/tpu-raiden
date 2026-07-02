@@ -56,14 +56,21 @@ def main(_):
           f"{'x'.join(map(str, c['shape']))}  "
           f"d2h {r['d2h_gbps']:.1f}  h2d {r['h2d_gbps']:.1f} Gbps")
 
-  # --- record mode: overwrite baselines, no gating ---
+   # --- record mode: overwrite baselines, no gating ---
   if _RECORD.value:
     for c, r in results:
       c['baseline_d2h'] = round(r['d2h_gbps'], 1)
       c['baseline_h2d'] = round(r['h2d_gbps'], 1)
-    with open(path, 'w') as f:
+    # In CI, BAP sets WORKLOAD_ARTIFACTS_DIR and uploads its contents as an
+    # artifact, so write the recorded baselines there to get them back out.
+    # Locally (env unset) this falls back to the --baselines path, unchanged.
+    out_path = path
+    adir = os.environ.get('WORKLOAD_ARTIFACTS_DIR')
+    if adir:
+      out_path = os.path.join(adir, 'gating_baselines.json')
+    with open(out_path, 'w') as f:
       json.dump(cfg, f, indent=2)
-    print(f'Recorded {len(results)} baselines -> {path}')
+    print(f'Recorded {len(results)} baselines -> {out_path}')
     return
 
   # --- gate mode ---
