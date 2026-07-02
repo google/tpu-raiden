@@ -5,3 +5,9 @@ build:oss --override_module=torch_tpu=%workspace%/third_party/torch_tpu_stub
 build --action_env=CC=clang-18
 build --action_env=CXX=clang++-18
 build --repo_env=CC=clang-18
+
+build:ci --google_default_credentials=true
+build:ci --remote_cache=grpcs://remotebuildexecution.googleapis.com
+build:ci --remote_instance_name=projects/ml-oss-rbe-testing/instances/default_instance
+build:ci --remote_default_exec_properties=cache-silo-key=tpu_raiden_v1
+build:ci --remote_local_fallback
