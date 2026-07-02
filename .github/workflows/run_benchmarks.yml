@@ -19,11 +19,11 @@ on:
 
   push:
     branches:
-      - V5
+      - V6
       
   pull_request:
     branches:
-      - V5
+      - V6
 
   schedule:
     - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
