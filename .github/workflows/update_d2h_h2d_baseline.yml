@@ -1,16 +1,6 @@
 name: Record H2D/D2H Baselines
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - V6
-      
-  pull_request:
-    branches:
-      - V6
-
-  schedule:
-    - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
 permissions: { contents: read, pull-requests: write }
   
 
