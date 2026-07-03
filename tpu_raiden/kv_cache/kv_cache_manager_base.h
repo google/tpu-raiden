@@ -53,8 +53,6 @@ struct BlockMetadata {
 
 using RecvCallback =
     std::function<absl::Status(int block_id, size_t size_bytes)>;
-using BlockReadinessCallback = std::function<absl::Status(
-    size_t layer_idx, size_t shard_idx, int block_id)>;
 
 namespace kv_cache {
 
@@ -100,10 +98,9 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   ~KVCacheManagerBase() override;
 
-
-  void SetBlockReadinessCallback(BlockReadinessCallback callback);
-  absl::Status WaitForBlockRead(size_t layer_idx, size_t shard_idx,
-                                int block_id) override;
+  void RegisterBlockReadinessCallback(
+      size_t layer_idx, size_t shard_idx, int block_id, uint64_t uuid,
+      transport::BlockTransportDelegate::HostBlockReadyCallback cb) override;
 
   // Async on-chip H2D offloads returning PJRT copy future E2E
   virtual absl::StatusOr<raiden::PjRtCopyFuture> H2d(
@@ -184,15 +181,11 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   // these host buffers to enable serving prefix cache lookups directly from
   // RAM.
 
-
   absl::Status ConfigureHostStagingSlots(int64_t num_slots,
                                          int64_t max_major_per_slot);
 
   absl::StatusOr<KVCacheHostSpan> HostSpan(size_t layer_idx, size_t shard_idx,
-                                           int64_t slot_idx,
-                                           int64_t num_major);
-
-
+                                           int64_t slot_idx, int64_t num_major);
 
   void SetExternalHostBuffer(
       const std::vector<raiden::BufferHoldAndAlias>& buffer_holds);
@@ -257,8 +250,8 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       const std::vector<int64_t>& copy_sizes);
 
   // Override parent AllocateBlocks using our dynamic block manager!
-  absl::StatusOr<std::vector<int>> AllocateBlocks(
-      size_t num_blocks, uint64_t uuid = 0) override {
+  absl::StatusOr<std::vector<int>> AllocateBlocks(size_t num_blocks,
+                                                  uint64_t uuid = 0) override {
     return host_block_manager_->Allocate(num_blocks, /*lock=*/true);
   }
 
@@ -273,17 +266,12 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<size_t> shard_idx = std::nullopt, int64_t device_id = -1);
 
  private:
-
   HostBufferAllocator host_allocator_ = nullptr;
   std::unique_ptr<xla::Semaphore> semaphore_;
 
   absl::Mutex recv_mu_;
   absl::flat_hash_map<int, RecvCallback> recv_callbacks_
       ABSL_GUARDED_BY(recv_mu_);
-
-  absl::Mutex block_readiness_mu_;
-  BlockReadinessCallback block_readiness_callback_
-      ABSL_GUARDED_BY(block_readiness_mu_);
 
   mutable absl::Mutex plans_mu_;
   struct RegisteredPlan {

@@ -93,9 +93,16 @@ class BlockTransportDelegate : public RawBufferTransportDelegate {
     return OnDataReceived();
   }
 
-  virtual absl::Status WaitForBlockRead(size_t layer_idx, size_t shard_idx,
-                                        int block_id) {
-    return absl::OkStatus();
+  using HostBlockReadyCallback = std::function<void(absl::Status)>;
+  virtual void RegisterBlockReadinessCallback(size_t layer_idx,
+                                              size_t shard_idx, int block_id,
+                                              uint64_t uuid,
+                                              HostBlockReadyCallback cb) {
+    cb(absl::OkStatus());
+  }
+
+  virtual void ScheduleAsyncTask(std::function<void()> task) {
+    std::thread(std::move(task)).detach();
   }
 
   virtual uint8_t* GetBlockHostPointer(size_t layer_idx, size_t shard_idx,
@@ -189,6 +196,25 @@ class BlockTransport : public RawBufferTransport {
 
   absl::Status HandleIncomingPush(int client_fd, const PacketHeader& header);
   absl::Status HandleIncomingPull(int client_fd, const PacketHeader& header);
+
+  struct SendStreamState {
+    int client_fd;
+    uint64_t uuid;
+    int remote_id;
+    size_t count_or_size;
+    MajorOrder major_order;
+    size_t current_step = 0;
+    size_t total_steps = 0;
+  };
+
+  void TriggerNextSendStep(std::shared_ptr<SendStreamState> state);
+  void ResolveStepCoordinates(const std::shared_ptr<SendStreamState>& state,
+                              size_t* layer, size_t* shard, size_t* block_idx);
+  uint32_t GetChunksTotalSize(const std::vector<BlockChunk>& chunks);
+
+  absl::Mutex active_sends_mu_;
+  absl::flat_hash_map<uint64_t, std::shared_ptr<SendStreamState>> active_sends_
+      ABSL_GUARDED_BY(active_sends_mu_);
 
   BlockTransportDelegate* block_delegate_;
 

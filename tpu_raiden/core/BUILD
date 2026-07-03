@@ -252,6 +252,7 @@ cc_library(
         ":status_macros",
         ":tpu_utils",
         "//tpu_raiden/kv_cache:kv_cache_manager_base",
+        "//tpu_raiden/transport:block_transport",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",

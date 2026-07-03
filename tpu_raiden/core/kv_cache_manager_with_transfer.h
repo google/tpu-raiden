@@ -53,6 +53,7 @@
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
+#include "tpu_raiden/transport/block_transport.h"
 
 namespace tpu_raiden {
 
@@ -322,8 +323,10 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   void ProcessPullStream(int fd, const ControlRequestHeader& req);
   void AckRemote(const std::string& remote_endpoint, uint64_t uuid);
   absl::Status OnLayerReceived(size_t layer_idx, uint64_t uuid) override;
-  absl::Status WaitForStagingBlockRead(size_t layer_idx, size_t shard_idx,
-                                       int block_id);
+  void RegisterBlockReadinessCallback(
+      size_t layer_idx, size_t shard_idx, int block_id, uint64_t uuid,
+      transport::BlockTransportDelegate::HostBlockReadyCallback cb) override;
+  void ScheduleAsyncTask(std::function<void()> task) override;
   std::shared_ptr<StagingReadinessState> CreateStagingReadiness(
       int64_t slot_idx, int64_t num_blocks);
   void MarkStagingLayerReady(

@@ -24,15 +24,11 @@
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
-#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
-#include "xla/future.h"
 #include "xla/pjrt/pjrt_client.h"
-#include "xla/pjrt/semaphore.h"
-#include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/transport/block_transport.h"
 
@@ -91,10 +87,6 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   size_t slice_byte_size() const override { return slice_byte_size_; }
   size_t bytes_per_block() const override;
   size_t shard_factor() const override { return shard_factor_; }
-  absl::Status WaitForBlockRead(size_t layer_idx, size_t shard_idx,
-                                int block_id) override {
-    return absl::OkStatus();
-  }
 
  protected:
   struct ShardBufferInfoBase {

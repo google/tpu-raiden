@@ -67,11 +67,14 @@ class MockDelegate : public BlockTransportDelegate {
     return OnDataReceived();
   }
 
-  absl::Status WaitForBlockRead(size_t layer_idx, size_t shard_idx,
-                                int block_id) override {
-    absl::MutexLock lock(wait_events_mu_);
-    wait_events_.push_back(std::make_tuple(layer_idx, shard_idx, block_id));
-    return absl::OkStatus();
+  void RegisterBlockReadinessCallback(size_t layer_idx, size_t shard_idx,
+                                      int block_id, uint64_t uuid,
+                                      HostBlockReadyCallback cb) override {
+    {
+      absl::MutexLock lock(wait_events_mu_);
+      wait_events_.push_back(std::make_tuple(layer_idx, shard_idx, block_id));
+    }
+    cb(absl::OkStatus());
   }
 
   bool on_data_received_called() const { return on_data_received_called_; }

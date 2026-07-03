@@ -45,11 +45,9 @@
 #include "xla/stream_executor/stream.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
-#include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/numa_thread_pool.h"
 #include "tpu_raiden/core/raiden_manager_base.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
-#include "tpu_raiden/core/raw_transfer_impl.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
@@ -102,7 +100,6 @@ KVCacheManagerBase::KVCacheManagerBase(
   }
 
   DetectAndAssignNumaNode(layer_buffers);
-
 
   xla::PjRtBuffer* first_buffer = layer_buffers[0][0];
   const xla::Shape& shape = first_buffer->on_device_shape();
@@ -183,8 +180,8 @@ KVCacheManagerBase::KVCacheManagerBase(
         shard_info.host_size = alloc_size;
         VLOG(1) << "KVCacheManagerBase: allocated host buffer for layer "
                 << layer_idx << ", shard " << i << " at "
-                << (void*)shard_info.host_ptr
-                << ", size " << shard_info.host_size;
+                << (void*)shard_info.host_ptr << ", size "
+                << shard_info.host_size;
       }
 
       auto status_or_hold = raiden::BufferHoldAndAlias::Acquire(
@@ -521,8 +518,8 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
               << ", works count: " << works.size();
       auto future = dma_pool_->Schedule(
           node >= 0 ? std::make_optional(node) : std::nullopt,
-          [this, works, is_partial, src_offsets,
-           dst_offsets, copy_sizes, slot_idx]() {
+          [this, works, is_partial, src_offsets, dst_offsets, copy_sizes,
+           slot_idx]() {
             return DispatchD2hWork(works, slot_idx, is_partial, src_offsets,
                                    dst_offsets, copy_sizes);
           });
@@ -646,7 +643,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2hReadExplicit(
     const std::vector<uint8_t*>& explicit_dst_ptrs, int parallelism,
     tpu_raiden::transport::MajorOrder major_order,
     tpu_raiden::transport::BlockReceivedCallback on_block_received) {
-  absl::MutexLock lock(&server_init_mu_);
+  absl::MutexLock lock(server_init_mu_);
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
@@ -889,9 +886,7 @@ absl::StatusOr<KVCacheHostSpan> KVCacheManagerBase::HostSpan(
       .shard_idx = shard_idx};
 }
 
-size_t KVCacheManagerBase::bytes_per_block() const {
-  return slice_byte_size_;
-}
+size_t KVCacheManagerBase::bytes_per_block() const { return slice_byte_size_; }
 
 bool KVCacheManagerBase::use_block_chunks(uint64_t uuid) const {
   absl::MutexLock l(plans_mu_);
@@ -1087,25 +1082,10 @@ absl::Status KVCacheManagerBase::OnSingleBlockReceived(int block_id,
   return absl::OkStatus();
 }
 
-
-void KVCacheManagerBase::SetBlockReadinessCallback(
-    BlockReadinessCallback callback) {
-  absl::MutexLock l(block_readiness_mu_);
-  block_readiness_callback_ = std::move(callback);
-}
-
-absl::Status KVCacheManagerBase::WaitForBlockRead(size_t layer_idx,
-                                                  size_t shard_idx,
-                                                  int block_id) {
-  BlockReadinessCallback callback;
-  {
-    absl::MutexLock l(block_readiness_mu_);
-    callback = block_readiness_callback_;
-  }
-  if (!callback) {
-    return absl::OkStatus();
-  }
-  return callback(layer_idx, shard_idx, block_id);
+void KVCacheManagerBase::RegisterBlockReadinessCallback(
+    size_t layer_idx, size_t shard_idx, int block_id, uint64_t uuid,
+    transport::BlockTransportDelegate::HostBlockReadyCallback cb) {
+  cb(absl::OkStatus());
 }
 
 absl::Status KVCacheManagerBase::PushKVCacheResharded(
@@ -1121,13 +1101,7 @@ absl::Status KVCacheManagerBase::PushKVCacheResharded(
   }
 
   // 2. D2H to copy from device to host.
-  TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2h());
-  TF_RETURN_IF_ERROR(d2h_future.Await());
-
-  for (size_t l = 0; l < num_layers_; ++l) {
-    VLOG(1) << "StartPushInternal (H2H start layer " << l
-            << "): uuid=" << request.uuid() << ", numa=" << numa;
-  }
+  ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2h());
 
   // 3. Group entries by dst_peer and collect unique block IDs
   std::map<std::string, std::vector<std::pair<int, int>>> peer_transfers;
@@ -1138,36 +1112,57 @@ absl::Status KVCacheManagerBase::PushKVCacheResharded(
     }
   }
 
-  // 4. Push blocks for each peer
-  absl::MutexLock lock(&server_init_mu_);
-  for (auto& [peer, transfers] : peer_transfers) {
-    std::vector<int> src_block_ids;
-    std::vector<int> dst_block_ids;
-    std::set<std::pair<int, int>> seen;
-    for (const auto& p : transfers) {
-      if (seen.insert(p).second) {
-        src_block_ids.push_back(p.first);
-        dst_block_ids.push_back(p.second);
+  d2h_future.OnReady([this, request, peer_transfers, numa](auto status_or) {
+    if (!status_or.ok()) {
+      LOG(ERROR) << "D2H copy failed for resharded push uuid " << request.uuid()
+                 << ": " << status_or.status().ToString();
+      return;
+    }
+
+    for (size_t l = 0; l < num_layers_; ++l) {
+      VLOG(1) << "StartPushInternal (H2H start layer " << l
+              << "): uuid=" << request.uuid() << ", numa=" << numa;
+    }
+
+    transport::BlockTransport* transport_server = nullptr;
+    {
+      absl::MutexLock lock(server_init_mu_);
+      transport_server = server_.get();
+    }
+    if (!transport_server) {
+      LOG(ERROR)
+          << "Transport server is not running during resharded push for uuid "
+          << request.uuid();
+      return;
+    }
+
+    for (const auto& [peer, transfers] : peer_transfers) {
+      std::vector<int> src_block_ids;
+      std::vector<int> dst_block_ids;
+      std::set<std::pair<int, int>> seen;
+      for (const auto& p : transfers) {
+        if (seen.insert(p).second) {
+          src_block_ids.push_back(p.first);
+          dst_block_ids.push_back(p.second);
+        }
       }
+
+      if (src_block_ids.empty()) continue;
+
+      transport_server->Push(
+          peer, src_block_ids, dst_block_ids, /*parallelism=*/1,
+          transport::MajorOrder::kLayerMajor, request.uuid(),
+          /*layer_idx=*/-1, [uuid = request.uuid(), peer](auto push_res) {
+            if (!push_res.ok()) {
+              LOG(ERROR) << "Resharded push to " << peer << " failed for uuid "
+                         << uuid << ": " << push_res.status().ToString();
+            } else {
+              VLOG(1) << "Resharded push to " << peer << " completed for uuid "
+                      << uuid;
+            }
+          });
     }
-
-    if (src_block_ids.empty()) continue;
-
-    if (!server_) {
-      return absl::FailedPreconditionError("Transport server is not running");
-    }
-
-    // Call BlockTransport::Push
-    TF_ASSIGN_OR_RETURN(
-        std::vector<int> allocated_ids,
-        server_->Push(peer, src_block_ids, dst_block_ids, /*parallelism=*/1,
-                      transport::MajorOrder::kLayerMajor, request.uuid()));
-  }
-
-  for (size_t l = 0; l < num_layers_; ++l) {
-    VLOG(1) << "StartPushInternal (H2H complete layer " << l
-            << "): uuid=" << request.uuid() << ", numa=" << numa;
-  }
+  });
 
   return absl::OkStatus();
 }
@@ -1183,8 +1178,8 @@ absl::Status KVCacheManagerBase::RegisterActivePlan(
         absl::StrCat("Plan with UUID ", uuid, " is already registered!"));
   }
   VLOG(1) << "RegisterActivePlan: Registered plan for UUID " << uuid
-            << ", is_sender: " << is_sender << ", shard_push_schedules size: "
-            << request.shard_push_schedules().size();
+          << ", is_sender: " << is_sender << ", shard_push_schedules size: "
+          << request.shard_push_schedules().size();
   return absl::OkStatus();
 }
 

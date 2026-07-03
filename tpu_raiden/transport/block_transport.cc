@@ -267,9 +267,8 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
   std::vector<int> allocated_ids;
 
   if (header.op == 1) {
-    ASSIGN_OR_RETURN(
-        allocated_ids,
-        block_delegate_->AllocateBlocks(header.count_or_size, header.uuid));
+    ASSIGN_OR_RETURN(allocated_ids, block_delegate_->AllocateBlocks(
+                                        header.count_or_size, header.uuid));
     RETURN_IF_ERROR(WriteExact(client_fd, allocated_ids.data(),
                                header.count_or_size * sizeof(int)));
   } else {
@@ -290,8 +289,7 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
 
   RETURN_IF_ERROR(ForEachPayload(
       major_order, target_layers, block_delegate_->num_shards(),
-      header.count_or_size,
-      [&](size_t l, size_t sh, size_t k) -> absl::Status {
+      header.count_or_size, [&](size_t l, size_t sh, size_t k) -> absl::Status {
         ABSL_DCHECK_LT(k, allocated_ids.size());
         const int dst_id = allocated_ids[k];
         uint32_t sender_size = 0;
@@ -299,8 +297,7 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
             ReadExact(client_fd, &sender_size, sizeof(sender_size)));
 
         std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
-            l, sh, dst_id, header.uuid,
-            static_cast<int64_t>(header.remote_id));
+            l, sh, dst_id, header.uuid, static_cast<int64_t>(header.remote_id));
         if (chunks.empty()) {
           return absl::NotFoundError(
               absl::StrCat("No transfer chunks found for block ", dst_id,
@@ -346,8 +343,7 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
         }
       }
       if (all_layers_called) {
-        for (size_t layer = 0; layer < block_delegate_->num_layers();
-             ++layer) {
+        for (size_t layer = 0; layer < block_delegate_->num_layers(); ++layer) {
           layer_progress_.erase({header.uuid, layer});
         }
       }
@@ -387,8 +383,7 @@ absl::Status BlockTransport::HandleIncomingPull(int client_fd,
 
   RETURN_IF_ERROR(WriteExact(client_fd, &resp_header, sizeof(resp_header)));
 
-  size_t local_blocks =
-      header.count_or_size / block_delegate_->shard_factor();
+  size_t local_blocks = header.count_or_size / block_delegate_->shard_factor();
   if (header.remote_id >
           static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
       local_blocks > static_cast<size_t>(std::numeric_limits<int>::max()) ||
@@ -396,27 +391,129 @@ absl::Status BlockTransport::HandleIncomingPull(int client_fd,
                          static_cast<size_t>(header.remote_id)) {
     return absl::OutOfRangeError("Requested block range exceeds int range");
   }
-  std::vector<int> target_layers(block_delegate_->num_layers());
-  std::iota(target_layers.begin(), target_layers.end(), 0);
-  return ForEachPayload(
-      major_order, target_layers, block_delegate_->num_shards(), local_blocks,
-      [&](size_t l, size_t sh, size_t k) -> absl::Status {
-        const int read_id = static_cast<int>(header.remote_id + k);
-        std::vector<BlockChunk> chunks =
-            block_delegate_->GetBlockChunks(l, sh, read_id, header.uuid);
-        RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
-        RETURN_IF_ERROR(block_delegate_->WaitForBlockRead(l, sh, read_id));
 
-        uint32_t total_size = 0;
-        for (const auto& chunk : chunks) {
-          total_size += chunk.size;
+  auto state = std::make_shared<SendStreamState>();
+  state->client_fd = client_fd;
+  state->uuid = header.uuid;
+  state->remote_id = static_cast<int>(header.remote_id);
+  state->count_or_size = header.count_or_size;
+  state->major_order = major_order;
+  state->current_step = 0;
+  state->total_steps = block_delegate_->num_layers() *
+                       block_delegate_->num_shards() * local_blocks;
+
+  {
+    absl::MutexLock lock(active_sends_mu_);
+    active_sends_[header.uuid] = state;
+  }
+
+  TriggerNextSendStep(state);
+  return absl::OkStatus();
+}
+
+void BlockTransport::TriggerNextSendStep(
+    std::shared_ptr<SendStreamState> state) {
+  if (state->current_step >= state->total_steps) {
+    {
+      absl::MutexLock lock(active_sends_mu_);
+      active_sends_.erase(state->uuid);
+    }
+    return;
+  }
+
+  size_t l, sh, k;
+  ResolveStepCoordinates(state, &l, &sh, &k);
+  int block_id = state->remote_id + k;
+
+  block_delegate_->RegisterBlockReadinessCallback(
+      l, sh, block_id, state->uuid,
+      [this, state, l, sh, block_id](absl::Status status) {
+        if (!status.ok()) {
+          LOG(ERROR) << "Pull response failed at step " << state->current_step
+                     << " for uuid " << state->uuid
+                     << ", status: " << status.ToString();
+          shutdown(state->client_fd, SHUT_RDWR);
+          close(state->client_fd);
+          absl::MutexLock lock(active_sends_mu_);
+          active_sends_.erase(state->uuid);
+          return;
         }
 
-        RETURN_IF_ERROR(
-            WriteExact(client_fd, &total_size, sizeof(total_size)));
+        block_delegate_->ScheduleAsyncTask([this, state, l, sh, block_id]() {
+          std::vector<BlockChunk> chunks =
+              block_delegate_->GetBlockChunks(l, sh, block_id, state->uuid);
+          if (chunks.empty()) {
+            LOG(ERROR) << "No transfer chunks found for block " << block_id
+                       << " and uuid " << state->uuid;
+            shutdown(state->client_fd, SHUT_RDWR);
+            close(state->client_fd);
+            absl::MutexLock lock(active_sends_mu_);
+            active_sends_.erase(state->uuid);
+            return;
+          }
+          absl::Status s = ValidateChunks(block_delegate_, l, sh, chunks);
+          if (!s.ok()) {
+            LOG(ERROR) << "Chunks validation failed: " << s.ToString();
+            shutdown(state->client_fd, SHUT_RDWR);
+            close(state->client_fd);
+            absl::MutexLock lock(active_sends_mu_);
+            active_sends_.erase(state->uuid);
+            return;
+          }
 
-        return RawBufferTransport::WriteVExact(client_fd, ToIovec(chunks));
+          uint32_t total_size = GetChunksTotalSize(chunks);
+          s = WriteExact(state->client_fd, &total_size, sizeof(total_size));
+          if (!s.ok()) {
+            LOG(ERROR) << "Write size failed: " << s.ToString();
+            shutdown(state->client_fd, SHUT_RDWR);
+            close(state->client_fd);
+            absl::MutexLock lock(active_sends_mu_);
+            active_sends_.erase(state->uuid);
+            return;
+          }
+          s = RawBufferTransport::WriteVExact(state->client_fd,
+                                              ToIovec(chunks));
+          if (!s.ok()) {
+            LOG(ERROR) << "Write payload failed: " << s.ToString();
+            shutdown(state->client_fd, SHUT_RDWR);
+            close(state->client_fd);
+            absl::MutexLock lock(active_sends_mu_);
+            active_sends_.erase(state->uuid);
+            return;
+          }
+
+          state->current_step++;
+          TriggerNextSendStep(state);
+        });
       });
+}
+
+void BlockTransport::ResolveStepCoordinates(
+    const std::shared_ptr<SendStreamState>& state, size_t* layer, size_t* shard,
+    size_t* block_idx) {
+  size_t L = block_delegate_->num_layers();
+  size_t Sh = block_delegate_->num_shards();
+  size_t K = state->count_or_size / block_delegate_->shard_factor();
+  size_t s = state->current_step;
+
+  if (state->major_order == MajorOrder::kLayerMajor) {
+    *block_idx = s % K;
+    *shard = (s / K) % Sh;
+    *layer = s / (K * Sh);
+  } else {
+    *shard = s % Sh;
+    *layer = (s / Sh) % L;
+    *block_idx = s / (Sh * L);
+  }
+}
+
+uint32_t BlockTransport::GetChunksTotalSize(
+    const std::vector<BlockChunk>& chunks) {
+  uint32_t total = 0;
+  for (const auto& chunk : chunks) {
+    total += chunk.size;
+  }
+  return total;
 }
 
 absl::StatusOr<std::vector<int>> BlockTransport::Push(
@@ -547,7 +644,7 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
     allocated_ids = local_block_ids;
   } else {
     ASSIGN_OR_RETURN(allocated_ids,
-                        block_delegate_->AllocateBlocks(local_blocks));
+                     block_delegate_->AllocateBlocks(local_blocks));
   }
 
   int P = parallelism;
@@ -693,7 +790,6 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
                            " and uuid ", uuid));
         }
         RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
-        RETURN_IF_ERROR(block_delegate_->WaitForBlockRead(l, sh, src_id));
 
         uint32_t total_size = 0;
         for (const auto& chunk : chunks) {
@@ -887,8 +983,7 @@ void BlockTransport::H2hReadWorker(
                 " bytes for Block ID: ", dst_id));
           }
 
-          RETURN_IF_ERROR(
-              RawBufferTransport::ReadVExact(fd, ToIovec(chunks)));
+          RETURN_IF_ERROR(RawBufferTransport::ReadVExact(fd, ToIovec(chunks)));
 
           if (on_block_received != nullptr) {
             RETURN_IF_ERROR(on_block_received(l, sh, dst_id, expected_size));

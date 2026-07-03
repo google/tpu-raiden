@@ -47,6 +47,7 @@
 #include <cstring>
 #include <deque>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -80,6 +81,7 @@
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
+#include "tpu_raiden/transport/block_transport.h"
 
 namespace tpu_raiden {
 namespace {
@@ -546,9 +548,6 @@ KVCacheManagerWithTransfer::~KVCacheManagerWithTransfer() {
   StopControlServer();
   push_pool_.reset();
   pull_pool_.reset();
-  if (num_layers() > 0) {
-    SetBlockReadinessCallback(nullptr);
-  }
   if (host_block_manager_ && !all_slots_.empty()) {
     std::vector<int> blocks_to_unlock;
     blocks_to_unlock.reserve(all_slots_.size() * max_blocks_);
@@ -677,7 +676,7 @@ KVCacheManagerWithTransfer::get_local_endpoints() const {
 }
 
 bool KVCacheManagerWithTransfer::EncodeIpToIpv6Bytes(const std::string& ip,
-                                                    uint8_t out[16]) {
+                                                     uint8_t out[16]) {
   // An IPv4 address must be sent as IPv4-mapped IPv6 ("::ffff:a.b.c.d") --
   // inet_pton(AF_INET6, "<ipv4>") fails on a bare IPv4 string. If it still
   // fails to parse, zero the field.
@@ -1130,37 +1129,40 @@ void KVCacheManagerWithTransfer::RemoveStagingReadinessLocked(
   state->cv.notify_all();
 }
 
-absl::Status KVCacheManagerWithTransfer::WaitForStagingBlockRead(
-    size_t layer_idx, size_t shard_idx, int block_id) {
+void KVCacheManagerWithTransfer::RegisterBlockReadinessCallback(
+    size_t layer_idx, size_t shard_idx, int block_id, uint64_t uuid,
+    transport::BlockTransportDelegate::HostBlockReadyCallback cb) {
   if (block_id < 0 || max_blocks_ <= 0) {
-    return absl::OkStatus();
+    cb(absl::OkStatus());
+    return;
   }
   std::shared_ptr<SendEntry> entry;
   {
     std::lock_guard<std::mutex> lock(mu_);
-    for (const auto& [u, e] : send_entries_) {
-      // block_id here is a HOST-staging block id (the sender's src_ints), but
-      // registered_block_set holds DEVICE block ids. In disagg those id spaces
-      // overlap and device blocks are reused across concurrent requests, so a
-      // naive match can hit the WRONG (registered-but-not-yet-pushed) entry
-      // whose d2h_layer_futures is still empty -- which used to throw a bogus
-      // "Layer index exceeds d2h futures size" and hang the transfer. Only
-      // accept an entry that has actually issued this layer's D2H future;
-      // otherwise treat as not-applicable. The layer-chaining (SendNextLayer)
-      // already gates each layer's D2H before its push, so skipping the wait
-      // here is safe.
-      if (e->registered_block_set.find(block_id) !=
-              e->registered_block_set.end() &&
-          layer_idx < e->d2h_layer_futures.size()) {
-        entry = e;
-        break;
+    auto it = send_entries_.find(uuid);
+    if (it != send_entries_.end()) {
+      entry = it->second;
+    } else {
+      for (const auto& [u, e] : send_entries_) {
+        if (e->registered_block_set.find(block_id) !=
+                e->registered_block_set.end() &&
+            layer_idx < e->d2h_layer_futures.size()) {
+          entry = e;
+          break;
+        }
       }
     }
   }
-  if (!entry) {
-    return absl::OkStatus();
+  if (!entry || layer_idx >= entry->d2h_layer_futures.size()) {
+    cb(absl::OkStatus());
+    return;
   }
-  return entry->d2h_layer_futures[layer_idx].Await();
+  entry->d2h_layer_futures[layer_idx].OnReady(
+      [cb = std::move(cb)](auto status_or) { cb(status_or.status()); });
+}
+
+void KVCacheManagerWithTransfer::ScheduleAsyncTask(std::function<void()> task) {
+  push_pool_->Schedule(std::move(task));
 }
 
 void KVCacheManagerWithTransfer::StartControlServer() {
@@ -1636,10 +1638,6 @@ void KVCacheManagerWithTransfer::ConfigureDataPortFromKvTransfer() {
     throw std::runtime_error("KVCacheManager BlockTransport is not running");
   }
   local_data_port_ = *data_port;
-  SetBlockReadinessCallback(
-      [this](size_t layer_idx, size_t shard_idx, int block_id) {
-        return WaitForStagingBlockRead(layer_idx, shard_idx, block_id);
-      });
 }
 
 std::vector<int> KVCacheManagerWithTransfer::ContiguousBlockIds(
