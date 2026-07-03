@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import json
 import os
 import sys
@@ -121,6 +120,19 @@ def main(_):
       out_path = os.path.join(adir, 'gating_baselines.json')
     with open(out_path, 'w') as f:
       json.dump(cfg, f, indent=2)
+    # Also keep the raw per-iteration distribution the floor was computed from
+    # (auditing / re-plot / recompute with a different sigma_k). Artifact only,
+    # NOT committed into gating_baselines.json (would bloat it with 1000s of pts).
+    if adir:
+      raw = [{'dtype': c['dtype'], 'num_layers': c['num_layers'],
+              'shape': c['shape'],
+              'd2h_gbps_all': r['d2h_gbps_all'], 'h2d_gbps_all': r['h2d_gbps_all'],
+              'd2h_gbps_summary': r['d2h_gbps_summary'],
+              'h2d_gbps_summary': r['h2d_gbps_summary']}
+             for c, r in results]
+      with open(os.path.join(adir, 'record_raw.json'), 'w') as f:
+        json.dump({'iters': iters, 'sigma_k': sigma_k, 'max_margin': max_margin,
+                   'configs': raw}, f)
     print(f'Recorded {len(results)} baselines+floors '
           f'(iters={iters}, sigma_k={sigma_k}, cap={max_margin*100:.0f}%) '
           f'-> {out_path}')
