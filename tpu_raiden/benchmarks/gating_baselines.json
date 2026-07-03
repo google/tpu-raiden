@@ -1,12 +1,13 @@
 {
-  "threshold": 0.03,
+  "sigma_k": 3.5,
+  "max_margin": 0.03,
   "iters": 20,
   "warmup": 3,
   "configs": [
-    {"dtype": "int32",   "num_layers": 8,  "shape": [8, 128, 1024, 128], "shard_axis": 2, "baseline_d2h": 930.1, "baseline_h2d": 895.1},
-    {"dtype": "int32",   "num_layers": 4,  "shape": [8, 128, 1024, 128], "shard_axis": 2, "baseline_d2h": 921.6, "baseline_h2d": 884.8},
-    {"dtype": "int32",   "num_layers": 2,  "shape": [8, 128, 1024, 128], "shard_axis": 2, "baseline_d2h": 904.8, "baseline_h2d": 874.1},
-    {"dtype": "float32", "num_layers": 1,  "shape": [8, 128, 1024, 128], "shard_axis": 2, "baseline_d2h": 868.1, "baseline_h2d": 831.4},
-    {"dtype": "float32", "num_layers": 64, "shape": [16, 128, 8, 2, 128], "shard_axis": 2, "baseline_d2h": 820.4, "baseline_h2d": 794.2}
+    {"dtype": "int32",   "num_layers": 8,  "shape": [8, 128, 1024, 128], "shard_axis": 2, "baseline_d2h": 928.2, "baseline_h2d": 892.7, "floor_d2h": 924.0, "floor_h2d": 888.1},
+    {"dtype": "int32",   "num_layers": 4,  "shape": [8, 128, 1024, 128], "shard_axis": 2, "baseline_d2h": 920.5, "baseline_h2d": 884.7, "floor_d2h": 912.0, "floor_h2d": 877.5},
+    {"dtype": "int32",   "num_layers": 2,  "shape": [8, 128, 1024, 128], "shard_axis": 2, "baseline_d2h": 897.2, "baseline_h2d": 867.7, "floor_d2h": 885.0, "floor_h2d": 854.4},
+    {"dtype": "float32", "num_layers": 1,  "shape": [8, 128, 1024, 128], "shard_axis": 2, "baseline_d2h": 858.1, "baseline_h2d": 827.4, "floor_d2h": 832.4, "floor_h2d": 802.6},
+    {"dtype": "float32", "num_layers": 64, "shape": [16, 128, 8, 2, 128], "shard_axis": 2, "baseline_d2h": 814.5, "baseline_h2d": 800.2, "floor_d2h": 793.5, "floor_h2d": 778.4}
   ]
 }
