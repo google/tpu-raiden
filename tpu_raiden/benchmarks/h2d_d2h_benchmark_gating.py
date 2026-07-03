@@ -39,6 +39,28 @@ def _baselines_path():
   return os.path.join(os.path.dirname(os.path.abspath(__file__)),
                       'gating_baselines.json')
 
+def _write_tb_metrics(results):
+  """Log per-config throughput to TENSORBOARD_OUTPUT_DIR so BAP ingests it.
+  Each tag MUST have a matching metrics{name:...} in benchmark_registry.pbtxt."""
+  tblog_dir = os.environ.get('TENSORBOARD_OUTPUT_DIR')
+  if not tblog_dir:
+    print('TENSORBOARD_OUTPUT_DIR not set; skipping TB metrics.')
+    return
+  try:
+    try:
+      import tensorboardX  # pylint: disable=g-import-not-at-top
+      w = tensorboardX.SummaryWriter(log_dir=tblog_dir)
+    except ImportError:
+      import torch.utils.tensorboard as tut  # pylint: disable=g-import-not-at-top
+      w = tut.SummaryWriter(log_dir=tblog_dir)
+    for c, r in results:
+      label = f"{c['dtype']}_L{c['num_layers']}_{'x'.join(map(str, c['shape']))}"
+      w.add_scalar(f'{label}/d2h_gbps', r['d2h_gbps'], global_step=0)
+      w.add_scalar(f'{label}/h2d_gbps', r['h2d_gbps'], global_step=0)
+    w.close()
+    print(f'Wrote TB metrics for {len(results)} configs -> {tblog_dir}')
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    print(f'WARNING: TB metric write failed: {e}', file=sys.stderr)
 
 def main(_):
   path = _baselines_path()
@@ -77,6 +99,9 @@ def main(_):
       json.dump(cfg, f, indent=2)
     print(f'Recorded {len(results)} baselines -> {out_path}')
     return
+
+  # emit per-config throughput to TB for the BAP dashboard (gate mode only)
+  _write_tb_metrics(results)
 
   # --- gate mode ---
   fails = 0
