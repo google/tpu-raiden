@@ -19,6 +19,7 @@ import sys
 
 from absl import app
 from absl import flags
+import numpy as np
 
 from tpu_raiden.benchmarks import perf_core
 
@@ -27,17 +28,37 @@ _BASELINES = flags.DEFINE_string(
     'Path to gating_baselines.json. Default: alongside this binary (runfiles).')
 _RECORD = flags.DEFINE_bool(
     'record', False,
-    'Re-measure and OVERWRITE baselines instead of gating (auto-update hook).')
+    'Re-measure and OVERWRITE baselines/floors instead of gating.')
 _ITERS = flags.DEFINE_integer(
     'iters', None,
-    'Override iters from the baselines file (e.g. more samples when recording). '
-    'Default: use the value in gating_baselines.json.')
+    'Override iters from the baselines file. Use a large value when recording '
+    '(the floor depends on a MAD/sigma estimate, which needs many samples to be '
+    'stable); the gate itself runs the smaller value in gating_baselines.json.')
+
 
 def _baselines_path():
   if _BASELINES.value:
     return _BASELINES.value
   return os.path.join(os.path.dirname(os.path.abspath(__file__)),
                       'gating_baselines.json')
+
+
+def _core_floor(samples, k, max_margin):
+  """Per-config gate floor: lower edge of the normal core, capped at max_margin.
+
+      floor = max(median - k * MAD_sigma,  median * (1 - max_margin))
+
+  MAD_sigma = 1.4826 * median(|x - median|) is an outlier-resistant standard
+  deviation, so the low tail does not drag the bound down. The cap keeps a noisy
+  config from ending up looser than a flat max_margin (e.g. fp32 L1).
+  """
+  x = np.asarray(samples, float)
+  med = np.median(x)
+  sigma = 1.4826 * np.median(np.abs(x - med))
+  core = med - k * sigma                      # normal-core lower bound
+  cap = med * (1.0 - max_margin)              # never looser than max_margin
+  return float(max(core, cap))
+
 
 def _write_tb_metrics(results):
   """Log per-config throughput to TENSORBOARD_OUTPUT_DIR so BAP ingests it.
@@ -62,11 +83,13 @@ def _write_tb_metrics(results):
   except Exception as e:  # pylint: disable=broad-exception-caught
     print(f'WARNING: TB metric write failed: {e}', file=sys.stderr)
 
+
 def main(_):
   path = _baselines_path()
   with open(path) as f:
     cfg = json.load(f)
-  thr = float(cfg.get('threshold', 0.03))
+  sigma_k = float(cfg.get('sigma_k', 3.5))       # #robust-sigmas below median
+  max_margin = float(cfg.get('max_margin', 0.03))  # floor never looser than this
   iters = int(cfg.get('iters', 20))
   if _ITERS.value is not None:
     iters = _ITERS.value
@@ -83,48 +106,52 @@ def main(_):
           f"{'x'.join(map(str, c['shape']))}  "
           f"d2h {r['d2h_gbps']:.1f}  h2d {r['h2d_gbps']:.1f} Gbps")
 
-   # --- record mode: overwrite baselines, no gating ---
+  # --- record mode: overwrite baselines + floors, no gating ---
   if _RECORD.value:
     for c, r in results:
       c['baseline_d2h'] = round(r['d2h_gbps'], 1)
       c['baseline_h2d'] = round(r['h2d_gbps'], 1)
-    # In CI, BAP sets WORKLOAD_ARTIFACTS_DIR and uploads its contents as an
-    # artifact, so write the recorded baselines there to get them back out.
-    # Locally (env unset) this falls back to the --baselines path, unchanged.
+      c['floor_d2h'] = round(_core_floor(r['d2h_gbps_all'], sigma_k, max_margin), 1)
+      c['floor_h2d'] = round(_core_floor(r['h2d_gbps_all'], sigma_k, max_margin), 1)
+    # In CI, BAP sets WORKLOAD_ARTIFACTS_DIR and uploads its contents, so write
+    # the recorded baselines there to get them back out; locally, overwrite path.
     out_path = path
     adir = os.environ.get('WORKLOAD_ARTIFACTS_DIR')
     if adir:
       out_path = os.path.join(adir, 'gating_baselines.json')
     with open(out_path, 'w') as f:
       json.dump(cfg, f, indent=2)
-    print(f'Recorded {len(results)} baselines -> {out_path}')
+    print(f'Recorded {len(results)} baselines+floors '
+          f'(iters={iters}, sigma_k={sigma_k}, cap={max_margin*100:.0f}%) '
+          f'-> {out_path}')
     return
 
   # emit per-config throughput to TB for the BAP dashboard (gate mode only)
   _write_tb_metrics(results)
 
-  # --- gate mode ---
+  # --- gate mode: compare the median of `iters` runs against the recorded floor ---
   fails = 0
-  print(f'\nperf gate  threshold={thr*100:.0f}%  '
-        f'(fail if median < {(1-thr)*100:.0f}% of baseline)\n')
-  print(f"{'config':30}{'dir':4}{'baseline':>9}{'median':>9}{'drop':>7}  verdict")
+  print(f'\nperf gate: median of {iters} iters vs per-config normal-core floor '
+        f'(median - {sigma_k} MADsigma, capped at {max_margin*100:.0f}%)\n')
+  print(f"{'config':30}{'dir':4}{'baseline':>9}{'floor':>9}{'median':>9}"
+        f"{'drop':>7}  verdict")
   for c, r in results:
     label = f"{c['dtype']} L{c['num_layers']} {'x'.join(map(str, c['shape']))}"
     for d in ('d2h', 'h2d'):
       base = float(c[f'baseline_{d}'])
+      floor = float(c[f'floor_{d}'])
       med = r[f'{d}_gbps']
-      floor = (1 - thr) * base
       ok = med >= floor
       fails += not ok
-      print(f"{label:30}{d:4}{base:9.1f}{med:9.1f}"
+      print(f"{label:30}{d:4}{base:9.1f}{floor:9.1f}{med:9.1f}"
             f"{(base-med)/base*100:6.1f}%  {'PASS' if ok else 'FAIL <-- REGRESSION'}")
 
   print()
   if fails:
-    print(f'GATE FAIL: {fails} direction(s) regressed > {thr*100:.0f}%',
+    print(f'GATE FAIL: {fails} direction(s) below the normal-core floor',
           file=sys.stderr)
     sys.exit(1)
-  print(f'GATE PASS: all {len(results)} configs within {thr*100:.0f}%')
+  print(f'GATE PASS: all {len(results)} configs at/above their normal-core floor')
 
 
 if __name__ == '__main__':
