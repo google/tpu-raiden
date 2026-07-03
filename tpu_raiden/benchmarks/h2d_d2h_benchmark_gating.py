@@ -28,7 +28,10 @@ _BASELINES = flags.DEFINE_string(
 _RECORD = flags.DEFINE_bool(
     'record', False,
     'Re-measure and OVERWRITE baselines instead of gating (auto-update hook).')
-
+_ITERS = flags.DEFINE_integer(
+    'iters', None,
+    'Override iters from the baselines file (e.g. more samples when recording). '
+    'Default: use the value in gating_baselines.json.')
 
 def _baselines_path():
   if _BASELINES.value:
@@ -43,6 +46,8 @@ def main(_):
     cfg = json.load(f)
   thr = float(cfg.get('threshold', 0.03))
   iters = int(cfg.get('iters', 20))
+  if _ITERS.value is not None:
+    iters = _ITERS.value
   warmup = int(cfg.get('warmup', 3))
   configs = cfg['configs']
 
