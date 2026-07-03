@@ -26,20 +26,24 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <future>
 #include <limits>
+#include <memory>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <thread>  // NOLINT
+#include <utility>
 #include <vector>
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "absl/strings/str_cat.h"
-#include "absl/synchronization/mutex.h"
-#include "xla/tsl/platform/statusor.h"
 #include "tpu_raiden/core/status_macros.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
 #include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/transport/raw_buffer_transport.h"
 
@@ -247,246 +251,172 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
             << ", numa=" << block_delegate_->node_id();
   ApplySocketAffinityAndBinding(client_fd);
 
-  if (header.op == 1) {  // Push
-    TF_ASSIGN_OR_RETURN(MajorOrder major_order, ParseMajorOrder(header.flags));
-    TF_ASSIGN_OR_RETURN(
-        std::vector<int> allocated_ids,
-        block_delegate_->AllocateBlocks(header.count_or_size, header.uuid));
-
-    RETURN_IF_ERROR(WriteExact(client_fd, allocated_ids.data(),
-                               header.count_or_size * sizeof(int)));
-
-    std::vector<int> target_layers;
-    if (header.local_id == 0xFFFFFFFF) {
-      target_layers.resize(block_delegate_->num_layers());
-      std::iota(target_layers.begin(), target_layers.end(), 0);
-    } else {
-      target_layers = {static_cast<int>(header.local_id)};
-    }
-
-    RETURN_IF_ERROR(ForEachPayload(
-        major_order, target_layers, block_delegate_->num_shards(),
-        header.count_or_size,
-        [&](size_t l, size_t sh, size_t k) -> absl::Status {
-          ABSL_DCHECK_LT(k, allocated_ids.size());
-          const int dst_id = allocated_ids[k];
-          uint32_t sender_size = 0;
-          RETURN_IF_ERROR(
-              ReadExact(client_fd, &sender_size, sizeof(sender_size)));
-
-          std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
-              l, sh, dst_id, header.uuid,
-              static_cast<int64_t>(header.remote_id));
-          if (chunks.empty()) {
-            return absl::NotFoundError(
-                absl::StrCat("No transfer chunks found for block ", dst_id,
-                             " and uuid ", header.uuid));
-          }
-          RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
-
-          uint32_t expected_size = 0;
-          for (const auto& chunk : chunks) {
-            expected_size += chunk.size;
-          }
-          if (sender_size != expected_size) {
-            return absl::InternalError(absl::StrCat(
-                "Block transfer size mismatch! Sender offered: ", sender_size,
-                " bytes, but Receiver expected: ", expected_size,
-                " bytes for Block ID: ", dst_id));
-          }
-
-          RETURN_IF_ERROR(
-              RawBufferTransport::ReadVExact(client_fd, ToIovec(chunks)));
-          return absl::OkStatus();
-        }));
-
-    bool trigger_on_layer_received = false;
-    const int l =
-        (header.local_id == 0xFFFFFFFF) ? 0 : static_cast<int>(header.local_id);
-    const size_t expected_chunks = header.reserved;  // P
-    {
-      absl::MutexLock lock(progress_mu_);
-      auto& progress = layer_progress_[{header.uuid, l}];
-      progress.completed_chunks++;
-      if (progress.completed_chunks == expected_chunks &&
-          !progress.on_layer_received_called) {
-        progress.on_layer_received_called = true;
-        trigger_on_layer_received = true;
-        bool all_layers_called = true;
-        for (size_t layer = 0; layer < block_delegate_->num_layers(); ++layer) {
-          auto it = layer_progress_.find({header.uuid, layer});
-          if (it == layer_progress_.end() ||
-              !it->second.on_layer_received_called) {
-            all_layers_called = false;
-            break;
-          }
-        }
-        if (all_layers_called) {
-          for (size_t layer = 0; layer < block_delegate_->num_layers();
-               ++layer) {
-            layer_progress_.erase({header.uuid, layer});
-          }
-        }
-      }
-    }
-
-    if (trigger_on_layer_received) {
-      RETURN_IF_ERROR(block_delegate_->OnLayerReceived(l, header.uuid));
-    }
-
-    LOG(INFO) << "HandleCustomRequest (H2H read complete): client_fd="
-              << client_fd << ", uuid=" << header.uuid
-              << ", numa=" << block_delegate_->node_id();
-    RETURN_IF_ERROR(
-        block_delegate_->OnBlocksReceived(allocated_ids, header.uuid));
-    uint8_t ack = 1;
-    RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
-  } else if (header.op == 6) {  // Explicit Multi-Block Targeted Push
-    TF_ASSIGN_OR_RETURN(MajorOrder major_order, ParseMajorOrder(header.flags));
-    std::vector<int> allocated_ids(header.count_or_size, 0);
-    RETURN_IF_ERROR(ReadExact(client_fd, allocated_ids.data(),
-                              header.count_or_size * sizeof(int)));
-    uint8_t ack = 1;
-    RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
-
-    std::vector<int> target_layers;
-    if (header.local_id == 0xFFFFFFFF) {
-      target_layers.resize(block_delegate_->num_layers());
-      std::iota(target_layers.begin(), target_layers.end(), 0);
-    } else {
-      target_layers = {static_cast<int>(header.local_id)};
-    }
-
-    RETURN_IF_ERROR(ForEachPayload(
-        major_order, target_layers, block_delegate_->num_shards(),
-        header.count_or_size,
-        [&](size_t l, size_t sh, size_t k) -> absl::Status {
-          ABSL_DCHECK_LT(k, allocated_ids.size());
-          const int dst_id = allocated_ids[k];
-          uint32_t sender_size = 0;
-          RETURN_IF_ERROR(
-              ReadExact(client_fd, &sender_size, sizeof(sender_size)));
-
-          std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
-              l, sh, dst_id, header.uuid,
-              static_cast<int64_t>(header.remote_id));
-          if (chunks.empty()) {
-            return absl::NotFoundError(
-                absl::StrCat("No transfer chunks found for block ", dst_id,
-                             " and uuid ", header.uuid));
-          }
-          RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
-
-          uint32_t expected_size = 0;
-          for (const auto& chunk : chunks) {
-            expected_size += chunk.size;
-          }
-          if (sender_size != expected_size) {
-            return absl::InternalError(absl::StrCat(
-                "Block transfer size mismatch! Sender offered: ", sender_size,
-                " bytes, but Receiver expected: ", expected_size,
-                " bytes for Block ID: ", dst_id));
-          }
-
-          RETURN_IF_ERROR(
-              RawBufferTransport::ReadVExact(client_fd, ToIovec(chunks)));
-          return absl::OkStatus();
-        }));
-
-    bool trigger_on_layer_received = false;
-    const int l =
-        (header.local_id == 0xFFFFFFFF) ? 0 : static_cast<int>(header.local_id);
-    const size_t expected_chunks = header.reserved;  // P
-    {
-      absl::MutexLock lock(progress_mu_);
-      auto& progress = layer_progress_[{header.uuid, l}];
-      progress.completed_chunks++;
-      if (progress.completed_chunks == expected_chunks &&
-          !progress.on_layer_received_called) {
-        progress.on_layer_received_called = true;
-        trigger_on_layer_received = true;
-        bool all_layers_called = true;
-        for (size_t layer = 0; layer < block_delegate_->num_layers(); ++layer) {
-          auto it = layer_progress_.find({header.uuid, layer});
-          if (it == layer_progress_.end() ||
-              !it->second.on_layer_received_called) {
-            all_layers_called = false;
-            break;
-          }
-        }
-        if (all_layers_called) {
-          for (size_t layer = 0; layer < block_delegate_->num_layers();
-               ++layer) {
-            layer_progress_.erase({header.uuid, layer});
-          }
-        }
-      }
-    }
-
-    if (trigger_on_layer_received) {
-      RETURN_IF_ERROR(block_delegate_->OnLayerReceived(l, header.uuid));
-    }
-
-    LOG(INFO) << "HandleCustomRequest (H2H read complete): client_fd="
-              << client_fd << ", uuid=" << header.uuid
-              << ", numa=" << block_delegate_->node_id();
-    RETURN_IF_ERROR(
-        block_delegate_->OnBlocksReceived(allocated_ids, header.uuid));
-    ack = 1;
-    RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
-  } else if (header.op == 2) {  // Pull request
-    TF_ASSIGN_OR_RETURN(MajorOrder major_order, ParseMajorOrder(header.flags));
-    if (block_delegate_->shard_factor() == 0) {
-      return absl::InvalidArgumentError("shard_factor must be positive");
-    }
-    if (header.count_or_size % block_delegate_->shard_factor() != 0) {
-      return absl::InvalidArgumentError(
-          "Requested remote block count is not divisible by shard_factor");
-    }
-    PacketHeader resp_header = {};
-    resp_header.op = 2;
-    resp_header.flags = header.flags;
-    resp_header.remote_id = header.local_id;
-    resp_header.local_id = 0;
-    resp_header.count_or_size = header.count_or_size;
-
-    RETURN_IF_ERROR(WriteExact(client_fd, &resp_header, sizeof(resp_header)));
-
-    size_t local_blocks =
-        header.count_or_size / block_delegate_->shard_factor();
-    if (header.remote_id >
-            static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
-        local_blocks > static_cast<size_t>(std::numeric_limits<int>::max()) ||
-        local_blocks > static_cast<size_t>(std::numeric_limits<int>::max()) -
-                           static_cast<size_t>(header.remote_id)) {
-      return absl::OutOfRangeError("Requested block range exceeds int range");
-    }
-    std::vector<int> target_layers(block_delegate_->num_layers());
-    std::iota(target_layers.begin(), target_layers.end(), 0);
-    RETURN_IF_ERROR(ForEachPayload(
-        major_order, target_layers, block_delegate_->num_shards(), local_blocks,
-        [&](size_t l, size_t sh, size_t k) -> absl::Status {
-          const int read_id = static_cast<int>(header.remote_id + k);
-          std::vector<BlockChunk> chunks =
-              block_delegate_->GetBlockChunks(l, sh, read_id, header.uuid);
-          RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
-          RETURN_IF_ERROR(block_delegate_->WaitForBlockRead(l, sh, read_id));
-
-          uint32_t total_size = 0;
-          for (const auto& chunk : chunks) {
-            total_size += chunk.size;
-          }
-
-          RETURN_IF_ERROR(
-              WriteExact(client_fd, &total_size, sizeof(total_size)));
-
-          return RawBufferTransport::WriteVExact(client_fd, ToIovec(chunks));
-        }));
+  if (header.op == 1 || header.op == 6) {
+    return HandleIncomingPush(client_fd, header);
+  } else if (header.op == 2) {
+    return HandleIncomingPull(client_fd, header);
   } else {
     return absl::UnimplementedError(
         absl::StrCat("Unsupported block transport op: ", header.op));
   }
+}
+
+absl::Status BlockTransport::HandleIncomingPush(int client_fd,
+                                                const PacketHeader& header) {
+  ASSIGN_OR_RETURN(MajorOrder major_order, ParseMajorOrder(header.flags));
+  std::vector<int> allocated_ids;
+
+  if (header.op == 1) {
+    ASSIGN_OR_RETURN(
+        allocated_ids,
+        block_delegate_->AllocateBlocks(header.count_or_size, header.uuid));
+    RETURN_IF_ERROR(WriteExact(client_fd, allocated_ids.data(),
+                               header.count_or_size * sizeof(int)));
+  } else {
+    allocated_ids.resize(header.count_or_size, 0);
+    RETURN_IF_ERROR(ReadExact(client_fd, allocated_ids.data(),
+                              header.count_or_size * sizeof(int)));
+    uint8_t ack = 1;
+    RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
+  }
+
+  std::vector<int> target_layers;
+  if (header.local_id == 0xFFFFFFFF) {
+    target_layers.resize(block_delegate_->num_layers());
+    std::iota(target_layers.begin(), target_layers.end(), 0);
+  } else {
+    target_layers = {static_cast<int>(header.local_id)};
+  }
+
+  RETURN_IF_ERROR(ForEachPayload(
+      major_order, target_layers, block_delegate_->num_shards(),
+      header.count_or_size,
+      [&](size_t l, size_t sh, size_t k) -> absl::Status {
+        ABSL_DCHECK_LT(k, allocated_ids.size());
+        const int dst_id = allocated_ids[k];
+        uint32_t sender_size = 0;
+        RETURN_IF_ERROR(
+            ReadExact(client_fd, &sender_size, sizeof(sender_size)));
+
+        std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
+            l, sh, dst_id, header.uuid,
+            static_cast<int64_t>(header.remote_id));
+        if (chunks.empty()) {
+          return absl::NotFoundError(
+              absl::StrCat("No transfer chunks found for block ", dst_id,
+                           " and uuid ", header.uuid));
+        }
+        RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
+
+        uint32_t expected_size = 0;
+        for (const auto& chunk : chunks) {
+          expected_size += chunk.size;
+        }
+        if (sender_size != expected_size) {
+          return absl::InternalError(absl::StrCat(
+              "Block transfer size mismatch! Sender offered: ", sender_size,
+              " bytes, but Receiver expected: ", expected_size,
+              " bytes for Block ID: ", dst_id));
+        }
+
+        RETURN_IF_ERROR(
+            RawBufferTransport::ReadVExact(client_fd, ToIovec(chunks)));
+        return absl::OkStatus();
+      }));
+
+  bool trigger_on_layer_received = false;
+  const int l =
+      (header.local_id == 0xFFFFFFFF) ? 0 : static_cast<int>(header.local_id);
+  const size_t expected_chunks = header.reserved;  // P
+  {
+    absl::MutexLock lock(progress_mu_);
+    auto& progress = layer_progress_[{header.uuid, l}];
+    progress.completed_chunks++;
+    if (progress.completed_chunks == expected_chunks &&
+        !progress.on_layer_received_called) {
+      progress.on_layer_received_called = true;
+      trigger_on_layer_received = true;
+      bool all_layers_called = true;
+      for (size_t layer = 0; layer < block_delegate_->num_layers(); ++layer) {
+        auto it = layer_progress_.find({header.uuid, layer});
+        if (it == layer_progress_.end() ||
+            !it->second.on_layer_received_called) {
+          all_layers_called = false;
+          break;
+        }
+      }
+      if (all_layers_called) {
+        for (size_t layer = 0; layer < block_delegate_->num_layers();
+             ++layer) {
+          layer_progress_.erase({header.uuid, layer});
+        }
+      }
+    }
+  }
+
+  if (trigger_on_layer_received) {
+    RETURN_IF_ERROR(block_delegate_->OnLayerReceived(l, header.uuid));
+  }
+
+  LOG(INFO) << "HandleCustomRequest (H2H read complete): client_fd="
+            << client_fd << ", uuid=" << header.uuid
+            << ", numa=" << block_delegate_->node_id();
+  RETURN_IF_ERROR(
+      block_delegate_->OnBlocksReceived(allocated_ids, header.uuid));
+  uint8_t ack = 1;
+  RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
   return absl::OkStatus();
+}
+
+absl::Status BlockTransport::HandleIncomingPull(int client_fd,
+                                                const PacketHeader& header) {
+  ASSIGN_OR_RETURN(MajorOrder major_order, ParseMajorOrder(header.flags));
+  if (block_delegate_->shard_factor() == 0) {
+    return absl::InvalidArgumentError("shard_factor must be positive");
+  }
+  if (header.count_or_size % block_delegate_->shard_factor() != 0) {
+    return absl::InvalidArgumentError(
+        "Requested remote block count is not divisible by shard_factor");
+  }
+  PacketHeader resp_header = {};
+  resp_header.op = 2;
+  resp_header.flags = header.flags;
+  resp_header.remote_id = header.local_id;
+  resp_header.local_id = 0;
+  resp_header.count_or_size = header.count_or_size;
+
+  RETURN_IF_ERROR(WriteExact(client_fd, &resp_header, sizeof(resp_header)));
+
+  size_t local_blocks =
+      header.count_or_size / block_delegate_->shard_factor();
+  if (header.remote_id >
+          static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+      local_blocks > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+      local_blocks > static_cast<size_t>(std::numeric_limits<int>::max()) -
+                         static_cast<size_t>(header.remote_id)) {
+    return absl::OutOfRangeError("Requested block range exceeds int range");
+  }
+  std::vector<int> target_layers(block_delegate_->num_layers());
+  std::iota(target_layers.begin(), target_layers.end(), 0);
+  return ForEachPayload(
+      major_order, target_layers, block_delegate_->num_shards(), local_blocks,
+      [&](size_t l, size_t sh, size_t k) -> absl::Status {
+        const int read_id = static_cast<int>(header.remote_id + k);
+        std::vector<BlockChunk> chunks =
+            block_delegate_->GetBlockChunks(l, sh, read_id, header.uuid);
+        RETURN_IF_ERROR(ValidateChunks(block_delegate_, l, sh, chunks));
+        RETURN_IF_ERROR(block_delegate_->WaitForBlockRead(l, sh, read_id));
+
+        uint32_t total_size = 0;
+        for (const auto& chunk : chunks) {
+          total_size += chunk.size;
+        }
+
+        RETURN_IF_ERROR(
+            WriteExact(client_fd, &total_size, sizeof(total_size)));
+
+        return RawBufferTransport::WriteVExact(client_fd, ToIovec(chunks));
+      });
 }
 
 absl::StatusOr<std::vector<int>> BlockTransport::Push(
@@ -616,7 +546,7 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
     }
     allocated_ids = local_block_ids;
   } else {
-    TF_ASSIGN_OR_RETURN(allocated_ids,
+    ASSIGN_OR_RETURN(allocated_ids,
                         block_delegate_->AllocateBlocks(local_blocks));
   }
 

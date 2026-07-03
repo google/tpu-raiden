@@ -15,19 +15,23 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_TRANSPORT_BLOCK_TRANSPORT_H_
 #define THIRD_PARTY_TPU_RAIDEN_TRANSPORT_BLOCK_TRANSPORT_H_
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
-#include <future>
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
+#include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
+#include "absl/synchronization/mutex.h"
 #include "tpu_raiden/transport/raw_buffer_transport.h"
 
 namespace tpu_raiden {
@@ -182,6 +186,9 @@ class BlockTransport : public RawBufferTransport {
                      MajorOrder major_order,
                      BlockReceivedCallback on_block_received,
                      uint64_t uuid = 0);
+
+  absl::Status HandleIncomingPush(int client_fd, const PacketHeader& header);
+  absl::Status HandleIncomingPull(int client_fd, const PacketHeader& header);
 
   BlockTransportDelegate* block_delegate_;
 
