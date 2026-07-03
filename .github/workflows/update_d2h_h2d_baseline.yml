@@ -3,11 +3,11 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - V6
+      - v6t
       
   pull_request:
     branches:
-      - V6
+      - v6t
 
   schedule:
     - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
