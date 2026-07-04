@@ -40,6 +40,7 @@
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
+#include "tpu_raiden/core/utils.h"
 #ifndef WITHOUT_PYTHON
 #include "tpu_raiden/frameworks/jax/utils.h"
 
@@ -301,8 +302,18 @@ void KVCacheManager::InitSubManagers(
           client = sub_buffers[0][0]->device()->client();
         }
       }
-      tpu_raiden::HostBufferAllocator host_alloc =
-          LocalCreateHostMemoryAllocator(client);
+      tpu_raiden::HostBufferAllocator host_alloc;
+      const char* shm_key_env = std::getenv("RAIDEN_SHM_KEY");
+      if (shm_key_env != nullptr && std::strlen(shm_key_env) > 0) {
+        host_alloc = tpu_raiden::CreateHostMemoryAllocator(
+            client, max_blocks,
+            (sub_buffers.empty() || sub_buffers[0].empty() ||
+             sub_buffers[0][0] == nullptr)
+                ? 0
+                : sub_buffers[0][0]->GetOnDeviceSizeInBytes().value_or(0));
+      } else {
+        host_alloc = LocalCreateHostMemoryAllocator(client);
+      }
 
       std::optional<int> sub_port = local_port;
       if (sub_port.has_value()) {

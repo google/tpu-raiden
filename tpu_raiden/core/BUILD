@@ -179,6 +179,7 @@ cc_library(
         ":host_memory_allocator",
         ":xla_raw_transfer_headers",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:str_format",
     ],
 )
 

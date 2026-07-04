@@ -19,9 +19,11 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 
 #include "absl/base/nullability.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "xla/pjrt/pjrt_client.h"
 
 namespace tpu_raiden {
@@ -88,6 +90,49 @@ class XlaHostMemoryAllocator : public HostMemoryAllocator {
 class MallocHostMemoryAllocator : public HostMemoryAllocator {
  public:
   absl::StatusOr<HostBufferAllocation> Allocate(size_t size_bytes) override;
+};
+
+struct alignas(64) SharedMemoryHeader {
+  uint64_t magic = 0x52414944454E5348;  // "RAIDENSH"
+  uint32_t version = 1;
+  char model_uid[256] = {0};
+  uint32_t global_mesh_shape[5] = {0};
+  uint32_t shard_layout[5] = {0};
+  uint32_t num_blocks = 0;
+  uint32_t block_size = 0;
+  uint32_t num_heads = 0;
+  uint32_t head_dim = 0;
+  uint32_t itemsize = 0;
+  uint64_t total_payload_bytes = 0;
+  uint32_t reference_count = 0;
+};
+
+class SharedMemoryHostMemoryAllocator : public HostMemoryAllocator {
+ public:
+  static absl::StatusOr<std::unique_ptr<SharedMemoryHostMemoryAllocator>>
+  Create(xla::PjRtClient* client, absl::string_view shm_key,
+         const SharedMemoryHeader& expected_schema);
+
+  ~SharedMemoryHostMemoryAllocator() override;
+
+  absl::StatusOr<HostBufferAllocation> Allocate(size_t size_bytes) override;
+  absl::StatusOr<HostBufferAllocation> AllocateDmaMapped(
+      size_t size_bytes) override;
+  absl::StatusOr<HostBufferAllocation> AllocateDmaMappedForDevice(
+      size_t size_bytes, const xla::PjRtDevice* device) override;
+
+ private:
+  SharedMemoryHostMemoryAllocator(xla::PjRtClient* client,
+                                  absl::string_view shm_key,
+                                  const SharedMemoryHeader& expected_schema);
+
+  xla::PjRtClient* client_ = nullptr;
+  std::string shm_key_;
+  SharedMemoryHeader expected_schema_;
+  int shm_fd_ = -1;
+  void* mapped_ptr_ = nullptr;
+  size_t mapped_size_ = 0;
+  bool dma_mapped_ = false;
 };
 
 }  // namespace tpu_raiden

@@ -90,8 +90,14 @@ KVCacheManager::KVCacheManager(UnpackedLayers unpacked,
     : KVCacheManagerWithTransfer(
           std::move(unpacked.buffers), local_port, host_blocks_to_allocate,
           unsafe_skip_buffer_lock, parallelism,
-          tpu_raiden::CreateHostMemoryAllocator(unpacked.client), node_id,
-          local_control_port, max_blocks, num_slots, timeout_s),
+          tpu_raiden::CreateHostMemoryAllocator(
+              unpacked.client, max_blocks,
+              (unpacked.buffers.empty() || unpacked.buffers[0].empty() ||
+               unpacked.buffers[0][0] == nullptr)
+                  ? 0
+                  : unpacked.buffers[0][0]->GetOnDeviceSizeInBytes().value_or(
+                        0)),
+          node_id, local_control_port, max_blocks, num_slots, timeout_s),
       kv_caches_(std::move(kv_caches)),
       // Move the keep-alive refs in AFTER the base ctor has acquired the
       // buffers; they pin the materialized device buffers for our lifetime.
@@ -110,9 +116,8 @@ KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
                      local_control_port, max_blocks, num_slots, timeout_s,
                      kv_caches) {
   if (listener_port) {
-    listener_ =
-        std::make_unique<tpu_raiden::kv_cache::KVCacheListener>(
-            this, *listener_port);
+    listener_ = std::make_unique<tpu_raiden::kv_cache::KVCacheListener>(
+        this, *listener_port);
   }
 }
 

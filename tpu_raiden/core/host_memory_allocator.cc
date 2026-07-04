@@ -14,7 +14,11 @@
 
 #include "tpu_raiden/core/host_memory_allocator.h"
 
+#include <cerrno>
+#include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <cstdint>
 #include <cstdlib>
@@ -202,6 +206,239 @@ absl::StatusOr<HostBufferAllocation> MallocHostMemoryAllocator::Allocate(
   alloc.size = size_bytes;
   alloc.owner = std::shared_ptr<void>(ptr, std::free);
   return alloc;
+}
+
+absl::StatusOr<std::unique_ptr<SharedMemoryHostMemoryAllocator>>
+SharedMemoryHostMemoryAllocator::Create(
+    xla::PjRtClient* client, absl::string_view shm_key,
+    const SharedMemoryHeader& expected_schema) {
+  return std::unique_ptr<SharedMemoryHostMemoryAllocator>(
+      new SharedMemoryHostMemoryAllocator(client, shm_key, expected_schema));
+}
+
+SharedMemoryHostMemoryAllocator::SharedMemoryHostMemoryAllocator(
+    xla::PjRtClient* client, absl::string_view shm_key,
+    const SharedMemoryHeader& expected_schema)
+    : client_(client), shm_key_(shm_key), expected_schema_(expected_schema) {}
+
+SharedMemoryHostMemoryAllocator::~SharedMemoryHostMemoryAllocator() {
+  if (mapped_ptr_ != nullptr && mapped_ptr_ != MAP_FAILED) {
+    SharedMemoryHeader* header = static_cast<SharedMemoryHeader*>(mapped_ptr_);
+    if (header->reference_count > 0) {
+      header->reference_count--;
+    }
+    if (dma_mapped_ && client_ != nullptr) {
+      (void)client_->DmaUnmap(mapped_ptr_);
+    }
+    munmap(mapped_ptr_, mapped_size_);
+  }
+  if (shm_fd_ >= 0) {
+    close(shm_fd_);
+  }
+}
+
+absl::StatusOr<HostBufferAllocation> SharedMemoryHostMemoryAllocator::Allocate(
+    size_t size_bytes) {
+  if (size_bytes == 0) {
+    HostBufferAllocation alloc;
+    alloc.ptr = nullptr;
+    alloc.size = 0;
+    return alloc;
+  }
+
+  if (mapped_ptr_ != nullptr && mapped_ptr_ != MAP_FAILED) {
+    HostBufferAllocation alloc;
+    alloc.ptr = static_cast<uint8_t*>(mapped_ptr_) + sizeof(SharedMemoryHeader);
+    alloc.size = size_bytes;
+    alloc.owner = std::shared_ptr<void>(mapped_ptr_, [](void*) {});
+    return alloc;
+  }
+
+  size_t aligned_payload_size = (size_bytes + 4095) & ~4095;
+  size_t total_size =
+      (sizeof(SharedMemoryHeader) + aligned_payload_size + 4095) & ~4095;
+  mapped_size_ = total_size;
+
+  std::string full_shm_key = shm_key_;
+  const char* server_name_env = std::getenv("RAIDEN_SHM_SERVER_NAME");
+  if (server_name_env != nullptr && std::strlen(server_name_env) > 0) {
+    absl::StrAppend(&full_shm_key, "_", server_name_env);
+  }
+  if (g_current_device != nullptr) {
+    absl::StrAppend(&full_shm_key, "_dev_",
+                    g_current_device->local_device_id().value());
+  }
+  if (full_shm_key.empty() || full_shm_key[0] != '/') {
+    full_shm_key.insert(0, "/");
+  }
+
+  VLOG(1) << "[SHM_ALLOCATOR] Attempting to open/create shm key: "
+          << full_shm_key << " of size " << total_size;
+
+  shm_fd_ = shm_open(full_shm_key.c_str(), O_RDWR, 0666);
+  bool is_warm_boot = (shm_fd_ >= 0);
+  VLOG(2) << "[SHM_DEBUG] shm_open for warm boot key: " << full_shm_key
+          << ", fd: " << shm_fd_ << ", errno: " << errno << " ("
+          << std::strerror(errno) << ")";
+
+  if (is_warm_boot) {
+    VLOG(1)
+        << "[SHM_ALLOCATOR] Found existing shm segment. Validating schema...";
+    void* header_ptr = mmap(nullptr, sizeof(SharedMemoryHeader),
+                            PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd_, 0);
+    if (header_ptr != MAP_FAILED) {
+      SharedMemoryHeader* header = static_cast<SharedMemoryHeader*>(header_ptr);
+      bool compatible = true;
+      if (header->magic != expected_schema_.magic) {
+        VLOG(1) << "magic mismatch: " << header->magic << " vs "
+                << expected_schema_.magic;
+        compatible = false;
+      }
+      if (header->version != expected_schema_.version) {
+        VLOG(1) << "version mismatch: " << header->version << " vs "
+                << expected_schema_.version;
+        compatible = false;
+      }
+      if (std::strcmp(header->model_uid, expected_schema_.model_uid) != 0) {
+        VLOG(1) << "model_uid mismatch: " << header->model_uid << " vs "
+                << expected_schema_.model_uid;
+        compatible = false;
+      }
+      if (header->num_blocks != expected_schema_.num_blocks) {
+        VLOG(1) << "num_blocks mismatch: " << header->num_blocks << " vs "
+                << expected_schema_.num_blocks;
+        compatible = false;
+      }
+      if (header->block_size != expected_schema_.block_size) {
+        VLOG(1) << "block_size mismatch: " << header->block_size << " vs "
+                << expected_schema_.block_size;
+        compatible = false;
+      }
+      if (header->num_heads != expected_schema_.num_heads) {
+        VLOG(1) << "num_heads mismatch: " << header->num_heads << " vs "
+                << expected_schema_.num_heads;
+        compatible = false;
+      }
+      if (header->head_dim != expected_schema_.head_dim) {
+        VLOG(1) << "head_dim mismatch: " << header->head_dim << " vs "
+                << expected_schema_.head_dim;
+        compatible = false;
+      }
+      if (header->itemsize != expected_schema_.itemsize) {
+        VLOG(1) << "itemsize mismatch: " << header->itemsize << " vs "
+                << expected_schema_.itemsize;
+        compatible = false;
+      }
+      munmap(header_ptr, sizeof(SharedMemoryHeader));
+
+      if (!compatible) {
+        VLOG(1) << "[SHM_ALLOCATOR] Existing shm schema incompatible. "
+                   "Re-creating...";
+        close(shm_fd_);
+        shm_fd_ = -1;
+        shm_unlink(full_shm_key.c_str());
+        is_warm_boot = false;
+      }
+    } else {
+      LOG(ERROR) << "[SHM_ALLOCATOR] Failed to map shm header for verification";
+      close(shm_fd_);
+      shm_fd_ = -1;
+      is_warm_boot = false;
+    }
+  }
+
+  if (!is_warm_boot) {
+    shm_fd_ = shm_open(full_shm_key.c_str(), O_CREAT | O_RDWR | O_EXCL, 0666);
+    if (shm_fd_ < 0) {
+      shm_fd_ = shm_open(full_shm_key.c_str(), O_CREAT | O_RDWR, 0666);
+    }
+    if (shm_fd_ < 0) {
+      return absl::InternalError(absl::StrCat(
+          "shm_open failed to create segment: ", std::strerror(errno)));
+    }
+
+    if (ftruncate(shm_fd_, total_size) != 0) {
+      close(shm_fd_);
+      shm_fd_ = -1;
+      shm_unlink(full_shm_key.c_str());
+      return absl::InternalError(absl::StrCat(
+          "ftruncate failed on shm segment: ", std::strerror(errno)));
+    }
+  }
+
+  mapped_ptr_ =
+      mmap(nullptr, total_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd_, 0);
+  if (mapped_ptr_ == MAP_FAILED) {
+    close(shm_fd_);
+    shm_fd_ = -1;
+    return absl::ResourceExhaustedError(
+        absl::StrCat("mmap failed on shm segment: ", std::strerror(errno)));
+  }
+
+  SharedMemoryHeader* header = static_cast<SharedMemoryHeader*>(mapped_ptr_);
+  if (!is_warm_boot) {
+    VLOG(1) << "[SHM_ALLOCATOR] Initializing fresh shm header schema...";
+    std::memcpy(header, &expected_schema_, sizeof(SharedMemoryHeader));
+    header->total_payload_bytes = size_bytes;
+    header->reference_count = 1;
+
+    volatile uint8_t* p = static_cast<volatile uint8_t*>(mapped_ptr_);
+    for (size_t i = 4096; i < total_size; i += 4096) {
+      p[i] = 0;
+    }
+  } else {
+    header->reference_count++;
+    VLOG(1) << "[SHM_ALLOCATOR] Successfully attached to existing shm segment. "
+               "Reference count: "
+            << header->reference_count;
+  }
+
+  HostBufferAllocation alloc;
+  alloc.ptr = static_cast<uint8_t*>(mapped_ptr_) + sizeof(SharedMemoryHeader);
+  alloc.size = size_bytes;
+  alloc.owner = std::shared_ptr<void>(mapped_ptr_, [](void*) {});
+  return alloc;
+}
+
+absl::StatusOr<HostBufferAllocation>
+SharedMemoryHostMemoryAllocator::AllocateDmaMapped(size_t size_bytes) {
+  auto alloc_or = Allocate(size_bytes);
+  if (!alloc_or.ok()) return alloc_or;
+
+  if (!dma_mapped_ && client_ != nullptr && client_->platform_name() != "cpu") {
+    VLOG(1) << "[SHM_ALLOCATOR] Registering shared memory mapping with PjRt "
+               "DMA engine...";
+    auto status = client_->DmaMap(mapped_ptr_, mapped_size_);
+    if (!status.ok()) {
+      return absl::InternalError(absl::StrCat(
+          "DmaMap failed on shared memory segment: ", status.message()));
+    }
+    dma_mapped_ = true;
+  }
+
+  return alloc_or;
+}
+
+absl::StatusOr<HostBufferAllocation>
+SharedMemoryHostMemoryAllocator::AllocateDmaMappedForDevice(
+    size_t size_bytes, const xla::PjRtDevice* device) {
+  g_current_device = device;
+  int numa_node = GetPjRtDeviceNumaNode(device);
+  VLOG(1) << "[SHM_ALLOCATOR] Allocation device: "
+          << (device ? device->DebugString() : "nullptr")
+          << ", NUMA node: " << numa_node;
+
+  if (numa_node >= 0) {
+    SetThreadMempolicy(2, numa_node);
+    auto alloc_or = AllocateDmaMapped(size_bytes);
+    SetThreadMempolicy(0);
+    g_current_device = nullptr;
+    return alloc_or;
+  }
+
+  auto alloc_or = AllocateDmaMapped(size_bytes);
+  g_current_device = nullptr;
+  return alloc_or;
 }
 
 }  // namespace tpu_raiden

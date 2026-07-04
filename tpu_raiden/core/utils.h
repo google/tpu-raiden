@@ -20,12 +20,17 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_format.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/shape.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
@@ -43,7 +48,38 @@ inline std::optional<std::vector<const uint8_t*>> CastExternalPointers(
   return cast_ptrs;
 }
 
-inline HostBufferAllocator CreateHostMemoryAllocator(xla::PjRtClient* client) {
+inline HostBufferAllocator CreateHostMemoryAllocator(
+    xla::PjRtClient* client, int64_t max_blocks = 0,
+    size_t total_payload_bytes = 0) {
+  const char* shm_key_env = std::getenv("RAIDEN_SHM_KEY");
+  if (shm_key_env != nullptr && std::strlen(shm_key_env) > 0) {
+    SharedMemoryHeader expected_schema;
+    const char* model_uid_env = std::getenv("RAIDEN_SHM_MODEL_UID");
+    if (model_uid_env != nullptr) {
+      absl::SNPrintF(expected_schema.model_uid,
+                     sizeof(expected_schema.model_uid), "%s", model_uid_env);
+    } else {
+      absl::SNPrintF(expected_schema.model_uid,
+                     sizeof(expected_schema.model_uid), "default_model");
+    }
+    expected_schema.num_blocks = max_blocks;
+    expected_schema.total_payload_bytes = total_payload_bytes;
+
+    auto allocator_or = SharedMemoryHostMemoryAllocator::Create(
+        client, shm_key_env, expected_schema);
+    if (!allocator_or.ok()) {
+      absl::Status status = allocator_or.status();
+      return [status](size_t size_bytes, const xla::PjRtDevice* device)
+                 -> absl::StatusOr<HostBufferAllocation> { return status; };
+    }
+    std::shared_ptr<HostMemoryAllocator> allocator =
+        std::move(allocator_or).value();
+    return [allocator](size_t size_bytes, const xla::PjRtDevice* device)
+               -> absl::StatusOr<HostBufferAllocation> {
+      return allocator->AllocateDmaMappedForDevice(size_bytes, device);
+    };
+  }
+
   auto allocator_or = HostMemoryAllocator::Create(client);
   if (!allocator_or.ok()) {
     absl::Status status = allocator_or.status();

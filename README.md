@@ -101,3 +101,51 @@ These are the core functional unit tests designed to verify the correctness of t
 If you'd like to try out Raiden and see it in action, please refer to the [`examples/`](examples/) directory. This folder contains a collection of hands-on scripts designed for users to interact with the library, including various testing scripts and performance microbenchmark scripts that demonstrate Raiden's capabilities.
 
 For detailed instructions on how to run these examples and interpret their outputs, please check out the [Examples README](examples/README.md).
+
+## Persistent Shared Memory Cache (TPU/Host Buffer Persistence)
+
+TPU Raiden supports allocating host memory staging buffers in POSIX Shared Memory (`/dev/shm`). This allows preserving the KV cache in DRAM when the model serving process terminates (e.g., during serving binary updates), preventing cold starts on process restarts.
+
+### 1. Enabling Shared Memory
+To enable shared memory, set the following environment variables before starting the model serving process:
+
+```bash
+# Enable shared memory by specifying a base namespace key
+export RAIDEN_SHM_KEY="raiden_cache"
+
+# Specify a unique identifier of the current model config for validation safety
+export RAIDEN_SHM_MODEL_UID="llama_70b_v1_config_hash"
+
+# [Optional] Set a server name if running multiple serving instances on the same host
+export RAIDEN_SHM_SERVER_NAME="server_8000"
+```
+
+When these variables are active, Raiden will automatically check for compatible shared memory segments:
+- **Cold Boot (First run)**: Raiden creates `/dev/shm/raiden_cache_<server_name>_dev_<local_dev_id>` files, initializes layout validation metadata headers, and sets up mappings.
+- **Warm Boot (Restarts)**: Raiden automatically re-attaches to the existing shared memory files, verifies that the model configuration (`RAIDEN_SHM_MODEL_UID` and caching dimensions) matches, and re-registers the pages with the TPU DMA engine without re-allocation.
+
+### 2. Running Multiple Servers on the Same Host
+If you are running multiple model servers on the same TPU VM, you can avoid namespace collisions by specifying a unique `RAIDEN_SHM_SERVER_NAME` for each server instance (e.g. `server_8000` and `server_8008`). If specified, Raiden automatically namespaces the file paths as `/dev/shm/<base_key>_<server_name>_dev_<dev_id>`.
+
+### 3. Disabling Shared Memory
+To disable shared memory and fall back to standard anonymous private memory allocations, simply unset the environment variables:
+
+```bash
+unset RAIDEN_SHM_KEY
+unset RAIDEN_SHM_MODEL_UID
+unset RAIDEN_SHM_SERVER_NAME
+```
+
+### 3. Manual Cleanup & Memory Reclamation
+Because POSIX shared memory files survive process termination, you may need to clean them up manually to free up host DRAM on the TPUVM.
+
+To see currently allocated Raiden shared memory files:
+```bash
+ls -la /dev/shm/ | grep raiden_cache
+```
+
+To reclaim memory, unlink/delete the shared memory files:
+```bash
+rm -f /dev/shm/raiden_cache_*
+```
+*(Note: unlinking deletes the filenames immediately, and the physical host DRAM pages are freed by the kernel as soon as all active serving processes detach or exit).*
