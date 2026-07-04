@@ -1,6 +1,6 @@
-common --experimental_repo_remote_exec
-common --nocheck_visibility
-common --copt=-DMLIR_PYTHON_PACKAGE_PREFIX=jaxlib.mlir.
+build:oss --experimental_repo_remote_exec
+build:oss --nocheck_visibility
+build:oss --copt=-DMLIR_PYTHON_PACKAGE_PREFIX=jaxlib.mlir.
 build:oss --override_module=torch_tpu=%workspace%/third_party/torch_tpu_stub
 build:oss --action_env=CC=clang-18
 build:oss --action_env=CXX=clang++-18
@@ -11,3 +11,4 @@ build:ci --remote_cache=grpcs://remotebuildexecution.googleapis.com
 build:ci --remote_instance_name=projects/ml-oss-rbe-testing/instances/default_instance
 build:ci --remote_default_exec_properties=cache-silo-key=tpu_raiden_v1
 build:ci --remote_local_fallback
+
