@@ -75,7 +75,7 @@ class RawBufferTransport {
 
   RawBufferTransport(RawBufferTransportDelegate* delegate, int local_port,
                      bool enable_conn_pool = true,
-                     std::optional<std::string> bind_ip = std::nullopt);
+                     const std::vector<std::string>& local_ips = {});
   virtual ~RawBufferTransport();
 
   // Directly pushes an arbitrary continuous byte array into a specific offset
@@ -103,9 +103,12 @@ class RawBufferTransport {
   static absl::Status ReadVExact(int fd, absl::Span<const struct iovec> iov);
 
  protected:
-  absl::StatusOr<int> ConnectToPeer(absl::string_view peer);
-  absl::StatusOr<int> AcquireConnection(absl::string_view peer);
-  void ReleaseConnection(absl::string_view peer, int fd);
+  absl::StatusOr<int> ConnectToPeer(absl::string_view peer,
+                                    absl::string_view local_ip = "");
+  virtual absl::StatusOr<int> AcquireConnection(
+      absl::string_view peer, absl::string_view local_ip = "");
+  virtual void ReleaseConnection(absl::string_view peer, int fd,
+                                 absl::string_view local_ip = "");
   void ClosePooledConnections();
 
   virtual absl::Status ProcessSingleRequest(int client_fd);
@@ -120,6 +123,7 @@ class RawBufferTransport {
   int local_port_;
   int server_fd_ = -1;
   std::string bound_ip_ = "127.0.0.1";
+  std::vector<std::string> local_ips_;
   std::atomic<bool> stopping_{false};
 
   absl::Mutex mu_;

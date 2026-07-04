@@ -15,6 +15,7 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_JAX_KV_CACHE_MANAGER_H_
 #define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_JAX_KV_CACHE_MANAGER_H_
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -198,6 +199,9 @@ class KVCacheManager {
       int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
       double timeout_s);
 
+  static constexpr uint64_t k48BitMask = 0xFFFFFFFFFFFFULL;
+  std::atomic<uint64_t> global_seq_counter_{1};
+
   std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> sub_managers_;
   std::vector<std::pair<int, int>> global_shard_to_submanager_;
   std::vector<std::vector<int64_t>> submanager_to_global_shards_;
@@ -205,6 +209,7 @@ class KVCacheManager {
 
   std::map<std::string, int> done_sending_counts_;
   std::map<std::string, int> done_recving_counts_;
+  std::map<std::string, int> req_expected_counts_;
   std::set<std::string> failed_recving_set_;
   std::shared_ptr<MetricsCollector> metrics_collector_;
 };

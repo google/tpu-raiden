@@ -137,30 +137,68 @@ class BlockTransport : public RawBufferTransport {
 
   BlockTransport(BlockTransportDelegate* delegate, int local_port,
                  bool enable_conn_pool = true,
-                 std::optional<std::string> bind_ip = std::nullopt,
+                 const std::vector<std::string>& local_ips = {},
                  int parallelism = 1);
   ~BlockTransport() override;
 
   // Standard Scatter-Gather Push (op = 1 / op = 6)
   absl::StatusOr<std::vector<int>> Push(
-      absl::string_view peer, const std::vector<int>& src_block_ids,
+      const std::vector<std::string>& peers,
+      const std::vector<int>& src_block_ids,
       const std::vector<int>& dst_block_ids = {}, int parallelism = 1,
       MajorOrder major_order = MajorOrder::kLayerMajor, uint64_t uuid = 0,
       int layer_idx = -1);
 
   // Asynchronous Scatter-Gather Push
-  void Push(absl::string_view peer, const std::vector<int>& src_block_ids,
+  void Push(const std::vector<std::string>& peers,
+            const std::vector<int>& src_block_ids,
             const std::vector<int>& dst_block_ids, int parallelism,
             MajorOrder major_order, uint64_t uuid, int layer_idx,
             std::function<void(absl::StatusOr<std::vector<int>>)> on_complete);
 
   // Synchronous Scatter-Gather Pull (op = 2)
   absl::StatusOr<std::vector<int>> Pull(
-      absl::string_view peer, const std::vector<int>& src_block_ids,
+      const std::vector<std::string>& peers,
+      const std::vector<int>& src_block_ids,
       const std::vector<int>& local_block_ids = {},
       const std::vector<uint8_t*>& explicit_dst_ptrs = {}, int parallelism = 1,
       MajorOrder major_order = MajorOrder::kLayerMajor,
       BlockReceivedCallback on_block_received = {}, uint64_t uuid = 0);
+
+  // Backward-compatible overloads
+  absl::StatusOr<std::vector<int>> Push(
+      absl::string_view peer, const std::vector<int>& src_block_ids,
+      const std::vector<int>& dst_block_ids = {}, int parallelism = 1,
+      MajorOrder major_order = MajorOrder::kLayerMajor, uint64_t uuid = 0,
+      int layer_idx = -1) {
+    return Push(std::vector<std::string>{std::string(peer)}, src_block_ids,
+                dst_block_ids, parallelism, major_order, uuid, layer_idx);
+  }
+
+  void Push(absl::string_view peer, const std::vector<int>& src_block_ids,
+            const std::vector<int>& dst_block_ids, int parallelism,
+            MajorOrder major_order, uint64_t uuid, int layer_idx,
+            std::function<void(absl::StatusOr<std::vector<int>>)> on_complete) {
+    Push(std::vector<std::string>{std::string(peer)}, src_block_ids,
+         dst_block_ids, parallelism, major_order, uuid, layer_idx,
+         std::move(on_complete));
+  }
+
+  absl::StatusOr<std::vector<int>> Pull(
+      absl::string_view peer, const std::vector<int>& src_block_ids,
+      const std::vector<int>& local_block_ids = {},
+      const std::vector<uint8_t*>& explicit_dst_ptrs = {}, int parallelism = 1,
+      MajorOrder major_order = MajorOrder::kLayerMajor,
+      BlockReceivedCallback on_block_received = {}, uint64_t uuid = 0) {
+    return Pull(std::vector<std::string>{std::string(peer)}, src_block_ids,
+                local_block_ids, explicit_dst_ptrs, parallelism, major_order,
+                on_block_received, uuid);
+  }
+
+  // Write a single block of data directly from a host pointer to a remote block
+  // ID.
+  absl::Status WriteBlockDirect(absl::string_view peer, int remote_block_id,
+                                const uint8_t* data_ptr, size_t size_bytes);
 
  protected:
   absl::Status HandleCustomRequest(int client_fd,
@@ -185,8 +223,8 @@ class BlockTransport : public RawBufferTransport {
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(scheduler_mu_);
 
   void H2hWriteWorker(int stream_idx, absl::string_view peer,
-                      size_t block_offset, size_t block_count,
-                      const std::vector<int>& src_block_ids,
+                      absl::string_view local_ip, size_t block_offset,
+                      size_t block_count, const std::vector<int>& src_block_ids,
                       const std::vector<int>& dst_block_ids,
                       std::vector<int>& allocated_ids,
                       std::vector<absl::Status>& statuses,
@@ -194,8 +232,9 @@ class BlockTransport : public RawBufferTransport {
                       int layer_idx = -1, int parallelism = 1);
 
   void H2hReadWorker(int stream_idx, absl::string_view peer,
-                     size_t local_block_offset, size_t local_block_count,
-                     size_t remote_block_offset, size_t remote_block_count,
+                     absl::string_view local_ip, size_t local_block_offset,
+                     size_t local_block_count, size_t remote_block_offset,
+                     size_t remote_block_count,
                      const std::vector<int>& src_block_ids,
                      const std::vector<int>& allocated_ids,
                      const std::vector<uint8_t*>& explicit_dst_ptrs,

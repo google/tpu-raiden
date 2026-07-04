@@ -21,14 +21,18 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>  // NOLINT(build/c++11)
+#include <tuple>
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
@@ -237,22 +241,21 @@ void KVCacheManager::InitSubManagers(
   std::vector<HostNicAddress> host_nics = GetLocalHostNicAddresses();
   size_t num_ext_nics = 0;
   for (const auto& nic : host_nics) {
-    if (nic.interface_name != "lo") num_ext_nics++;
+    if (nic.classification == NicClassification::kDataPlane) num_ext_nics++;
   }
-  // TEMPORARY HACK: Force all shards to be collapsed under a single sub-manager
-  // instance (NUMA 0) to avoid the threading and synchronization overhead
-  // of running multiple KVCacheManagerWithTransfer instances.
-  // This hack can be disabled via the DISABLE_SINGLE_NUMA env var.
-  bool disable_single_numa = false;
-  const char* disable_single_numa_env = std::getenv("DISABLE_SINGLE_NUMA");
-  if (disable_single_numa_env != nullptr) {
-    if (std::strcmp(disable_single_numa_env, "true") == 0 ||
-        std::strcmp(disable_single_numa_env, "1") == 0) {
-      disable_single_numa = true;
+  // Flag controlling whether multi-NUMA / multi-NIC sub-managers are disabled.
+  // Set DISABLE_MULTI_NUMA=1 or true to force all shards under a single NUMA 0
+  // sub-manager.
+  bool force_single_numa = false;
+  const char* disable_multi_numa_env = std::getenv("DISABLE_MULTI_NUMA");
+  if (disable_multi_numa_env != nullptr) {
+    if (std::strcmp(disable_multi_numa_env, "true") == 0 ||
+        std::strcmp(disable_multi_numa_env, "1") == 0) {
+      force_single_numa = true;
     }
   }
 
-  if (!disable_single_numa) {
+  if (force_single_numa) {
     std::vector<int> all_shards;
     all_shards.reserve(total_num_shards_);
     for (int i = 0; i < static_cast<int>(total_num_shards_); ++i) {
@@ -260,6 +263,16 @@ void KVCacheManager::InitSubManagers(
     }
     numa_to_shards.clear();
     numa_to_shards[0] = std::move(all_shards);
+  } else if (numa_to_shards.size() == 1 && num_ext_nics > 1 &&
+             total_num_shards_ > 1) {
+    // If PJRT reports all devices on NUMA 0, but multiple external NICs exist,
+    // distribute shards round-robin across NUMA nodes matching external NIC
+    // count.
+    numa_to_shards.clear();
+    for (size_t sh = 0; sh < total_num_shards_; ++sh) {
+      int target_numa = static_cast<int>(sh % num_ext_nics);
+      numa_to_shards[target_numa].push_back(static_cast<int>(sh));
+    }
   }
 
   // Allocate the per-NUMA sub-managers. With an ephemeral data-plane port
@@ -414,7 +427,9 @@ std::vector<EndpointDescriptor> KVCacheManager::get_local_endpoints() const {
       if (s < submanager_to_global_shards_.size()) {
         shards = submanager_to_global_shards_[s];
       }
-      res.push_back({sub_eps[0].endpoint, shards});
+      for (const auto& sub_ep : sub_eps) {
+        res.push_back({sub_ep.endpoint, shards});
+      }
     }
   }
   return res;
@@ -426,32 +441,43 @@ void KVCacheManager::StartRead(
     const std::vector<int64_t>& remote_block_ids,
     const std::vector<int64_t>& local_block_ids, int parallelism,
     std::optional<std::vector<int64_t>> local_host_block_ids) {
+  if (remote_descriptors.empty() || remote_block_ids.empty()) return;
+  if (remote_block_ids.size() != local_block_ids.size()) return;
+  if (local_host_block_ids.has_value() &&
+      local_host_block_ids->size() != remote_block_ids.size())
+    return;
+
+  req_expected_counts_[req_id] = static_cast<int>(sub_managers_.size());
+
   for (size_t s = 0; s < sub_managers_.size(); ++s) {
-    std::set<int64_t> sub_shards;
+    absl::flat_hash_set<int64_t> sub_shards;
     if (s < submanager_to_global_shards_.size()) {
       sub_shards.insert(submanager_to_global_shards_[s].begin(),
                         submanager_to_global_shards_[s].end());
     }
 
-    std::string matched_ep;
+    std::vector<EndpointDescriptor> matched_descs;
     for (const auto& desc : remote_descriptors) {
+      bool match = false;
       for (int64_t rsh : desc.shards) {
         if (sub_shards.find(rsh) != sub_shards.end()) {
-          matched_ep = desc.endpoint;
+          match = true;
           break;
         }
       }
-      if (!matched_ep.empty()) break;
+      if (match) {
+        matched_descs.push_back(desc);
+      }
     }
-    if (matched_ep.empty() && !remote_descriptors.empty()) {
-      matched_ep = remote_descriptors[0].endpoint;
+    if (matched_descs.empty() && !remote_descriptors.empty()) {
+      matched_descs.push_back(remote_descriptors[0]);
     }
 
-    if (!matched_ep.empty()) {
-      sub_managers_[s]->StartRead(req_id, uuid, matched_ep, remote_block_ids,
-                                  local_block_ids, parallelism,
-                                  local_host_block_ids);
-    }
+    if (matched_descs.empty()) continue;
+
+    sub_managers_[s]->StartRead(req_id, uuid, matched_descs, remote_block_ids,
+                                local_block_ids, parallelism,
+                                local_host_block_ids);
   }
 }
 
@@ -461,6 +487,10 @@ void KVCacheManager::StartRead(
     const std::vector<int64_t>& remote_block_ids,
     const std::vector<int64_t>& local_block_ids, int parallelism,
     std::optional<std::vector<int64_t>> local_host_block_ids) {
+  if (remote_block_ids.size() != local_block_ids.size()) return;
+  if (local_host_block_ids.has_value() &&
+      local_host_block_ids->size() != remote_block_ids.size())
+    return;
   for (size_t s = 0; s < sub_managers_.size(); ++s) {
     sub_managers_[s]->StartRead(req_id, uuid, remote_endpoint, remote_block_ids,
                                 local_block_ids, parallelism,
@@ -485,12 +515,19 @@ KVCacheManager::CompleteReadRaw() {
       }
     }
     for (const auto& req : r) {
-      done_recving_counts_[req]++;
-      if (done_recving_counts_[req] == num_subs) {
+      auto [cnt_it, inserted] = done_recving_counts_.emplace(req, 0);
+      cnt_it->second++;
+      int expected = num_subs;
+      if (auto exp_it = req_expected_counts_.find(req);
+          exp_it != req_expected_counts_.end()) {
+        expected = exp_it->second;
+      }
+      if (cnt_it->second >= expected) {
+        done_recving_counts_.erase(cnt_it);
+        req_expected_counts_.erase(req);
         if (failed_recving_set_.find(req) == failed_recving_set_.end()) {
           done_recving.push_back(req);
         }
-        done_recving_counts_.erase(req);
         failed_recving_set_.erase(req);
       }
     }

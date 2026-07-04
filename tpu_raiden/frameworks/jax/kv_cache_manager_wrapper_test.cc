@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -27,6 +29,15 @@ namespace kv_cache {
 namespace jax {
 namespace {
 
+struct StartReadCall {
+  std::string req_id;
+  uint64_t uuid;
+  std::string remote_endpoint;
+  std::vector<int64_t> remote_block_ids;
+  std::vector<int64_t> local_block_ids;
+  std::optional<std::vector<int64_t>> local_host_block_ids;
+};
+
 class MockSubManager : public KVCacheManagerWithTransfer {
  public:
   MockSubManager()
@@ -36,6 +47,7 @@ class MockSubManager : public KVCacheManagerWithTransfer {
   std::vector<std::string> sending, recving, failed;
   std::string started_ep;
   std::vector<int64_t> started_remote_blocks, started_local_blocks;
+  std::vector<StartReadCall> start_read_calls;
 
   void StartRead(const std::string& req_id, uint64_t uuid,
                  const std::string& remote_endpoint,
@@ -47,6 +59,8 @@ class MockSubManager : public KVCacheManagerWithTransfer {
     started_ep = remote_endpoint;
     started_remote_blocks = remote_block_ids;
     started_local_blocks = local_block_ids;
+    start_read_calls.push_back({req_id, uuid, remote_endpoint, remote_block_ids,
+                                local_block_ids, local_host_block_ids});
   }
 
   std::tuple<std::vector<std::string>, std::vector<std::string>,
@@ -168,6 +182,83 @@ TEST(KVCacheManagerWrapperTest,
   EXPECT_EQ(ptr1->started_ep, "10.0.0.1:45000");
   EXPECT_EQ(ptr1->started_remote_blocks, remote_blocks);
   EXPECT_EQ(ptr1->started_local_blocks, local_blocks);
+}
+
+TEST(KVCacheManagerWrapperTest, StartReadUnifiedMultiEndpointMultiSubManager) {
+  auto sub0 = std::make_unique<MockSubManager>();
+  auto sub1 = std::make_unique<MockSubManager>();
+  MockSubManager* ptr0 = sub0.get();
+  MockSubManager* ptr1 = sub1.get();
+
+  std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> subs;
+  subs.push_back(std::move(sub0));
+  subs.push_back(std::move(sub1));
+
+  KVCacheManager mgr(std::move(subs));
+  // Local sub0 holds shards [0, 1], sub1 holds [2, 3]
+  mgr.SetSubmanagerShardsForTesting({{0, 1}, {2, 3}});
+
+  std::vector<EndpointDescriptor> remote_descs = {{"10.0.0.1:45000", {0, 1}},
+                                                  {"10.0.0.2:45000", {0, 1}},
+                                                  {"10.0.0.3:45000", {2, 3}},
+                                                  {"10.0.0.4:45000", {2, 3}}};
+
+  std::vector<int64_t> remote_blocks = {10, 20, 30, 40, 50};
+  std::vector<int64_t> local_blocks = {100, 200, 300, 400, 500};
+  std::vector<int64_t> host_blocks = {1000, 2000, 3000, 4000, 5000};
+  uint64_t uuid = 1000;
+
+  mgr.StartRead("req_unified", uuid, remote_descs, remote_blocks, local_blocks,
+                1, host_blocks);
+
+  // In unified architecture, full block lists are passed to each submanager
+  // with original req_id (no _ep0/_ep1 slicing)
+  ASSERT_EQ(ptr0->start_read_calls.size(), 1);
+  const auto& call0 = ptr0->start_read_calls[0];
+  EXPECT_EQ(call0.req_id, "req_unified");
+  EXPECT_EQ(call0.uuid, uuid);
+  EXPECT_EQ(call0.remote_block_ids, remote_blocks);
+  EXPECT_EQ(call0.local_block_ids, local_blocks);
+  ASSERT_TRUE(call0.local_host_block_ids.has_value());
+  EXPECT_EQ(call0.local_host_block_ids.value(), host_blocks);
+
+  ASSERT_EQ(ptr1->start_read_calls.size(), 1);
+  const auto& call1 = ptr1->start_read_calls[0];
+  EXPECT_EQ(call1.req_id, "req_unified");
+  EXPECT_EQ(call1.uuid, uuid);
+  EXPECT_EQ(call1.remote_block_ids, remote_blocks);
+  EXPECT_EQ(call1.local_block_ids, local_blocks);
+  ASSERT_TRUE(call1.local_host_block_ids.has_value());
+  EXPECT_EQ(call1.local_host_block_ids.value(), host_blocks);
+
+  // Completion Tracking Aggregation:
+  // 1. sub0 completes first -> parent req_unified should NOT be returned yet
+  // (needs sub1 too)
+  ptr0->recving.push_back("req_unified");
+  auto [s1, r1, f1] = mgr.CompleteReadRaw();
+  EXPECT_TRUE(r1.empty());
+
+  // 2. sub1 completes -> parent req_unified SHOULD be returned in done_recving
+  ptr1->recving.push_back("req_unified");
+  auto [s2, r2, f2] = mgr.CompleteReadRaw();
+  EXPECT_EQ(r2, std::vector<std::string>{"req_unified"});
+}
+
+TEST(KVCacheManagerWrapperTest, StartReadInputVectorValidation) {
+  auto sub0 = std::make_unique<MockSubManager>();
+  MockSubManager* ptr0 = sub0.get();
+
+  std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> subs;
+  subs.push_back(std::move(sub0));
+
+  KVCacheManager mgr(std::move(subs));
+
+  std::vector<EndpointDescriptor> remote_descs = {{"10.0.0.1:45000", {0}}};
+  std::vector<int64_t> remote_blocks = {10, 20};
+  std::vector<int64_t> local_blocks = {100};  // Size mismatch!
+
+  mgr.StartRead("req_mismatch", 100, remote_descs, remote_blocks, local_blocks);
+  EXPECT_TRUE(ptr0->start_read_calls.empty());
 }
 
 }  // namespace
