@@ -210,8 +210,9 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   }
 
   std::vector<tpu_raiden::transport::BlockChunk> GetBlockChunks(
-      size_t layer_idx, size_t shard_idx, int block_id, uint64_t uuid,
-      int64_t sender_node_id = -1, absl::string_view peer = "") override;
+      size_t layer_idx, size_t shard_idx, absl::Span<const int64_t> block_ids,
+      size_t total_bytes, uint64_t uuid, int64_t sender_node_id = -1,
+      absl::string_view peer = "") override;
 
   bool IsDramDestination(uint64_t uuid) const;
 

@@ -15,6 +15,7 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_TRANSPORT_BLOCK_TRANSPORT_H_
 #define THIRD_PARTY_TPU_RAIDEN_TRANSPORT_BLOCK_TRANSPORT_H_
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -32,6 +33,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
 #include "tpu_raiden/transport/raw_buffer_transport.h"
 
 namespace tpu_raiden {
@@ -63,18 +65,26 @@ class BlockTransportDelegate : public RawBufferTransportDelegate {
   // Returns the active node ID (rank) of the worker.
   virtual int64_t node_id() const { return -1; }
 
-  // Returns the list of contiguous chunks that constitute a block
+  // Returns the list of contiguous chunks that constitute a block range
   // for a specific transaction (identified by uuid).
   // Optionally accepts the sender_node_id to distinguish senders in many-to-one
   // transfers.
-  virtual std::vector<BlockChunk> GetBlockChunks(size_t layer_idx,
-                                                 size_t shard_idx, int block_id,
-                                                 uint64_t uuid,
-                                                 int64_t sender_node_id = -1,
-                                                 absl::string_view peer = "") {
-    // Default implementation: block is contiguous and of uniform size.
-    return {{GetBlockHostPointer(layer_idx, shard_idx, block_id),
-             bytes_per_block()}};
+  virtual std::vector<BlockChunk> GetBlockChunks(
+      size_t layer_idx, size_t shard_idx, absl::Span<const int64_t> block_ids,
+      size_t total_bytes, uint64_t uuid, int64_t sender_node_id = -1,
+      absl::string_view peer = "") {
+    // Default implementation: blocks are contiguous and of uniform size.
+    std::vector<BlockChunk> result;
+    size_t accumulated_bytes = 0;
+    for (int64_t block_id : block_ids) {
+      if (accumulated_bytes >= total_bytes) break;
+      size_t size =
+          std::min(bytes_per_block(), total_bytes - accumulated_bytes);
+      result.push_back(
+          {GetBlockHostPointer(layer_idx, shard_idx, block_id), size});
+      accumulated_bytes += size;
+    }
+    return result;
   }
 
   virtual absl::StatusOr<std::vector<int>> AllocateBlocks(

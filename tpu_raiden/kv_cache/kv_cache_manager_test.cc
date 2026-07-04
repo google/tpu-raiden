@@ -21,12 +21,12 @@
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
+#include "tpu_raiden/transport/block_transport.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
 namespace {
 
-// Helper subclass to pretend we are device-backed for validation tests
 class TestKVCacheManager : public KVCacheManagerBase {
  public:
   TestKVCacheManager(size_t num_layers, size_t num_shards,
@@ -112,6 +112,80 @@ TEST(KVCacheManagerTest, H2hReadExplicitAcceptsParallelism) {
   EXPECT_EQ(status.status().code(), absl::StatusCode::kUnavailable);
   EXPECT_THAT(status.status().message(),
               testing::HasSubstr("Failed to connect to peer"));
+}
+
+TEST(KVCacheManagerTest, AsymmetricBlockSizesGetBlockChunks) {
+  // 1. Sender (Block size: 256 bytes)
+  TestKVCacheManager sender(/*num_layers=*/1, /*num_shards=*/1,
+                            /*slice_byte_size=*/256);
+  std::vector<uint8_t> sender_buffer(256 * 10, 0);
+  std::vector<const uint8_t*> sender_ptrs = {sender_buffer.data()};
+  std::vector<size_t> sender_sizes = {sender_buffer.size()};
+  sender.SetExternalHostPointers(sender_ptrs, sender_sizes);
+
+  // 2. Receiver (Block size: 512 bytes)
+  TestKVCacheManager receiver(/*num_layers=*/1, /*num_shards=*/1,
+                              /*slice_byte_size=*/512);
+  std::vector<uint8_t> receiver_buffer(512 * 10, 0);
+  std::vector<const uint8_t*> receiver_ptrs = {receiver_buffer.data()};
+  std::vector<size_t> receiver_sizes = {receiver_buffer.size()};
+  receiver.SetExternalHostPointers(receiver_ptrs, receiver_sizes);
+
+  // Set up StartTransferRequest with schedules
+  tpu_raiden::rpc::StartTransferRequest request;
+  request.set_uuid(112233);
+  request.set_is_sender(true);
+
+  // Schedule:
+  // Sender (256B block 0) has shard entry:
+  //   - Pushes src_block_id=0, src_offset_bytes=64, size_bytes=128
+  //   - To dst_shard_idx=0, dst_block_id=0, dst_offset_bytes=192 on receiver
+  auto* schedules = request.mutable_shard_push_schedules();
+  auto* src_schedule = &(*schedules)[0];  // shard 0
+  auto* entry = src_schedule->add_entries();
+  entry->set_dst_peer("127.0.0.1:20025");
+  entry->set_dst_shard_idx(0);
+  entry->set_dst_offset_bytes(192);
+  entry->set_src_offset_bytes(64);
+  entry->set_size_bytes(128);
+  entry->set_src_block_id(0);
+  entry->set_dst_block_id(0);
+
+  // Register active plan on both sides
+  absl::Status status =
+      sender.RegisterActivePlan(112233, request, /*is_sender=*/true);
+  ASSERT_TRUE(status.ok()) << status.ToString();
+
+  // Receiver schedule should be the same request but marked as is_sender=false
+  request.set_is_sender(false);
+  status = receiver.RegisterActivePlan(112233, request, /*is_sender=*/false);
+  ASSERT_TRUE(status.ok()) << status.ToString();
+
+  // 3. Resolve chunks on Sender (should return offset 64 from block 0 base)
+  std::vector<int64_t> src_block_ids = {0};
+  std::vector<transport::BlockChunk> sender_chunks = sender.GetBlockChunks(
+      /*layer_idx=*/0, /*shard_idx=*/0, src_block_ids, /*total_bytes=*/128,
+      /*uuid=*/112233, /*sender_node_id=*/-1, /*peer=*/"127.0.0.1:20025");
+
+  ASSERT_EQ(sender_chunks.size(), 1);
+  EXPECT_EQ(sender_chunks[0].size, 128);
+  // Verify pointer offset
+  uint8_t* sender_base =
+      sender.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
+  EXPECT_EQ(sender_chunks[0].ptr, sender_base + 64);
+
+  // 4. Resolve chunks on Receiver (should return offset 192 from block 0 base)
+  std::vector<int64_t> dst_block_ids = {0};
+  std::vector<transport::BlockChunk> receiver_chunks = receiver.GetBlockChunks(
+      /*layer_idx=*/0, /*shard_idx=*/0, dst_block_ids, /*total_bytes=*/128,
+      /*uuid=*/112233, /*sender_node_id=*/0, /*peer=*/"127.0.0.1:20025");
+
+  ASSERT_EQ(receiver_chunks.size(), 1);
+  EXPECT_EQ(receiver_chunks[0].size, 128);
+  // Verify pointer offset
+  uint8_t* receiver_base =
+      receiver.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
+  EXPECT_EQ(receiver_chunks[0].ptr, receiver_base + 192);
 }
 
 }  // namespace

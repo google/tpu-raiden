@@ -40,10 +40,11 @@
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "tpu_raiden/core/status_macros.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
+#include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/transport/raw_buffer_transport.h"
 
@@ -296,8 +297,10 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
         RETURN_IF_ERROR(
             ReadExact(client_fd, &sender_size, sizeof(sender_size)));
 
+        const int64_t block_id_val = dst_id;
         std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
-            l, sh, dst_id, header.uuid, static_cast<int64_t>(header.remote_id));
+            l, sh, absl::MakeConstSpan(&block_id_val, 1), sender_size,
+            header.uuid, static_cast<int64_t>(header.remote_id));
         if (chunks.empty()) {
           return absl::NotFoundError(
               absl::StrCat("No transfer chunks found for block ", dst_id,
@@ -440,8 +443,10 @@ void BlockTransport::TriggerNextSendStep(
         }
 
         block_delegate_->ScheduleAsyncTask([this, state, l, sh, block_id]() {
-          std::vector<BlockChunk> chunks =
-              block_delegate_->GetBlockChunks(l, sh, block_id, state->uuid);
+          const int64_t block_id_val = block_id;
+          std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
+              l, sh, absl::MakeConstSpan(&block_id_val, 1),
+              block_delegate_->bytes_per_block(), state->uuid);
           if (chunks.empty()) {
             LOG(ERROR) << "No transfer chunks found for block " << block_id
                        << " and uuid " << state->uuid;
@@ -782,8 +787,10 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
         ABSL_DCHECK_LT(block_offset + k, src_block_ids.size());
         const int src_id = src_block_ids[block_offset + k];
 
-        std::vector<BlockChunk> chunks =
-            block_delegate_->GetBlockChunks(l, sh, src_id, uuid, -1, peer);
+        const int64_t block_id_val = src_id;
+        std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
+            l, sh, absl::MakeConstSpan(&block_id_val, 1),
+            block_delegate_->bytes_per_block(), uuid, -1, peer);
         if (chunks.empty()) {
           return absl::NotFoundError(
               absl::StrCat("No transfer chunks found for block ", src_id,
@@ -950,8 +957,10 @@ void BlockTransport::H2hReadWorker(
                 "Destination block id is negative");
           }
 
-          std::vector<BlockChunk> chunks =
-              block_delegate_->GetBlockChunks(l, sh, dst_id, uuid);
+          const int64_t block_id_val = dst_id;
+          std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
+              l, sh, absl::MakeConstSpan(&block_id_val, 1),
+              block_delegate_->bytes_per_block(), uuid);
           if (chunks.empty()) {
             return absl::NotFoundError(
                 absl::StrCat("No transfer chunks found for block ", dst_id,

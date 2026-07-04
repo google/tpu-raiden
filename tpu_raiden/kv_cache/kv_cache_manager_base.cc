@@ -1195,7 +1195,8 @@ bool KVCacheManagerBase::IsDramDestination(uint64_t uuid) const {
 
 std::vector<tpu_raiden::transport::BlockChunk>
 KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
-                                   int block_id, uint64_t uuid,
+                                   absl::Span<const int64_t> block_ids,
+                                   size_t total_bytes, uint64_t uuid,
                                    int64_t sender_node_id,
                                    absl::string_view peer) {
   RegisteredPlan plan;
@@ -1210,9 +1211,17 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
   }
 
   if (!has_plan || uuid == 0) {
-    auto default_chunk = GetBlockHostPointer(layer_idx, shard_idx, block_id);
-    size_t default_size = bytes_per_block();
-    return {{default_chunk, default_size}};
+    std::vector<tpu_raiden::transport::BlockChunk> chunks;
+    size_t accumulated_bytes = 0;
+    for (int64_t block_id : block_ids) {
+      if (accumulated_bytes >= total_bytes) break;
+      size_t size =
+          std::min(bytes_per_block(), total_bytes - accumulated_bytes);
+      chunks.push_back(
+          {GetBlockHostPointer(layer_idx, shard_idx, block_id), size});
+      accumulated_bytes += size;
+    }
+    return chunks;
   }
 
   const auto& request = plan.request;
@@ -1223,68 +1232,89 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
 
   std::vector<tpu_raiden::transport::BlockChunk> chunks;
   size_t block_size_bytes = bytes_per_block();
-  size_t block_start_byte = static_cast<size_t>(block_id) * block_size_bytes;
   uint8_t* base_host_ptr = GetHostPointer(layer_idx, shard_idx);
+  size_t accumulated_bytes = 0;
 
-  if (is_sender) {
-    const auto& schedule = schedule_it->second;
-    for (const auto& entry : schedule.entries()) {
-      if (!peer.empty() && entry.dst_peer() != peer) {
-        continue;
-      }
-      if (static_cast<size_t>(entry.src_block_id()) == block_id) {
-        size_t src_base_offset = entry.src_offset_bytes();
-        size_t size = entry.size_bytes();
-        size_t src_stride = entry.src_stride_bytes();
-        int count = entry.count();
-        if (count <= 0) count = 1;
+  for (int64_t block_id : block_ids) {
+    if (accumulated_bytes >= total_bytes) break;
+    size_t block_start_byte = static_cast<size_t>(block_id) * block_size_bytes;
+    std::vector<tpu_raiden::transport::BlockChunk> block_resolved_chunks;
 
-        for (int c = 0; c < count; ++c) {
-          size_t src_offset = src_base_offset + c * src_stride;
-          chunks.push_back(
-              {.ptr = base_host_ptr + block_start_byte + src_offset,
-               .size = size});
-        }
-      }
-    }
-  } else {
-    int found_src_shard = -1;
-    if (sender_node_id != -1) {
-      found_src_shard = static_cast<int>(sender_node_id);
-    } else {
-      for (const auto& [src_shard, src_schedule] : schedules) {
-        for (const auto& entry : src_schedule.entries()) {
-          if (static_cast<size_t>(entry.dst_shard_idx()) == shard_idx &&
-              static_cast<size_t>(entry.dst_block_id()) == block_id) {
-            found_src_shard = src_shard;
-            break;
-          }
-        }
-        if (found_src_shard != -1) break;
-      }
-    }
-
-    if (found_src_shard != -1) {
-      const auto& schedule = schedules.at(found_src_shard);
-      for (const auto& entry : schedule.entries()) {
-        if (static_cast<size_t>(entry.dst_shard_idx()) == shard_idx &&
-            static_cast<size_t>(entry.dst_block_id()) == block_id) {
+    if (is_sender) {
+      if (schedule_it != schedules.end()) {
+        const auto& schedule = schedule_it->second;
+        for (const auto& entry : schedule.entries()) {
           if (!peer.empty() && entry.dst_peer() != peer) {
             continue;
           }
-          size_t dst_base_offset = entry.dst_offset_bytes();
-          size_t size = entry.size_bytes();
-          size_t dst_stride = entry.dst_stride_bytes();
-          int count = entry.count();
-          if (count <= 0) count = 1;
+          if (static_cast<size_t>(entry.src_block_id()) == block_id) {
+            size_t src_base_offset = entry.src_offset_bytes();
+            size_t size = entry.size_bytes();
+            size_t src_stride = entry.src_stride_bytes();
+            int count = entry.count();
+            if (count <= 0) count = 1;
 
-          for (int c = 0; c < count; ++c) {
-            size_t dst_offset = dst_base_offset + c * dst_stride;
-            chunks.push_back(
-                {.ptr = base_host_ptr + block_start_byte + dst_offset,
-                 .size = size});
+            for (int c = 0; c < count; ++c) {
+              size_t src_offset = src_base_offset + c * src_stride;
+              block_resolved_chunks.push_back(
+                  {.ptr = base_host_ptr + block_start_byte + src_offset,
+                   .size = size});
+            }
           }
         }
+      }
+    } else {
+      int found_src_shard = -1;
+      if (sender_node_id != -1) {
+        found_src_shard = static_cast<int>(sender_node_id);
+      } else {
+        for (const auto& [src_shard, src_schedule] : schedules) {
+          for (const auto& entry : src_schedule.entries()) {
+            if (static_cast<size_t>(entry.dst_shard_idx()) == shard_idx &&
+                static_cast<size_t>(entry.dst_block_id()) == block_id) {
+              found_src_shard = src_shard;
+              break;
+            }
+          }
+          if (found_src_shard != -1) break;
+        }
+      }
+
+      if (found_src_shard != -1) {
+        auto schedule_found_it = schedules.find(found_src_shard);
+        if (schedule_found_it != schedules.end()) {
+          const auto& schedule = schedule_found_it->second;
+          for (const auto& entry : schedule.entries()) {
+            if (static_cast<size_t>(entry.dst_shard_idx()) == shard_idx &&
+                static_cast<size_t>(entry.dst_block_id()) == block_id) {
+              if (!peer.empty() && entry.dst_peer() != peer) {
+                continue;
+              }
+              size_t dst_base_offset = entry.dst_offset_bytes();
+              size_t size = entry.size_bytes();
+              size_t dst_stride = entry.dst_stride_bytes();
+              int count = entry.count();
+              if (count <= 0) count = 1;
+
+              for (int c = 0; c < count; ++c) {
+                size_t dst_offset = dst_base_offset + c * dst_stride;
+                block_resolved_chunks.push_back(
+                    {.ptr = base_host_ptr + block_start_byte + dst_offset,
+                     .size = size});
+              }
+            }
+          }
+        }
+      }
+    }
+
+    for (const auto& chunk : block_resolved_chunks) {
+      if (accumulated_bytes >= total_bytes) break;
+      size_t size_to_add =
+          std::min(chunk.size, total_bytes - accumulated_bytes);
+      if (size_to_add > 0) {
+        chunks.push_back({.ptr = chunk.ptr, .size = size_to_add});
+        accumulated_bytes += size_to_add;
       }
     }
   }
@@ -1292,7 +1322,6 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
   if (!chunks.empty()) {
     return chunks;
   }
-
   return {};
 }
 
