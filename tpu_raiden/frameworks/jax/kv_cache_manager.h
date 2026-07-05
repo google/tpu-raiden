@@ -40,6 +40,8 @@ namespace tpu_raiden {
 class MetricsCollector;
 
 namespace kv_cache {
+class KVCacheListener;
+
 namespace jax {
 
 struct UnpackedCache {
@@ -68,7 +70,10 @@ class KVCacheManager {
   KVCacheManager(nanobind::list kv_caches, int64_t node_id,
                  int64_t local_control_port, int64_t max_blocks,
                  int64_t num_slots, double timeout_s,
-                 bool unsafe_skip_buffer_lock, int parallelism);
+                 bool unsafe_skip_buffer_lock, int parallelism,
+                 std::optional<int> listener_port = std::nullopt,
+                 std::optional<int> listener_controller_port = std::nullopt);
+
 #endif
 
   // FFI metadata constructor (cache-only by default)
@@ -114,7 +119,13 @@ class KVCacheManager {
 
   std::vector<EndpointDescriptor> get_local_endpoints() const;
 
+  std::optional<int> listener_port() const;
+  bool is_listener_active() const;
+  std::string transfer_address() const;
+  std::string listener_address() const;
+
   void SetSubmanagerShardsForTesting(
+
       const std::vector<std::vector<int64_t>>& assignment) {
     submanager_to_global_shards_ = assignment;
   }
@@ -187,7 +198,9 @@ class KVCacheManager {
   KVCacheManager(UnpackedCache&& cache, int64_t node_id,
                  int64_t local_control_port, int64_t max_blocks,
                  int64_t num_slots, double timeout_s,
-                 bool unsafe_skip_buffer_lock, int parallelism);
+                 bool unsafe_skip_buffer_lock, int parallelism,
+                 std::optional<int> listener_port = std::nullopt,
+                 std::optional<int> listener_controller_port = std::nullopt);
 
   std::optional<nanobind::list> device_arrays_;
 #endif
@@ -197,13 +210,16 @@ class KVCacheManager {
       std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
       bool unsafe_skip_buffer_lock, int parallelism, int64_t node_id,
       int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
-      double timeout_s);
+      double timeout_s, std::optional<int> listener_port = std::nullopt,
+      std::optional<int> listener_controller_port = std::nullopt);
 
   static constexpr uint64_t k48BitMask = 0xFFFFFFFFFFFFULL;
   std::atomic<uint64_t> global_seq_counter_{1};
 
   std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> sub_managers_;
+  std::vector<std::unique_ptr<KVCacheListener>> listeners_;
   std::vector<std::pair<int, int>> global_shard_to_submanager_;
+
   std::vector<std::vector<int64_t>> submanager_to_global_shards_;
   size_t total_num_shards_ = 0;
 

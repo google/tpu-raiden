@@ -22,12 +22,12 @@
 #include <gtest/gtest.h>
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
-#include "third_party/grpc/include/grpcpp/channel.h"
-#include "third_party/grpc/include/grpcpp/create_channel.h"
-#include "third_party/grpc/include/grpcpp/security/credentials.h"
-#include "third_party/grpc/include/grpcpp/security/server_credentials.h"
-#include "third_party/grpc/include/grpcpp/server.h"
-#include "third_party/grpc/include/grpcpp/server_builder.h"
+#include "grpcpp/channel.h"
+#include "grpcpp/create_channel.h"
+#include "grpcpp/security/credentials.h"
+#include "grpcpp/security/server_credentials.h"
+#include "grpcpp/server.h"
+#include "grpcpp/server_builder.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_client.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_server.h"
 

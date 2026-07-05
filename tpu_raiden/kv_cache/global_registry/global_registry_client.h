@@ -26,7 +26,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
-#include "third_party/grpc/include/grpcpp/channel.h"
+#include "grpcpp/channel.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry.grpc.pb.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry.pb.h"
 
