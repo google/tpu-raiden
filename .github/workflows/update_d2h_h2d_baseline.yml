@@ -14,8 +14,6 @@ on:
 permissions: { contents: read, pull-requests: write }
   
 
-# test
-
 jobs:
   record:
     uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@affd28b492f67c242afa8b119e590b25816b7b88
