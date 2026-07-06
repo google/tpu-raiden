@@ -47,13 +47,11 @@ _TIMEOUT_S = flags.DEFINE_integer('timeout_s', 180, 'Per-process hard timeout.')
 _LAYERS = 32   # C++ kNumLayers (fixed)
 _SHARDS = 1    # C++ kNumShards (fixed)
 
-# (block_size_bytes, num_blocks, parallelism). Trimmed for fast VALIDATION: 128MB
-# is dropped (256 GiB/side -> OOM risk, 13 TiB moved). Small configs are enough to
-# confirm Python bandwidth agrees with C++.
+# (block_size_bytes, num_blocks, parallelism). DEBUG: just one tiny config so the
+# job finishes fast (before the flaky container hook dies) and we get the Python
+# output to see where it hangs. Add configs back once Python works.
 _CONFIGS = [
     (1048576, 64, 1),
-    (1048576, 64, 8),
-    (16777216, 64, 8),
 ]
 
 _CPP_RE = re.compile(r'Throughput:\s*([0-9.]+)')                 # "Throughput: X GB/s (collective)"
@@ -88,10 +86,15 @@ def _locate(basename):
 
 
 def _run(cmd, timeout):
-  """Run a command, capturing combined stdout/stderr; never raise on non-zero."""
+  """Run a command, capturing combined stdout/stderr; never raise on non-zero.
+
+  PYTHONUNBUFFERED=1 so the child's [launch]/[sender]/[receiver] prints are NOT
+  lost when we kill it on timeout -- that's what tells us where a hang happened.
+  """
+  env = {**os.environ, 'PYTHONUNBUFFERED': '1'}
   try:
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                       text=True, timeout=timeout)
+                       text=True, timeout=timeout, env=env)
     return p.returncode, p.stdout
   except subprocess.TimeoutExpired as e:
     out = e.output
