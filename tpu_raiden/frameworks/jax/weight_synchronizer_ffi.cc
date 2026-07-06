@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "tpu_raiden/frameworks/jax/weight_synchronizer_ffi.h"
+#include "tpu_raiden/frameworks/jax/weight_synchronizer_ffi_internal.h"
 
 #include <arpa/inet.h>
 #include <ifaddrs.h>
@@ -30,10 +31,12 @@
 #include <string>
 #include <utility>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/mutex.h"
 #include "xla/ffi/api/ffi.h"
 #include "xla/stream_executor/device_address.h"
 #include "xla/stream_executor/platform.h"
@@ -45,6 +48,40 @@
 namespace tpu_raiden {
 namespace weight_sync {
 
+static absl::Mutex ws_mu;
+static auto* ws_map =
+    new absl::flat_hash_map<int32_t, WeightSynchronizerBase*>();
+
+void ClearSharedWsMap() {
+  absl::MutexLock lock(ws_mu);
+  ws_map->clear();
+}
+
+// Retains and returns a thread-safe singleton instance of
+// `WeightSynchronizerBase` for a given listener port across multiple devices on
+// the same physical host. In multi-device/multi-host JAX topologies (`pjit`),
+// multiple local ranks initialize FFI targets independently. Sharing the
+// instance avoids re-binding the same socket (`Address already in use`).
+static WeightSynchronizerBase* GetSharedWs(int32_t shard_idx,
+                                           int32_t listener_port,
+                                           int32_t num_layers,
+                                           int32_t parallelism,
+                                           int64_t slice_byte_size,
+                                           int32_t local_port) {
+  absl::MutexLock lock(ws_mu);
+  int32_t key = (listener_port > 0) ? listener_port : -(shard_idx + 1);
+  auto& ws = (*ws_map)[key];
+  if (ws == nullptr) {
+    std::optional<int> opt_listener_port =
+        (listener_port > 0) ? std::make_optional(listener_port) : std::nullopt;
+    ws = new WeightSynchronizerBase(
+        static_cast<size_t>(num_layers), static_cast<size_t>(parallelism),
+        static_cast<size_t>(slice_byte_size), std::make_optional(local_port),
+        std::nullopt, parallelism, opt_listener_port);
+  }
+  return ws;
+}
+
 WeightSynchronizerBase* g_weight_synchronizers[32] = {nullptr};
 std::unique_ptr<stream_executor::Stream> g_streams[32] = {nullptr};
 
@@ -53,11 +90,12 @@ std::unique_ptr<stream_executor::Stream> g_streams[32] = {nullptr};
 xla::ffi::Error TriggerWeightSynchronizerInitImpl(
     xla::ffi::AnyBuffer x, xla::ffi::AnyBuffer shard_idx_buf,
     int64_t slice_byte_size, int32_t local_port, int32_t parallelism,
-    int32_t num_layers, xla::ffi::Result<xla::ffi::AnyBuffer> out) {
+    int32_t num_layers, int32_t listener_port,
+    xla::ffi::Result<xla::ffi::AnyBuffer> out) {
   (void)x;
   if (shard_idx_buf.untyped_data() == nullptr) {
     return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
-                           "shard_idx_buf has null untyped data.");
+                           "shard_idx_buf null.");
   }
   int32_t shard_idx =
       *reinterpret_cast<const int32_t*>(shard_idx_buf.untyped_data());
@@ -72,13 +110,9 @@ xla::ffi::Error TriggerWeightSynchronizerInitImpl(
         << "[TPU Worker FFI] >>> WS LAZY INITIALIZATION TRIGGERED <<< Shard: "
         << shard_idx;
 
-    g_weight_synchronizers[shard_idx] =
-        new tpu_raiden::weight_sync::WeightSynchronizerBase(
-            static_cast<size_t>(num_layers), static_cast<size_t>(parallelism),
-            static_cast<size_t>(slice_byte_size),
-            std::make_optional(local_port),
-            std::nullopt,  // host_blocks_to_allocate
-            parallelism);
+    g_weight_synchronizers[shard_idx] = GetSharedWs(
+        shard_idx, listener_port, num_layers, parallelism, slice_byte_size,
+        local_port);
 
     // Allocate the StreamExecutor Stream once per shard, and cache E2E!
     int64_t dev_id = static_cast<int64_t>(shard_idx);
@@ -144,6 +178,9 @@ xla::ffi::Error TriggerWeightSynchronizerInitImpl(
   int32_t* out_ptr = reinterpret_cast<int32_t*>(out->untyped_data());
   std::memcpy(out_ptr, ipv6, 16);
   out_ptr[4] = port;
+  if (out->element_count() >= 6) {
+    out_ptr[5] = g_weight_synchronizers[shard_idx]->listener_port().value_or(0);
+  }
 
   return xla::ffi::Error::Success();
 }
@@ -152,7 +189,8 @@ xla::ffi::Error TriggerWeightSynchronizerInitImpl(
 xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
     xla::ffi::AnyBuffer x, xla::ffi::AnyBuffer shard_idx_buf,
     int64_t slice_byte_size, int32_t local_port, int32_t parallelism,
-    int32_t num_layers, xla::ffi::Result<xla::ffi::AnyBuffer> out) {
+    int32_t num_layers, int32_t listener_port,
+    xla::ffi::Result<xla::ffi::AnyBuffer> out) {
   // --- Init Part ---
   if (shard_idx_buf.untyped_data() == nullptr) {
     return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
@@ -171,13 +209,9 @@ xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
         << "[TPU Worker FFI] >>> WS LAZY INITIALIZATION TRIGGERED <<< Shard: "
         << shard_idx;
 
-    g_weight_synchronizers[shard_idx] =
-        new tpu_raiden::weight_sync::WeightSynchronizerBase(
-            static_cast<size_t>(num_layers), static_cast<size_t>(parallelism),
-            static_cast<size_t>(slice_byte_size),
-            std::make_optional(local_port),
-            std::nullopt,  // host_blocks_to_allocate
-            parallelism);
+    g_weight_synchronizers[shard_idx] = GetSharedWs(
+        shard_idx, listener_port, num_layers, parallelism, slice_byte_size,
+        local_port);
 
     int64_t dev_id = static_cast<int64_t>(shard_idx);
     auto platform_or =
@@ -240,11 +274,16 @@ xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
   int32_t* out_ptr = reinterpret_cast<int32_t*>(out->untyped_data());
   std::memcpy(out_ptr, ipv6, 16);
   out_ptr[4] = port;
+  if (out->element_count() >= 6) {
+    out_ptr[5] = g_weight_synchronizers[shard_idx]->listener_port().value_or(0);
+  }
 
   // --- D2H Part ---
   size_t size = g_weight_synchronizers[shard_idx]->slice_byte_size();
+  size_t local_slot = static_cast<size_t>(shard_idx) %
+                      g_weight_synchronizers[shard_idx]->num_shards();
   uint8_t* dst_host_ptr = const_cast<uint8_t*>(
-      g_weight_synchronizers[shard_idx]->GetHostBufferPtr(0, 0));
+      g_weight_synchronizers[shard_idx]->GetHostBufferPtr(0, local_slot));
   const uint8_t* src_device_ptr =
       reinterpret_cast<const uint8_t*>(x.untyped_data());
 
@@ -396,6 +435,55 @@ xla::ffi::Error TriggerExecuteReshardingImpl(
   return xla::ffi::Error::Success();
 }
 
+// FFI custom call handler executing asynchronous Host-to-Device (H2D) memory
+// transfers from local staging buffers (`GetHostBufferPtr`) directly onto
+// device memory buffers. Uses multi-host modulo indexing (`shard_idx %
+// num_shards()`) to ensure global shard indices map to the correct local
+// staging slot.
+xla::ffi::Error TriggerH2DImpl(xla::ffi::AnyBuffer anchor,
+                               xla::ffi::AnyBuffer shard_idx_buf,
+                               xla::ffi::Result<xla::ffi::AnyBuffer> out) {
+  (void)anchor;
+  if (shard_idx_buf.untyped_data() == nullptr) {
+    return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
+                           "shard_idx_buf null.");
+  }
+  int32_t shard_idx =
+      *reinterpret_cast<const int32_t*>(shard_idx_buf.untyped_data());
+  if (shard_idx < 0 || shard_idx >= 32 ||
+      g_weight_synchronizers[shard_idx] == nullptr) {
+    return xla::ffi::Error(xla::ffi::ErrorCode::kInternal,
+                           "WS not initialized.");
+  }
+
+  size_t size = g_weight_synchronizers[shard_idx]->slice_byte_size();
+  size_t local_slot = static_cast<size_t>(shard_idx) %
+                      g_weight_synchronizers[shard_idx]->num_shards();
+  const uint8_t* src_host_ptr =
+      g_weight_synchronizers[shard_idx]->GetHostBufferPtr(0, local_slot);
+  uint8_t* d_base = reinterpret_cast<uint8_t*>(out->untyped_data());
+
+  if (g_streams[shard_idx] == nullptr) {
+    std::memcpy(d_base, src_host_ptr, size);
+  } else {
+    stream_executor::Stream* stream = g_streams[shard_idx].get();
+    stream_executor::DeviceAddressBase device_dst(d_base, size);
+    absl::Status status = stream->Memcpy(&device_dst, src_host_ptr, size);
+    if (!status.ok()) {
+      return xla::ffi::Error(
+          xla::ffi::ErrorCode::kInternal,
+          "H2D Memcpy failed: " + std::string(status.message()));
+    }
+    absl::Status sync_status = stream->BlockHostUntilDone();
+    if (!sync_status.ok()) {
+      return xla::ffi::Error(
+          xla::ffi::ErrorCode::kInternal,
+          "Stream sync failed: " + std::string(sync_status.message()));
+    }
+  }
+  return xla::ffi::Error::Success();
+}
+
 XLA_FFI_DEFINE_HANDLER(
     kWSInit, TriggerWeightSynchronizerInitImpl,
     xla::ffi::Ffi::Bind()
@@ -405,6 +493,7 @@ XLA_FFI_DEFINE_HANDLER(
         .Attr<int32_t>("local_port")
         .Attr<int32_t>("parallelism")
         .Attr<int32_t>("num_layers")
+        .Attr<int32_t>("listener_port")
         .Ret<xla::ffi::AnyBuffer>());  // return result buffer
 
 XLA_FFI_DEFINE_HANDLER(
@@ -416,6 +505,7 @@ XLA_FFI_DEFINE_HANDLER(
         .Attr<int32_t>("local_port")
         .Attr<int32_t>("parallelism")
         .Attr<int32_t>("num_layers")
+        .Attr<int32_t>("listener_port")
         .Ret<xla::ffi::AnyBuffer>());  // return result buffer
 
 XLA_FFI_DEFINE_HANDLER(
@@ -429,6 +519,14 @@ XLA_FFI_DEFINE_HANDLER(
         .Arg<xla::ffi::AnyBuffer>()  // dst_offsets
         .Arg<xla::ffi::AnyBuffer>()  // sizes
         .Arg<xla::ffi::AnyBuffer>()  // dst_shard_indices
+        .Ret<xla::ffi::AnyBuffer>()  // result (aliased to anchor)
+);
+
+XLA_FFI_DEFINE_HANDLER(
+    kH2D, TriggerH2DImpl,
+    xla::ffi::Ffi::Bind()
+        .Arg<xla::ffi::AnyBuffer>()  // anchor
+        .Arg<xla::ffi::AnyBuffer>()  // shard_idx_buf
         .Ret<xla::ffi::AnyBuffer>()  // result (aliased to anchor)
 );
 
@@ -448,6 +546,11 @@ XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "execute_resharding", "Host",
                          kExecuteResharding);
 XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "execute_resharding", "TPU",
                          kExecuteResharding);
+
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "h2d", "Host", kH2D);
+XLA_FFI_REGISTER_HANDLER(xla::ffi::GetXlaFfiApi(), "h2d", "TPU", kH2D);
+
+extern "C" void ForceLinkWeightSynchronizerFfi() {}
 
 }  // namespace weight_sync
 }  // namespace tpu_raiden

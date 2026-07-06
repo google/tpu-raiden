@@ -25,16 +25,19 @@ namespace tpu_raiden {
 namespace weight_sync {
 
 extern std::unique_ptr<stream_executor::Stream> g_streams[32];
+void ClearSharedWsMap();
 
 xla::ffi::Error TriggerWeightSynchronizerInitImpl(
     xla::ffi::AnyBuffer x, xla::ffi::AnyBuffer shard_idx_buf,
     int64_t slice_byte_size, int32_t local_port, int32_t parallelism,
-    int32_t num_layers, xla::ffi::Result<xla::ffi::AnyBuffer> out);
+    int32_t num_layers, int32_t listener_port,
+    xla::ffi::Result<xla::ffi::AnyBuffer> out);
 
 xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
     xla::ffi::AnyBuffer x, xla::ffi::AnyBuffer shard_idx_buf,
     int64_t slice_byte_size, int32_t local_port, int32_t parallelism,
-    int32_t num_layers, xla::ffi::Result<xla::ffi::AnyBuffer> out);
+    int32_t num_layers, int32_t listener_port,
+    xla::ffi::Result<xla::ffi::AnyBuffer> out);
 
 
 

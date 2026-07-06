@@ -564,8 +564,24 @@ def generate_strided_copy_chunks(
   """Translates an N-dimensional grid intersection into strided memory copy chunks.
 
   Instead of returning flat 1D chunks, this function groups contiguous dimension
-  runs and returns strided chunk descriptors: (src_offset, dst_offset, size,
-  src_stride, dst_stride, count)
+  runs and returns strided chunk descriptors that enable hardware-accelerated
+  2D/3D
+  transfers without host-side scatter/gather loops.
+
+  Args:
+    src_shard_slice: Bounding box slice of the source shard across all N
+      dimensions.
+    dst_shard_slice: Bounding box slice of the destination shard across all N
+      dimensions.
+    intersection_slice: The overlapping region between source and destination
+      shards.
+    itemsize: Byte size of a single element (e.g., 4 for float32, 2 for
+      bfloat16).
+
+  Returns:
+    A list of strided chunk descriptors where each tuple contains:
+      (src_offset, dst_offset, size_bytes, src_stride_bytes, dst_stride_bytes,
+      count)
   """
   rank = len(src_shard_slice)
   src_shape = [e - s for s, e in src_shard_slice]
@@ -573,23 +589,23 @@ def generate_strided_copy_chunks(
   int_shape = [e - s for s, e in intersection_slice]
 
   # Calculate how many inner dimensions can be merged into a contiguous chunk
-  contiguous_elements = 1
-  split_dim = rank - 1
+  split_dim = -1
   for d in range(rank - 1, -1, -1):
     dim_size = int_shape[d]
-    contiguous_elements *= dim_size
-    split_dim = d
-
-    # Check if we can merge the next outer dimension
     src_full = dim_size == src_shape[d]
     dst_full = dim_size == dst_shape[d]
     if not (src_full and dst_full):
+      split_dim = d
       break
 
-  contiguous_bytes = contiguous_elements * itemsize
+  if split_dim != -1:
+    contiguous_elements = math.prod(int_shape[max(1, split_dim) :])
+    stride_dim = max(0, split_dim - 1)
+  else:
+    contiguous_elements = math.prod(int_shape)
+    stride_dim = -1
 
-  # The dimension to collapse using stride is split_dim - 1
-  stride_dim = split_dim - 1
+  contiguous_bytes = contiguous_elements * itemsize
 
   src_strides = [1] * rank
   for i in range(rank - 2, -1, -1):
@@ -803,10 +819,40 @@ class RaidenController:
       dst_mem_type: int,
       expected_block_count: int,
       dst_controller_address: Optional[str],
-      src_controller_address: Optional[str],
   ) -> None:
-    # key: (src_unit, src_block_id, src_block_offset, size, src_stride, count)
-    src_unit, src_block_id, src_block_offset, size, src_stride, count = key
+    """Executes a decentralized, greedy K-ary tree broadcast for a slice of data across destination workers.
+
+    Schedules tree hops dynamically by assigning idle destination workers that
+    have received
+    and unpacked their slice as active source nodes for subsequent downstream
+    destinations.
+
+    Args:
+      key: Tuple identifying the slice: (src_unit, shard_idx, src_block_id,
+        src_block_offset, size, src_stride, count).
+      targets: List of destination worker target tuples awaiting this slice.
+      final_plan: Reference to the global multi-host TransferPlan.
+      fanout_k: Maximum number of concurrent child transfers per active source
+        node.
+      req_id: Unique string identifier for this multi-hop transfer schedule.
+      uuid: Numerical transaction ID across all participating workers.
+      dst_mem_type: Memory tier destination (e.g. HBM / HOST).
+      expected_block_count: Total physical block pushes expected by each
+        destination worker.
+      dst_controller_address: BNS/IP network address of the destination
+        controller.
+      src_controller_address: BNS/IP network address of the source controller.
+    """
+    # key: (src_unit, shard_idx, src_block_id, src_block_offset, size, src_stride, count)
+    (
+        src_unit,
+        shard_idx,
+        src_block_id,
+        src_block_offset,
+        size,
+        src_stride,
+        count,
+    ) = key
 
     available_sources = [src_unit]
     node_slice_offsets = {
@@ -823,7 +869,14 @@ class RaidenController:
       for s in list(available_sources):
         while active_pushes[s] < fanout_k and pending_targets:
           t = pending_targets.pop(0)
-          dst_unit, dst_peer, dst_block_id, dst_block_offset, dst_stride = t
+          (
+              dst_unit,
+              dst_peer,
+              dst_shard_idx,
+              dst_block_id,
+              dst_block_offset,
+              dst_stride,
+          ) = t
 
           active_pushes[s] += 1
           scheduled_any = True
@@ -832,7 +885,7 @@ class RaidenController:
 
           entry = (
               dst_peer,
-              0,
+              dst_shard_idx,
               dst_block_offset,
               s_block_offset,
               size,
@@ -843,7 +896,7 @@ class RaidenController:
               count,
           )
 
-          sub_schedule = {s: {0: [entry]}}
+          sub_schedule = {s: {shard_idx if s == src_unit else 0: [entry]}}
           sub_plan = TransferPlan(
               src_units=[s],
               dst_units=[dst_unit],
@@ -1275,16 +1328,6 @@ class RaidenController:
                     chunks = generate_strided_copy_chunks(
                         src_slice, dst_slice, intersection, itemsize
                     )
-                    src_block_bytes = (
-                        math.prod([e - s for s, e in src_slice[1:]]) * itemsize
-                        if len(src_slice) > 1
-                        else itemsize
-                    )
-                    dst_block_bytes = (
-                        math.prod([e - s for s, e in dst_slice[1:]]) * itemsize
-                        if len(dst_slice) > 1
-                        else itemsize
-                    )
                     for (
                         src_offset,
                         dst_offset,
@@ -1293,6 +1336,18 @@ class RaidenController:
                         dst_stride,
                         count,
                     ) in chunks:
+                      src_block_bytes = (
+                          math.prod([e - s for s, e in src_slice[1:]])
+                          * itemsize
+                          if len(src_slice) > 1
+                          else itemsize
+                      )
+                      dst_block_bytes = (
+                          math.prod([e - s for s, e in dst_slice[1:]])
+                          * itemsize
+                          if len(dst_slice) > 1
+                          else itemsize
+                      )
                       src_block_id = src_offset // src_block_bytes
                       dst_block_id = dst_offset // dst_block_bytes
 
@@ -1368,7 +1423,7 @@ class RaidenController:
                 for entry in entries:
                   (
                       dst_peer,
-                      _,
+                      dst_shard_idx,
                       dst_block_offset,
                       src_block_offset,
                       size,
@@ -1383,6 +1438,7 @@ class RaidenController:
                     continue
                   key = (
                       src_unit,
+                      shard_idx,
                       src_block_id,
                       src_block_offset,
                       size,
@@ -1392,6 +1448,7 @@ class RaidenController:
                   val = (
                       dst_unit,
                       dst_peer,
+                      dst_shard_idx,
                       dst_block_id,
                       dst_block_offset,
                       dst_stride,
@@ -1406,6 +1463,7 @@ class RaidenController:
             for key, targets in groups.items():
               (
                   src_unit,
+                  shard_idx,
                   src_block_id,
                   src_block_offset,
                   size,
@@ -1417,13 +1475,14 @@ class RaidenController:
                 for (
                     dst_unit,
                     dst_peer,
+                    dst_shard_idx,
                     dst_block_id,
                     dst_block_offset,
                     dst_stride,
                 ) in targets:
                   entry = (
                       dst_peer,
-                      0,
+                      dst_shard_idx,
                       dst_block_offset,
                       src_block_offset,
                       size,
@@ -1434,7 +1493,7 @@ class RaidenController:
                       count,
                   )
                   direct_schedules.setdefault(src_unit, {}).setdefault(
-                      0, []
+                      shard_idx, []
                   ).append(entry)
               else:
                 # TODO(b/12345678): Optimize early stages with topology-aware

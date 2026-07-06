@@ -30,13 +30,33 @@ def init_weight_synchronizer(
     local_port: int = 0,
     parallelism: int = 1,
     num_layers: int = 1,
+    listener_port: int = -1,
 ) -> jax.Array:
-  """Registers and executes init_weight_synchronizer FFI custom call."""
+  """Registers and executes init_weight_synchronizer FFI custom call on each device rank.
+
+  Args:
+    device_array: Sharded input device array serving as the FFI target anchor.
+    shard_idx: Sharding index array representing shard IDs on each local rank.
+    mesh: JAX device mesh across all participating physical devices/hosts.
+    slice_byte_size: Byte size of the physical weight slice to synchronize per
+      shard.
+    local_port: Port number for the local sender transport server (`0` for
+      auto-assign).
+    parallelism: Number of parallel TCP/IPC streams to use for memory transfer.
+    num_layers: Total number of network layers or synchronization iterations.
+    listener_port: Optional pre-assigned listener port to share across ranks
+      (`-1` to initialize new).
+
+  Returns:
+    A sharded 1D int32 array containing synchronization metadata (`out_dim=6` if
+    `listener_port >= 0`).
+  """
 
   @compute_on.compute_on("device_host")
   def _local_init(anchor, s_idx):
     axis_names = mesh.axis_names
-    out_shape = tuple([1] * len(axis_names)) + (5,)
+    out_dim = 6 if listener_port >= 0 else 5
+    out_shape = tuple([1] * len(axis_names)) + (out_dim,)
     return jax.ffi.ffi_call(
         "init_weight_synchronizer",
         jax.ShapeDtypeStruct(out_shape, jnp.int32),
@@ -48,6 +68,7 @@ def init_weight_synchronizer(
         local_port=np.int32(local_port),
         parallelism=np.int32(parallelism),
         num_layers=np.int32(num_layers),
+        listener_port=np.int32(listener_port),
     )
 
   axis_names = mesh.axis_names
@@ -73,13 +94,33 @@ def init_weight_synchronizer_and_d2h(
     local_port: int = 0,
     parallelism: int = 1,
     num_layers: int = 1,
+    listener_port: int = -1,
 ) -> jax.Array:
-  """Registers and executes init_weight_synchronizer_and_d2h FFI custom call."""
+  """Registers and executes init_weight_synchronizer_and_d2h FFI custom call on each device rank.
+
+  Args:
+    device_array: Sharded input device array serving as the FFI target anchor.
+    shard_idx: Sharding index array representing shard IDs on each local rank.
+    mesh: JAX device mesh across all participating physical devices/hosts.
+    slice_byte_size: Byte size of the physical weight slice to synchronize per
+      shard.
+    local_port: Port number for the local sender transport server (`0` for
+      auto-assign).
+    parallelism: Number of parallel TCP/IPC streams to use for memory transfer.
+    num_layers: Total number of network layers or synchronization iterations.
+    listener_port: Optional pre-assigned listener port to share across ranks
+      (`-1` to initialize new).
+
+  Returns:
+    A sharded 1D int32 array containing synchronization metadata (`out_dim=6` if
+    `listener_port >= 0`).
+  """
 
   @compute_on.compute_on("device_host")
   def _local_init_and_d2h(anchor, s_idx):
     axis_names = mesh.axis_names
-    out_shape = tuple([1] * len(axis_names)) + (5,)
+    out_dim = 6 if listener_port >= 0 else 5
+    out_shape = tuple([1] * len(axis_names)) + (out_dim,)
     return jax.ffi.ffi_call(
         "init_weight_synchronizer_and_d2h",
         jax.ShapeDtypeStruct(out_shape, jnp.int32),
@@ -91,6 +132,7 @@ def init_weight_synchronizer_and_d2h(
         local_port=np.int32(local_port),
         parallelism=np.int32(parallelism),
         num_layers=np.int32(num_layers),
+        listener_port=np.int32(listener_port),
     )
 
   axis_names = mesh.axis_names
@@ -185,3 +227,42 @@ def prepare_extended_info(
 def destroy_weight_synchronizer():
   """Cleans up WeightSynchronizer instances."""
   _weight_synchronizer_ffi.destroy_weight_synchronizer()
+
+
+def is_listener_active(shard_idx: int = 0) -> bool:
+  """Returns whether the native C++ listener for the shard is active."""
+  return _weight_synchronizer_ffi.is_listener_active(shard_idx)
+
+
+def h2d(device_array, shard_idx, mesh) -> jax.Array:
+  """Executes asynchronous Host-to-Device (H2D) copy from local staging buffer directly onto device memory via FFI.
+
+  Args:
+    device_array: Sharded destination device array onto which host memory is
+      copied.
+    shard_idx: Sharding index array representing shard IDs on each local rank.
+    mesh: JAX device mesh across all participating physical devices/hosts.
+
+  Returns:
+    The updated sharded device array with data copied from the local host
+    buffer.
+  """
+
+  @compute_on.compute_on("device_host")
+  def _local_h2d(anchor, s_idx):
+    return jax.ffi.ffi_call(
+        "h2d",
+        jax.ShapeDtypeStruct(anchor.shape, anchor.dtype),
+        has_side_effect=True,
+    )(anchor, s_idx)
+
+  axis_names = mesh.axis_names
+  anchor_spec = device_array.sharding.spec
+  index_spec = jax.sharding.PartitionSpec(*axis_names)
+
+  return jax.shard_map(
+      _local_h2d,
+      mesh=mesh,
+      in_specs=(anchor_spec, index_spec),
+      out_specs=anchor_spec,
+  )(device_array, shard_idx)

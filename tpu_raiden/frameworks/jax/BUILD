@@ -206,6 +206,7 @@ cc_library(
     ],
     hdrs = [
         "weight_synchronizer_ffi.h",
+        "weight_synchronizer_ffi_internal.h",
     ],
     copts = [
         "-fexceptions",
@@ -218,9 +219,11 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
         "@xla//xla/ffi/api:ffi",
         "@xla//xla/stream_executor:device_address",
         "@xla//xla/stream_executor:platform",
@@ -378,9 +381,11 @@ cc_library(
     features = ["-use_header_modules"],
     deps = [
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
         "@xla//xla/ffi/api:ffi",
         "@xla//xla/stream_executor:device_address",
         "@xla//xla/stream_executor:platform",
@@ -398,6 +403,7 @@ cc_test(
     deps = [
         ":weight_synchronizer_ffi_mock",
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
+        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log",
         "@xla//xla/ffi/api:c_api",
         "@xla//xla/ffi/api:ffi",

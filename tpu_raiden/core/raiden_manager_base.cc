@@ -23,7 +23,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <thread>  // NOLINT
 #include <utility>
 #include <vector>
 
@@ -192,29 +191,40 @@ std::vector<std::string> RaidenManagerBase::local_ips() const {
   return local_ips_;
 }
 
+// Resolves host memory pointer for a specific layer and shard.
+// In multi-host distributed execution, shard_idx may represent the global shard
+// ID across multiple worker nodes. Modulo indexing (`shard_idx %
+// shards.size()`) ensures clean resolution to the local worker's assigned shard
+// buffers.
+// TODO(raiden-dev): It might be clearer if the base manager doesn't have to
+// deal with global shard idx.
 uint8_t* RaidenManagerBase::GetHostPointer(size_t layer_idx, size_t shard_idx) {
-  if (layer_idx >= layers_.size() ||
-      shard_idx >= layers_[layer_idx].shards.size()) {
+  if (layer_idx >= layers_.size() || layers_[layer_idx].shards.empty()) {
     return nullptr;
   }
-  return const_cast<uint8_t*>(layers_[layer_idx].shards[shard_idx].host_ptr);
+  size_t local_idx = shard_idx % layers_[layer_idx].shards.size();
+  return const_cast<uint8_t*>(layers_[layer_idx].shards[local_idx].host_ptr);
 }
 
+// Resolves host memory allocation size in bytes for a specific layer and shard
+// using multi-host modulo indexing.
 size_t RaidenManagerBase::GetHostSize(size_t layer_idx, size_t shard_idx) {
-  if (layer_idx >= layers_.size() ||
-      shard_idx >= layers_[layer_idx].shards.size()) {
+  if (layer_idx >= layers_.size() || layers_[layer_idx].shards.empty()) {
     return 0;
   }
-  return layers_[layer_idx].shards[shard_idx].host_size;
+  size_t local_idx = shard_idx % layers_[layer_idx].shards.size();
+  return layers_[layer_idx].shards[local_idx].host_size;
 }
 
+// Const overload resolving host memory pointer for a specific layer and shard
+// using multi-host modulo indexing.
 const uint8_t* RaidenManagerBase::GetHostPointer(size_t layer_idx,
                                                  size_t shard_idx) const {
-  if (layer_idx >= layers_.size() ||
-      shard_idx >= layers_[layer_idx].shards.size()) {
+  if (layer_idx >= layers_.size() || layers_[layer_idx].shards.empty()) {
     return nullptr;
   }
-  return layers_[layer_idx].shards[shard_idx].host_ptr;
+  size_t local_idx = shard_idx % layers_[layer_idx].shards.size();
+  return layers_[layer_idx].shards[local_idx].host_ptr;
 }
 
 void RaidenManagerBase::SetExternalHostPointers(

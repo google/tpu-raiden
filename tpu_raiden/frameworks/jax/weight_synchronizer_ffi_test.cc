@@ -19,6 +19,7 @@
 #include <memory>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
 #include "xla/ffi/api/c_api.h"
 #include "xla/ffi/api/ffi.h"
@@ -61,13 +62,17 @@ class WeightSynchronizerFfiTest : public ::testing::Test {
 
   void TearDown() override {
     // Clean up global registry between tests
+    absl::flat_hash_set<WeightSynchronizerBase*> deleted;
     for (int i = 0; i < 32; ++i) {
       if (g_weight_synchronizers[i] != nullptr) {
-        delete g_weight_synchronizers[i];
+        if (deleted.insert(g_weight_synchronizers[i]).second) {
+          delete g_weight_synchronizers[i];
+        }
         g_weight_synchronizers[i] = nullptr;
       }
       g_streams[i].reset();
     }
+    ClearSharedWsMap();
   }
 };
 
@@ -79,13 +84,16 @@ class WeightSynchronizerFfiParamTest : public WeightSynchronizerFfiTest,
   xla::ffi::Error CallInit(xla::ffi::AnyBuffer x, xla::ffi::AnyBuffer shard_idx_buf,
                             int64_t slice_byte_size, int32_t local_port,
                             int32_t parallelism, int32_t num_layers,
-                            xla::ffi::Result<xla::ffi::AnyBuffer> out) {
+                            xla::ffi::Result<xla::ffi::AnyBuffer> out,
+                            int32_t listener_port = 0) {
     if (GetParam() == FfiType::kInit) {
-      return TriggerWeightSynchronizerInitImpl(x, shard_idx_buf, slice_byte_size,
-                                                local_port, parallelism, num_layers, out);
+      return TriggerWeightSynchronizerInitImpl(
+          x, shard_idx_buf, slice_byte_size, local_port, parallelism,
+          num_layers, listener_port, out);
     } else {
-      return TriggerWeightSynchronizerInitAndD2hImpl(x, shard_idx_buf, slice_byte_size,
-                                                      local_port, parallelism, num_layers, out);
+      return TriggerWeightSynchronizerInitAndD2hImpl(
+          x, shard_idx_buf, slice_byte_size, local_port, parallelism,
+          num_layers, listener_port, out);
     }
   }
 };
