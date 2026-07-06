@@ -79,16 +79,39 @@ absl::Status ValidateOffsetsAndSizes(const std::vector<int64_t>& src_offsets,
 
 }  // namespace
 
+namespace {
+size_t ResolveSliceByteSize(
+    const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
+    int64_t slice_byte_size) {
+  if (layer_buffers.empty() || layer_buffers[0].empty()) return 0;
+  xla::PjRtBuffer* first = layer_buffers[0][0];
+  const bool flat = first->on_device_shape().dimensions().size() == 1;
+
+  if (flat != (slice_byte_size > 0)) {
+    throw std::invalid_argument(absl::StrCat(
+        "slice_byte_size must be provided exactly when the registered ",
+        "buffers are flat rank-1 (unified-pool) byte arrays: flat shapes ",
+        "carry no block structure to derive geometry from, while shaped ",
+        "buffers define it via their leading (block) dimension."));
+  }
+
+  if (flat) {
+    return static_cast<size_t>(slice_byte_size);
+  }
+
+  return raiden::GetMajorSliceByteSize(first);
+}
+}  // namespace
+
 KVCacheManagerBase::KVCacheManagerBase(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     bool unsafe_skip_buffer_lock, int parallelism,
-    HostBufferAllocator host_allocator, std::optional<std::string> bind_ip)
+    HostBufferAllocator host_allocator, std::optional<std::string> bind_ip,
+    int64_t slice_byte_size)
     : RaidenManagerBase(layer_buffers.size(),
                         layer_buffers.empty() ? 0 : layer_buffers[0].size(),
-                        layer_buffers.empty() ? 0
-                                              : raiden::GetMajorSliceByteSize(
-                                                    layer_buffers[0][0]),
+                        ResolveSliceByteSize(layer_buffers, slice_byte_size),
                         local_port, parallelism, bind_ip),
       host_allocator_(host_allocator) {
   if (num_layers_ == 0 || num_shards_ == 0) {
@@ -184,8 +207,8 @@ KVCacheManagerBase::KVCacheManagerBase(
           dst_buffer, c_api_, extension_, unsafe_skip_buffer_lock);
       if (!status_or_hold.ok()) {
         throw std::runtime_error(
-            std::string("Failed to acquire PJRT hold: ") +
-            std::string(status_or_hold.status().message()));
+            absl::StrCat("Failed to acquire PJRT hold: ",
+                         status_or_hold.status().message()));
       }
       hold_info.push_back(std::move(status_or_hold.value()));
       layer_info.shards.push_back(std::move(shard_info));

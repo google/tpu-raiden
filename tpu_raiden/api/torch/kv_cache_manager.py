@@ -72,6 +72,7 @@ class KVCacheManager:
       parallelism: int = 4,
       node_id: int = 0,
       listener_port: Optional[int] = None,
+      slice_byte_size: int = 0,
   ):
     """Instantiates the TransferEngine-based KVCacheManager.
 
@@ -89,6 +90,11 @@ class KVCacheManager:
       node_id: Unique identifier for this host/node in the distributed mesh.
       listener_port: Sockets server port for incoming C++ KVCacheListener
         commands.
+      slice_byte_size: Explicit per-block byte size, required when kv_caches are
+        flat rank-1 byte tensors, whose shape carries no block structure; the
+        block count is derived as nbytes // slice_byte_size. Leave 0 for shaped
+        tensors, which derive their block geometry from the leading (block)
+        dimension.
     """
     if host_blocks_to_allocate is not None:
       self._impl = _impl.KVCacheManager(
@@ -114,6 +120,7 @@ class KVCacheManager:
           unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
           listener_port=listener_port,
           parallelism=parallelism,
+          slice_byte_size=slice_byte_size,
       )
 
   @property

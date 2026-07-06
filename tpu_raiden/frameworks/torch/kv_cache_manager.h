@@ -48,7 +48,8 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
                  int64_t local_control_port, int64_t max_blocks,
                  int64_t num_slots, double timeout_s,
                  bool unsafe_skip_buffer_lock, int parallelism = 4,
-                 std::optional<int> listener_port = std::nullopt);
+                 std::optional<int> listener_port = std::nullopt,
+                 int64_t slice_byte_size = 0);
 
   ~KVCacheManager() override;
 
@@ -86,7 +87,8 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
                  bool unsafe_skip_buffer_lock, int parallelism, int64_t node_id,
                  int64_t local_control_port, int64_t max_blocks,
                  int64_t num_slots, double timeout_s,
-                 std::vector<at::Tensor> kv_caches);
+                 std::vector<at::Tensor> kv_caches,
+                 int64_t slice_byte_size = 0);
 
   std::vector<at::Tensor> kv_caches_;
   // Keep-alives for the materialized device buffers backing the manager.
