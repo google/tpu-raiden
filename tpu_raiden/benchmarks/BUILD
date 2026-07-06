@@ -30,9 +30,9 @@ py_library(
 
 
 py_binary(
-    name = "h2d_d2h_perf_test",
+    name = "multi_host_perf_test_oss",
     testonly = True,
-    srcs = ["h2d_d2h_perf_test.py"],
+    srcs = ["multi_host_perf_test_oss.py"],
     deps = [
         ":perf_core",
         "@com_google_absl_py//absl:app",
@@ -49,5 +49,48 @@ py_binary(
         ":perf_core",
         "@com_google_absl_py//absl:app",
         "@com_google_absl_py//absl/flags",
+    ],
+)
+
+py_binary(
+    name = "h2h_perf_test_oss",
+    testonly = True,
+    srcs = ["h2h_perf_test_oss.py"],
+    deps = [
+        "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
+        "@com_google_absl_py//absl:app",
+        "@com_google_absl_py//absl/flags",
+        "@jax//jax",
+        "@pypi//numpy",
+        "@pypi//libtpu",
+    ],
+)
+
+# Same source as the binary above, exposed as a library so the H2H gate can reuse
+# the PUSH transport (run_launcher / run_sender / run_receiver) in-process.
+py_library(
+    name = "h2h_perf_test_oss_lib",
+    testonly = True,
+    srcs = ["h2h_perf_test_oss.py"],
+    deps = [
+        "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
+        "@com_google_absl_py//absl:app",
+        "@com_google_absl_py//absl/flags",
+        "@jax//jax",
+        "@pypi//numpy",
+        "@pypi//libtpu",
+    ],
+)
+
+py_binary(
+    name = "h2h_benchmark_gating",
+    testonly = True,
+    srcs = ["h2h_benchmark_gating.py"],
+    data = ["h2h_gating_baselines.json"],
+    deps = [
+        ":h2h_perf_test_oss_lib",
+        "@com_google_absl_py//absl:app",
+        "@com_google_absl_py//absl/flags",
+        "@pypi//numpy",
     ],
 )

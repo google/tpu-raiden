@@ -27,17 +27,37 @@ benchmarks {
     id: "tpu-v5e-single-node"
     runner_label: "linux-x86-ct5lp-224-8tpu"
     container_image: "us-central1-docker.pkg.dev/wyzhang-dev/quickstart-docker-repo/ml-build:939285342"
-    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci" }
+    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss" }
   }
 
-  metrics { name: "int32_L8_8x128x1024x128/d2h_gbps" unit: "Gbps" stats { stat: MEAN } }
-  metrics { name: "int32_L8_8x128x1024x128/h2d_gbps" unit: "Gbps" stats { stat: MEAN } }
-  metrics { name: "int32_L4_8x128x1024x128/d2h_gbps" unit: "Gbps" stats { stat: MEAN } }
-  metrics { name: "int32_L4_8x128x1024x128/h2d_gbps" unit: "Gbps" stats { stat: MEAN } }
-  metrics { name: "int32_L2_8x128x1024x128/d2h_gbps" unit: "Gbps" stats { stat: MEAN } }
-  metrics { name: "int32_L2_8x128x1024x128/h2d_gbps" unit: "Gbps" stats { stat: MEAN } }
-  metrics { name: "float32_L1_8x128x1024x128/d2h_gbps" unit: "Gbps" stats { stat: MEAN } }
-  metrics { name: "float32_L1_8x128x1024x128/h2d_gbps" unit: "Gbps" stats { stat: MEAN } }
-  metrics { name: "float32_L64_16x128x8x2x128/d2h_gbps" unit: "Gbps" stats { stat: MEAN } }
-  metrics { name: "float32_L64_16x128x8x2x128/h2d_gbps" unit: "Gbps" stats { stat: MEAN } }
+  metrics {
+    name: "d2h_time_sec"
+    unit: "s"
+    stats { stat: MEAN }
+  }
+}
+
+benchmarks {
+  name: "h2h_gating"
+  description: "H2H push perf gate: single-host cross-socket, fail if median GB/s drops >3% vs h2h_gating_baselines.json"
+  owner: "raiden-dev"
+
+  workload {
+    action: "./ml_actions/actions/workload_executors/bazel"
+    action_inputs { key: "target" value: "//tpu_raiden/benchmarks:h2h_benchmark_gating" }
+    action_inputs { key: "runtime_flags" value: "" }
+  }
+
+  environment_configs {
+    id: "tpu-v5e-single-node"
+    runner_label: "linux-x86-ct5lp-224-8tpu"
+    container_image: "us-central1-docker.pkg.dev/wyzhang-dev/quickstart-docker-repo/ml-build:939285342"
+    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss" }
+  }
+
+  metrics { name: "1048576B_x64_P1/h2h_gbs" unit: "GB/s" stats { stat: MEAN } }
+  metrics { name: "1048576B_x64_P8/h2h_gbs" unit: "GB/s" stats { stat: MEAN } }
+  metrics { name: "16777216B_x64_P1/h2h_gbs" unit: "GB/s" stats { stat: MEAN } }
+  metrics { name: "16777216B_x64_P8/h2h_gbs" unit: "GB/s" stats { stat: MEAN } }
+  metrics { name: "134217728B_x64_P8/h2h_gbs" unit: "GB/s" stats { stat: MEAN } }
 }
