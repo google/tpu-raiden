@@ -29,8 +29,11 @@
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
+#include "tpu_raiden/rpc/rpc_utils.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
@@ -38,10 +41,35 @@ namespace kv_cache {
 using ::tpu_raiden::rpc::ControlRequest;
 using ::tpu_raiden::rpc::ControlResponse;
 
-KVCacheListener::KVCacheListener(KVCacheManagerBase* engine,
-                                 int listener_port)
-    : engine_(engine), listener_port_(listener_port) {
-  server_fd_ = socket(AF_INET6, SOCK_STREAM, 0);
+KVCacheListener::KVCacheListener(KVCacheManagerBase* engine, int listener_port,
+                                 int controller_port)
+    : engine_(engine),
+      listener_port_(listener_port),
+      controller_port_(controller_port) {
+  if (engine_ && controller_port_ > 0) {
+    engine_->SetBlocksReceivedCallback(
+        [this](const std::vector<int>& block_ids, uint64_t uuid) {
+          ControlRequest req;
+          req.set_command(ControlRequest::COMMAND_TRANSFER_COMPLETED);
+          for (int id : block_ids) {
+            req.add_completed_block_ids(id);
+          }
+
+          std::string controller_addr =
+              absl::StrCat("localhost:", controller_port_);
+          ControlResponse resp;
+          absl::Status status = rpc::SendRpcSync(controller_addr, req, resp);
+          if (!status.ok()) {
+            LOG(WARNING) << "Failed to notify controller at " << controller_addr
+                         << ": " << status;
+          } else if (!resp.success()) {
+            LOG(WARNING) << "Controller failed to process completion: "
+                         << resp.message();
+          }
+        });
+  }
+
+  server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd_ < 0) {
     LOG(FATAL) << "Failed to create C++ KVCacheListener socket: "
                << std::strerror(errno);
@@ -52,11 +80,10 @@ KVCacheListener::KVCacheListener(KVCacheManagerBase* engine,
     LOG(WARNING) << "setsockopt SO_REUSEADDR failed";
   }
 
-  sockaddr_in6 address{
-      .sin6_family = AF_INET6,
-      .sin6_port = htons(listener_port_),
-      .sin6_addr = in6addr_any,
-  };
+  sockaddr_in address;
+  address.sin_family = AF_INET;
+  address.sin_port = htons(listener_port_);
+  address.sin_addr.s_addr = INADDR_ANY;
 
   if (bind(server_fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) <
       0) {
@@ -72,7 +99,7 @@ KVCacheListener::KVCacheListener(KVCacheManagerBase* engine,
   socklen_t addr_len = sizeof(address);
   if (getsockname(server_fd_, reinterpret_cast<sockaddr*>(&address),
                   &addr_len) == 0) {
-    listener_port_ = ntohs(address.sin6_port);
+    listener_port_ = ntohs(address.sin_port);
   }
 
   LOG(INFO) << "Native C++ KVCacheListener actively listening on port: "
@@ -84,12 +111,12 @@ KVCacheListener::KVCacheListener(KVCacheManagerBase* engine,
 KVCacheListener::~KVCacheListener() {
   stopping_ = true;
   if (server_fd_ >= 0) {
-    int sock = socket(AF_INET6, SOCK_STREAM, 0);
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock >= 0) {
-      sockaddr_in6 serv_addr{};
-      serv_addr.sin6_family = AF_INET6;
-      serv_addr.sin6_port = htons(listener_port_);
-      inet_pton(AF_INET6, "::1", &serv_addr.sin6_addr);
+      sockaddr_in serv_addr{};
+      serv_addr.sin_family = AF_INET;
+      serv_addr.sin_port = htons(listener_port_);
+      inet_pton(AF_INET, "localhost", &serv_addr.sin_addr);
       if (connect(sock, reinterpret_cast<sockaddr*>(&serv_addr),
                   sizeof(serv_addr)) == 0) {
         ControlRequest req;
@@ -201,6 +228,16 @@ void KVCacheListener::ConnectionWorker(int client_fd) {
       LOG(ERROR) << "WaitForPendingWork failed during shutdown: " << status;
     }
     stopping_ = true;
+  } else if (req.command() == ControlRequest::COMMAND_GET_ENDPOINTS) {
+    LOG(INFO) << "C++ KVCacheListener received GET_ENDPOINTS command.";
+    std::string ip = engine_->local_ip();
+    int port = engine_->local_port().value_or(0);
+    std::string endpoint = absl::StrContains(ip, ':')
+                               ? absl::StrCat("[", ip, "]:", port)
+                               : absl::StrCat(ip, ":", port);
+    for (size_t i = 0; i < engine_->num_shards(); ++i) {
+      resp.add_endpoints(endpoint);
+    }
   } else {
     resp.set_success(false);
     resp.set_message("COMMAND_UNSPECIFIED");

@@ -16,36 +16,79 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include "grpcpp/create_channel.h"
 #include "grpcpp/grpcpp.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "grpcpp/security/credentials.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_client.h"
 #include "tpu_raiden/kv_cache/lru_cache.h"
+#include "tpu_raiden/kv_cache/raiden_controller_embedded.h"
+#include "tpu_raiden/kv_cache/raiden_id.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
 
+namespace {
+RaidenId FromProto(const ::tpu_raiden::rpc::RaidenIdProto& proto) {
+  return RaidenId{
+      .job_name = proto.job_name(),
+      .job_replica_id = proto.job_replica_id(),
+      .data_name = proto.data_name(),
+      .data_replica_idx = proto.data_replica_idx(),
+  };
+}
+}  // namespace
+
 KVCacheStore::KVCacheStore(size_t capacity, std::string global_registry_address,
-                           RaidenId raiden_id)
+                           RaidenId raiden_id,
+                           std::optional<RemoteFetchConfig> remote_config)
     : lru_cache_(capacity), raiden_id_(std::move(raiden_id)) {
   if (!global_registry_address.empty()) {
     auto channel = grpc::CreateChannel(global_registry_address,
                                        grpc::InsecureChannelCredentials());
     registry_client_ =
-        std::make_unique<global_registry::GlobalRegistryClient>(channel);
+        std::make_shared<global_registry::GlobalRegistryClient>(channel);
+  }
+
+  if (remote_config.has_value()) {
+    controller_ = std::make_unique<RaidenControllerEmbedded>(
+        this, remote_config->controller_port,
+        remote_config->orchestrator_address, remote_config->local_worker_port,
+        std::vector<std::string>{}, remote_config->bytes_per_block,
+        remote_config->num_shards, remote_config->num_listeners);
+
+    absl::Status status = controller_->Start();
+    if (!status.ok()) {
+      LOG(ERROR) << "Failed to start RaidenControllerEmbedded: " << status;
+    }
+
+    completion_poller_thread_ =
+        std::thread(&KVCacheStore::CompletionPollerLoop, this);
   }
 }
 
-KVCacheStore::~KVCacheStore() = default;
+KVCacheStore::~KVCacheStore() {
+  if (controller_) {
+    controller_->Stop();
+  }
+  completion_queue_.Stop();
+  if (completion_poller_thread_.joinable()) {
+    completion_poller_thread_.join();
+  }
+}
 
 absl::StatusOr<BlockSliceList> KVCacheStore::Lookup(
     const std::vector<std::string>& block_hashes, bool enable_global) {
@@ -76,11 +119,7 @@ absl::StatusOr<BlockSliceList> KVCacheStore::Lookup(
       const auto& global_results = global_results_or.value();
       for (size_t i = 0; i < global_results.size(); ++i) {
         const auto& metadata = global_results[i];
-        RaidenId remote_id;
-        remote_id.job_name = metadata.host_address();
-        remote_id.job_replica_id = "0";
-        remote_id.data_name = "kv_cache";
-        remote_id.data_replica_idx = metadata.block_id();
+        RaidenId remote_id = FromProto(metadata.raiden_id());
         results.push_back(std::make_pair(
             remaining_hashes[i], std::vector<RaidenBlockID>{RaidenBlockID(
                                      remote_id, -1, BlockStatus::REMOTE)}));
@@ -278,6 +317,171 @@ int KVCacheStore::GetPinCount(const std::string& hash) const {
 size_t KVCacheStore::capacity() const {
   absl::MutexLock lock(mutex_);
   return lru_cache_.capacity();
+}
+
+absl::flat_hash_map<std::string, KVCacheStore::FetchFuture>
+KVCacheStore::FetchRemote(const std::vector<std::string>& block_hashes) {
+  absl::flat_hash_map<std::string, FetchFuture> results;
+  absl::flat_hash_map<RaidenId, FetchRequestItem, RaidenIdHash> grouped_reqs;
+
+  {
+    absl::MutexLock lock(mutex_);
+    for (const auto& hash : block_hashes) {
+      std::vector<RaidenBlockID>* blocks = lru_cache_.Get(hash);
+      if (blocks) {
+        for (const auto& block : *blocks) {
+          if (block.status == BlockStatus::REMOTE) {
+            auto& item = grouped_reqs[block.raiden_id];
+            item.src_raiden_id = block.raiden_id;
+            item.block_hashes.push_back(hash);
+            item.dst_block_ids.push_back(block.host_block_id);
+          }
+        }
+      }
+    }
+  }
+
+  FetchRequest full_request;
+  for (auto& [raiden_id, item] : grouped_reqs) {
+    for (size_t i = 0; i < item.block_hashes.size(); ++i) {
+      const auto& hash = item.block_hashes[i];
+      int dst_block_id = item.dst_block_ids[i];
+
+      std::shared_ptr<FetchState> state;
+      {
+        absl::MutexLock lock(fetch_mu_);
+        uint64_t fetch_id = next_fetch_id_++;
+        state = std::make_shared<FetchState>();
+        state->fetch_id = fetch_id;
+        state->block_hash = hash;
+        state->pending_blocks.insert(dst_block_id);
+        block_to_fetch_[dst_block_id] = fetch_id;
+        active_fetches_[fetch_id] = state;
+      }
+      results[hash] = FetchFuture(state);
+    }
+    full_request.push_back(std::move(item));
+  }
+
+  if (!full_request.empty()) {
+    PushFetchWork(std::move(full_request));
+  }
+
+  return results;
+}
+
+void KVCacheStore::CompletionPollerLoop() {
+  FetchCompletion completion;
+  while (PopFetchCompletion(completion)) {
+    std::vector<global_registry::Registration> write_through_regs;
+    {
+      absl::MutexLock lock(mutex_);
+      for (const auto& item : completion) {
+        if (item.success) {
+          std::vector<RaidenBlockID>* blocks = lru_cache_.Get(item.block_hash);
+          if (blocks) {
+            for (auto& block : *blocks) {
+              if (block.status == BlockStatus::REMOTE &&
+                  block.host_block_id == item.host_block_id) {
+                block.status = BlockStatus::HOST;
+                block.raiden_id = raiden_id_;
+                LOG(INFO) << "Upgraded block " << item.block_hash << " to HOST";
+                if (registry_client_) {
+                  write_through_regs.push_back({
+                      .prefix_hash = item.block_hash,
+                      .raiden_id = raiden_id_,
+                      .block_id = item.host_block_id,
+                  });
+                }
+              }
+            }
+          }
+        } else {
+          LOG(ERROR) << "Fetch failed for " << item.block_hash << ": "
+                     << item.error_message;
+        }
+      }
+    }
+
+    if (!write_through_regs.empty() && registry_client_) {
+      std::thread([client = registry_client_,
+                   regs = std::move(write_through_regs)]() {
+        auto status = client->Register(regs);
+        if (!status.ok()) {
+          LOG(WARNING) << "Async batch write-through failed: "
+                       << status.message();
+        } else {
+          LOG(INFO) << "Async batch write-through succeeded for " << regs.size()
+                    << " blocks";
+        }
+      }).detach();
+    }
+
+    {
+      absl::MutexLock lock(fetch_mu_);
+      for (const auto& item : completion) {
+        auto it = block_to_fetch_.find(item.host_block_id);
+        if (it != block_to_fetch_.end()) {
+          uint64_t fetch_id = it->second;
+          auto state_it = active_fetches_.find(fetch_id);
+          if (state_it != active_fetches_.end()) {
+            auto& state = state_it->second;
+            state->pending_blocks.erase(item.host_block_id);
+            if (!item.success) {
+              state->failed = true;
+              state->error_message += item.error_message + ";";
+            }
+
+            if (state->pending_blocks.empty()) {
+              if (state->failed) {
+                failed_fetches_.push_back(state->block_hash);
+              } else {
+                done_fetches_.push_back(state->block_hash);
+              }
+              state->notification.Notify();
+              active_fetches_.erase(state_it);
+            }
+          }
+          block_to_fetch_.erase(it);
+        }
+      }
+    }
+  }
+}
+
+absl::Status KVCacheStore::FetchFuture::Await() {
+  if (!state_) {
+    return absl::InvalidArgumentError("FetchFuture has no valid state.");
+  }
+  state_->notification.WaitForNotification();
+  if (state_->failed) {
+    return absl::InternalError(state_->error_message);
+  }
+  return absl::OkStatus();
+}
+
+bool KVCacheStore::FetchFuture::IsDone() const {
+  if (!state_) return true;
+  return state_->notification.HasBeenNotified();
+}
+
+std::tuple<std::vector<std::string>, std::vector<std::string>,
+           std::vector<std::string>>
+KVCacheStore::PollFetchRemoteStatus() {
+  absl::MutexLock lock(fetch_mu_);
+  std::vector<std::string> pending;
+  pending.reserve(active_fetches_.size());
+  for (const auto& [id, state] : active_fetches_) {
+    pending.push_back(state->block_hash);
+  }
+
+  std::vector<std::string> done = std::move(done_fetches_);
+  std::vector<std::string> failed = std::move(failed_fetches_);
+
+  done_fetches_.clear();
+  failed_fetches_.clear();
+
+  return {std::move(done), std::move(failed), std::move(pending)};
 }
 
 }  // namespace kv_cache

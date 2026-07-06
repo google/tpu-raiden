@@ -31,12 +31,25 @@ class RaidenBlockID:
       status: BlockStatus = ...,
   ) -> None: ...
 
+class RemoteFetchConfig:
+  orchestrator_address: str
+  controller_port: int
+  local_worker_port: int
+  bytes_per_block: int
+  num_shards: int
+  def __init__(self) -> None: ...
+
+class FetchFuture:
+  def Await(self) -> None: ...
+  def IsDone(self) -> bool: ...
+
 class KVCacheStore:
   def __init__(
       self,
       capacity: int,
       global_registry_address: str = '',
       raiden_id: RaidenId = ...,
+      remote_config: RemoteFetchConfig | None = None,
   ) -> None: ...
 
   @property
@@ -106,4 +119,10 @@ class KVCacheStore:
     ...
   def release(self, block_hashes: list[bytes]) -> None:
     """Releases previously pinned block hashes, making them eligible for LRU eviction when capacity is exceeded."""
+    ...
+  def fetch_remote(self, block_hashes: list[bytes]) -> dict[bytes, FetchFuture]:
+    """Initiates remote fetch for the given block hashes."""
+    ...
+  def poll_fetch_remote_status(self) -> tuple[list[bytes], list[bytes], list[bytes]]:
+    """Polls the status of remote fetches. Returns (done, failed, pending) block hashes."""
     ...

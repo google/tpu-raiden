@@ -30,13 +30,14 @@
 #include "grpcpp/support/status.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry.grpc.pb.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry.pb.h"
+#include "tpu_raiden/kv_cache/raiden_id.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
 namespace global_registry {
 
 struct RegistryEntry {
-  std::string host_address;
+  RaidenId raiden_id;
   int32_t block_id;
   absl::Time expire_time;
 };
@@ -79,8 +80,13 @@ class GlobalRegistryServiceImpl final : public GlobalRegistryService::Service {
 
   absl::Mutex mutex_;
   // Key: prefix_hash
-  // Value: single active registration entry
-  absl::flat_hash_map<std::string, RegistryEntry> registry_
+  // Value: list of active registration entries
+  absl::flat_hash_map<std::string, std::vector<RegistryEntry>> registry_
+      ABSL_GUARDED_BY(mutex_);
+
+  // Key: prefix_hash
+  // Value: last returned index for round-robin selection
+  absl::flat_hash_map<std::string, size_t> round_robin_indices_
       ABSL_GUARDED_BY(mutex_);
 
   std::atomic<bool> shutdown_{false};

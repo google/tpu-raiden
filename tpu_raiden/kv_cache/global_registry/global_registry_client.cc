@@ -32,10 +32,20 @@
 #include <openssl/sha.h>
 #include "tpu_raiden/kv_cache/global_registry/global_registry.grpc.pb.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry.pb.h"
+#include "tpu_raiden/kv_cache/raiden_id.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
 namespace global_registry {
+
+namespace {
+void ToProto(const RaidenId& id, ::tpu_raiden::rpc::RaidenIdProto* proto) {
+  proto->set_job_name(id.job_name);
+  proto->set_job_replica_id(id.job_replica_id);
+  proto->set_data_name(id.data_name);
+  proto->set_data_replica_idx(id.data_replica_idx);
+}
+}  // namespace
 
 GlobalRegistryClient::GlobalRegistryClient(
     std::shared_ptr<grpc::Channel> channel)
@@ -48,7 +58,7 @@ absl::Status GlobalRegistryClient::Register(
     auto* entry = request.add_entries();
     entry->set_prefix_hash(reg.prefix_hash);
     auto* meta = entry->mutable_metadata();
-    meta->set_host_address(reg.host_address);
+    ToProto(reg.raiden_id, meta->mutable_raiden_id());
     meta->set_block_id(reg.block_id);
     if (reg.ttl > absl::ZeroDuration()) {
       entry->set_ttl_seconds(absl::ToInt64Seconds(reg.ttl));
@@ -93,14 +103,13 @@ absl::StatusOr<std::vector<KVBlockMetadata>> GlobalRegistryClient::Lookup(
 }
 
 absl::Status GlobalRegistryClient::Unregister(
-    const std::vector<std::string>& prefix_hashes,
-    absl::string_view host_address) {
+    const std::vector<std::string>& prefix_hashes, const RaidenId& raiden_id) {
   UnregisterRequest request;
   request.mutable_prefix_hashes()->Reserve(prefix_hashes.size());
   for (const auto& hash : prefix_hashes) {
     request.add_prefix_hashes(hash);
   }
-  request.set_host_address(host_address);
+  ToProto(raiden_id, request.mutable_raiden_id());
 
   UnregisterResponse response;
   grpc::ClientContext context;
