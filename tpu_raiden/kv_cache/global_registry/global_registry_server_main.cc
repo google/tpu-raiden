@@ -19,13 +19,14 @@
 #include <memory>
 #include <string>
 
-#include "base/init_google.h"
+#include "absl/flags/parse.h"
+#include "absl/log/initialize.h"
 #include "absl/flags/flag.h"
 #include "absl/log/log.h"
 #include "absl/time/time.h"
-#include "third_party/grpc/include/grpcpp/security/server_credentials.h"
-#include "third_party/grpc/include/grpcpp/server.h"
-#include "third_party/grpc/include/grpcpp/server_builder.h"
+#include "grpcpp/security/server_credentials.h"
+#include "grpcpp/server.h"
+#include "grpcpp/server_builder.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_server.h"
 
 ABSL_FLAG(int32_t, port, 50051, "Port to listen on");
@@ -61,7 +62,8 @@ void RunServer() {
 }
 
 int main(int argc, char** argv) {
-  InitGoogle(argv[0], &argc, &argv, true);
+  absl::ParseCommandLine(argc, argv);
+  absl::InitializeLog();
   RunServer();
   return 0;
 }
