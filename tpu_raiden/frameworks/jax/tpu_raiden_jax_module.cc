@@ -178,7 +178,8 @@ NB_MODULE(_tpu_raiden_jax, m) {
                 res.value().first,
                 tpu_raiden::RaidenFuture{std::move(res.value().second)});
           },
-          nb::arg("peer"), nb::arg("src_block_ids"))
+          nb::arg("peer"), nb::arg("src_block_ids"),
+          nb::call_guard<nb::gil_scoped_release>())
 
       .def(
           "h2h_read",
@@ -192,7 +193,8 @@ NB_MODULE(_tpu_raiden_jax, m) {
                 res.value().first,
                 tpu_raiden::RaidenFuture{std::move(res.value().second)});
           },
-          nb::arg("peer"), nb::arg("src_block_ids"))
+          nb::arg("peer"), nb::arg("src_block_ids"),
+          nb::call_guard<nb::gil_scoped_release>())
 
       .def("local_port", &tpu_raiden::kv_cache::jax::KVCacheManager::local_port)
       .def("get_host_pointer",
