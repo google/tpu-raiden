@@ -24,7 +24,7 @@ jobs:
     name: H2H cross-socket C++ vs Python
     runs-on: linux-x86-ct5lp-224-8tpu     # same TPU box the benchmarks use (2 NUMA nodes)
     container:
-      image: us-docker.pkg.dev/ml-oss-artifacts-transient/ml-public-testing-container/ml-build:939285342
+      image: "us-central1-docker.pkg.dev/wyzhang-dev/quickstart-docker-repo/ml-build:939285342"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
