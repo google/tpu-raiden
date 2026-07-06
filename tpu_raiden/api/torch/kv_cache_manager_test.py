@@ -37,6 +37,7 @@ import torch
 
 from tpu_raiden.api.torch import kv_cache_manager
 
+BufferSpec = kv_cache_manager.BufferSpec
 KVCacheManager = kv_cache_manager.KVCacheManager
 
 
@@ -217,6 +218,94 @@ class KVCacheManagerTest(parameterized.TestCase):
       time.sleep(0.1)
 
     self.assertTrue(done_prod, "Producer did not finish sending in time")
+
+  def test_unified_pool_requires_slice_byte_size(self):
+    """A flat 1D tensor without explicit geometry is rejected."""
+    pool = torch.zeros(4096, dtype=torch.int8, device=self.device)
+
+    with self.assertRaisesRegex(ValueError, "slice_byte_size"):
+      KVCacheManager(
+          kv_caches=[pool],
+          node_id=0,
+          local_control_port=0,
+          max_blocks=4,
+          num_slots=2,
+      )
+
+  def test_unified_pool_e2e_transfer_polling(self):
+    """Byte-exact block pull between two flat unified pools."""
+    num_blocks = 2
+    slice_byte_size = 1024
+    total = num_blocks * slice_byte_size
+
+    # Producer pool: block 0 = 0,1,2,... (mod 127), block 1 = zeros.
+    src_host = torch.zeros(total, dtype=torch.int8)
+    src_host[:slice_byte_size] = (
+        torch.arange(slice_byte_size, dtype=torch.int64)
+        .remainder(127)
+        .to(torch.int8)
+    )
+    src_pool = src_host.to(self.device)
+    dst_pool = torch.zeros(total, dtype=torch.int8, device=self.device)
+
+    producer = KVCacheManager(
+        kv_caches=[src_pool],
+        node_id=0,
+        local_control_port=0,
+        max_blocks=2,
+        num_slots=2,
+        buffer_spec=BufferSpec(slice_byte_size=slice_byte_size),
+    )
+    consumer = KVCacheManager(
+        kv_caches=[dst_pool],
+        node_id=0,
+        local_control_port=0,
+        max_blocks=2,
+        num_slots=2,
+        buffer_spec=BufferSpec(slice_byte_size=slice_byte_size),
+    )
+
+    port = producer.local_control_port
+    self.assertGreater(port, 0)
+
+    req_id = "test_req_unified_pool"
+    uuid = 424242
+    producer.register_read(req_id, uuid, [0])
+
+    # Pull producer block 0 into consumer block 1: exercises non-identity
+    # block addressing (offset = block_id * slice_byte_size) on both sides.
+    consumer.start_read(
+        req_id=req_id,
+        uuid=uuid,
+        remote_endpoint=f"127.0.0.1:{port}",
+        remote_block_ids=[0],
+        local_block_ids=[1],
+    )
+
+    done = False
+    for _ in range(50):
+      _, done_recving, failed_recving = consumer.poll_stats()
+      if req_id in failed_recving:
+        self.fail("Transfer failed")
+      if req_id in done_recving:
+        done = True
+        break
+      time.sleep(0.1)
+
+    self.assertTrue(done, "Consumer did not finish transfer in time")
+
+    got = dst_pool.cpu().numpy()
+    expected_block = src_host[:slice_byte_size].numpy()
+    np.testing.assert_array_equal(
+        got[slice_byte_size:],
+        expected_block,
+        err_msg="consumer block 1 must be byte-identical to producer block 0",
+    )
+    np.testing.assert_array_equal(
+        got[:slice_byte_size],
+        np.zeros(slice_byte_size, dtype=np.int8),
+        err_msg="consumer block 0 must be untouched",
+    )
 
 
 if __name__ == "__main__":

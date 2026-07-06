@@ -31,6 +31,7 @@
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
 #include "tpu_raiden/core/tpu_pjrt_manager.h"
+#include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
 
 namespace tpu_raiden {
 namespace {
@@ -522,6 +523,88 @@ TEST(KVCacheManagerWithTransferTest, MultiIpOrchestratedTransfer) {
   }
   for (int i = 0; i < elements_per_slice; ++i) {
     EXPECT_EQ(read_back[elements_per_slice + i], static_cast<float>(i));
+  }
+}
+
+TEST(KVCacheManagerWithTransferTest, FlatPoolLocalOrchestratedTransfer) {
+  TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,
+                          TpuPjrtManager::GetDefault());
+
+  // 2 blocks x 1024 bytes in one flat 1D pool.
+  constexpr int64_t kSliceBytes = 1024;
+  constexpr int64_t kNumBlocks = 2;
+  constexpr int64_t kTotalBytes = kNumBlocks * kSliceBytes;
+  std::vector<int8_t> host_data(kTotalBytes);
+  for (int64_t i = 0; i < kTotalBytes; ++i) {
+    host_data[i] = static_cast<int8_t>(i % 256);
+  }
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<xla::PjRtBuffer> buffer,
+      pjrt_manager->BufferFromHost(host_data.data(), xla::S8, {kTotalBytes}));
+  ASSERT_THAT(buffer->GetReadyFuture().Await(), IsOk());
+
+  std::vector<std::vector<xla::PjRtBuffer*>> layer_buffers = {{buffer.get()}};
+  kv_cache::BufferSpec buffer_spec;
+  buffer_spec.slice_byte_size = kSliceBytes;
+  auto engine = std::make_unique<KVCacheManagerWithTransfer>(
+      layer_buffers,
+      /*local_port=*/std::nullopt,
+      /*host_blocks_to_allocate=*/std::nullopt,
+      /*unsafe_skip_buffer_lock=*/true,
+      /*parallelism=*/1,
+      /*host_allocator=*/nullptr,
+      /*node_id=*/0,
+      /*local_control_port=*/0,
+      /*max_blocks=*/2,
+      /*num_slots=*/2,
+      /*timeout_s=*/10.0,
+      /*metrics_collector=*/nullptr, buffer_spec);
+
+  // The explicit geometry, not the flat shape, defines the block size.
+  EXPECT_EQ(engine->slice_byte_size(), kSliceBytes);
+
+  ASSERT_THAT(engine->ConfigureHostStagingSlots(2, 2), IsOk());
+
+  // Pull block 0 into block 1 through the local loopback endpoint.
+  uint64_t uuid = 54321;
+  std::string req_id = "flat_pool_local_test_req";
+  engine->NotifyForRead(req_id, uuid, /*block_ids=*/{0});
+
+  int port = engine->local_control_port();
+  ASSERT_GT(port, 0);
+  engine->StartRead(req_id, uuid, "127.0.0.1:" + std::to_string(port),
+                    /*remote_block_ids=*/{0},
+                    /*local_block_ids=*/{1});
+
+  bool done = false;
+  for (int i = 0; i < 100; ++i) {
+    auto [done_sending, done_recving, failed_recving] =
+        engine->CompleteReadRaw();
+    if (std::find(failed_recving.begin(), failed_recving.end(), req_id) !=
+        failed_recving.end()) {
+      FAIL() << "Transfer failed";
+    }
+    if (std::find(done_recving.begin(), done_recving.end(), req_id) !=
+        done_recving.end()) {
+      done = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  ASSERT_TRUE(done) << "Transfer timed out";
+
+  // Block 1's bytes must now equal block 0's original bytes and block 0 must
+  // be untouched. A byte-exact match proves the explicit slice size addressed
+  // the flat pool correctly (rank-1 memory is linear, so no tiled-layout
+  // remapping is involved).
+  TF_ASSERT_OK_AND_ASSIGN(auto literal, buffer->ToLiteral().Await());
+  auto read_back = literal->data<int8_t>();
+  ASSERT_EQ(read_back.size(), kNumBlocks * kSliceBytes);
+  for (int64_t i = 0; i < kSliceBytes; ++i) {
+    ASSERT_EQ(read_back[i], static_cast<int8_t>(i % 256))
+        << "block 0 corrupted at byte " << i;
+    ASSERT_EQ(read_back[kSliceBytes + i], static_cast<int8_t>(i % 256))
+        << "block 1 wrong at byte " << i;
   }
 }
 

@@ -28,6 +28,7 @@
 #include "tpu_raiden/core/utils.h"
 #include "tpu_raiden/frameworks/torch/torch_utils.h"
 #include "tpu_raiden/kv_cache/kv_cache_listener.h"
+#include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
 
 namespace tpu_raiden {
 namespace torch {
@@ -79,14 +80,12 @@ KVCacheManager::KVCacheManager(
                      /*max_blocks=*/0, /*num_slots=*/0, /*timeout_s=*/120.0,
                      /*kv_caches=*/{}) {}
 
-KVCacheManager::KVCacheManager(UnpackedLayers unpacked,
-                               std::optional<int> local_port,
-                               std::optional<int> host_blocks_to_allocate,
-                               bool unsafe_skip_buffer_lock, int parallelism,
-                               int64_t node_id, int64_t local_control_port,
-                               int64_t max_blocks, int64_t num_slots,
-                               double timeout_s,
-                               std::vector<at::Tensor> kv_caches)
+KVCacheManager::KVCacheManager(
+    UnpackedLayers unpacked, std::optional<int> local_port,
+    std::optional<int> host_blocks_to_allocate, bool unsafe_skip_buffer_lock,
+    int parallelism, int64_t node_id, int64_t local_control_port,
+    int64_t max_blocks, int64_t num_slots, double timeout_s,
+    std::vector<at::Tensor> kv_caches, const kv_cache::BufferSpec& buffer_spec)
     : KVCacheManagerWithTransfer(
           std::move(unpacked.buffers), local_port, host_blocks_to_allocate,
           unsafe_skip_buffer_lock, parallelism,
@@ -97,7 +96,8 @@ KVCacheManager::KVCacheManager(UnpackedLayers unpacked,
                   ? 0
                   : unpacked.buffers[0][0]->GetOnDeviceSizeInBytes().value_or(
                         0)),
-          node_id, local_control_port, max_blocks, num_slots, timeout_s),
+          node_id, local_control_port, max_blocks, num_slots, timeout_s,
+          /*metrics_collector=*/nullptr, buffer_spec),
       kv_caches_(std::move(kv_caches)),
       // Move the keep-alive refs in AFTER the base ctor has acquired the
       // buffers; they pin the materialized device buffers for our lifetime.
@@ -108,13 +108,14 @@ KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
                                int64_t max_blocks, int64_t num_slots,
                                double timeout_s, bool unsafe_skip_buffer_lock,
                                int parallelism,
-                               std::optional<int> listener_port)
+                               std::optional<int> listener_port,
+                               const kv_cache::BufferSpec& buffer_spec)
     : KVCacheManager(UnpackLayers(SingleShardLayers(kv_caches)),
                      /*local_port=*/std::nullopt,
                      /*host_blocks_to_allocate=*/std::nullopt,
                      unsafe_skip_buffer_lock, parallelism, node_id,
                      local_control_port, max_blocks, num_slots, timeout_s,
-                     kv_caches) {
+                     kv_caches, buffer_spec) {
   if (listener_port) {
     listener_ = std::make_unique<tpu_raiden::kv_cache::KVCacheListener>(
         this, *listener_port);

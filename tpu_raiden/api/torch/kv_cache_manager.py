@@ -52,6 +52,8 @@ _load_torch_tpu_common()
 
 from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _impl
 
+BufferSpec = _impl.BufferSpec
+
 
 class KVCacheManager:
   """Wrapper around compiled C++ KV Cache Manager.
@@ -72,6 +74,7 @@ class KVCacheManager:
       parallelism: int = 4,
       node_id: int = 0,
       listener_port: Optional[int] = None,
+      buffer_spec: Optional[BufferSpec] = None,
   ):
     """Instantiates the TransferEngine-based KVCacheManager.
 
@@ -89,6 +92,8 @@ class KVCacheManager:
       node_id: Unique identifier for this host/node in the distributed mesh.
       listener_port: Sockets server port for incoming C++ KVCacheListener
         commands.
+      buffer_spec: KV cache buffer spec. Its slice_byte_size (explicit per-block
+        byte size) is required when kv_caches are flat 1D byte tensors.
     """
     if host_blocks_to_allocate is not None:
       self._impl = _impl.KVCacheManager(
@@ -114,6 +119,7 @@ class KVCacheManager:
           unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
           listener_port=listener_port,
           parallelism=parallelism,
+          buffer_spec=buffer_spec or BufferSpec(),
       )
 
   @property

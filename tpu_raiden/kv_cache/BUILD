@@ -61,7 +61,6 @@ cc_library(
         "//tpu_raiden/core:numa_thread_pool",
         "//tpu_raiden/core:raiden_manager_base",
         "//tpu_raiden/core:raw_transfer_core",
-        "//tpu_raiden/core:raw_transfer_impl",
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/core:tpu_utils",
         "//tpu_raiden/core:xla_raw_transfer_headers",

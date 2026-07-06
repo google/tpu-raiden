@@ -114,6 +114,18 @@ NB_MODULE(_tpu_raiden_torch, m) {
   // =========================================================================
   // 2. Bind KVCacheManager
   // =========================================================================
+  nb::class_<tpu_raiden::kv_cache::BufferSpec>(m, "BufferSpec")
+      .def(nb::init<>())
+      .def(
+          "__init__",
+          [](tpu_raiden::kv_cache::BufferSpec* self, int64_t slice_byte_size) {
+            new (self) tpu_raiden::kv_cache::BufferSpec();
+            self->slice_byte_size = slice_byte_size;
+          },
+          nb::arg("slice_byte_size"))
+      .def_rw("slice_byte_size",
+              &tpu_raiden::kv_cache::BufferSpec::slice_byte_size);
+
   nb::class_<KVCacheManager>(m, "KVCacheManager")
       .def(nb::init<const std::vector<std::vector<at::Tensor>>&,
                     std::optional<int>, std::optional<int>, bool, int>(),
@@ -122,12 +134,14 @@ NB_MODULE(_tpu_raiden_torch, m) {
            nb::arg("unsafe_skip_buffer_lock") = false,
            nb::arg("parallelism") = 1)
       .def(nb::init<const std::vector<at::Tensor>&, int64_t, int64_t, int64_t,
-                    int64_t, double, bool, int, std::optional<int>>(),
+                    int64_t, double, bool, int, std::optional<int>,
+                    const tpu_raiden::kv_cache::BufferSpec&>(),
            nb::arg("kv_caches"), nb::arg("node_id"),
            nb::arg("local_control_port"), nb::arg("max_blocks"),
            nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
            nb::arg("unsafe_skip_buffer_lock") = true,
-           nb::arg("parallelism") = 4, nb::arg("listener_port") = nb::none())
+           nb::arg("parallelism") = 4, nb::arg("listener_port") = nb::none(),
+           nb::arg("buffer_spec") = tpu_raiden::kv_cache::BufferSpec())
       .def(
           "RegisterRecv",
           [](KVCacheManager& self, uint64_t uuid, const std::string& req_id,

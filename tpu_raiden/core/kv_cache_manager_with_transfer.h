@@ -160,7 +160,8 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
       HostBufferAllocator host_allocator, int64_t node_id = 0,
       int64_t local_control_port = -1, int64_t max_blocks = 0,
       int64_t num_slots = 0, double timeout_s = 120.0,
-      std::shared_ptr<MetricsCollector> metrics_collector = nullptr);
+      std::shared_ptr<MetricsCollector> metrics_collector = nullptr,
+      const kv_cache::BufferSpec& buffer_spec = {});
 
   KVCacheManagerWithTransfer(
       const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
