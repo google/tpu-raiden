@@ -41,19 +41,19 @@ from absl import flags
 _SENDER_NUMA = flags.DEFINE_integer('sender_numa', 0, 'NUMA node for the sender.')
 _RECEIVER_NUMA = flags.DEFINE_integer('receiver_numa', 1, 'NUMA node for the receiver.')
 _WARMUP = flags.DEFINE_integer('warmup', 3, 'Warmup transfers.')
-_ITERS = flags.DEFINE_integer('iters', 50, 'Timed transfers.')
-_TIMEOUT_S = flags.DEFINE_integer('timeout_s', 600, 'Per-process hard timeout.')
+_ITERS = flags.DEFINE_integer('iters', 20, 'Timed transfers.')
+_TIMEOUT_S = flags.DEFINE_integer('timeout_s', 180, 'Per-process hard timeout.')
 
 _LAYERS = 32   # C++ kNumLayers (fixed)
 _SHARDS = 1    # C++ kNumShards (fixed)
 
-# (block_size_bytes, num_blocks, parallelism) -- mirrors run_h2h_compare.sh.
+# (block_size_bytes, num_blocks, parallelism). Trimmed for fast VALIDATION: 128MB
+# is dropped (256 GiB/side -> OOM risk, 13 TiB moved). Small configs are enough to
+# confirm Python bandwidth agrees with C++.
 _CONFIGS = [
     (1048576, 64, 1),
     (1048576, 64, 8),
-    (16777216, 64, 1),
     (16777216, 64, 8),
-    (134217728, 64, 8),
 ]
 
 _CPP_RE = re.compile(r'Throughput:\s*([0-9.]+)')                 # "Throughput: X GB/s (collective)"
@@ -94,16 +94,21 @@ def _run(cmd, timeout):
                        text=True, timeout=timeout)
     return p.returncode, p.stdout
   except subprocess.TimeoutExpired as e:
-    return 124, (e.output or '') + f'\n[timeout after {timeout}s]'
+    out = e.output
+    if isinstance(out, (bytes, bytearray)):  # on timeout, output may be undecoded bytes
+      out = out.decode('utf-8', 'replace')
+    return 124, (out or '') + f'\n[timeout after {timeout}s]'
 
 
 def _run_cpp(cc, bs, nb, p, port):
   """Start the C++ receiver (bg) + sender (timed); return GB/s or -1.0."""
+  # Discard the receiver's stdout/stderr: we only need the SENDER's throughput
+  # line, and an undrained PIPE here deadlocks once the receiver's log fills it.
   recv = subprocess.Popen(
       [cc, '--role=receiver', '--data_interface=lo', f'--peer_control_port={port}',
        f'--numa_node={_RECEIVER_NUMA.value}', f'--block_size={bs}',
        f'--num_blocks={nb}', f'--parallelism={p}'],
-      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
   time.sleep(3)  # let the control server bind
   rc, out = _run(
       [cc, '--role=sender', '--peer_control_ip=127.0.0.1', '--data_interface=lo',
@@ -168,12 +173,17 @@ def main(_):
 
   results = []
   port = 9990
-  for bs, nb, p in _CONFIGS:
+  n = len(_CONFIGS)
+  for i, (bs, nb, p) in enumerate(_CONFIGS, 1):
     port += 1
+    label = _label(bs, nb, p)
+    print(f'[compare] ({i}/{n}) {label}: running C++ ...', flush=True)
     cpp = _run_cpp(cc, bs, nb, p, port)
+    print(f'[compare] ({i}/{n}) {label}: C++ done ({cpp:.3f} GB/s); running Python ...',
+          flush=True)
     py = _run_py(py_bin, bs, nb, p)
-    results.append((_label(bs, nb, p), cpp, py))
-    print(f'[measured] {_label(bs, nb, p):22} cpp={cpp:8.3f} py={py:8.3f} GB/s', flush=True)
+    results.append((label, cpp, py))
+    print(f'[measured] {label:22} cpp={cpp:8.3f} py={py:8.3f} GB/s', flush=True)
 
   _emit_tb(results)
 

@@ -52,6 +52,13 @@ from absl import flags
 # so it never tries to grab the TPU (/dev/vfio), which is busy/claimed on the
 # shared runner and would fail init ("Device or resource busy") -- see b/ crash.
 os.environ.setdefault('JAX_PLATFORMS', 'cpu')
+
+# Single-host loopback: force the transport to bind 127.0.0.1, like the C++
+# runner's --data_interface=lo. Otherwise InitTransportServer() auto-picks the
+# real NIC (eth0) and the intra-host transfer over it HANGS (that data path is
+# meant for cross-node over physical NICs). Excluding eth0 -- the only NIC on the
+# runner -- empties the candidate list, so the manager falls back to 127.0.0.1.
+os.environ.setdefault('EXCLUDE_CONTROL_INTERFACE', 'eth0')
 import jax  # noqa: E402
 import numpy as np  # noqa: E402
 
