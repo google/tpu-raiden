@@ -30,11 +30,11 @@ on:
 
   push:
     branches:
-      - V7
+      - V6
       
   pull_request:
     branches:
-      - V7
+      - V6
   schedule:
     - cron: "0 0 * * *"  # Runs at 00:00 UTC every day test
 
