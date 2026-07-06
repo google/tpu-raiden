@@ -43,13 +43,12 @@ permissions:
   contents: read
   pull-requests: write
 
+
 jobs:
   h2h_compare:
     name: H2H cross-socket C++ vs Python
-    runs-on: linux-x86-ct5lp-224-8tpu     # TPU box: 2 NUMA nodes + ml build env
+    runs-on: linux-x86-ct5lp-224-8tpu
     container:
-      # Stable repo (NOT the -transient one the earlier attempt used, which can be
-      # garbage-collected); same image tag BAP uses in benchmark_registry.pbtxt.
       image: us-central1-docker.pkg.dev/wyzhang-dev/quickstart-docker-repo/ml-build:939285342
     steps:
       - name: Checkout
@@ -59,8 +58,21 @@ jobs:
         run: |
           bazel build -c opt --config=oss --config=ci \
             --copt=-Wno-error=bitwise-instead-of-logical \
+            --copt=-Wno-bitwise-instead-of-logical \
+            --host_copt=-Wno-error=bitwise-instead-of-logical \
+            --host_copt=-Wno-bitwise-instead-of-logical \
             //tpu_raiden/examples/microbenchmarks:h2h_benchmark_runner \
             //tpu_raiden/benchmarks:h2h_perf_test_oss
+
+      - name: Debug - run Python benchmark once (show full output)
+        run: |
+          set +e
+          ./bazel-bin/tpu_raiden/benchmarks/h2h_perf_test_oss --role=launch \
+            --sender_numa=0 --receiver_numa=1 \
+            --num_layers=32 --num_shards=1 \
+            --block_size=1048576 --num_blocks=64 --parallelism=1 \
+            --warmup=3 --iters=50
+          echo "=== python exit code: $? ==="
 
       - name: Run C++ vs Python sweep
         run: |
