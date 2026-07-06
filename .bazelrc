@@ -2,6 +2,7 @@ common --experimental_repo_remote_exec
 common --nocheck_visibility
 common --copt=-DMLIR_PYTHON_PACKAGE_PREFIX=jaxlib.mlir.
 build:oss --override_module=torch_tpu=%workspace%/third_party/torch_tpu_stub
+build:oss --copt=-Wno-error=bitwise-instead-of-logical
 build --action_env=CC=clang-18
 build --action_env=CXX=clang++-18
 build --repo_env=CC=clang-18
