@@ -1,0 +1,62 @@
+# Copyright 2026 Google LLC.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# TEMPORARY validation workflow: run the single-host cross-socket H2H comparison
+# (C++ h2h_benchmark_runner vs Python push h2h_perf_test_oss) on the TPU runner,
+# only to confirm the Python bandwidth agrees with the C++ number. DELETE this
+# file once the Python code is validated.
+#
+# This does NOT go through BAP (comparison is two-binary + diff, which doesn't fit
+# BAP's one-workload->metrics model), so the linux-x86-n2-16 -> n2-32 override
+# that BAP's pre/post jobs need does NOT apply here. It runs directly on the TPU
+# box (2 NUMA nodes, needed for cross-socket), using the stable (non-transient)
+# ml-build image and the -Wbitwise build fix that the earlier attempt was missing.
+
+name: H2H Compare (C++ vs Python) [TEMP - delete after validation]
+
+on:
+  workflow_dispatch:   # manual only; run from the Actions tab on demand
+
+permissions:
+  contents: read
+
+jobs:
+  h2h_compare:
+    name: H2H cross-socket C++ vs Python
+    runs-on: linux-x86-ct5lp-224-8tpu     # TPU box: 2 NUMA nodes + ml build env
+    container:
+      # Stable repo (NOT the -transient one the earlier attempt used, which can be
+      # garbage-collected); same image tag BAP uses in benchmark_registry.pbtxt.
+      image: us-central1-docker.pkg.dev/wyzhang-dev/quickstart-docker-repo/ml-build:939285342
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build both binaries
+        run: |
+          bazel build -c opt --config=oss --config=ci \
+            --copt=-Wno-error=bitwise-instead-of-logical \
+            //tpu_raiden/examples/microbenchmarks:h2h_benchmark_runner \
+            //tpu_raiden/benchmarks:h2h_perf_test_oss
+
+      - name: Run C++ vs Python sweep
+        run: |
+          bash tpu_raiden/benchmarks/run_h2h_compare.sh | tee h2h_compare.txt
+
+      - name: Upload comparison table
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h2h_compare
+          path: h2h_compare.txt
