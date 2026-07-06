@@ -846,10 +846,15 @@ void RaidenControllerEmbedded::SaveWorkQueuePollerLoop() {
                                     .mutable_save_request()
                                     ->mutable_shard_save_schedules();
 
+        // Store-assigned dst HOST slot (central allocator); -1 when absent so
+        // the worker falls back to D2hAutoAllocate.
+        int dst_host_id =
+            (b < req.dst_host_block_ids.size()) ? req.dst_host_block_ids[b] : -1;
         for (size_t local_sh = 0; local_sh < num_local_shards; ++local_sh) {
           auto& schedule = (*shard_schedules)[static_cast<int32_t>(local_sh)];
           auto* entry = schedule.add_entries();
           entry->set_src_block_id(src_id);
+          entry->set_dst_block_id(dst_host_id);
         }
         global_shard_offset += num_local_shards;
       }

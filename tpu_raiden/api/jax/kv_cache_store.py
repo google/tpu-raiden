@@ -206,6 +206,22 @@ class RemoteFetchConfig:
   def num_listeners(self, val: int):
     self._impl.num_listeners = val
 
+  @property
+  def num_host_blocks(self) -> int:
+    return self._impl.num_host_blocks
+
+  @num_host_blocks.setter
+  def num_host_blocks(self, val: int):
+    self._impl.num_host_blocks = val
+
+  @property
+  def host_block_offset(self) -> int:
+    return self._impl.host_block_offset
+
+  @host_block_offset.setter
+  def host_block_offset(self, val: int):
+    self._impl.host_block_offset = val
+
 
 class KVCacheStore:
   """Wrapper around compiled C++ KVCacheStore."""

@@ -354,6 +354,7 @@ void KVCacheListener::ConnectionWorker(int client_fd) {
       LOG(INFO) << "C++ KVCacheListener received EXECUTE_SAVE, uuid=" << uuid;
 
       std::vector<int64_t> src_block_ids;
+      std::vector<int64_t> dst_block_ids;
       std::vector<int64_t> copy_sizes;
 
       if (!save_req.shard_save_schedules().empty()) {
@@ -361,21 +362,45 @@ void KVCacheListener::ConnectionWorker(int client_fd) {
             save_req.shard_save_schedules().begin()->second;
         for (const auto& entry : first_schedule.entries()) {
           src_block_ids.push_back(entry.src_block_id());
+          dst_block_ids.push_back(entry.dst_block_id());
           copy_sizes.push_back(1);
         }
+      }
+
+      // Central allocation: if the store assigned all dst HOST slots (>=0), D2H
+      // straight into them instead of auto-allocating on the worker. Keeps the
+      // id identical across every sub-manager. Empty/-1 => legacy auto-alloc.
+      bool central_dst = !dst_block_ids.empty();
+      for (int64_t d : dst_block_ids) {
+        if (d < 0) { central_dst = false; break; }
       }
 
       if (src_block_ids.empty()) {
         resp.set_success(true);
         resp.set_message("No blocks to save");
       } else {
-        auto res_or = engine_->D2hAutoAllocate(src_block_ids, copy_sizes);
+        std::vector<int> allocated_ids;
+        absl::StatusOr<raiden::PjRtCopyFuture> res_or;
+        if (central_dst) {
+          allocated_ids.assign(dst_block_ids.begin(), dst_block_ids.end());
+          VLOG(2) << "Save central D2h into store dst slots (n="
+                  << dst_block_ids.size() << ")";
+          res_or = engine_->D2h(src_block_ids, dst_block_ids, copy_sizes);
+        } else {
+          auto aa_or = engine_->D2hAutoAllocate(src_block_ids, copy_sizes);
+          if (aa_or.ok()) {
+            allocated_ids = aa_or.value().first;
+            res_or = std::move(aa_or.value().second);
+          } else {
+            res_or = aa_or.status();
+          }
+        }
         if (!res_or.ok()) {
           resp.set_success(false);
-          resp.set_message("Failed to trigger D2H auto allocate: " +
+          resp.set_message("Failed to trigger D2H: " +
                            std::string(res_or.status().message()));
         } else {
-          auto [allocated_ids, future] = std::move(res_or).value();
+          auto future = std::move(res_or).value();
 
           future.OnReady(
               [port = controller_port_,

@@ -116,6 +116,9 @@ struct SaveRequest {
   uint64_t save_id;
   std::vector<std::string> block_hashes;
   std::vector<int> src_block_ids;  // HBM block IDs
+  // Store-assigned dst HOST block ids (central allocator). Empty => worker
+  // auto-allocates (D2hAutoAllocate); filled => worker D2Hs into these slots.
+  std::vector<int> dst_host_block_ids;
 };
 
 struct SaveCompletionItem {
@@ -215,6 +218,16 @@ struct RemoteFetchConfig {
   size_t bytes_per_block = 0;
   size_t num_shards = 0;
   size_t num_listeners = 1;
+  // If > 0, the store owns a CENTRAL host-block allocator of this many slots and
+  // assigns host_block_id itself (authority) instead of letting each sub-manager
+  // auto-allocate. This keeps the id identical across all sub-managers/listeners,
+  // avoiding the lockstep dependency. 0 = disabled (worker auto-allocates).
+  size_t num_host_blocks = 0;
+  // First host block id the store owns. The store pool is [host_block_offset,
+  // host_block_offset + num_host_blocks). Set this to the worker's staging slot
+  // pool size (num_slots * max_blocks) so the store's slots are DISJOINT from
+  // the blocks KVCacheManager pre-locks for its slot pool.
+  size_t host_block_offset = 0;
 };
 
 // KV Store that manages the indices and routing of prefix cache across serving
@@ -472,6 +485,17 @@ class KVCacheStore {
   FetchCompletionQueue completion_queue_;
   std::unique_ptr<RaidenControllerEmbedded> controller_;
   std::optional<RemoteFetchConfig> config_;
+
+  // Central host-block allocator (authority). Enabled when
+  // config_->num_host_blocks > 0. free_ids is a stack of currently-free host
+  // block indices; the store assigns these so every sub-manager writes the same
+  // host_block_id. Guarded by mutex_. See AllocHostBlock()/FreeHostBlock().
+  bool host_pool_enabled_ = false;
+  std::vector<int> host_free_ids_ ABSL_GUARDED_BY(mutex_);
+  // Returns a free host block id, or -1 if the pool is disabled or exhausted.
+  int AllocHostBlock() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  void FreeHostBlock(int id) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
   void CompletionPollerLoop();
   std::thread completion_poller_thread_;
   void LoadCompletionPollerLoop();

@@ -459,7 +459,11 @@ NB_MODULE(_tpu_raiden_jax, m) {
       .def_rw("num_shards",
               &tpu_raiden::kv_cache::RemoteFetchConfig::num_shards)
       .def_rw("num_listeners",
-              &tpu_raiden::kv_cache::RemoteFetchConfig::num_listeners);
+              &tpu_raiden::kv_cache::RemoteFetchConfig::num_listeners)
+      .def_rw("num_host_blocks",
+              &tpu_raiden::kv_cache::RemoteFetchConfig::num_host_blocks)
+      .def_rw("host_block_offset",
+              &tpu_raiden::kv_cache::RemoteFetchConfig::host_block_offset);
 
   nb::class_<tpu_raiden::kv_cache::KVCacheStore::FetchFuture>(m, "FetchFuture")
       .def("Await",

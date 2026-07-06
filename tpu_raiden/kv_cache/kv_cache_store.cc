@@ -61,6 +61,21 @@ KVCacheStore::KVCacheStore(size_t capacity, std::string global_registry_address,
   }
 
   if (remote_config.has_value()) {
+    if (remote_config->num_host_blocks > 0) {
+      host_pool_enabled_ = true;
+      // Store owns [offset, offset+count). Free stack in descending order so
+      // pop() yields offset, offset+1, ... ascending. The offset keeps these
+      // slots DISJOINT from the blocks KVCacheManager pre-locks for its staging
+      // slot pool, so the two allocators never touch the same host memory.
+      int base = static_cast<int>(remote_config->host_block_offset);
+      int count = static_cast<int>(remote_config->num_host_blocks);
+      host_free_ids_.reserve(count);
+      for (int i = base + count - 1; i >= base; --i) {
+        host_free_ids_.push_back(i);
+      }
+      LOG(INFO) << "KVCacheStore central host-block pool enabled: ids [" << base
+                << ", " << (base + count) << ")";
+    }
     controller_ = std::make_unique<RaidenControllerEmbedded>(
         this, remote_config->controller_port,
         remote_config->orchestrator_address, remote_config->local_worker_port,
@@ -334,6 +349,18 @@ size_t KVCacheStore::capacity() const {
   return lru_cache_.capacity();
 }
 
+int KVCacheStore::AllocHostBlock() {
+  if (!host_pool_enabled_ || host_free_ids_.empty()) return -1;
+  int id = host_free_ids_.back();
+  host_free_ids_.pop_back();
+  return id;
+}
+
+void KVCacheStore::FreeHostBlock(int id) {
+  if (!host_pool_enabled_ || id < 0) return;
+  host_free_ids_.push_back(id);
+}
+
 absl::flat_hash_map<std::string, KVCacheStore::FetchFuture>
 KVCacheStore::FetchRemote(const std::vector<std::string>& block_hashes) {
   absl::flat_hash_map<std::string, FetchFuture> results;
@@ -345,6 +372,15 @@ KVCacheStore::FetchRemote(const std::vector<std::string>& block_hashes) {
       RaidenBlockID* block = lru_cache_.Get(hash);
       if (block) {
         if (block->status == BlockStatus::REMOTE) {
+          // Central allocation: the store assigns the local dst host block id so
+          // every sub-manager/listener writes the same slot (no per-worker
+          // divergence). Falls back to -1 (receiver auto-allocates) when the
+          // pool is disabled.
+          if (host_pool_enabled_ && block->host_block_id < 0) {
+            block->host_block_id = AllocHostBlock();
+            VLOG(2) << "FetchRemote central-allocated host_block_id "
+                    << block->host_block_id << " for " << hash;
+          }
           auto& item = grouped_reqs[block->raiden_id];
           item.src_raiden_id = block->raiden_id;
           item.block_hashes.push_back(hash);
@@ -413,6 +449,14 @@ void KVCacheStore::CompletionPollerLoop() {
         } else {
           LOG(ERROR) << "Fetch failed for " << item.block_hash << ": "
                      << item.error_message;
+          // Return the centrally-allocated dst slot so a failed fetch doesn't
+          // leak it; the block stays REMOTE with no host residency.
+          RaidenBlockID* block = lru_cache_.Get(item.block_hash);
+          if (block && block->status == BlockStatus::REMOTE &&
+              block->host_block_id >= 0) {
+            FreeHostBlock(block->host_block_id);
+            block->host_block_id = -1;
+          }
         }
       }
     }
@@ -767,6 +811,15 @@ absl::flat_hash_map<std::string, KVCacheStore::SaveFuture> KVCacheStore::Save(
 
       full_request.block_hashes.push_back(hash);
       full_request.src_block_ids.push_back(src_hbm_id);
+      // Central allocation: the store picks the dst HOST slot so every
+      // sub-manager D2Hs into the same id (no lockstep dependency). When the
+      // pool is disabled this stays empty and the worker auto-allocates.
+      if (host_pool_enabled_) {
+        int dst = (block->host_block_id >= 0) ? block->host_block_id
+                                              : AllocHostBlock();
+        block->host_block_id = dst;
+        full_request.dst_host_block_ids.push_back(dst);
+      }
     }
   }
 
@@ -911,6 +964,7 @@ absl::flat_hash_map<std::string, KVCacheStore::EvictFuture> KVCacheStore::Evict(
   full_request.evict_id = evict_id;
 
   std::vector<std::shared_ptr<EvictState>> created_states;
+  std::vector<std::shared_ptr<EvictState>> locally_done;
   std::vector<std::string> registry_unregs;
 
   {
@@ -966,17 +1020,30 @@ absl::flat_hash_map<std::string, KVCacheStore::EvictFuture> KVCacheStore::Evict(
       state->evict_id = evict_id;
       state->block_hash = hash;
       results[hash] = EvictFuture(state);
-      created_states.push_back(state);
 
-      full_request.block_hashes.push_back(hash);
-      full_request.host_block_ids.push_back(block->host_block_id);
+      if (host_pool_enabled_) {
+        // Central pool is the authority: free the slot here and resolve now. The
+        // worker never allocated/locked these slots (Save/Fetch went through
+        // D2h/H2H into store-provided ids, not LogicalBlockManager), so an
+        // UnlockBlocks round-trip would error ("Cannot unlock unallocated
+        // block"). No worker action is needed on evict.
+        int hid = block->host_block_id;
+        if (block->status == BlockStatus::INIT) {
+          lru_cache_.Erase(hash);  // invalidates `block`
+        } else {
+          block->host_block_id = -1;
+        }
+        FreeHostBlock(hid);
+        locally_done.push_back(state);
+      } else {
+        created_states.push_back(state);
+        full_request.block_hashes.push_back(hash);
+        full_request.host_block_ids.push_back(block->host_block_id);
+      }
     }
   }
 
-  if (full_request.block_hashes.empty()) {
-    return results;
-  }
-
+  // Unregister evicted blocks from the global registry (both paths).
   if (registry_client_ && !registry_unregs.empty()) {
     std::thread([client = registry_client_, unregs = std::move(registry_unregs),
                  id = raiden_id_]() {
@@ -987,6 +1054,27 @@ absl::flat_hash_map<std::string, KVCacheStore::EvictFuture> KVCacheStore::Evict(
             << status;
       }
     }).detach();
+  }
+
+  // Central pool: the evict was finalized locally in the loop above; resolve the
+  // futures and don't round-trip to the worker (no host_block_manager_ state to
+  // touch). Must run before the full_request.empty() early-return, since the
+  // local path never populates full_request.
+  if (host_pool_enabled_) {
+    {
+      absl::MutexLock lock(&evict_mu_);
+      for (const auto& state : locally_done) {
+        done_evicts_.push_back(state->block_hash);
+      }
+    }
+    for (const auto& state : locally_done) {
+      state->notification.Notify();
+    }
+    return results;
+  }
+
+  if (full_request.block_hashes.empty()) {
+    return results;
   }
 
   {
@@ -1032,10 +1120,14 @@ void KVCacheStore::EvictCompletionPollerLoop() {
         if (item.success) {
           RaidenBlockID* block = lru_cache_.Get(item.block_hash);
           if (block) {
+            // Return the freed host slot to the central pool (no-op if pool off).
+            int freed_id = block->host_block_id;
             if (block->status == BlockStatus::INIT) {
               lru_cache_.Erase(item.block_hash);
+              FreeHostBlock(freed_id);
             } else if (block->status == BlockStatus::HBM) {
               block->host_block_id = -1;
+              FreeHostBlock(freed_id);
             }
           }
         } else {
