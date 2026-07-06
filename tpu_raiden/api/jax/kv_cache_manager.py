@@ -50,6 +50,8 @@ class KVCacheManager:
       host_blocks_to_allocate: Optional[int] = None,
       parallelism: int = 4,
       node_id: int = 0,
+      listener_port: Optional[int] = None,
+      listener_controller_port: Optional[int] = None,
   ):
     """Instantiates the TransferEngine-based KVCacheManager.
 
@@ -65,8 +67,11 @@ class KVCacheManager:
         pool.
       parallelism: Number of parallel network copies per layer.
       node_id: Unique identifier for this host/node in the distributed mesh.
+      listener_port: Optional port for the internal KVCacheListener.
     """
     if host_blocks_to_allocate is not None:
+      # Legacy constructor doesn't support listener_port in this wrapper currently,
+      # but we can pass it if _impl supports it. Assuming it doesn't for now based on previous impl.
       self._impl = _impl.KVCacheManager(
           kv_caches,
           local_control_port if local_control_port > 0 else None,
@@ -89,9 +94,27 @@ class KVCacheManager:
           timeout_s=timeout_s,
           unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
           parallelism=parallelism,
+          listener_port=listener_port,
+          listener_controller_port=listener_controller_port,
       )
 
+  @property
+  def is_listener_active(self) -> bool:
+    """Returns True if any internal listener is active."""
+    return self._impl.is_listener_active
+
+  @property
+  def transfer_address(self) -> str:
+    """Returns the data plane transfer address."""
+    return self._impl.transfer_address
+
+  @property
+  def listener_address(self) -> str:
+    """Returns the listener address."""
+    return self._impl.listener_address
+
   def get_local_endpoints(self) -> List[Dict[str, Any]]:
+
     """Returns the active Raiden endpoint descriptors."""
     return self._impl.get_local_endpoints()
 
