@@ -224,7 +224,6 @@ class KVCacheStore {
   struct FetchState {
     uint64_t fetch_id;
     std::string block_hash;
-    absl::flat_hash_set<int> pending_blocks;
     bool failed = false;
     std::string error_message;
     absl::Notification notification;
@@ -486,7 +485,10 @@ class KVCacheStore {
   uint64_t next_fetch_id_ ABSL_GUARDED_BY(fetch_mu_) = 1;
   absl::flat_hash_map<uint64_t, std::shared_ptr<FetchState>> active_fetches_
       ABSL_GUARDED_BY(fetch_mu_);
-  absl::flat_hash_map<int, uint64_t> block_to_fetch_ ABSL_GUARDED_BY(fetch_mu_);
+  // Maps block hash -> fetch_id. Keyed by hash (not dst block id) because the
+  // dst host block may be auto-allocated by the receiving worker during fetch.
+  absl::flat_hash_map<std::string, uint64_t> hash_to_fetch_
+      ABSL_GUARDED_BY(fetch_mu_);
   std::vector<std::string> done_fetches_ ABSL_GUARDED_BY(fetch_mu_);
   std::vector<std::string> failed_fetches_ ABSL_GUARDED_BY(fetch_mu_);
 

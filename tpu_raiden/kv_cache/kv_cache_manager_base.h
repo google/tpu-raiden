@@ -111,6 +111,9 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
                                 uint64_t uuid = 0) override;
 
+  void UpdatePlanDstBlocks(uint64_t uuid,
+                           const std::vector<int>& dst_ids) override;
+
   // Async on-chip H2D offloads returning PJRT copy future E2E
   virtual absl::StatusOr<raiden::PjRtCopyFuture> H2d(
       const std::vector<int64_t>& src_offsets_major_dim = {},

@@ -1104,6 +1104,25 @@ absl::Status KVCacheManagerBase::OnBlocksReceived(
   return absl::OkStatus();
 }
 
+void KVCacheManagerBase::UpdatePlanDstBlocks(uint64_t uuid,
+                                             const std::vector<int>& dst_ids) {
+  absl::MutexLock l(plans_mu_);
+  auto it = active_plans_.find(uuid);
+  if (it == active_plans_.end()) return;
+  auto* schedules = it->second.request.mutable_shard_push_schedules();
+  // Each shard's entries are in block order; replace the k-th placeholder (-1)
+  // dst_block_id with the k-th worker-allocated dst id.
+  for (auto& kv : *schedules) {
+    size_t k = 0;
+    for (auto& entry : *kv.second.mutable_entries()) {
+      if (entry.dst_block_id() < 0) {
+        if (k < dst_ids.size()) entry.set_dst_block_id(dst_ids[k]);
+        ++k;
+      }
+    }
+  }
+}
+
 absl::Status KVCacheManagerBase::PushKVCacheResharded(
     const tpu_raiden::rpc::StartTransferRequest& request) {
   // 1. Register the active plan so GetBlockChunks can use it

@@ -22,9 +22,26 @@
 
 #include "grpcpp/grpcpp.h"
 #include "net/util/ports.h"
+#include <csignal>
+
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
+// OSS shim: google3 gunit provides bare EXPECT_OK/ASSERT_OK; abseil ships them as
+// ABSL_EXPECT_OK/ABSL_ASSERT_OK. Alias to abseil's IsOk() matcher.
+#ifndef EXPECT_OK
+#define EXPECT_OK(expr) EXPECT_THAT(expr, ::absl_testing::IsOk())
+#define ASSERT_OK(expr) ASSERT_THAT(expr, ::absl_testing::IsOk())
+#endif
+// OSS: google3 InitGoogle ignores SIGPIPE; the standalone gtest_main binary does
+// not, so a broken-pipe write during socket teardown would kill the process.
+namespace {
+const int kRaidenIgnoreSigpipe = [] {
+  signal(SIGPIPE, SIG_IGN);
+  return 0;
+}();
+}  // namespace
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "grpcpp/security/server_credentials.h"

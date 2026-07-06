@@ -155,6 +155,10 @@ message ControlRequest {
   string error_message = 10;
   SaveRequest save_request = 11;
   EvictRequest evict_request = 12;
+  // Transfer uuid for COMMAND_TRANSFER_COMPLETED: lets the controller map the
+  // (possibly worker-auto-allocated) completed_block_ids back to block hashes by
+  // order, so remote-fetch completions are keyed by hash, not by block id.
+  int64 transfer_uuid = 13;
 }
 
 message ControlResponse {

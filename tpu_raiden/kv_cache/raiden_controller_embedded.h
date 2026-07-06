@@ -113,13 +113,17 @@ class RaidenControllerEmbedded {
   std::atomic<bool> stopping_{false};
 
   absl::Mutex pending_mu_;
-  absl::flat_hash_map<int, std::string> pending_fetches_
+  // Maps a fetch transfer uuid to its ORDERED block hashes, so a completion
+  // (which carries worker-side block ids in the same order, possibly
+  // auto-allocated) can be re-keyed to the block hash. Keyed by hash downstream.
+  absl::flat_hash_map<uint64_t, std::vector<std::string>> pending_fetches_
       ABSL_GUARDED_BY(pending_mu_);
-  // Maps dst_block_id to number of listeners that have completed
-  absl::flat_hash_map<int, size_t> block_completion_counts_
+  // Maps block hash to number of listeners that have completed it.
+  absl::flat_hash_map<std::string, size_t> block_completion_counts_
       ABSL_GUARDED_BY(pending_mu_);
-  // Maps dst_block_id to number of active fetch listeners
-  absl::flat_hash_map<int, size_t> fetch_listeners_count_
+  // Maps a fetch uuid to how many of its hashes are still outstanding, so the
+  // pending_fetches_ entry can be dropped once every hash finished.
+  absl::flat_hash_map<uint64_t, size_t> fetch_remaining_
       ABSL_GUARDED_BY(pending_mu_);
 
   struct ControllerLoadState {

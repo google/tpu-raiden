@@ -15,6 +15,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include <cstdint>
+#include <csignal>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -64,6 +65,7 @@ void RunServer() {
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
   absl::InitializeLog();
+  signal(SIGPIPE, SIG_IGN);  // standalone server: survive dropped clients
   RunServer();
   return 0;
 }

@@ -327,16 +327,16 @@ void RaidenControllerEmbedded::WorkQueuePollerLoop() {
         continue;
       }
 
-      // Record pending fetches before negotiating
+      uint64_t uuid = absl::ToUnixMicros(absl::Now());
+
+      // Record pending fetch keyed by uuid -> ordered hashes, so the completion
+      // (worker block ids in the same order) can be re-keyed to the hash.
       {
         absl::MutexLock lock(pending_mu_);
-        for (size_t i = 0; i < batch_item.block_hashes.size(); ++i) {
-          pending_fetches_[batch_item.dst_block_ids[i]] =
-              batch_item.block_hashes[i];
-        }
+        pending_fetches_[uuid] = batch_item.block_hashes;
+        fetch_remaining_[uuid] = batch_item.block_hashes.size();
       }
 
-      uint64_t uuid = absl::ToUnixMicros(absl::Now());
       auto neg_resp_or = NegotiateFetch(addr_or.value(), batch_item, uuid);
 
       if (!neg_resp_or.ok()) {
@@ -620,28 +620,32 @@ void RaidenControllerEmbedded::ConnectionWorker(int client_fd) {
     FetchCompletion completion;
     {
       absl::MutexLock lock(pending_mu_);
-      for (int32_t block_id : req.completed_block_ids()) {
-        auto it = pending_fetches_.find(block_id);
-        if (it != pending_fetches_.end()) {
-          block_completion_counts_[block_id]++;
-          if (block_completion_counts_[block_id] >= num_listeners_) {
+      uint64_t uuid = static_cast<uint64_t>(req.transfer_uuid());
+      auto uit = pending_fetches_.find(uuid);
+      if (uit == pending_fetches_.end()) {
+        LOG(WARNING) << "Received completion for unknown fetch uuid: " << uuid;
+      } else {
+        const std::vector<std::string>& hashes = uit->second;
+        // completed_block_ids are the worker's (possibly auto-allocated) dst
+        // host block ids, in the same order as the fetch's block hashes.
+        for (int i = 0; i < req.completed_block_ids_size(); ++i) {
+          if (static_cast<size_t>(i) >= hashes.size()) break;
+          const std::string& hash = hashes[i];
+          int host_block_id = req.completed_block_ids(i);
+          if (++block_completion_counts_[hash] >= num_listeners_) {
             FetchCompletionItem item;
-            item.block_hash = it->second;
-            item.host_block_id = block_id;
+            item.block_hash = hash;
+            item.host_block_id = host_block_id;  // worker-allocated dst
             item.success = true;
             completion.push_back(item);
-            pending_fetches_.erase(it);
-            block_completion_counts_.erase(block_id);
-            VLOG(1) << "Fetch completed for block_id " << block_id
-                    << " across all listeners";
-          } else {
-            VLOG(1) << "Fetch completed for block_id " << block_id << " on "
-                    << block_completion_counts_[block_id] << "/"
-                    << num_listeners_ << " listeners";
+            block_completion_counts_.erase(hash);
+            if (--fetch_remaining_[uuid] == 0) {
+              pending_fetches_.erase(uuid);
+              fetch_remaining_.erase(uuid);
+            }
+            VLOG(1) << "Fetch completed for hash " << hash << " (host_block_id "
+                    << host_block_id << ") across all listeners";
           }
-        } else {
-          LOG(WARNING) << "Received completion for unknown block_id: "
-                       << block_id;
         }
       }
     }

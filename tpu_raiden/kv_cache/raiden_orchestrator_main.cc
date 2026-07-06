@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <csignal>
 #include <string>
 
 #include "absl/flags/parse.h"
@@ -26,6 +27,7 @@ ABSL_FLAG(std::string, bind_ip, "", "IP to bind to");
 int main(int argc, char* argv[]) {
   absl::ParseCommandLine(argc, argv);
   absl::InitializeLog();
+  signal(SIGPIPE, SIG_IGN);  // standalone server: survive dropped clients
 
   int port = absl::GetFlag(FLAGS_port);
   std::string bind_ip = absl::GetFlag(FLAGS_bind_ip);

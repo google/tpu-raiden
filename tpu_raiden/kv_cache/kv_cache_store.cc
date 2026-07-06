@@ -360,6 +360,7 @@ KVCacheStore::FetchRemote(const std::vector<std::string>& block_hashes) {
       const auto& hash = item.block_hashes[i];
       int dst_block_id = item.dst_block_ids[i];
 
+      (void)dst_block_id;  // may be -1: the receiving worker auto-allocates.
       std::shared_ptr<FetchState> state;
       {
         absl::MutexLock lock(fetch_mu_);
@@ -367,8 +368,7 @@ KVCacheStore::FetchRemote(const std::vector<std::string>& block_hashes) {
         state = std::make_shared<FetchState>();
         state->fetch_id = fetch_id;
         state->block_hash = hash;
-        state->pending_blocks.insert(dst_block_id);
-        block_to_fetch_[dst_block_id] = fetch_id;
+        hash_to_fetch_[hash] = fetch_id;
         active_fetches_[fetch_id] = state;
       }
       results[hash] = FetchFuture(state);
@@ -393,11 +393,14 @@ void KVCacheStore::CompletionPollerLoop() {
         if (item.success) {
           RaidenBlockID* block = lru_cache_.Get(item.block_hash);
           if (block) {
-            if (block->status == BlockStatus::REMOTE &&
-                block->host_block_id == item.host_block_id) {
+            if (block->status == BlockStatus::REMOTE) {
+              // Record the (possibly worker-auto-allocated) local host block id.
+              block->host_block_id = item.host_block_id;
               block->status = BlockStatus::HOST;
               block->raiden_id = raiden_id_;
-              LOG(INFO) << "Upgraded block " << item.block_hash << " to HOST";
+              LOG(INFO) << "Upgraded block " << item.block_hash
+                        << " to HOST (host_block_id " << item.host_block_id
+                        << ")";
               if (registry_client_) {
                 write_through_regs.push_back({
                     .prefix_hash = item.block_hash,
@@ -431,29 +434,23 @@ void KVCacheStore::CompletionPollerLoop() {
     {
       absl::MutexLock lock(fetch_mu_);
       for (const auto& item : completion) {
-        auto it = block_to_fetch_.find(item.host_block_id);
-        if (it != block_to_fetch_.end()) {
+        auto it = hash_to_fetch_.find(item.block_hash);
+        if (it != hash_to_fetch_.end()) {
           uint64_t fetch_id = it->second;
           auto state_it = active_fetches_.find(fetch_id);
           if (state_it != active_fetches_.end()) {
             auto& state = state_it->second;
-            state->pending_blocks.erase(item.host_block_id);
             if (!item.success) {
               state->failed = true;
               state->error_message += item.error_message + ";";
+              failed_fetches_.push_back(state->block_hash);
+            } else {
+              done_fetches_.push_back(state->block_hash);
             }
-
-            if (state->pending_blocks.empty()) {
-              if (state->failed) {
-                failed_fetches_.push_back(state->block_hash);
-              } else {
-                done_fetches_.push_back(state->block_hash);
-              }
-              state->notification.Notify();
-              active_fetches_.erase(state_it);
-            }
+            state->notification.Notify();
+            active_fetches_.erase(state_it);
           }
-          block_to_fetch_.erase(it);
+          hash_to_fetch_.erase(it);
         }
       }
     }

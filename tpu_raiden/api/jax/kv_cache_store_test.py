@@ -23,7 +23,6 @@ if not os.path.exists("/dev/accel0"):
 from absl.testing import absltest
 import portpicker
 
-from google3.pyglib import resources
 from tpu_raiden.api.jax import kv_cache_store
 from tpu_raiden.api.jax.kv_cache_manager import KVCacheManager
 import jax
@@ -44,27 +43,36 @@ def setUpModule():
   _orchestrator_port = portpicker.pick_unused_port()
   _registry_port = portpicker.pick_unused_port()
 
-  orchestrator_binary = resources.GetResourceFilename(
-      "google3/third_party/tpu_raiden/tpu_raiden/kv_cache/raiden_orchestrator_main"
-  )
-  registry_binary = resources.GetResourceFilename(
-      "google3/third_party/tpu_raiden/tpu_raiden/kv_cache/global_registry/global_registry_server"
-  )
+  try:
+    from google3.pyglib import resources  # pylint: disable=g-import-not-at-top
+    orchestrator_binary = resources.GetResourceFilename(
+        "google3/third_party/tpu_raiden/tpu_raiden/kv_cache/raiden_orchestrator_main"
+    )
+    registry_binary = resources.GetResourceFilename(
+        "google3/third_party/tpu_raiden/tpu_raiden/kv_cache/global_registry/global_registry_server"
+    )
+    orch_extra = ["--bind_ip=0.0.0.0", "--alsologtostderr"]
+    reg_extra = ["--alsologtostderr"]
+  except ImportError:
+    # OSS: bazel-bin binaries; the OSS absl mains parse flags strictly, so only
+    # pass flags they define (orchestrator has --port/--bind_ip; registry --port).
+    ws = os.environ.get(
+        "RAIDEN_WS",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
+    orchestrator_binary = os.path.join(
+        ws, "bazel-bin/tpu_raiden/kv_cache/raiden_orchestrator_main")
+    registry_binary = os.path.join(
+        ws, "bazel-bin/tpu_raiden/kv_cache/global_registry/global_registry_server")
+    orch_extra = ["--bind_ip=0.0.0.0"]
+    reg_extra = []
 
   print(f"Starting Orchestrator on port {_orchestrator_port}")
-  _orchestrator_process = subprocess.Popen([
-      orchestrator_binary,
-      f"--port={_orchestrator_port}",
-      "--bind_ip=0.0.0.0",
-      "--alsologtostderr",
-  ])
+  _orchestrator_process = subprocess.Popen(
+      [orchestrator_binary, f"--port={_orchestrator_port}", *orch_extra])
 
   print(f"Starting Registry on port {_registry_port}")
-  _registry_process = subprocess.Popen([
-      registry_binary,
-      f"--port={_registry_port}",
-      "--alsologtostderr",
-  ])
+  _registry_process = subprocess.Popen(
+      [registry_binary, f"--port={_registry_port}", *reg_extra])
 
   # Give them some time to start
   time.sleep(2)

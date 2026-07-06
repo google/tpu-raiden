@@ -34,6 +34,7 @@ cc_grpc_library(
     name = "global_registry_cc_grpc",
     srcs = [":global_registry_proto"],
     generate_mocks = True,
+    grpc_only = True,
     deps = [":global_registry_cc_proto"],
 )
 

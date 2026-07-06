@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>  // NOLINT
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -52,6 +53,7 @@ KVCacheListener::KVCacheListener(KVCacheManagerBase* engine, int listener_port,
         [this](const std::vector<int>& block_ids, uint64_t uuid) {
           ControlRequest req;
           req.set_command(ControlRequest::COMMAND_TRANSFER_COMPLETED);
+          req.set_transfer_uuid(static_cast<int64_t>(uuid));
           for (int id : block_ids) {
             req.add_completed_block_ids(id);
           }
@@ -86,15 +88,35 @@ KVCacheListener::KVCacheListener(KVCacheManagerBase* engine, int listener_port,
   address.sin_port = htons(listener_port_);
   address.sin_addr.s_addr = INADDR_ANY;
 
-  if (bind(server_fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) <
-      0) {
-    LOG(FATAL) << "C++ KVCacheListener bind failed on port "
-               << listener_port_ << ": " << std::strerror(errno);
+  // Retry on EADDRINUSE (a listener from an earlier transfer/test may still be
+  // releasing the port), then fail GRACEFULLY rather than LOG(FATAL): aborting
+  // the whole process on one port collision would kill every other in-process
+  // user (e.g. every other test in a suite). On give-up we mark the listener
+  // inactive so callers see is_active()==false instead of a crash.
+  constexpr int kMaxBindAttempts = 100;  // ~10s at 100ms
+  int bind_attempts = 0;
+  while (bind(server_fd_, reinterpret_cast<sockaddr*>(&address),
+              sizeof(address)) < 0) {
+    if (errno == EADDRINUSE && ++bind_attempts < kMaxBindAttempts) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      continue;
+    }
+    LOG(ERROR) << "C++ KVCacheListener bind failed on port " << listener_port_
+               << " after " << bind_attempts
+               << " attempts: " << std::strerror(errno);
+    close(server_fd_);
+    server_fd_ = -1;
+    stopping_ = true;  // is_active() -> false
+    return;
   }
 
   if (listen(server_fd_, 128) < 0) {
-    LOG(FATAL) << "C++ KVCacheListener listen failed: "
-               << std::strerror(errno);
+    LOG(ERROR) << "C++ KVCacheListener listen failed on port " << listener_port_
+               << ": " << std::strerror(errno);
+    close(server_fd_);
+    server_fd_ = -1;
+    stopping_ = true;
+    return;
   }
 
   socklen_t addr_len = sizeof(address);

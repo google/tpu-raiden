@@ -284,6 +284,7 @@ cc_test(
         "//tpu_raiden/kv_cache/global_registry:global_registry_client_cc",
         "//tpu_raiden/kv_cache/global_registry:global_registry_server_lib",
         "@com_github_grpc_grpc//:grpc++",
+        "@com_google_absl//absl/status:status_matchers",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest",
