@@ -94,3 +94,19 @@ py_binary(
         "@pypi//numpy",
     ],
 )
+
+# C++ vs Python comparison as ONE BAP workload: both benchmark binaries are
+# runfiles data deps, so `bazel run` on the TPU runner builds and ships them.
+py_binary(
+    name = "h2h_compare_bench",
+    testonly = True,
+    srcs = ["h2h_compare_bench.py"],
+    data = [
+        ":h2h_perf_test_oss",
+        "//tpu_raiden/examples/microbenchmarks:h2h_benchmark_runner",
+    ],
+    deps = [
+        "@com_google_absl_py//absl:app",
+        "@com_google_absl_py//absl/flags",
+    ],
+)

@@ -47,8 +47,13 @@ import time
 
 from absl import app
 from absl import flags
-import jax
-import numpy as np
+
+# H2H is host-to-host (CPU only); force JAX to the CPU backend BEFORE importing it
+# so it never tries to grab the TPU (/dev/vfio), which is busy/claimed on the
+# shared runner and would fail init ("Device or resource busy") -- see b/ crash.
+os.environ.setdefault('JAX_PLATFORMS', 'cpu')
+import jax  # noqa: E402
+import numpy as np  # noqa: E402
 
 from tpu_raiden.frameworks.jax import _tpu_raiden_jax as kv_cache_manager
 
