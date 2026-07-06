@@ -27,8 +27,8 @@ on:
       - V6 
       - main 
   schedule:
-    #- cron: "0 0 * * *"  # Runs at 00:00 UTC every day
-    - cron: "*/15 * * * *"  # Runs at 00:00 UTC every day
+    - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
+
 
 permissions:
   contents: read
