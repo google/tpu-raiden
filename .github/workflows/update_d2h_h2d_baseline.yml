@@ -4,10 +4,12 @@ on:
   push:
     branches:
       - V6
+      - main
       # test 
   pull_request:
     branches:
       - V6 
+      - main 
 
   schedule:
     - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
