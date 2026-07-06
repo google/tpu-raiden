@@ -26,10 +26,22 @@
 name: H2H Compare (C++ vs Python) [TEMP - delete after validation]
 
 on:
-  workflow_dispatch:   # manual only; run from the Actions tab on demand
+  workflow_dispatch:
+
+  push:
+    branches:
+      - V7
+      
+  pull_request:
+    branches:
+      - V7
+  schedule:
+    - cron: "0 0 * * *"  # Runs at 00:00 UTC every day test
+
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   h2h_compare:
