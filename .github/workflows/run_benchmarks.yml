@@ -27,7 +27,11 @@ on:
       - V6 
       - main 
   schedule:
-    - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
+    #- cron: "0 0 * * *"  # Runs at 00:00 UTC every day
+    - cron: "*/10 * * * *"  # Runs at 00:00 UTC every day
+concurrency:
+  group: perf-bench
+  cancel-in-progress: false 
 
 permissions:
   contents: read
