@@ -40,7 +40,9 @@
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
+#include "tpu_raiden/kv_cache/kv_cache_listener.h"
 #ifndef WITHOUT_PYTHON
+
 #include "tpu_raiden/frameworks/jax/utils.h"
 
 namespace nb = nanobind;
@@ -161,25 +163,34 @@ KVCacheManager::KVCacheManager(UnpackedCache&& cache,
 KVCacheManager::KVCacheManager(nanobind::list kv_caches, int64_t node_id,
                                int64_t local_control_port, int64_t max_blocks,
                                int64_t num_slots, double timeout_s,
-                               bool unsafe_skip_buffer_lock, int parallelism)
+                               bool unsafe_skip_buffer_lock, int parallelism,
+                               std::optional<int> listener_port,
+                               std::optional<int> listener_controller_port,
+                               std::optional<int> host_blocks_to_allocate)
     : KVCacheManager(UnpackAndMove(std::move(kv_caches)), node_id,
                      local_control_port, max_blocks, num_slots, timeout_s,
-                     unsafe_skip_buffer_lock, parallelism) {}
+                     unsafe_skip_buffer_lock, parallelism, listener_port,
+                     listener_controller_port, host_blocks_to_allocate) {}
 
 KVCacheManager::KVCacheManager(UnpackedCache&& cache, int64_t node_id,
                                int64_t local_control_port, int64_t max_blocks,
                                int64_t num_slots, double timeout_s,
-                               bool unsafe_skip_buffer_lock, int parallelism)
+                               bool unsafe_skip_buffer_lock, int parallelism,
+                               std::optional<int> listener_port,
+                               std::optional<int> listener_controller_port,
+                               std::optional<int> host_blocks_to_allocate)
     : device_arrays_(std::move(cache.device_arrays)) {
   const char* enable_metrics_env = std::getenv("ENABLE_RAIDEN_METRICS");
   if (enable_metrics_env != nullptr &&
       std::strcmp(enable_metrics_env, "true") == 0) {
     metrics_collector_ = std::make_shared<MetricsCollector>();
   }
-  InitSubManagers(cache.layer_buffers, std::nullopt, std::nullopt,
+  InitSubManagers(cache.layer_buffers, std::nullopt, host_blocks_to_allocate,
                   unsafe_skip_buffer_lock, parallelism, node_id,
-                  local_control_port, max_blocks, num_slots, timeout_s);
+                  local_control_port, max_blocks, num_slots, timeout_s,
+                  listener_port, listener_controller_port);
 }
+
 #endif
 
 KVCacheManager::KVCacheManager(size_t num_layers, size_t num_shards,
@@ -215,7 +226,8 @@ void KVCacheManager::InitSubManagers(
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     bool unsafe_skip_buffer_lock, int parallelism, int64_t node_id,
     int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
-    double timeout_s) {
+    double timeout_s, std::optional<int> listener_port,
+    std::optional<int> listener_controller_port) {
   if (layer_buffers.empty()) return;
   size_t num_layers = layer_buffers.size();
   total_num_shards_ = layer_buffers[0].size();
@@ -325,6 +337,18 @@ void KVCacheManager::InitSubManagers(
         if (metrics_collector_) {
           sub_mgr->SetMetricsCollector(metrics_collector_);
         }
+
+        if (listener_port.has_value()) {
+          int sub_listener_port = *listener_port + sub_idx;
+          int ctrl_port = listener_controller_port.value_or(local_control_port);
+          listeners_.push_back(std::make_unique<KVCacheListener>(
+              sub_mgr.get(), sub_listener_port, ctrl_port));
+
+          LOG(INFO) << "Started KVCacheListener for sub-manager " << sub_idx
+                    << " on port " << sub_listener_port
+                    << ", reporting to controller port " << ctrl_port;
+        }
+
       } catch (const std::exception& e) {
         // A consecutive (or requested) port was unavailable. Retry the whole
         // allocation from a fresh ephemeral base; for fixed ports, propagate.
@@ -364,6 +388,37 @@ int KVCacheManager::local_control_port() const {
 
 int64_t KVCacheManager::node_id() const {
   return sub_managers_.empty() ? 0 : sub_managers_[0]->node_id();
+}
+
+std::optional<int> KVCacheManager::listener_port() const {
+  if (!listeners_.empty()) {
+    return listeners_[0]->listener_port();
+  }
+  return std::nullopt;
+}
+
+bool KVCacheManager::is_listener_active() const {
+  for (const auto& l : listeners_) {
+    if (l->is_active()) return true;
+  }
+  return false;
+}
+
+std::string KVCacheManager::transfer_address() const {
+  auto port = local_port();
+  if (!port.has_value()) return "";
+  // Assuming local_ip() is available or deduce from sub_managers_
+  return sub_managers_.empty()
+             ? ""
+             : sub_managers_[0]->local_ip() + ":" + std::to_string(*port);
+}
+
+std::string KVCacheManager::listener_address() const {
+  auto port = listener_port();
+  if (!port.has_value()) return "";
+  return sub_managers_.empty()
+             ? ""
+             : sub_managers_[0]->local_ip() + ":" + std::to_string(*port);
 }
 
 uint8_t* KVCacheManager::GetHostPointer(size_t layer_idx, size_t shard_idx) {

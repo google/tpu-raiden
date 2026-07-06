@@ -36,10 +36,18 @@ py_library(
 py_test(
     name = "kv_cache_store_test",
     srcs = ["kv_cache_store_test.py"],
-    data = ["//tpu_raiden/kv_cache/global_registry:global_registry_server"],
+    data = [
+        "//tpu_raiden/kv_cache:raiden_orchestrator_main",
+        "//tpu_raiden/kv_cache/global_registry:global_registry_server",
+    ],
     deps = [
         ":kv_cache_store",
+        ":kv_cache_manager_jax_py",
+        "//pyglib:resources",
         "@com_google_absl_py//absl/testing:absltest",
+        "//third_party/py/portpicker",
+        "@jax//jax",
+        "@pypi//numpy",
         # buildcleaner: keep
         "//tpu_raiden/frameworks/jax:_raw_transfer",
     ],

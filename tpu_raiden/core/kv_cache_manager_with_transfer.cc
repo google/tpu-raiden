@@ -1681,6 +1681,10 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
   bool found = false;
   std::vector<int> accumulated_host_blocks;
 
+  // Forward to base class to notify listeners (e.g. RaidenController)
+  TF_RETURN_IF_ERROR(
+      kv_cache::KVCacheManagerBase::OnBlocksReceived(block_ids, uuid));
+
   {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = active_recv_entries_.find(uuid);
@@ -1719,10 +1723,6 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
     }
   }
 
-  if (!found) {
-    // Forward to base class for direct pull operations
-    return RaidenManagerBase::OnBlocksReceived(block_ids, uuid);
-  }
 
   {
     std::lock_guard<std::mutex> lock(mu_);
