@@ -16,6 +16,7 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <thread>  // NOLINT(build/c++11)
@@ -25,13 +26,32 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
-#include "third_party/grpc/include/grpcpp/server_context.h"
-#include "third_party/grpc/include/grpcpp/support/status.h"
+#include "grpcpp/server_context.h"
+#include "grpcpp/support/status.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry.pb.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
 namespace global_registry {
+namespace {
+
+RaidenId FromProto(const ::tpu_raiden::rpc::RaidenIdProto& proto) {
+  return RaidenId{
+      .job_name = proto.job_name(),
+      .job_replica_id = proto.job_replica_id(),
+      .data_name = proto.data_name(),
+      .data_replica_idx = proto.data_replica_idx(),
+  };
+}
+
+void ToProto(const RaidenId& id, ::tpu_raiden::rpc::RaidenIdProto* proto) {
+  proto->set_job_name(id.job_name);
+  proto->set_job_replica_id(id.job_replica_id);
+  proto->set_data_name(id.data_name);
+  proto->set_data_replica_idx(id.data_replica_idx);
+}
+
+}  // namespace
 
 GlobalRegistryServiceImpl::GlobalRegistryServiceImpl(
     absl::Duration default_ttl, absl::Duration cleanup_interval)
@@ -79,9 +99,11 @@ grpc::Status GlobalRegistryServiceImpl::Register(grpc::ServerContext* context,
       response->set_error_message("prefix_hash cannot be empty");
       return grpc::Status::OK;
     }
-    if (entry.metadata().host_address().empty()) {
+    if (!entry.has_metadata() || !entry.metadata().has_raiden_id() ||
+        entry.metadata().raiden_id().job_name().empty()) {
       response->set_success(false);
-      response->set_error_message("host_address cannot be empty");
+      response->set_error_message(
+          "metadata.raiden_id.job_name cannot be empty");
       return grpc::Status::OK;
     }
   }
@@ -91,16 +113,27 @@ grpc::Status GlobalRegistryServiceImpl::Register(grpc::ServerContext* context,
   for (const auto& entry : request->entries()) {
     const std::string& prefix_hash = entry.prefix_hash();
     const KVBlockMetadata& meta = entry.metadata();
-    const std::string& host = meta.host_address();
+    RaidenId raiden_id = FromProto(meta.raiden_id());
 
     absl::Duration ttl = entry.ttl_seconds() > 0
                              ? absl::Seconds(entry.ttl_seconds())
                              : default_ttl_;
     absl::Time expire_time = now + ttl;
-
     int32_t block_id = meta.block_id();
 
-    registry_[prefix_hash] = {host, block_id, expire_time};
+    auto& entries = registry_[prefix_hash];
+    bool found = false;
+    for (auto& existing : entries) {
+      if (existing.raiden_id == raiden_id) {
+        existing.block_id = block_id;
+        existing.expire_time = expire_time;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      entries.push_back({raiden_id, block_id, expire_time});
+    }
   }
 
   response->set_success(true);
@@ -115,13 +148,32 @@ grpc::Status GlobalRegistryServiceImpl::Lookup(grpc::ServerContext* context,
 
   for (const std::string& hash : request->prefix_hashes()) {
     auto it = registry_.find(hash);
-    if (it == registry_.end() || it->second.expire_time <= now) {
+    if (it == registry_.end()) {
       break;
     }
 
+    const auto& entries = it->second;
+    std::vector<RegistryEntry> valid_entries;
+    valid_entries.reserve(entries.size());
+    for (const auto& entry : entries) {
+      if (entry.expire_time > now) {
+        valid_entries.push_back(entry);
+      }
+    }
+
+    if (valid_entries.empty()) {
+      break;
+    }
+
+    // Round-robin selection
+    size_t& idx = round_robin_indices_[hash];
+    idx = idx % valid_entries.size();
+    const auto& picked = valid_entries[idx];
+    idx++;  // Increment for next lookup
+
     auto* meta = response->add_results();
-    meta->set_host_address(it->second.host_address);
-    meta->set_block_id(it->second.block_id);
+    ToProto(picked.raiden_id, meta->mutable_raiden_id());
+    meta->set_block_id(picked.block_id);
   }
 
   return grpc::Status::OK;
@@ -132,12 +184,12 @@ grpc::Status GlobalRegistryServiceImpl::Unregister(
     UnregisterResponse* response) {
   absl::MutexLock lock(mutex_);
 
-  const std::string& host = request->host_address();
-  if (host.empty()) {
+  if (!request->has_raiden_id() || request->raiden_id().job_name().empty()) {
     response->set_success(false);
-    response->set_error_message("host_address cannot be empty");
+    response->set_error_message("raiden_id cannot be empty");
     return grpc::Status::OK;
   }
+  RaidenId raiden_id = FromProto(request->raiden_id());
 
   bool overall_success = true;
   std::vector<std::string> errors;
@@ -151,11 +203,22 @@ grpc::Status GlobalRegistryServiceImpl::Unregister(
       continue;
     }
 
-    if (it->second.host_address == host) {
-      registry_.erase(it);
-    } else {
+    auto& entries = it->second;
+    auto orig_size = entries.size();
+    entries.erase(std::remove_if(entries.begin(), entries.end(),
+                                 [&raiden_id](const RegistryEntry& entry) {
+                                   return entry.raiden_id == raiden_id;
+                                 }),
+                  entries.end());
+
+    if (entries.size() == orig_size) {
       overall_success = false;
-      errors.push_back(hash + ": host mismatch");
+      errors.push_back(hash + ": raiden_id mismatch or not found");
+    }
+
+    if (entries.empty()) {
+      registry_.erase(it);
+      round_robin_indices_.erase(hash);
     }
   }
 
@@ -178,14 +241,21 @@ void GlobalRegistryServiceImpl::CleanupExpiredEntries() {
 
   std::vector<std::string> keys_to_remove;
 
-  for (const auto& [hash, entry] : registry_) {
-    if (entry.expire_time <= now) {
+  for (auto& [hash, entries] : registry_) {
+    entries.erase(std::remove_if(entries.begin(), entries.end(),
+                                 [now](const RegistryEntry& entry) {
+                                   return entry.expire_time <= now;
+                                 }),
+                  entries.end());
+
+    if (entries.empty()) {
       keys_to_remove.push_back(hash);
     }
   }
 
   for (const auto& key : keys_to_remove) {
     registry_.erase(key);
+    round_robin_indices_.erase(key);
   }
 }
 

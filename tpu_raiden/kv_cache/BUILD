@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 load("@rules_python//python:defs.bzl", "py_library")
 
 package(default_visibility = ["//visibility:public"])
@@ -98,6 +98,7 @@ cc_library(
     deps = [
         ":kv_cache_manager_base",
         ":logical_block_manager",
+        ":raiden_id",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/kv_cache/global_registry:global_registry_client_cc",
@@ -145,6 +146,13 @@ cc_test(
 )
 
 cc_library(
+    name = "raiden_id",
+    hdrs = ["raiden_id.h"],
+    visibility = ["//visibility:public"],
+    deps = ["@com_google_absl//absl/hash"],
+)
+
+cc_library(
     name = "lru_cache",
     hdrs = ["lru_cache.h"],
     deps = ["@com_google_absl//absl/container:flat_hash_map"],
@@ -160,10 +168,72 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "raiden_orchestrator_test",
+    srcs = ["raiden_orchestrator_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":raiden_orchestrator",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_google_absl//absl/strings",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "raiden_orchestrator",
+    srcs = ["raiden_orchestrator.cc"],
+    hdrs = ["raiden_orchestrator.h"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":raiden_id",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "//tpu_raiden/transport:raw_buffer_transport",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/hash",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
+    ],
+)
+
+cc_binary(
+    name = "raiden_orchestrator_main",
+    srcs = ["raiden_orchestrator_main.cc"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":raiden_orchestrator",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:initialize",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
 cc_library(
     name = "kv_cache_store",
-    srcs = ["kv_cache_store.cc"],
-    hdrs = ["kv_cache_store.h"],
+    srcs = [
+        "kv_cache_store.cc",
+        "raiden_controller_embedded.cc",
+    ],
+    hdrs = [
+        "kv_cache_store.h",
+        "raiden_controller_embedded.h",
+    ],
     copts = [
         "-fno-strict-aliasing",
         "-fexceptions",
@@ -172,12 +242,25 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":lru_cache",
+        ":raiden_id",
         "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/core:status_macros",
+        "//tpu_raiden/core:tpu_utils",
+        "//tpu_raiden/kv_cache/global_registry:global_registry_client_cc",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "//tpu_raiden/rpc:rpc_utils",
+        "//tpu_raiden/transport:raw_buffer_transport",
+        "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:span",
     ],
 )
@@ -191,9 +274,17 @@ cc_test(
     ],
     features = ["-use_header_modules"],
     deps = [
+        ":kv_cache_listener",
+        ":kv_cache_manager_base",
         ":kv_cache_store",
+        ":raiden_orchestrator",
         "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/kv_cache/global_registry:global_registry_client_cc",
+        "//tpu_raiden/kv_cache/global_registry:global_registry_server_lib",
+        "@com_github_grpc_grpc//:grpc++",
+        "@com_google_absl//absl/status:status_matchers",
         "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
@@ -221,8 +312,11 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":kv_cache_manager_base",
+        "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "//tpu_raiden/rpc:rpc_utils",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
     ],
 )

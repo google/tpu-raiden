@@ -16,7 +16,7 @@ syntax = "proto3";
 
 package tpu_raiden.rpc;
 
-import "third_party/tpu_raiden/tpu_raiden/rpc/raiden_service.proto";
+import "tpu_raiden/rpc/raiden_service.proto";
 
 option java_multiple_files = true;
 option java_outer_classname = "ControllerServiceProto";

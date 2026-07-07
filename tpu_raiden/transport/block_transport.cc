@@ -273,6 +273,22 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
     allocated_ids.resize(header.count_or_size, 0);
     RETURN_IF_ERROR(ReadExact(client_fd, allocated_ids.data(),
                               header.count_or_size * sizeof(int)));
+    // Any dst id the sender left as -1 (e.g. a remote fetch whose consumer had
+    // no local host block yet) is auto-allocated here on the receiver; the
+    // allocated id flows out via OnBlocksReceived so the store can record it.
+    bool auto_allocated = false;
+    for (int& dst : allocated_ids) {
+      if (dst < 0) {
+        ASSIGN_OR_RETURN(std::vector<int> one,
+                         block_delegate_->AllocateBlocks(1, header.uuid));
+        dst = one[0];
+        auto_allocated = true;
+      }
+    }
+    if (auto_allocated) {
+      // Patch the plan's placeholder dst ids so GetBlockChunks resolves them.
+      block_delegate_->UpdatePlanDstBlocks(header.uuid, allocated_ids);
+    }
     uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
   }
