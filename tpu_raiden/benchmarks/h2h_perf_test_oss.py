@@ -265,16 +265,18 @@ def run_sender():
         f'layers={_NUM_LAYERS.value}, block_size={_BLOCK_SIZE.value}B, '
         f'parallelism={_PARALLELISM.value}')
 
-  _wn = [0]
+  # Explicit dst = 0..N, exactly like the C++ runner's iota(dst_block_ids). This
+  # selects the op=0 push path (write to blocks the receiver pre-allocated via
+  # make_caches). The 2-arg form (no dst) selects op=1 dynamic allocation, whose
+  # receiver-serving path hangs on this transport -- the C++ runner never uses it
+  # and never calls notify_for_read, so we don't either.
+  dst_block_ids = block_ids
 
   def one_write():
-    # Producer registers its source blocks as read-ready before the transfer,
-    # mirroring the tests' NotifyForRead(producer) step. Fresh uuid per write.
-    _wn[0] += 1
-    manager.notify_for_read(f'h2h_push_{_wn[0]}', _wn[0], block_ids)
     t0 = time.perf_counter()
-    # h2h_write -> (allocated_dst_ids, RaidenFuture); time issue + Await like C++.
-    _alloc, fut = manager.h2h_write(peer=peer, src_block_ids=block_ids)
+    # h2h_write -> (dst_ids, RaidenFuture); time issue + Await like C++ H2hWrite.
+    _alloc, fut = manager.h2h_write(peer=peer, src_block_ids=block_ids,
+                                    dst_block_ids=dst_block_ids)
     fut.Await()
     return time.perf_counter() - t0
 
@@ -286,7 +288,8 @@ def run_sender():
   # a known src->dst block map, handed to the receiver so it can byte-compare
   # exactly what landed against the deterministic source fill.
   if _VERIFY.value:
-    dst_ids, fut = manager.h2h_write(peer=peer, src_block_ids=block_ids)
+    dst_ids, fut = manager.h2h_write(peer=peer, src_block_ids=block_ids,
+                                     dst_block_ids=dst_block_ids)
     fut.Await()
     _write_json(os.path.join(rv, 'verify_map.json'),
                 {'src_ids': [int(x) for x in block_ids],
