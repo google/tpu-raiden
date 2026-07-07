@@ -362,6 +362,29 @@ def run_sender():
   os._exit(0)  # kill any lingering transfer threads
 
 
+def _read_host_block_layer(manager, layer, shard, num_blocks, block_size):
+  """Read a layer's received data the way the C++ runner verifies it -- from the
+  manager's OWN host buffer via get_host_pointer, NOT from the JAX array `arrs`.
+
+  The transport writes the pushed bytes directly into these host buffers; the JAX
+  arrays passed at construction are a SEPARATE view that does not reflect that
+  direct write, so reading `arrs` falsely reports corruption. get_host_pointer's
+  Python return type isn't documented for this build -- it may be an int address, a
+  bytes, or a memoryview -- so handle all three and raise a clear error otherwise.
+  """
+  nbytes = num_blocks * block_size
+  p = manager.get_host_pointer(layer, shard)
+  if isinstance(p, (bytes, bytearray, memoryview)):
+    raw = bytes(p[:nbytes])
+  elif isinstance(p, int):
+    raw = bytes((ctypes.c_uint8 * nbytes).from_address(p))
+  else:
+    raise TypeError(
+        f'get_host_pointer returned {type(p).__name__} ({repr(p)[:60]}); '
+        'expected int address / bytes / memoryview -- adjust _read_host_block_layer')
+  return np.frombuffer(raw, dtype=np.int8).reshape((num_blocks, block_size))
+
+
 # ---------------- receiver (passive target) ----------------
 def run_receiver():
   bind_to_numa(_BIND_NUMA.value)
@@ -389,7 +412,11 @@ def run_receiver():
     src_ids, dst_ids = m['src_ids'], m['dst_ids']
     mismatched = 0
     for layer in range(_NUM_LAYERS.value):
-      got = np.asarray(arrs[layer])
+      # Read the manager's host buffer (where the transport actually wrote), like
+      # the C++ runner's GetHostPointer verify -- NOT np.asarray(arrs[layer]), whose
+      # JAX view doesn't reflect the direct host-memory write and false-fails.
+      got = _read_host_block_layer(manager, layer, 0,
+                                   _NUM_BLOCKS.value, _BLOCK_SIZE.value)
       exp = _layer_fill(layer)
       for s_id, d_id in zip(src_ids, dst_ids):
         if not np.array_equal(got[d_id], exp[s_id]):
@@ -432,6 +459,21 @@ def _report_and_emit(times):
         f'p90 {p90_t*1e3:.3f} p99 {p99_t*1e3:.3f}')
   print(f'Throughput (mean): {gbs_mean:8.3f} GB/s = {gbps_mean:8.3f} Gbps')
   print(f'Throughput (median): {gbs_med:8.3f} GB/s = {gbps_med:8.3f} Gbps')
+  # Full distribution across ALL iters (so you can see the spread + tails, not
+  # just p50). Percentiles + a compact ASCII histogram of the per-iter GB/s.
+  g = np.array(gbs_all, dtype=float)
+  pcts = [0, 1, 10, 25, 50, 75, 90, 99, 100]
+  qs = np.percentile(g, pcts)
+  print(f'Throughput distribution over {len(gbs_all)} iters (GB/s):')
+  print('  ' + '  '.join(f'p{p}={q:.2f}' for p, q in zip(pcts, qs)))
+  print(f'  mean={g.mean():.2f} std={g.std():.2f} '
+        f'min={g.min():.2f} max={g.max():.2f} '
+        f'cv={100 * g.std() / g.mean():.1f}%')
+  counts, edges = np.histogram(g, bins=12)
+  peak = max(int(counts.max()), 1)
+  for i in range(len(counts)):
+    bar = '#' * int(round(40 * counts[i] / peak))
+    print(f'  [{edges[i]:7.2f},{edges[i + 1]:7.2f}) {int(counts[i]):5d} {bar}')
   print('=========================================================')
 
   tbdir = os.environ.get('TENSORBOARD_OUTPUT_DIR')

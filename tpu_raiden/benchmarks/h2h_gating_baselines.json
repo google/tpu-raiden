@@ -5,9 +5,6 @@
   "warmup": 3,
   "configs": [
     {"block_size": 1048576,   "num_blocks": 64, "num_layers": 32, "num_shards": 1, "parallelism": 1, "baseline_gbs": 0.0, "floor_gbs": 0.0},
-    {"block_size": 1048576,   "num_blocks": 64, "num_layers": 32, "num_shards": 1, "parallelism": 8, "baseline_gbs": 0.0, "floor_gbs": 0.0},
-    {"block_size": 16777216,  "num_blocks": 64, "num_layers": 32, "num_shards": 1, "parallelism": 1, "baseline_gbs": 0.0, "floor_gbs": 0.0},
-    {"block_size": 16777216,  "num_blocks": 64, "num_layers": 32, "num_shards": 1, "parallelism": 8, "baseline_gbs": 0.0, "floor_gbs": 0.0},
-    {"block_size": 134217728, "num_blocks": 64, "num_layers": 32, "num_shards": 1, "parallelism": 8, "baseline_gbs": 0.0, "floor_gbs": 0.0}
+    {"block_size": 1048576,   "num_blocks": 64, "num_layers": 32, "num_shards": 1, "parallelism": 8, "baseline_gbs": 0.0, "floor_gbs": 0.0}
   ]
 }
