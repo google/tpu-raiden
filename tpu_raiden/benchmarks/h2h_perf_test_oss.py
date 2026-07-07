@@ -181,6 +181,18 @@ def _primary_endpoint(port):
 
 
 def _resolve_endpoints(manager):
+  # The push connects to the block-transport data plane, which listens on
+  # manager.local_port() (kernel-assigned). This is EXACTLY what the C++
+  # h2h_benchmark_runner advertises (*manager->local_port()), and it works.
+  # get_local_endpoints() returns a DIFFERENT port (a control/aggregate endpoint);
+  # advertising it made the sender connect to a socket the block-transport accept
+  # loop never serves -> the push hung forever. So advertise local_port() directly.
+  try:
+    port = manager.local_port()
+    if port:
+      return [_primary_endpoint(port)]
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    print(f'WARNING: local_port() unavailable ({e}); falling back.', file=sys.stderr)
   try:
     eps = manager.get_local_endpoints()
     out = [e if isinstance(e, str) else e.get('endpoint', str(e)) for e in eps]
