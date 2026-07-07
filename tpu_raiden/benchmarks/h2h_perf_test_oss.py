@@ -59,6 +59,15 @@ os.environ.setdefault('JAX_PLATFORMS', 'cpu')
 # meant for cross-node over physical NICs). Excluding eth0 -- the only NIC on the
 # runner -- empties the candidate list, so the manager falls back to 127.0.0.1.
 os.environ.setdefault('EXCLUDE_CONTROL_INTERFACE', 'eth0')
+
+# libtpu still loads on this CPU-only run and its background threads try to NUMA-
+# pin themselves. bind_to_numa() has (correctly) constrained the process to ONE
+# node's cores, so that pinning finds no cross-node cores and spams
+# 'tpu_utils.cc: No allowed cores found for pinning on this NUMA node'. It is
+# harmless for a host-only H2H test -- raise the C++/libtpu log threshold to ERROR
+# so it stays quiet. (setdefault: export TF_CPP_MIN_LOG_LEVEL=0 to see it again.)
+os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
+os.environ.setdefault('TPU_MIN_LOG_LEVEL', '2')
 import jax  # noqa: E402
 import numpy as np  # noqa: E402
 
@@ -152,6 +161,36 @@ def bind_to_numa(node):
     print(f'WARNING: NUMA membind unavailable: {e}', file=sys.stderr)
 
 
+def report_numa_placement(tag):
+  """Hard proof of where this process's pages live -> validates cross-NUMA.
+
+  Parses /proc/self/numa_maps (per-node resident page counts, 'N<node>=<pages>')
+  and prints the dominant node. Run after the KV caches are allocated+touched:
+  sender pages should sit on its --bind_numa node, receiver on the other, so the
+  H2H transfer genuinely crosses the socket boundary.
+  """
+  try:
+    per_node = {}
+    with open('/proc/self/numa_maps') as f:
+      for line in f:
+        for tok in line.split():
+          if len(tok) > 2 and tok[0] == 'N':
+            key, sep, val = tok.partition('=')
+            if sep and key[1:].isdigit() and val.isdigit():
+              per_node[int(key[1:])] = per_node.get(int(key[1:]), 0) + int(val)
+  except OSError as e:
+    print(f'[numa] {tag}: numa_maps unavailable ({e})', file=sys.stderr)
+    return
+  if not per_node:
+    print(f'[numa] {tag}: no page counts in numa_maps')
+    return
+  total = sum(per_node.values())
+  parts = ', '.join(f'node{n}={p}({100 * p // total}%)'
+                    for n, p in sorted(per_node.items()))
+  dom = max(per_node, key=per_node.get)
+  print(f'[numa] {tag}: pages {parts}; dominant=node{dom}')
+
+
 def _wait_until(cond, timeout, what, soft=False):
   t0 = time.time()
   while not cond():
@@ -238,9 +277,16 @@ def make_caches(fill):
 
 def _new_manager(arrs):
   # NOTE(VERIFY): same constructor the pull version used; h2h_write is a method on it.
+  # parallelism is the PUSH stream count (Push() splits blocks into `parallelism`
+  # concurrent H2hWriteWorkers). The binding defaults it to 4, and num_slots is a
+  # SEPARATE staging-slot knob -- so wiring --parallelism only into num_slots left
+  # the push stuck at 4 streams regardless of the flag, which made Python's numbers
+  # not track the C++ runner (C++ passes the flag straight to the manager's
+  # parallelism). Pass it explicitly so both split into the same number of streams.
   return kv_cache_manager.KVCacheManager(
       kv_caches=arrs, local_control_port=0,
       max_blocks=_NUM_BLOCKS.value, num_slots=_PARALLELISM.value,
+      parallelism=_PARALLELISM.value,
       unsafe_skip_buffer_lock=True)
 
 
@@ -271,6 +317,7 @@ def run_sender():
   peer = _read_json(r_path)['endpoints'][0]
 
   arrs = make_caches(fill=True)
+  report_numa_placement(f'sender(bind_numa={_BIND_NUMA.value})')
   manager = _new_manager(arrs)
   block_ids = list(range(_NUM_BLOCKS.value))
   print(f'[sender] peer={peer}, blocks={len(block_ids)}, '
@@ -323,6 +370,7 @@ def run_receiver():
   s_path, r_path = os.path.join(rv, 's.json'), os.path.join(rv, 'r.json')
 
   arrs = make_caches(fill=False)
+  report_numa_placement(f'receiver(bind_numa={_BIND_NUMA.value})')
   manager = _new_manager(arrs)
   endpoints = _resolve_endpoints(manager)
   print(f'[receiver] endpoints={endpoints}, blocks={_NUM_BLOCKS.value}')
