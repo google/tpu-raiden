@@ -41,21 +41,27 @@ from absl import flags
 _SENDER_NUMA = flags.DEFINE_integer('sender_numa', 0, 'NUMA node for the sender.')
 _RECEIVER_NUMA = flags.DEFINE_integer('receiver_numa', 1, 'NUMA node for the receiver.')
 _WARMUP = flags.DEFINE_integer('warmup', 3, 'Warmup transfers.')
-_ITERS = flags.DEFINE_integer('iters', 20, 'Timed transfers.')
-_TIMEOUT_S = flags.DEFINE_integer('timeout_s', 180, 'Per-process hard timeout.')
+_ITERS = flags.DEFINE_integer('iters', 50, 'Timed transfers (match C++ kNumIterations=50).')
+_TIMEOUT_S = flags.DEFINE_integer('timeout_s', 300, 'Per-process hard timeout.')
 
 _LAYERS = 32   # C++ kNumLayers (fixed)
 _SHARDS = 1    # C++ kNumShards (fixed)
 
-# (block_size_bytes, num_blocks, parallelism). DEBUG: just one tiny config so the
-# job finishes fast (before the flaky container hook dies) and we get the Python
-# output to see where it hangs. Add configs back once Python works.
+# (block_size_bytes, num_blocks, parallelism). 128MB dropped (OOM risk); 16MB P1
+# dropped (too slow at ~3 GB/s -> would exceed the timeout at 50 iters).
 _CONFIGS = [
     (1048576, 64, 1),
+    (1048576, 64, 8),
+    (16777216, 64, 8),
 ]
 
-_CPP_RE = re.compile(r'Throughput:\s*([0-9.]+)')                 # "Throughput: X GB/s (collective)"
-_PY_RE = re.compile(r'Throughput \(mean\):\s*([0-9.]+)')          # "Throughput (mean): X GB/s = ..."
+# We report the MEDIAN of 50 iters for both sides.
+#  * Python prints "Throughput (median): X GB/s" directly.
+#  * C++ prints only mean throughput + p50/p90/p99 LATENCY, so we derive the C++
+#    median throughput from its p50 latency: total_bytes / p50_seconds.
+_CPP_MEAN_RE = re.compile(r'Throughput:\s*([0-9.]+)')             # fallback (mean) GB/s
+_CPP_P50_RE = re.compile(r'p50:\s*([0-9.]+)')                     # "p50:   X ms"
+_PY_RE = re.compile(r'Throughput \(median\):\s*([0-9.]+)')        # "Throughput (median): X GB/s"
 
 
 def _label(bs, nb, p):
@@ -122,9 +128,18 @@ def _run_cpp(cc, bs, nb, p, port):
     recv.terminate(); recv.wait(10)
   except Exception:  # pylint: disable=broad-exception-caught
     recv.kill()
-  m = _CPP_RE.search(out or '')
+  # MEDIAN throughput from the C++ p50 latency: total_bytes / p50_seconds.
+  # total_bytes mirrors the C++ runner (active_managers=1 on single-host loopback).
+  m = _CPP_P50_RE.search(out or '')
   if m:
-    return float(m.group(1))
+    p50_ms = float(m.group(1))
+    if p50_ms > 0:
+      total_bytes = _LAYERS * _SHARDS * nb * bs
+      return (total_bytes / 1e9) / (p50_ms / 1000.0)
+  # fallback to the mean throughput line if p50 wasn't found
+  m2 = _CPP_MEAN_RE.search(out or '')
+  if m2:
+    return float(m2.group(1))
   print(f'[compare] C++ FAILED for {_label(bs, nb, p)} (rc={rc}); output:\n{out}',
         flush=True)
   return -1.0
@@ -190,7 +205,8 @@ def main(_):
 
   _emit_tb(results)
 
-  print(f"\n{'config':22}{'cpp_GB/s':>10}{'py_GB/s':>10}{'py/cpp':>9}")
+  print(f'\n=== MEDIAN of {_ITERS.value} iters (GB/s) ===')
+  print(f"{'config':22}{'cpp_med':>10}{'py_med':>10}{'py/cpp':>9}")
   print('-' * 51)
   py_fail = 0
   for label, cpp, py in results:

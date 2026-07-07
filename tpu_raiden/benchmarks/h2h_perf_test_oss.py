@@ -273,7 +273,13 @@ def run_sender():
   def one_write():
     _wn[0] += 1
     i = _wn[0]
-    print(f'[sender] write {i}: calling h2h_write ...', flush=True)
+    # PRODUCER must register its source blocks as read-ready first, else the
+    # transport's WaitForBlockRead (inside h2h_write's payload send) blocks
+    # forever. The pull path called notify_for_read; the push benchmark dropped
+    # it, which is why the FIRST write hangs. Readiness is per-block (no uuid in
+    # WaitForBlockRead), so any fresh uuid works.
+    manager.notify_for_read(f'h2h_push_{i}', i, block_ids)
+    print(f'[sender] write {i}: notified, calling h2h_write ...', flush=True)
     t0 = time.perf_counter()
     # h2h_write -> (allocated_dst_ids, RaidenFuture); time issue + Await like C++.
     alloc, fut = manager.h2h_write(peer=peer, src_block_ids=block_ids)

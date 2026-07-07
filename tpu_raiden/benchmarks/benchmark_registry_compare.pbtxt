@@ -30,10 +30,13 @@ benchmarks {
     id: "tpu-v5e-single-node"
     runner_label: "linux-x86-ct5lp-224-8tpu"
     container_image: "us-central1-docker.pkg.dev/wyzhang-dev/quickstart-docker-repo/ml-build:939285342"
-    # workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci" }
-    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci --noremote_accept_cached" }
+    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci" }
   }
 
   metrics { name: "1048576B_x64_P1/cpp_gbs" unit: "GB/s" stats { stat: MEAN } }
   metrics { name: "1048576B_x64_P1/py_gbs" unit: "GB/s" stats { stat: MEAN } }
+  metrics { name: "1048576B_x64_P8/cpp_gbs" unit: "GB/s" stats { stat: MEAN } }
+  metrics { name: "1048576B_x64_P8/py_gbs" unit: "GB/s" stats { stat: MEAN } }
+  metrics { name: "16777216B_x64_P8/cpp_gbs" unit: "GB/s" stats { stat: MEAN } }
+  metrics { name: "16777216B_x64_P8/py_gbs" unit: "GB/s" stats { stat: MEAN } }
 }
