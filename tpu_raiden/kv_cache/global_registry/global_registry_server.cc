@@ -25,8 +25,8 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
-#include "third_party/grpc/include/grpcpp/server_context.h"
-#include "third_party/grpc/include/grpcpp/support/status.h"
+#include "grpcpp/server_context.h"
+#include "grpcpp/support/status.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry.pb.h"
 
 namespace tpu_raiden {

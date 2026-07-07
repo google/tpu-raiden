@@ -56,10 +56,11 @@ cc_binary(
     srcs = ["global_registry_server_main.cc"],
     deps = [
         ":global_registry_server_lib",
-        "//base",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
         "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:initialize",
         "@com_google_absl//absl/time",
     ],
 )
@@ -71,7 +72,7 @@ cc_library(
     deps = [
         ":global_registry_cc_grpc",
         ":global_registry_cc_proto",
-        "//third_party/openssl:crypto",
+        "@boringssl//:crypto",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",

@@ -21,8 +21,8 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
-#include "third_party/grpc/include/grpcpp/client_context.h"
-#include "third_party/grpc/include/grpcpp/support/status.h"
+#include "grpcpp/client_context.h"
+#include "grpcpp/support/status.h"
 #include "tpu_raiden/rpc/coordination.grpc.pb.h"
 
 namespace tpu_raiden {

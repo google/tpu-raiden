@@ -26,10 +26,10 @@
 #include "absl/strings/escaping.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
-#include "third_party/grpc/include/grpcpp/channel.h"
-#include "third_party/grpc/include/grpcpp/client_context.h"
-#include "third_party/grpc/include/grpcpp/support/status.h"
-#include "third_party/openssl/sha.h"
+#include "grpcpp/channel.h"
+#include "grpcpp/client_context.h"
+#include "grpcpp/support/status.h"
+#include <openssl/sha.h>
 #include "tpu_raiden/kv_cache/global_registry/global_registry.grpc.pb.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry.pb.h"
 

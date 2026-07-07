@@ -44,6 +44,7 @@ cc_library(
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/core:tpu_utils",
         "//tpu_raiden/core:utils",
+        "//tpu_raiden/kv_cache:kv_cache_listener",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -69,6 +70,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":mock_nanobind",
+        "//tpu_raiden/kv_cache:kv_cache_listener",
         "@jax//jaxlib:py_client",
         "@nanobind",
         "@rules_python//python/cc:current_py_cc_headers",
@@ -136,6 +138,7 @@ nanobind_extension(
         ":raw_transfer_jax",
         ":weight_synchronizer_jax",
         "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/kv_cache:kv_cache_listener",
         "//tpu_raiden/kv_cache:kv_cache_store",
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",

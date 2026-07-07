@@ -144,6 +144,29 @@ TEST(LRUCacheTest, EraseAndClear) {
   EXPECT_EQ(cache.size(), 0);
 }
 
+TEST(LRUCacheTest, PutBack) {
+  LRUCache<int, std::string> cache(3);
+  cache.Put(1, "one");
+  cache.Put(2, "two");
+  // MRU to LRU is: 2, 1.
+
+  // PutBack(3) should add 3 to the back (LRU position).
+  cache.PutBack(3, "three");
+  // Now MRU to LRU should be: 2, 1, 3.
+  // Verify by checking Evict(): first evicted item should be 3.
+  auto evicted1 = cache.Evict();
+  ASSERT_TRUE(evicted1.has_value());
+  EXPECT_EQ(evicted1->first, 3);
+
+  auto evicted2 = cache.Evict();
+  ASSERT_TRUE(evicted2.has_value());
+  EXPECT_EQ(evicted2->first, 1);
+
+  auto evicted3 = cache.Evict();
+  ASSERT_TRUE(evicted3.has_value());
+  EXPECT_EQ(evicted3->first, 2);
+}
+
 }  // namespace
 }  // namespace kv_cache
 }  // namespace tpu_raiden
