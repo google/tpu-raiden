@@ -210,6 +210,19 @@ NB_MODULE(_tpu_raiden_jax, m) {
                            const>(
                &tpu_raiden::kv_cache::jax::KVCacheManager::GetHostPointer),
            nb::arg("layer_idx"), nb::arg("shard_idx"))
+      // Length-bounded read of a host buffer, done ENTIRELY in C++: copy exactly
+      // `nbytes` from the real GetHostPointer into a Python bytes. Unlike
+      // get_host_pointer (which hands a bare address to Python -> reading it with
+      // ctypes segfaults), this never round-trips the pointer, so integrity verify
+      // can safely read what the transport actually wrote (mirrors the C++ runner).
+      .def(
+          "read_host_bytes",
+          [](const tpu_raiden::kv_cache::jax::KVCacheManager& self,
+             size_t layer_idx, size_t shard_idx, size_t nbytes) {
+            const uint8_t* p = self.GetHostPointer(layer_idx, shard_idx);
+            return nb::bytes(reinterpret_cast<const char*>(p), nbytes);
+          },
+          nb::arg("layer_idx"), nb::arg("shard_idx"), nb::arg("nbytes"))
       .def_prop_ro("num_layers",
                    &tpu_raiden::kv_cache::jax::KVCacheManager::num_layers)
       .def_prop_ro("num_shards",
