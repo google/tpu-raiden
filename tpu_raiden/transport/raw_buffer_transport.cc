@@ -242,6 +242,9 @@ RawBufferTransport::RawBufferTransport(
   if (listen(server_fd_, 128) < 0) {
     LOG(FATAL) << "Failed to listen on server socket: " << std::strerror(errno);
   }
+  LOG(ERROR) << "===H2HDBG [xport] RawBufferTransport LISTENING port="
+             << local_port_ << " requested_port=" << local_port
+             << " bound_ip=" << bound_ip_ << " server_fd=" << server_fd_;
 
   // 2. Start listener
   listener_thread_ = std::thread(&RawBufferTransport::ListenerLoop, this);
