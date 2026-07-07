@@ -363,25 +363,11 @@ def run_sender():
 
 
 def _read_host_block_layer(manager, layer, shard, num_blocks, block_size):
-  """Read a layer's received data the way the C++ runner verifies it -- from the
-  manager's OWN host buffer via get_host_pointer, NOT from the JAX array `arrs`.
-
-  The transport writes the pushed bytes directly into these host buffers; the JAX
-  arrays passed at construction are a SEPARATE view that does not reflect that
-  direct write, so reading `arrs` falsely reports corruption. get_host_pointer's
-  Python return type isn't documented for this build -- it may be an int address, a
-  bytes, or a memoryview -- so handle all three and raise a clear error otherwise.
-  """
-  nbytes = num_blocks * block_size
-  p = manager.get_host_pointer(layer, shard)
-  if isinstance(p, (bytes, bytearray, memoryview)):
-    raw = bytes(p[:nbytes])
-  elif isinstance(p, int):
-    raw = bytes((ctypes.c_uint8 * nbytes).from_address(p))
-  else:
-    raise TypeError(
-        f'get_host_pointer returned {type(p).__name__} ({repr(p)[:60]}); '
-        'expected int address / bytes / memoryview -- adjust _read_host_block_layer')
+  """Read a layer's received data from the manager's OWN host buffer, the way the
+  C++ runner verifies it. Uses read_host_bytes (the copy happens in C++ with an
+  explicit length -> safe) instead of get_host_pointer + ctypes (bare address ->
+  segfaults) or np.asarray(arrs) (JAX view that doesn't reflect the direct write)."""
+  raw = manager.read_host_bytes(layer, shard, num_blocks * block_size)
   return np.frombuffer(raw, dtype=np.int8).reshape((num_blocks, block_size))
 
 
@@ -412,9 +398,10 @@ def run_receiver():
     src_ids, dst_ids = m['src_ids'], m['dst_ids']
     mismatched = 0
     for layer in range(_NUM_LAYERS.value):
-      # Read the manager's host buffer (where the transport actually wrote), like
-      # the C++ runner's GetHostPointer verify -- NOT np.asarray(arrs[layer]), whose
-      # JAX view doesn't reflect the direct host-memory write and false-fails.
+      # Read the manager's host buffer (where the transport actually wrote) via the
+      # length-bounded read_host_bytes binding -- mirrors the C++ runner's
+      # GetHostPointer verify. NOT np.asarray(arrs[layer]) (JAX view that misses the
+      # direct write) and NOT get_host_pointer+ctypes (bare address -> segfault).
       got = _read_host_block_layer(manager, layer, 0,
                                    _NUM_BLOCKS.value, _BLOCK_SIZE.value)
       exp = _layer_fill(layer)
