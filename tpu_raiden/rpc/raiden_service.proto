@@ -23,6 +23,7 @@ message RaidenIdProto {
   string job_name = 1;
   string job_replica_id = 2;
   string data_name = 3;
+  int32 data_replica_idx = 4;
 }
 
 // Coordinate intervals representing a contiguous slice along a single tensor
@@ -100,6 +101,21 @@ message StartTransferRequest {
   bool use_block_chunks = 7;
   int64 expected_block_count = 8;
   string req_id = 9;
+  MemoryType src_mem_type = 10;
+}
+
+message FetchNegotiationRequest {
+  repeated string block_hashes = 1;
+  RaidenIdProto src_unit = 2;
+  RaidenIdProto dst_unit = 3;
+  repeated string dst_worker_data_addresses = 4;
+  repeated int32 dst_block_ids = 5;
+  int64 uuid = 6;
+}
+
+message FetchNegotiationResponse {
+  repeated string found_block_hashes = 1;
+  repeated string missing_block_hashes = 2;
 }
 
 message GetMetadataResponse {
@@ -114,12 +130,25 @@ message ControlRequest {
     COMMAND_REGISTER_WORK_UNIT = 3;
     COMMAND_GET_METADATA = 4;
     COMMAND_REGISTER_TRANSFER_SCHEDULE = 5;
+    COMMAND_RESOLVE_CONTROLLER = 6;
+    COMMAND_NEGOTIATE_FETCH = 7;
+    COMMAND_GET_ENDPOINTS = 8;
+    COMMAND_TRANSFER_COMPLETED = 9;
+    COMMAND_EXECUTE_FETCH = 10;
+    COMMAND_EXECUTE_LOAD = 11;
+    COMMAND_LOAD_COMPLETED = 12;
   }
   Command command = 1;
   repeated string peers = 2;
 
   StartTransferRequest start_transfer_request = 3;
   RegisterWorkUnitRequest register_work_unit_request = 4;
+  RaidenIdProto target_unit = 5;
+  FetchNegotiationRequest fetch_negotiation_request = 6;
+  repeated int32 completed_block_ids = 7;
+  LoadRequest load_request = 8;
+  bool success = 9;
+  string error_message = 10;
 }
 
 message ControlResponse {
@@ -127,4 +156,22 @@ message ControlResponse {
   string message = 2;
   string response_data = 3;
   GetMetadataResponse get_metadata_response = 4;
+  FetchNegotiationResponse fetch_negotiation_response = 5;
+  repeated string endpoints = 6;
+  StartTransferRequest start_transfer_request = 7;
+}
+
+message ShardLoadEntryProto {
+  int32 src_block_id = 1;
+  int32 dst_block_id = 2;
+}
+
+message ShardLoadScheduleProto {
+  repeated ShardLoadEntryProto entries = 1;
+}
+
+message LoadRequest {
+  int64 uuid = 1;
+  // Key: local shard partition index
+  map<int32, ShardLoadScheduleProto> shard_load_schedules = 2;
 }

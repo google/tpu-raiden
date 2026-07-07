@@ -38,6 +38,26 @@ cc_proto_library(
     deps = [":raiden_service_proto"],
 )
 
+cc_library(
+    name = "rpc_utils",
+    srcs = ["rpc_utils.cc"],
+    hdrs = ["rpc_utils.h"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":raiden_service_cc_proto",
+        "//tpu_raiden/core:status_macros",
+        "//tpu_raiden/transport:raw_buffer_transport",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
 py_proto_library(
     name = "raiden_service_py_pb2",
     visibility = ["//visibility:public"],
