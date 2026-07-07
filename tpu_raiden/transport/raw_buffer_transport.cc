@@ -14,7 +14,6 @@
 
 #include "tpu_raiden/transport/raw_buffer_transport.h"
 
-#include "absl/log/log.h"
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -242,9 +241,6 @@ RawBufferTransport::RawBufferTransport(
   if (listen(server_fd_, 128) < 0) {
     LOG(FATAL) << "Failed to listen on server socket: " << std::strerror(errno);
   }
-  LOG(ERROR) << "===H2HDBG [xport] RawBufferTransport LISTENING port="
-             << local_port_ << " requested_port=" << local_port
-             << " bound_ip=" << bound_ip_ << " server_fd=" << server_fd_;
 
   // 2. Start listener
   listener_thread_ = std::thread(&RawBufferTransport::ListenerLoop, this);
@@ -442,8 +438,6 @@ void RawBufferTransport::ClosePooledConnections() {
 absl::Status RawBufferTransport::ProcessSingleRequest(int client_fd) {
   PacketHeader header = {};
   RETURN_IF_ERROR(ReadExact(client_fd, &header, sizeof(header)));
-  LOG(ERROR) << "===H2HDBG [recv] ProcessSingleRequest fd=" << client_fd
-             << " op=" << static_cast<int>(header.op);
 
   if (header.op == 5) {
     uint32_t dst_offset = header.remote_id;
@@ -490,7 +484,6 @@ absl::Status RawBufferTransport::HandleCustomRequest(
 }
 
 void RawBufferTransport::ConnectionWorker(int client_fd) {
-  LOG(ERROR) << "===H2HDBG [recv] ConnectionWorker start fd=" << client_fd;
   while (!stopping_) {
     struct pollfd pfd;
     pfd.fd = client_fd;
@@ -538,7 +531,6 @@ void RawBufferTransport::ListenerLoop() {
       if (stopping_) break;
       continue;
     }
-    LOG(ERROR) << "===H2HDBG [recv] accepted client_fd=" << client_fd;
 
     int opt = 1;
     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
