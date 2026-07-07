@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <string>
@@ -223,6 +224,20 @@ NB_MODULE(_tpu_raiden_jax, m) {
             return nb::bytes(reinterpret_cast<const char*>(p), nbytes);
           },
           nb::arg("layer_idx"), nb::arg("shard_idx"), nb::arg("nbytes"))
+      // Symmetric to read_host_bytes: copy `data` INTO the manager's host buffer
+      // (non-const GetHostPointer), also entirely in C++. Needed because the fill
+      // written to the JAX arrays passed at construction does NOT reach the
+      // manager's H2H transmit buffer -- so without this the sender ships zeros and
+      // the receiver-side byte-integrity check fails. Mirrors the C++ runner, which
+      // fills via GetHostPointer before sending.
+      .def(
+          "write_host_bytes",
+          [](tpu_raiden::kv_cache::jax::KVCacheManager& self, size_t layer_idx,
+             size_t shard_idx, nb::bytes data) {
+            uint8_t* p = self.GetHostPointer(layer_idx, shard_idx);
+            std::memcpy(p, data.c_str(), data.size());
+          },
+          nb::arg("layer_idx"), nb::arg("shard_idx"), nb::arg("data"))
       .def_prop_ro("num_layers",
                    &tpu_raiden::kv_cache::jax::KVCacheManager::num_layers)
       .def_prop_ro("num_shards",
