@@ -19,7 +19,13 @@ from typing import List, Optional
 import torch
 
 # Import Pybind11 dynamic binary extension E2E!
+from tpu_raiden.api.torch import torch_tpu_common_loader
+
+torch_tpu_common_loader.load_torch_tpu_common()
+
+# pylint: disable=g-import-not-at-top
 from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _weight_synchronizer
+# pylint: enable=g-import-not-at-top
 
 
 class WeightSynchronizer:

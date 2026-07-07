@@ -20,6 +20,20 @@ load("//tpu_raiden/core:header_only_cc_info.bzl", "header_only_cc_info")
 package(default_visibility = ["//visibility:public"])
 
 header_only_cc_info(
+    name = "torch_tpu_device_buffer_headers",
+    deps = [
+        "@torch_tpu//torch_tpu/eager:device_buffer",
+    ],
+)
+
+header_only_cc_info(
+    name = "torch_tpu_structured_log_buffer_headers",
+    deps = [
+        "@torch_tpu//torch_tpu/eager:structured_log_buffer",
+    ],
+)
+
+header_only_cc_info(
     name = "torch_tpu_tensor_to_buffer_headers",
     deps = [
         "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
@@ -41,6 +55,7 @@ cc_library(
     linkopts = ["-Wl,--allow-shlib-undefined"],
     visibility = ["//visibility:public"],
     deps = [
+        ":torch_tpu_tensor_to_buffer_headers",
         ":torch_utils",
         "//tpu_raiden/core:xla_raw_transfer_headers",
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
@@ -48,7 +63,6 @@ cc_library(
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch/c10/core:base_headers",
         "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
-        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
 
@@ -67,12 +81,13 @@ cc_library(
         "-use_header_modules",
     ],
     deps = [
+        ":torch_tpu_device_buffer_headers",
+        ":torch_tpu_structured_log_buffer_headers",
         ":torch_tpu_tensor_to_buffer_headers",
         "//tpu_raiden/core:xla_raw_transfer_headers",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
         "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
-        "@torch_tpu//torch_tpu/eager:structured_log_buffer",
     ],
 )
 
@@ -89,11 +104,11 @@ cc_library(
         "-use_header_modules",
     ],
     deps = [
+        ":torch_tpu_tensor_to_buffer_headers",
         ":torch_tpu_utils",
         "//tpu_raiden/core:xla_raw_transfer_headers",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
-        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
 
@@ -130,6 +145,7 @@ cc_library(
     linkopts = ["-Wl,--allow-shlib-undefined"],
     visibility = ["//visibility:public"],
     deps = [
+        ":torch_tpu_tensor_to_buffer_headers",
         ":torch_utils",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
         "//tpu_raiden/core:utils",
@@ -137,7 +153,6 @@ cc_library(
         "//tpu_raiden/kv_cache:kv_cache_listener",
         "@com_google_absl//absl/strings",
         "@torch_tpu//shims/torch:aten_headers",
-        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
 
@@ -182,6 +197,8 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":torch_tpu_device_buffer_headers",
+        ":torch_tpu_tensor_to_buffer_headers",
         ":torch_tpu_utils",
         "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:raw_transfer_core",
@@ -194,8 +211,6 @@ cc_library(
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch/c10/core:base_headers",
         "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
-        "@torch_tpu//torch_tpu/eager:device_buffer",
-        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
     alwayslink = 1,
 )
@@ -231,6 +246,8 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":torch_tpu_device_buffer_headers",
+        ":torch_tpu_tensor_to_buffer_headers",
         ":torch_tpu_utils_mock",
         "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:raw_transfer_core",
@@ -243,8 +260,6 @@ cc_library(
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch/c10/core:base_headers",
         "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
-        "@torch_tpu//torch_tpu/eager:device_buffer",
-        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
 
@@ -262,9 +277,9 @@ cc_library(
     ],
     features = ["-use_header_modules"],
     deps = [
+        ":torch_tpu_device_buffer_headers",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
-        "@torch_tpu//torch_tpu/eager:device_buffer",
         "@xla//xla/pjrt:pjrt_client",
     ],
 )
@@ -280,10 +295,10 @@ cc_library(
     ],
     features = ["-use_header_modules"],
     deps = [
+        ":torch_tpu_tensor_to_buffer_headers",
         ":torch_tpu_utils_mock",
         "//tpu_raiden/core:xla_raw_transfer_headers",
         "@torch_tpu//shims/torch:aten_headers",
-        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
 
@@ -299,6 +314,7 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":torch_tpu_tensor_to_buffer_headers",
         ":torch_utils_mock",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
         "//tpu_raiden/core:utils",
@@ -307,7 +323,6 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@torch_tpu//shims/torch:aten_headers",
         "@torch_tpu//shims/torch:torch_headers",
-        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
 
@@ -323,6 +338,7 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":torch_tpu_tensor_to_buffer_headers",
         ":torch_utils_mock",
         "//tpu_raiden/core:xla_raw_transfer_headers",
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
@@ -331,7 +347,6 @@ cc_library(
         "@torch_tpu//shims/torch:torch_headers",
         "@torch_tpu//shims/torch/c10/core:base_headers",
         "@torch_tpu//shims/torch/torch/headeronly:torch_headeronly",
-        "@torch_tpu//torch_tpu/eager:tensor_to_buffer",
     ],
 )
 

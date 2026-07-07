@@ -28,29 +28,15 @@
 
 """High-performance PyTorch KV Cache Manager (repurposed as TransferEngine)."""
 
-import ctypes
-import os
-import pathlib
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import torch_tpu
-from torch_tpu import _loader as _torch_tpu_loader
+from tpu_raiden.api.torch import torch_tpu_common_loader
 
+torch_tpu_common_loader.load_torch_tpu_common()
 
-Path = pathlib.Path
-
-
-def _load_torch_tpu_common() -> None:
-  _torch_tpu_loader.load()
-  common = Path(torch_tpu.__file__).resolve().parent / "common"
-  lib = common / "libpywrap_torch_tpu_common.so"
-  if lib.exists():
-    ctypes.CDLL(str(lib), mode=os.RTLD_GLOBAL | os.RTLD_NOW)
-
-
-_load_torch_tpu_common()
-
+# pylint: disable=g-import-not-at-top
 from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _impl
+# pylint: enable=g-import-not-at-top
 
 
 class KVCacheManager:

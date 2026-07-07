@@ -15,7 +15,14 @@
 """Python wrapper for the compiled C++ KVCacheStore."""
 
 from typing import Any
+
+from tpu_raiden.api.torch import torch_tpu_common_loader
+
+torch_tpu_common_loader.load_torch_tpu_common()
+
+# pylint: disable=g-import-not-at-top
 from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _impl
+# pylint: enable=g-import-not-at-top
 
 
 class RaidenId:
