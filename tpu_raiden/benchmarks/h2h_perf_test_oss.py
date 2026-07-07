@@ -346,6 +346,13 @@ def run_sender():
   # a known src->dst block map, handed to the receiver so it can byte-compare
   # exactly what landed against the deterministic source fill.
   if _VERIFY.value:
+    # Fill the manager's TRANSMIT buffers with the deterministic pattern via
+    # write_host_bytes. make_caches(fill=True) fills the JAX arrays, which are NOT
+    # the manager's H2H buffer -> without this the sender ships zeros (got_nonzero=0)
+    # and the receiver's byte check fails. Mirrors the C++ runner filling via
+    # GetHostPointer before the verify send.
+    for layer in range(_NUM_LAYERS.value):
+      manager.write_host_bytes(layer, 0, _layer_fill(layer).tobytes())
     dst_ids, fut = manager.h2h_write(peer=peer, src_block_ids=block_ids,
                                      dst_block_ids=dst_block_ids)
     fut.Await()
