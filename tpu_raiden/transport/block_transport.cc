@@ -736,6 +736,8 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
     }
   });
 
+  LOG(ERROR) << "===H2HDBG [send] connected fd=" << fd
+             << " peer=" << std::string(peer) << " stream=" << stream_idx;
   PacketHeader header = {};
   header.op = dst_block_ids.empty() ? 1 : 6;
   header.flags = static_cast<uint8_t>(major_order);
@@ -756,6 +758,8 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
     statuses[stream_idx] = s;
     return;
   }
+  LOG(ERROR) << "===H2HDBG [send] sent header op=" << static_cast<int>(header.op)
+             << " block_count=" << block_count << " stream=" << stream_idx;
 
   if (header.op == 6) {
     ABSL_DCHECK_LE(block_offset + block_count, dst_block_ids.size());
@@ -764,6 +768,8 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
       statuses[stream_idx] = s;
       return;
     }
+    LOG(ERROR) << "===H2HDBG [send] op6 sent dst_ids, waiting for ack, stream="
+               << stream_idx;
     uint8_t ack = 0;
     s = ReadExact(fd, &ack, 1);
     if (!s.ok() || ack != 1) {
