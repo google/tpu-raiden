@@ -405,6 +405,12 @@ def run_receiver():
       got = _read_host_block_layer(manager, layer, 0,
                                    _NUM_BLOCKS.value, _BLOCK_SIZE.value)
       exp = _layer_fill(layer)
+      if layer == 0 and src_ids:
+        s0, d0 = src_ids[0], dst_ids[0]
+        print(f'[verify-dbg] L0: got[d={d0}][:8]={got[d0][:8].tolist()} '
+              f'exp[s={s0}][:8]={exp[s0][:8].tolist()} '
+              f'got_nonzero={int(np.count_nonzero(got))}/{got.size}',
+              file=sys.stderr)
       for s_id, d_id in zip(src_ids, dst_ids):
         if not np.array_equal(got[d_id], exp[s_id]):
           mismatched += 1
