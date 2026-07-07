@@ -29,8 +29,12 @@
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
+#include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
+#include "tpu_raiden/rpc/rpc_utils.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
@@ -38,10 +42,35 @@ namespace kv_cache {
 using ::tpu_raiden::rpc::ControlRequest;
 using ::tpu_raiden::rpc::ControlResponse;
 
-KVCacheListener::KVCacheListener(KVCacheManagerBase* engine,
-                                 int listener_port)
-    : engine_(engine), listener_port_(listener_port) {
-  server_fd_ = socket(AF_INET6, SOCK_STREAM, 0);
+KVCacheListener::KVCacheListener(KVCacheManagerBase* engine, int listener_port,
+                                 int controller_port)
+    : engine_(engine),
+      listener_port_(listener_port),
+      controller_port_(controller_port) {
+  if (engine_ && controller_port_ > 0) {
+    engine_->SetBlocksReceivedCallback(
+        [this](const std::vector<int>& block_ids, uint64_t uuid) {
+          ControlRequest req;
+          req.set_command(ControlRequest::COMMAND_TRANSFER_COMPLETED);
+          for (int id : block_ids) {
+            req.add_completed_block_ids(id);
+          }
+
+          std::string controller_addr =
+              absl::StrCat("localhost:", controller_port_);
+          ControlResponse resp;
+          absl::Status status = rpc::SendRpcSync(controller_addr, req, resp);
+          if (!status.ok()) {
+            LOG(WARNING) << "Failed to notify controller at " << controller_addr
+                         << ": " << status;
+          } else if (!resp.success()) {
+            LOG(WARNING) << "Controller failed to process completion: "
+                         << resp.message();
+          }
+        });
+  }
+
+  server_fd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd_ < 0) {
     LOG(FATAL) << "Failed to create C++ KVCacheListener socket: "
                << std::strerror(errno);
@@ -52,11 +81,10 @@ KVCacheListener::KVCacheListener(KVCacheManagerBase* engine,
     LOG(WARNING) << "setsockopt SO_REUSEADDR failed";
   }
 
-  sockaddr_in6 address{
-      .sin6_family = AF_INET6,
-      .sin6_port = htons(listener_port_),
-      .sin6_addr = in6addr_any,
-  };
+  sockaddr_in address;
+  address.sin_family = AF_INET;
+  address.sin_port = htons(listener_port_);
+  address.sin_addr.s_addr = INADDR_ANY;
 
   if (bind(server_fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) <
       0) {
@@ -72,7 +100,7 @@ KVCacheListener::KVCacheListener(KVCacheManagerBase* engine,
   socklen_t addr_len = sizeof(address);
   if (getsockname(server_fd_, reinterpret_cast<sockaddr*>(&address),
                   &addr_len) == 0) {
-    listener_port_ = ntohs(address.sin6_port);
+    listener_port_ = ntohs(address.sin_port);
   }
 
   LOG(INFO) << "Native C++ KVCacheListener actively listening on port: "
@@ -84,12 +112,12 @@ KVCacheListener::KVCacheListener(KVCacheManagerBase* engine,
 KVCacheListener::~KVCacheListener() {
   stopping_ = true;
   if (server_fd_ >= 0) {
-    int sock = socket(AF_INET6, SOCK_STREAM, 0);
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock >= 0) {
-      sockaddr_in6 serv_addr{};
-      serv_addr.sin6_family = AF_INET6;
-      serv_addr.sin6_port = htons(listener_port_);
-      inet_pton(AF_INET6, "::1", &serv_addr.sin6_addr);
+      sockaddr_in serv_addr{};
+      serv_addr.sin_family = AF_INET;
+      serv_addr.sin_port = htons(listener_port_);
+      inet_pton(AF_INET, "localhost", &serv_addr.sin_addr);
       if (connect(sock, reinterpret_cast<sockaddr*>(&serv_addr),
                   sizeof(serv_addr)) == 0) {
         ControlRequest req;
@@ -201,6 +229,224 @@ void KVCacheListener::ConnectionWorker(int client_fd) {
       LOG(ERROR) << "WaitForPendingWork failed during shutdown: " << status;
     }
     stopping_ = true;
+  } else if (req.command() == ControlRequest::COMMAND_GET_ENDPOINTS) {
+    LOG(INFO) << "C++ KVCacheListener received GET_ENDPOINTS command.";
+    std::string ip = engine_->local_ip();
+    int port = engine_->local_port().value_or(0);
+    std::string endpoint = absl::StrContains(ip, ':')
+                               ? absl::StrCat("[", ip, "]:", port)
+                               : absl::StrCat(ip, ":", port);
+    for (size_t i = 0; i < engine_->num_shards(); ++i) {
+      resp.add_endpoints(endpoint);
+    }
+  } else if (req.command() == ControlRequest::COMMAND_EXECUTE_LOAD) {
+    if (req.has_load_request()) {
+      const auto& load_req = req.load_request();
+      uint64_t uuid = load_req.uuid();
+      LOG(INFO) << "C++ KVCacheListener received EXECUTE_LOAD, uuid=" << uuid;
+
+      std::vector<raiden::PjRtCopyFuture> shard_futures;
+      absl::Status load_status = absl::OkStatus();
+      std::vector<int> all_dst_block_ids;
+
+      for (const auto& [local_sh_idx, schedule] :
+           load_req.shard_load_schedules()) {
+        std::vector<int64_t> src_block_ids;
+        std::vector<int64_t> dst_block_ids;
+        std::vector<int64_t> copy_sizes;
+
+        for (const auto& entry : schedule.entries()) {
+          src_block_ids.push_back(entry.src_block_id());
+          dst_block_ids.push_back(entry.dst_block_id());
+          copy_sizes.push_back(1);
+          all_dst_block_ids.push_back(entry.dst_block_id());
+        }
+
+        if (src_block_ids.empty()) continue;
+
+        auto fut_or = engine_->H2d(
+            src_block_ids, dst_block_ids, copy_sizes,
+            /*slot_idx=*/std::nullopt,
+            /*target_layer_idx=*/std::nullopt,
+            /*target_shard_idx=*/static_cast<size_t>(local_sh_idx));
+        if (!fut_or.ok()) {
+          load_status = fut_or.status();
+          LOG(ERROR) << "Failed to trigger H2D for shard " << local_sh_idx
+                     << ": " << load_status;
+          break;
+        }
+        shard_futures.push_back(std::move(fut_or.value()));
+      }
+
+      if (load_status.ok() && !shard_futures.empty()) {
+        raiden::PjRtCopyFuture joined_future =
+            raiden::JoinPjRtCopyFutures(absl::MakeSpan(shard_futures));
+
+        absl::flat_hash_set<int> unique_dst_ids(all_dst_block_ids.begin(),
+                                                all_dst_block_ids.end());
+        std::vector<int> deduped_dst_ids(unique_dst_ids.begin(),
+                                         unique_dst_ids.end());
+
+        joined_future.OnReady([port = controller_port_,
+                               deduped_dst_ids = std::move(deduped_dst_ids),
+                               uuid](auto res_status) {
+          ControlRequest comp_req;
+          comp_req.set_command(ControlRequest::COMMAND_LOAD_COMPLETED);
+          comp_req.mutable_load_request()->set_uuid(uuid);
+          for (int id : deduped_dst_ids) {
+            comp_req.add_completed_block_ids(id);
+          }
+          if (res_status.ok()) {
+            comp_req.set_success(true);
+          } else {
+            comp_req.set_success(false);
+            comp_req.set_error_message(
+                std::string(res_status.status().message()));
+          }
+
+          std::string controller_addr = absl::StrCat("localhost:", port);
+          ControlResponse comp_resp;
+          absl::Status rpc_status =
+              rpc::SendRpcSync(controller_addr, comp_req, comp_resp);
+          if (!rpc_status.ok()) {
+            LOG(WARNING) << "Failed to notify controller of load completion at "
+                         << controller_addr << ": " << rpc_status;
+          } else if (!comp_resp.success()) {
+            LOG(WARNING) << "Controller failed to process load completion: "
+                         << comp_resp.message();
+          }
+        });
+      } else if (!load_status.ok()) {
+        resp.set_success(false);
+        resp.set_message("Failed to trigger H2D: " +
+                         std::string(load_status.message()));
+      }
+    } else {
+      resp.set_success(false);
+      resp.set_message("Missing load_request");
+    }
+  } else if (req.command() == ControlRequest::COMMAND_EXECUTE_SAVE) {
+    if (req.has_save_request()) {
+      const auto& save_req = req.save_request();
+      uint64_t uuid = save_req.uuid();
+      LOG(INFO) << "C++ KVCacheListener received EXECUTE_SAVE, uuid=" << uuid;
+
+      std::vector<int64_t> src_block_ids;
+      std::vector<int64_t> copy_sizes;
+
+      if (!save_req.shard_save_schedules().empty()) {
+        const auto& first_schedule =
+            save_req.shard_save_schedules().begin()->second;
+        for (const auto& entry : first_schedule.entries()) {
+          src_block_ids.push_back(entry.src_block_id());
+          copy_sizes.push_back(1);
+        }
+      }
+
+      if (src_block_ids.empty()) {
+        resp.set_success(true);
+        resp.set_message("No blocks to save");
+      } else {
+        auto res_or = engine_->D2hAutoAllocate(src_block_ids, copy_sizes);
+        if (!res_or.ok()) {
+          resp.set_success(false);
+          resp.set_message("Failed to trigger D2H auto allocate: " +
+                           std::string(res_or.status().message()));
+        } else {
+          auto [allocated_ids, future] = std::move(res_or).value();
+
+          future.OnReady(
+              [port = controller_port_,
+               allocated_ids = std::move(allocated_ids),
+               uuid](auto res_status) {
+                ControlRequest comp_req;
+                comp_req.set_command(ControlRequest::COMMAND_SAVE_COMPLETED);
+                comp_req.mutable_save_request()->set_uuid(uuid);
+                for (int id : allocated_ids) {
+                  comp_req.add_completed_block_ids(id);
+                }
+                if (res_status.ok()) {
+                  comp_req.set_success(true);
+                } else {
+                  comp_req.set_success(false);
+                  comp_req.set_error_message(
+                      std::string(res_status.status().message()));
+                }
+
+                std::string controller_addr = absl::StrCat("localhost:", port);
+                ControlResponse comp_resp;
+                absl::Status rpc_status =
+                    rpc::SendRpcSync(controller_addr, comp_req, comp_resp);
+                if (!rpc_status.ok()) {
+                  LOG(WARNING)
+                      << "Failed to notify controller of save completion at "
+                      << controller_addr << ": " << rpc_status;
+                } else if (!comp_resp.success()) {
+                  LOG(WARNING)
+                      << "Controller failed to process save completion: "
+                      << comp_resp.message();
+                }
+              });
+        }
+      }
+    } else {
+      resp.set_success(false);
+      resp.set_message("Missing save_request");
+    }
+  } else if (req.command() == ControlRequest::COMMAND_EXECUTE_EVICT) {
+    if (req.has_evict_request()) {
+      const auto& evict_req = req.evict_request();
+      uint64_t uuid = evict_req.uuid();
+      LOG(INFO) << "C++ KVCacheListener received EXECUTE_EVICT, uuid=" << uuid;
+
+      std::vector<int> host_block_ids;
+
+      if (!evict_req.shard_evict_schedules().empty()) {
+        const auto& first_schedule =
+            evict_req.shard_evict_schedules().begin()->second;
+        for (const auto& entry : first_schedule.entries()) {
+          host_block_ids.push_back(entry.host_block_id());
+        }
+      }
+
+      if (host_block_ids.empty()) {
+        resp.set_success(true);
+        resp.set_message("No blocks to evict");
+      } else {
+        absl::Status status = engine_->UnlockBlocks(host_block_ids);
+
+        ControlRequest comp_req;
+        comp_req.set_command(ControlRequest::COMMAND_EVICT_COMPLETED);
+        comp_req.mutable_evict_request()->set_uuid(uuid);
+        if (status.ok()) {
+          comp_req.set_success(true);
+        } else {
+          comp_req.set_success(false);
+          comp_req.set_error_message(std::string(status.message()));
+        }
+
+        std::string controller_addr =
+            absl::StrCat("localhost:", controller_port_);
+        ControlResponse comp_resp;
+        absl::Status rpc_status =
+            rpc::SendRpcSync(controller_addr, comp_req, comp_resp);
+        if (!rpc_status.ok()) {
+          LOG(WARNING) << "Failed to notify controller of evict completion at "
+                       << controller_addr << ": " << rpc_status;
+        } else if (!comp_resp.success()) {
+          LOG(WARNING) << "Controller failed to process evict completion: "
+                       << comp_resp.message();
+        }
+        resp.set_success(status.ok());
+        if (!status.ok()) {
+          resp.set_message("Failed to unlock blocks: " +
+                           std::string(status.message()));
+        }
+      }
+    } else {
+      resp.set_success(false);
+      resp.set_message("Missing evict_request");
+    }
   } else {
     resp.set_success(false);
     resp.set_message("COMMAND_UNSPECIFIED");

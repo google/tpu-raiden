@@ -21,7 +21,7 @@
 #include <vector>
 
 #include "absl/status/statusor.h"
-#include "third_party/grpc/include/grpcpp/channel.h"
+#include "grpcpp/channel.h"
 #include "tpu_raiden/rpc/coordination.grpc.pb.h"
 #include "tpu_raiden/rpc/coordination.pb.h"
 
