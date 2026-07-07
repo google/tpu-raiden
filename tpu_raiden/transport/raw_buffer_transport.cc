@@ -364,6 +364,8 @@ void RawBufferTransport::ClosePooledConnections() {
 absl::Status RawBufferTransport::ProcessSingleRequest(int client_fd) {
   PacketHeader header = {};
   RETURN_IF_ERROR(ReadExact(client_fd, &header, sizeof(header)));
+  LOG(ERROR) << "===H2HDBG recv: ProcessSingleRequest read header op="
+             << static_cast<int>(header.op) << " fd=" << client_fd;
 
   if (header.op == 5) {
     uint32_t dst_offset = header.remote_id;
@@ -458,6 +460,8 @@ void RawBufferTransport::ListenerLoop() {
       if (stopping_) break;
       continue;
     }
+    LOG(ERROR) << "===H2HDBG recv: ListenerLoop accepted client_fd=" << client_fd
+               << " on server_fd=" << server_fd_;
 
     int opt = 1;
     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
