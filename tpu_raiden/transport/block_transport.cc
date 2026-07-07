@@ -281,13 +281,20 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
   const size_t bytes_per_block = block_delegate_->bytes_per_block();
 
   if (header.op == 1) {  // Push
+    LOG(ERROR) << "===H2HDBG recv: op=1 push, count=" << header.count_or_size
+               << " uuid=" << header.uuid;
     TF_ASSIGN_OR_RETURN(MajorOrder major_order, ParseMajorOrder(header.flags));
     TF_ASSIGN_OR_RETURN(
         std::vector<int> allocated_ids,
         block_delegate_->AllocateBlocks(header.count_or_size, header.uuid));
+    LOG(ERROR) << "===H2HDBG recv: allocated " << allocated_ids.size()
+               << " blocks, sending ids";
 
     RETURN_IF_ERROR(WriteExact(client_fd, allocated_ids.data(),
                                header.count_or_size * sizeof(int)));
+    LOG(ERROR) << "===H2HDBG recv: ids sent, reading payload"
+               << " (use_chunks=" << block_delegate_->use_block_chunks(header.uuid)
+               << ")";
 
     std::vector<int> target_layers;
     if (header.local_id == 0xFFFFFFFF) {
@@ -751,6 +758,8 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
     statuses[stream_idx] = s;
     return;
   }
+  LOG(ERROR) << "===H2HDBG sender: connected to " << peer << ", header sent (op="
+             << static_cast<int>(header.op) << "), waiting for allocated ids";
 
   if (header.op == 6) {
     ABSL_DCHECK_LE(block_offset + block_count, dst_block_ids.size());
@@ -783,6 +792,8 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
       allocated_ids[block_offset + k] = stream_allocated_ids[k];
     }
   }
+  LOG(ERROR) << "===H2HDBG sender: got allocated ids, sending payload"
+             << " (use_chunks=" << block_delegate_->use_block_chunks(uuid) << ")";
 
   std::vector<int> target_layers;
   if (layer_idx == -1) {
@@ -826,6 +837,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
     statuses[stream_idx] = s;
     return;
   }
+  LOG(ERROR) << "===H2HDBG sender: payload fully sent, waiting for ack";
 
   uint8_t ack = 0;
   s = ReadExact(fd, &ack, 1);
