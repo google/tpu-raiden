@@ -169,16 +169,25 @@ NB_MODULE(_tpu_raiden_jax, m) {
       .def(
           "h2h_write",
           [](tpu_raiden::kv_cache::jax::KVCacheManager& self, std::string peer,
-             const std::vector<int>& src_block_ids)
+             const std::vector<int>& src_block_ids,
+             const std::vector<int>& dst_block_ids)
               -> absl::StatusOr<
                   std::pair<std::vector<int>, tpu_raiden::RaidenFuture>> {
-            auto res = self.H2hWrite(peer, src_block_ids);
+            // dst_block_ids empty -> op=1 (receiver dynamically allocates), which
+            // fails on the JAX manager (no allocatable receiver blocks -> the
+            // receiver closes the socket -> "Socket closed during readv"). Passing
+            // explicit dst_block_ids selects op=6 (write to known blocks), the only
+            // working push path here and what the C++ h2h_benchmark_runner uses.
+            // Exposes the existing optional 3rd arg of KVCacheManager::H2hWrite;
+            // default {} preserves the old (op=1) behavior for other callers.
+            auto res = self.H2hWrite(peer, src_block_ids, dst_block_ids);
             if (!res.ok()) return res.status();
             return std::make_pair(
                 res.value().first,
                 tpu_raiden::RaidenFuture{std::move(res.value().second)});
           },
-          nb::arg("peer"), nb::arg("src_block_ids"))
+          nb::arg("peer"), nb::arg("src_block_ids"),
+          nb::arg("dst_block_ids") = std::vector<int>())
 
       .def(
           "h2h_read",
