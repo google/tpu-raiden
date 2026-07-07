@@ -37,6 +37,4 @@ benchmarks {
   metrics { name: "1048576B_x64_P1/py_gbs" unit: "GB/s" stats { stat: MEAN } }
   metrics { name: "1048576B_x64_P8/cpp_gbs" unit: "GB/s" stats { stat: MEAN } }
   metrics { name: "1048576B_x64_P8/py_gbs" unit: "GB/s" stats { stat: MEAN } }
-  metrics { name: "16777216B_x64_P8/cpp_gbs" unit: "GB/s" stats { stat: MEAN } }
-  metrics { name: "16777216B_x64_P8/py_gbs" unit: "GB/s" stats { stat: MEAN } }
 }

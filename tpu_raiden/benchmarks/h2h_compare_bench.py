@@ -33,6 +33,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 from absl import app
@@ -48,11 +49,14 @@ _LAYERS = 32   # C++ kNumLayers (fixed)
 _SHARDS = 1    # C++ kNumShards (fixed)
 
 # (block_size_bytes, num_blocks, parallelism). 128MB dropped (OOM risk); 16MB P1
-# dropped (too slow at ~3 GB/s -> would exceed the timeout at 50 iters).
+# dropped (too slow at ~3 GB/s -> would exceed the timeout at 50 iters). 16MB P8
+# dropped too: sender+receiver each allocate ~32GB of host KV cache (32 layers x
+# 64 blocks x 16MB), which OOM-kills the pod mid-run and drops BAP's control
+# channel (the ':50051 ECONNREFUSED' that failed the job). The two 1MB configs
+# below give a clean P1-vs-P8 read without exhausting host memory.
 _CONFIGS = [
     (1048576, 64, 1),
     (1048576, 64, 8),
-    (16777216, 64, 8),
 ]
 
 # We report the MEDIAN of 50 iters for both sides.
@@ -62,6 +66,10 @@ _CONFIGS = [
 _CPP_MEAN_RE = re.compile(r'Throughput:\s*([0-9.]+)')             # fallback (mean) GB/s
 _CPP_P50_RE = re.compile(r'p50:\s*([0-9.]+)')                     # "p50:   X ms"
 _PY_RE = re.compile(r'Throughput \(median\):\s*([0-9.]+)')        # "Throughput (median): X GB/s"
+# The C++ receiver runs its OWN data-integrity check (reads GetHostPointer, byte-
+# compares vs the deterministic fill) and prints one of these after the sender
+# disconnects. Surfacing it is how we learn whether C++ integrity passes here.
+_CPP_VERIFY_RE = re.compile(r'Data integrity verification (PASSED|FAILED)')
 
 
 def _label(bs, nb, p):
@@ -110,24 +118,48 @@ def _run(cmd, timeout):
 
 
 def _run_cpp(cc, bs, nb, p, port):
-  """Start the C++ receiver (bg) + sender (timed); return GB/s or -1.0."""
-  # Discard the receiver's stdout/stderr: we only need the SENDER's throughput
-  # line, and an undrained PIPE here deadlocks once the receiver's log fills it.
+  """Start the C++ receiver (bg) + sender (timed); return GB/s or -1.0.
+
+  Also surfaces the C++ receiver's OWN data-integrity verdict. The receiver runs
+  that check only AFTER the sender's control connection closes (i.e. after the
+  sender process exits), so we must let it finish on its own rather than killing
+  it the instant the sender returns. Its log goes to a temp FILE (not a PIPE --
+  an undrained PIPE deadlocks once the receiver's chatty log fills it).
+  """
+  recv_log = tempfile.NamedTemporaryFile(
+      mode='w+', suffix='.cpprecv', delete=False)
   recv = subprocess.Popen(
       [cc, '--role=receiver', '--data_interface=lo', f'--peer_control_port={port}',
        f'--numa_node={_RECEIVER_NUMA.value}', f'--block_size={bs}',
        f'--num_blocks={nb}', f'--parallelism={p}'],
-      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+      stdout=recv_log, stderr=subprocess.STDOUT)
   time.sleep(3)  # let the control server bind
   rc, out = _run(
       [cc, '--role=sender', '--peer_control_ip=127.0.0.1', '--data_interface=lo',
        f'--peer_control_port={port}', f'--numa_node={_SENDER_NUMA.value}',
        f'--block_size={bs}', f'--num_blocks={nb}', f'--parallelism={p}'],
       _TIMEOUT_S.value)
+  # Let the receiver detect the disconnect, run its integrity check and exit on
+  # its own; only force-kill if it wedges.
   try:
-    recv.terminate(); recv.wait(10)
-  except Exception:  # pylint: disable=broad-exception-caught
-    recv.kill()
+    recv.wait(30)
+  except subprocess.TimeoutExpired:
+    try:
+      recv.terminate(); recv.wait(10)
+    except Exception:  # pylint: disable=broad-exception-caught
+      recv.kill()
+  try:
+    recv_log.flush(); recv_log.seek(0)
+    recv_out = recv_log.read()
+  finally:
+    recv_log.close()
+    try:
+      os.unlink(recv_log.name)
+    except OSError:
+      pass
+  vm = _CPP_VERIFY_RE.search(recv_out or '')
+  verdict = vm.group(1) if vm else 'UNKNOWN (verdict not found in receiver log)'
+  print(f'[compare] C++ integrity {_label(bs, nb, p)}: {verdict}', flush=True)
   # MEDIAN throughput from the C++ p50 latency: total_bytes / p50_seconds.
   # total_bytes mirrors the C++ runner (active_managers=1 on single-host loopback).
   m = _CPP_P50_RE.search(out or '')
@@ -153,6 +185,13 @@ def _run_py(py_bin, bs, nb, p):
        f'--num_shards={_SHARDS}', f'--block_size={bs}', f'--num_blocks={nb}',
        f'--parallelism={p}', f'--warmup={_WARMUP.value}', f'--iters={_ITERS.value}'],
       _TIMEOUT_S.value)
+  # Surface the sender/receiver NUMA placement proof even on success (the launcher
+  # inherits their stdout, so these lines are in `out` but would otherwise be
+  # swallowed here). Confirms sender pages -> node 0, receiver -> node 1 = truly
+  # cross-socket.
+  for line in (out or '').splitlines():
+    if line.startswith('[numa]'):
+      print(f'[compare] {_label(bs, nb, p)} {line}', flush=True)
   m = _PY_RE.search(out or '')
   if m:
     return float(m.group(1))
