@@ -893,6 +893,14 @@ int main(int argc, char* argv[]) {
     std::cout << absl::StrFormat("Throughput: %8.3f GB/s (collective)\n",
                                  throughput_gbs);
 
+    // Emit every raw per-iteration latency (already in ms) so the Python
+    // analysis driver (h2h_cpp_gate.py) can capture the full distribution, not
+    // just the p50/p90/p99 summary above. One "H2H_ITER_MS <ms>" line per iter.
+    for (double val : collective_latencies_ms) {
+      std::cout << absl::StrFormat("H2H_ITER_MS %.6f\n", val);
+    }
+    std::cout << std::flush;
+
     std::cout << "Closing control connection..." << std::endl;
     close(control_fd);
   }
