@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import csv
 import json
 import os
 import sys
@@ -34,6 +35,14 @@ _ITERS = flags.DEFINE_integer(
     'Override iters from the baselines file. Use a large value when recording '
     '(the floor depends on a MAD/sigma estimate, which needs many samples to be '
     'stable); the gate itself runs the smaller value in gating_baselines.json.')
+_DUMP = flags.DEFINE_string(
+    'dump', None,
+    'CSV to write EVERY raw per-iteration sample (config,dir,iter,gbps) for your '
+    'own analysis. On BAP it is redirected into WORKLOAD_ARTIFACTS_DIR so the '
+    'workflow uploads it as a downloadable artifact. Use --iters=500 for 500.')
+_ANALYZE = flags.DEFINE_bool(
+    'analyze', False,
+    'Dump raw samples (--dump) + print, then exit 0. No record, no gate.')
 
 
 def _baselines_path():
@@ -105,6 +114,27 @@ def main(_):
     print(f"[measured] {c['dtype']} L{c['num_layers']} "
           f"{'x'.join(map(str, c['shape']))}  "
           f"d2h {r['d2h_gbps']:.1f}  h2d {r['h2d_gbps']:.1f} Gbps")
+
+  # --- dump raw per-iteration samples for offline analysis ---
+  if _DUMP.value:
+    dump_path = _DUMP.value
+    adir = os.environ.get('WORKLOAD_ARTIFACTS_DIR')
+    if adir:  # on BAP, land it where the workflow uploads artifacts from
+      dump_path = os.path.join(adir, os.path.basename(dump_path))
+    with open(dump_path, 'w', newline='') as f:
+      w = csv.writer(f)
+      w.writerow(['config', 'dir', 'iter', 'gbps'])
+      for c, r in results:
+        label = f"{c['dtype']}_L{c['num_layers']}_{'x'.join(map(str, c['shape']))}"
+        for d in ('d2h', 'h2d'):
+          for it, v in enumerate(r[f'{d}_gbps_all']):
+            w.writerow([label, d, it, f'{float(v):.4f}'])
+    print(f'Wrote raw samples ({iters} iters x {len(results)} configs x 2 dirs) '
+          f'-> {dump_path}')
+
+  if _ANALYZE.value:
+    print('analyze mode: raw samples dumped, no record/gate. Done.')
+    return
 
   # --- record mode: overwrite baselines + floors, no gating ---
   if _RECORD.value:

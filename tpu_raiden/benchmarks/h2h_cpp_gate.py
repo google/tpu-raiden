@@ -31,9 +31,11 @@ Metrics are emitted to TENSORBOARD_OUTPUT_DIR so BAP ingests them; every tag has
 a matching metrics{name:...} in the registry pbtxt.
 """
 
+import csv
 import json
 import os
 import re
+import statistics
 import subprocess
 import sys
 import time
@@ -48,12 +50,29 @@ _TIMEOUT_S = flags.DEFINE_integer('timeout_s', 300, 'Per-process hard timeout.')
 _RECORD = flags.DEFINE_bool('record', False,
                             'Record baselines to --baselines instead of gating.')
 _BASELINES = flags.DEFINE_string(
-    'baselines', 'tpu_raiden/benchmarks/h2h_cpp_baselines.json',
-    'Baselines file: read for gating, written for --record.')
-_MARGIN = flags.DEFINE_float('margin', 0.03,
-                             'Allowed fractional drop below baseline (floor).')
+    'baselines', None,
+    'Baselines JSON path. Default: alongside this binary (runfiles).')
+_MAX_MARGIN = flags.DEFINE_float(
+    'max_margin', 0.03,
+    'Floor is never looser than this fractional drop below the median.')
+_SIGMA_K = flags.DEFINE_float(
+    'sigma_k', 3.5, 'Robust sigmas (MAD) below the median for the gate floor.')
 _CONTROL_PORT = flags.DEFINE_integer('control_port', 9099,
                                      'Base control port for the C++ handshake.')
+_RUNS = flags.DEFINE_integer(
+    'runs', 1,
+    'Repeat each config N times. Each run is one C++ invocation (median of the '
+    'runner\'s fixed 50 internal iters). Use a large N (e.g. 500) to build a '
+    'run-to-run distribution for analysis; record/gate use the median across runs.')
+_DUMP = flags.DEFINE_string(
+    'dump', None,
+    'CSV to write every sample for your own analysis (config,run,iter,gbs,'
+    'integrity). On BAP it is redirected into WORKLOAD_ARTIFACTS_DIR so the '
+    'workflow uploads it as a downloadable artifact.')
+_ANALYZE = flags.DEFINE_bool(
+    'analyze', False,
+    'Collect + --dump + print distribution stats only. No gate, no baseline '
+    'write; always exits 0. Use for the data-collection workflow.')
 
 _LAYERS = 32   # C++ kNumLayers (fixed in the runner)
 _SHARDS = 1    # C++ kNumShards (fixed in the runner)
@@ -66,9 +85,29 @@ _CONFIGS = [
 ]
 
 _CPP_P50_RE = re.compile(r'p50:\s*([0-9.]+)')          # "p50:   X ms"
-_CPP_MEAN_RE = re.compile(r'Throughput:\s*([0-9.]+)')  # fallback (mean) GB/s
+_CPP_P90_RE = re.compile(r'p90:\s*([0-9.]+)')          # "p90:   X ms"
+_CPP_P99_RE = re.compile(r'p99:\s*([0-9.]+)')          # "p99:   X ms"
+_CPP_MEAN_RE = re.compile(r'Throughput:\s*([0-9.]+)')  # mean GB/s
+# OPTIONAL per-iteration raw latency. If the runner prints one line per iter like
+# "H2H_ITER_MS <ms>" (a ~3-line print loop over the latency vector it ALREADY
+# builds to compute p50/p90/p99), this captures every raw sample -> one run gives
+# all 50 points, no re-running. Absent, we fall back to the per-run median.
+_CPP_RAW_RE = re.compile(r'H2H_ITER_MS\s+([0-9.]+)')
 _INTEG_PASS = 'Data integrity verification PASSED'
 _INTEG_FAIL = 'Data integrity verification FAILED'
+
+
+def _baselines_path():
+  """Baselines file: --baselines if given, else alongside this binary (runfiles).
+
+  A CWD-relative path breaks under `bazel run` (CWD is the runfiles tree, not the
+  workspace), so default to the copy shipped next to this .py via the BUILD data
+  dep -- which is what the gate reads on BAP.
+  """
+  if _BASELINES.value:
+    return _BASELINES.value
+  return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      'h2h_cpp_baselines.json')
 
 
 def _label(bs, nb, p):
@@ -98,11 +137,16 @@ def _run(cmd, timeout):
     return 124, out + f'\n[timeout after {timeout}s]'
 
 
-def _run_cpp(cc, bs, nb, p, port):
-  """Spawn the C++ receiver (bg) + sender (timed) and return (gbs, integrity_ok).
+def _f(regex, text):
+  m = regex.search(text or '')
+  return float(m.group(1)) if m else -1.0
 
-  gbs is the median throughput derived from the sender's p50 latency, or -1.0 on
-  failure. integrity_ok is True only if the receiver printed the PASSED line.
+
+def _run_cpp(cc, bs, nb, p, port):
+  """Spawn the C++ receiver (bg) + sender (timed) for ONE run.
+
+  Returns a dict: gbs (median throughput from p50 latency), mean_gbs, p50_ms,
+  p90_ms, p99_ms, integrity (bool). gbs is -1.0 on failure.
   """
   base = [cc, '--data_interface=lo', f'--peer_control_port={port}',
           f'--block_size={bs}', f'--num_blocks={nb}', f'--parallelism={p}']
@@ -124,22 +168,30 @@ def _run_cpp(cc, bs, nb, p, port):
     recv_out = ''
 
   integrity_ok = (_INTEG_PASS in recv_out) and (_INTEG_FAIL not in recv_out)
+  p50 = _f(_CPP_P50_RE, sender_out)
+  p90 = _f(_CPP_P90_RE, sender_out)
+  p99 = _f(_CPP_P99_RE, sender_out)
+  mean_gbs = _f(_CPP_MEAN_RE, sender_out)
+  total_bytes = _LAYERS * _SHARDS * nb * bs
+
+  # Per-iteration raw samples if the runner emits them; else empty.
+  raw_gbs = [(total_bytes / 1e9) / (float(ms) / 1000.0)
+             for ms in _CPP_RAW_RE.findall(sender_out or '') if float(ms) > 0]
 
   gbs = -1.0
-  m = _CPP_P50_RE.search(sender_out or '')
-  if m and float(m.group(1)) > 0:
-    total_bytes = _LAYERS * _SHARDS * nb * bs
-    gbs = (total_bytes / 1e9) / (float(m.group(1)) / 1000.0)
-  else:
-    m2 = _CPP_MEAN_RE.search(sender_out or '')
-    if m2:
-      gbs = float(m2.group(1))
+  if p50 > 0:
+    gbs = (total_bytes / 1e9) / (p50 / 1000.0)
+  elif raw_gbs:
+    gbs = statistics.median(raw_gbs)
+  elif mean_gbs > 0:
+    gbs = mean_gbs
 
   if gbs < 0 or not integrity_ok:
     print(f'[cpp] {_label(bs, nb, p)} FAILED (rc={rc}, integrity_ok={integrity_ok});'
           f' sender output:\n{sender_out}\n--- receiver tail ---\n{recv_out[-2000:]}',
           flush=True)
-  return gbs, integrity_ok
+  return {'gbs': gbs, 'mean_gbs': mean_gbs, 'p50_ms': p50, 'p90_ms': p90,
+          'p99_ms': p99, 'integrity': integrity_ok, 'raw_gbs': raw_gbs}
 
 
 def _emit(tag, value):
@@ -160,59 +212,167 @@ def _emit(tag, value):
     print(f'WARNING: TB write failed for {tag}: {e}', file=sys.stderr)
 
 
+def _core_floor(samples, k, max_margin):
+  """Gate floor: lower edge of the normal core, capped so it is never looser
+  than max_margin (mirrors the d2h/h2d _core_floor exactly).
+
+      floor = max(median - k * MAD_sigma,  median * (1 - max_margin))
+
+  MAD_sigma = 1.4826 * median(|x - median|) is an outlier-resistant stddev, so a
+  low tail does not drag the bound down; the cap keeps a noisy config from ending
+  up looser than a flat max_margin.
+  """
+  med = statistics.median(samples)
+  mad = statistics.median([abs(x - med) for x in samples]) if len(samples) > 1 else 0.0
+  sigma = 1.4826 * mad
+  core = med - k * sigma
+  cap = med * (1.0 - max_margin)
+  return max(core, cap)
+
+
+def _pct(xs, q):
+  """q-th percentile (0..100) of non-empty xs via linear interpolation."""
+  xs = sorted(xs)
+  if len(xs) == 1:
+    return xs[0]
+  pos = (len(xs) - 1) * (q / 100.0)
+  lo = int(pos)
+  hi = min(lo + 1, len(xs) - 1)
+  return xs[lo] + (xs[hi] - xs[lo]) * (pos - lo)
+
+
 def main(_):
   cc = _locate('h2h_benchmark_runner')
-  print(f'[cpp-gate] C++ runner: {cc}', flush=True)
+  runs = max(1, _RUNS.value)
+  print(f'[cpp-gate] C++ runner: {cc}  (runs={runs} per config)', flush=True)
 
+  writer = dump = dump_path = None
+  if _DUMP.value:
+    dump_path = _DUMP.value
+    # On BAP, land the CSV in WORKLOAD_ARTIFACTS_DIR so the workflow uploads it.
+    adir = os.environ.get('WORKLOAD_ARTIFACTS_DIR')
+    if adir:
+      dump_path = os.path.join(adir, os.path.basename(dump_path))
+    dump = open(dump_path, 'w', newline='')
+    writer = csv.writer(dump)
+    # iter = per-iteration index when the runner emits raw H2H_ITER_MS samples,
+    # else -1 (the row is that run's median). mean_gbs/p50_ms/p90_ms/p99_ms are
+    # the runner's own summary of the 50 internal iters -- available every run,
+    # repeated on each raw row so every row is self-describing.
+    writer.writerow(['config', 'run', 'iter', 'gbs', 'mean_gbs', 'p50_ms',
+                     'p90_ms', 'p99_ms', 'integrity'])
+
+  # results[label] = representative {gbs (median across all samples), integrity}
   results = {}
   for i, (bs, nb, p) in enumerate(_CONFIGS):
     label = _label(bs, nb, p)
     port = _CONTROL_PORT.value + i
-    print(f'[cpp-gate] ({i + 1}/{len(_CONFIGS)}) {label}: running C++ ...',
+    series, integ_all = [], True
+    print(f'[cpp-gate] ({i + 1}/{len(_CONFIGS)}) {label}: {runs} run(s) ...',
           flush=True)
-    gbs, integ = _run_cpp(cc, bs, nb, p, port)
-    results[label] = {'gbs': gbs, 'integrity': integ}
-    print(f'[measured] {label:<22} {gbs:8.3f} GB/s  integrity={"OK" if integ else "CORRUPT"}',
-          flush=True)
-    _emit(f'{label}/cpp_gbs', gbs)
+    for run in range(runs):
+      m = _run_cpp(cc, bs, nb, p, port)
+      integ_all = integ_all and m['integrity']
+      # Prefer per-iteration raw samples (one run -> 50 points); else the run's
+      # single median.
+      if m['raw_gbs']:
+        samples = [(j, g) for j, g in enumerate(m['raw_gbs'])]
+      elif m['gbs'] > 0:
+        samples = [(-1, m['gbs'])]
+      else:
+        samples = []
+      series.extend(g for _, g in samples)
+      if writer:
+        for it, g in samples:
+          writer.writerow([label, run, it, f'{g:.4f}', f'{m["mean_gbs"]:.4f}',
+                           f'{m["p50_ms"]:.4f}', f'{m["p90_ms"]:.4f}',
+                           f'{m["p99_ms"]:.4f}', int(m['integrity'])])
+        dump.flush()
+      if runs > 1 and (run + 1) % 10 == 0:
+        print(f'    {label}: {run + 1}/{runs} runs done', flush=True)
 
-  if _RECORD.value:
-    with open(_BASELINES.value, 'w') as f:
-      json.dump({'margin': _MARGIN.value, 'configs': results}, f, indent=2)
-    print(f'\nRecorded {len(results)} C++ H2H baselines -> {_BASELINES.value}',
-          flush=True)
+    if series:
+      med = _pct(series, 50)
+      print(f'[measured] {label:<22} n={len(series):<4} median={med:8.3f}  '
+            f'p10={_pct(series, 10):7.3f}  p90={_pct(series, 90):7.3f}  '
+            f'min={min(series):7.3f}  max={max(series):7.3f}  '
+            f'stdev={statistics.pstdev(series):6.3f} GB/s  '
+            f'integrity={"OK" if integ_all else "CORRUPT"}', flush=True)
+    else:
+      med = -1.0
+      print(f'[measured] {label}: ALL {runs} run(s) failed', flush=True)
+    results[label] = {'gbs': med, 'integrity': integ_all, 'samples': series}
+    _emit(f'{label}/cpp_gbs', med)
+
+  if dump:
+    dump.close()
+    print(f'\nWrote samples for {len(_CONFIGS)} config(s) x {runs} run(s) -> '
+          f'{dump_path}', flush=True)
+
+  if _ANALYZE.value:
+    print('\nanalyze mode: data collected, no gate/baseline. Done.', flush=True)
     return
 
-  # Gate mode.
+  if _RECORD.value:
+    # baseline = median of all samples; floor = median - k*MADsigma capped at
+    # max_margin (same _core_floor as d2h/h2d). Record from MANY samples (large
+    # --runs, or the runner's raw H2H_ITER_MS) so the MAD estimate is stable.
+    k, cap = _SIGMA_K.value, _MAX_MARGIN.value
+    cfg = {'sigma_k': k, 'max_margin': cap, 'configs': {}}
+    for label, r in results.items():
+      s = r['samples']
+      cfg['configs'][label] = {
+          'baseline_gbs': round(_pct(s, 50), 3) if s else 0.0,
+          'floor_gbs': round(_core_floor(s, k, cap), 3) if s else 0.0,
+          'integrity': r['integrity'],
+          'n_samples': len(s),
+      }
+    # On BAP the runfiles tree is read-only, so write into WORKLOAD_ARTIFACTS_DIR
+    # (BAP uploads it as a downloadable artifact you then commit); locally, write
+    # straight to the file.
+    out_path = _baselines_path()
+    adir = os.environ.get('WORKLOAD_ARTIFACTS_DIR')
+    if adir:
+      out_path = os.path.join(adir, 'h2h_cpp_baselines.json')
+    with open(out_path, 'w') as f:
+      json.dump(cfg, f, indent=2)
+    print(f'\nRecorded {len(results)} C++ H2H baselines+floors '
+          f'(sigma_k={k}, cap={cap*100:.0f}%) -> {out_path}', flush=True)
+    return
+
+  # Gate mode: measured median vs recorded floor, plus integrity.
+  bpath = _baselines_path()
   try:
-    with open(_BASELINES.value) as f:
+    with open(bpath) as f:
       base = json.load(f)
   except (OSError, ValueError) as e:
-    print(f'GATE ERROR: cannot read baselines {_BASELINES.value}: {e}',
-          file=sys.stderr)
+    print(f'GATE ERROR: cannot read baselines {bpath}: {e}', file=sys.stderr)
     sys.exit(1)
 
   bad = []
-  print('\nconfig                  baseline    floor   measured  integ  verdict')
-  print('-' * 70)
+  print(f'\nH2H C++ gate: median vs floor (median - {base.get("sigma_k", 3.5)} '
+        f'MADsigma, capped at {base.get("max_margin", 0.03)*100:.0f}%) + integrity\n')
+  print('config                  baseline    floor   measured   drop  integ  verdict')
+  print('-' * 76)
   for label, r in results.items():
     b = base.get('configs', {}).get(label, {})
-    baseline = float(b.get('gbs', 0.0))
-    floor = baseline * (1.0 - base.get('margin', _MARGIN.value))
+    baseline = float(b.get('baseline_gbs', 0.0))
+    floor = float(b.get('floor_gbs', 0.0))
+    med = r['gbs']
     integ = r['integrity']
-    drop = (r['gbs'] < floor) and baseline > 0
-    ok = integ and not drop
-    verdict = 'PASS' if ok else 'FAIL'
-    reason = '' if ok else (' <-- CORRUPT' if not integ else ' <-- SLOW')
-    print(f'{label:<22} {baseline:8.3f} {floor:8.3f} {r["gbs"]:8.3f}  '
-          f'{"OK" if integ else "CORRUPT":<7} {verdict}{reason}')
+    slow = (med < floor) and floor > 0
+    ok = integ and not slow
+    drop = (baseline - med) / baseline * 100 if baseline > 0 else 0.0
+    reason = '' if ok else (' <-- CORRUPT' if not integ else ' <-- REGRESSION')
+    print(f'{label:<22} {baseline:8.3f} {floor:8.3f} {med:8.3f} {drop:6.1f}%  '
+          f'{"OK" if integ else "CORRUPT":<7} {"PASS" if ok else "FAIL"}{reason}')
     if not ok:
       bad.append(label)
 
   if bad:
-    print(f'\nGATE FAIL: {len(bad)} config(s) failed: {bad}', file=sys.stderr)
+    print(f'\nGATE FAIL: {len(bad)} config(s): {bad}', file=sys.stderr)
     sys.exit(1)
-  print('\nGATE PASS: all configs within floor and integrity intact.', flush=True)
+  print('\nGATE PASS: all configs at/above floor and integrity intact.', flush=True)
 
 
 if __name__ == '__main__':

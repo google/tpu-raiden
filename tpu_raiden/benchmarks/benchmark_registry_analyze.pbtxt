@@ -1,0 +1,43 @@
+# Raw-sample data collection for OFFLINE ANALYSIS (not gating, not baselines).
+# Each workload runs with --analyze --dump=<csv>; the driver writes the CSV into
+# WORKLOAD_ARTIFACTS_DIR, which the workflow uploads as a downloadable artifact.
+# Manual-only (workflow_dispatch); do NOT put on push/cron.
+#
+#   d2h/h2d : Python, in-process -> --iters=500 gives 500 TRUE raw samples/dir.
+#   h2h C++ : subprocess -> --runs=N. With the runner's H2H_ITER_MS print, one
+#             run = 50 raw samples (so --runs=10 -> 500); without it, --runs=N
+#             gives N medians (slow). See h2h_benchmark_runner.cc.
+
+benchmarks {
+  name: "h2d_d2h_analyze"
+  description: "Dump 500 raw per-iteration d2h+h2d throughput samples to a CSV artifact."
+  owner: "raiden-dev"
+  workload {
+    action: "./ml_actions/actions/workload_executors/bazel"
+    action_inputs { key: "target" value: "//tpu_raiden/benchmarks:h2d_d2h_benchmark_gating" }
+    action_inputs { key: "runtime_flags" value: "--analyze --iters=500 --dump=d2h_h2d_samples.csv" }
+  }
+  environment_configs {
+    id: "tpu-v5e-single-node"
+    runner_label: "linux-x86-ct5lp-224-8tpu"
+    container_image: "us-central1-docker.pkg.dev/wyzhang-dev/quickstart-docker-repo/ml-build:939285342"
+    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci" }
+  }
+}
+
+benchmarks {
+  name: "h2h_cpp_analyze"
+  description: "Dump raw H2H C++ throughput samples to a CSV artifact (50/run if the runner prints H2H_ITER_MS)."
+  owner: "raiden-dev"
+  workload {
+    action: "./ml_actions/actions/workload_executors/bazel"
+    action_inputs { key: "target" value: "//tpu_raiden/benchmarks:h2h_cpp_gate" }
+    action_inputs { key: "runtime_flags" value: "--analyze --runs=10 --dump=h2h_samples.csv" }
+  }
+  environment_configs {
+    id: "tpu-v5e-single-node"
+    runner_label: "linux-x86-ct5lp-224-8tpu"
+    container_image: "us-central1-docker.pkg.dev/wyzhang-dev/quickstart-docker-repo/ml-build:939285342"
+    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci" }
+  }
+}
