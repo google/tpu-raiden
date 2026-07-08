@@ -13,8 +13,10 @@
 // limitations under the License.
 
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -169,16 +171,18 @@ NB_MODULE(_tpu_raiden_jax, m) {
       .def(
           "h2h_write",
           [](tpu_raiden::kv_cache::jax::KVCacheManager& self, std::string peer,
-             const std::vector<int>& src_block_ids)
+             const std::vector<int>& src_block_ids,
+             const std::vector<int>& dst_block_ids)
               -> absl::StatusOr<
                   std::pair<std::vector<int>, tpu_raiden::RaidenFuture>> {
-            auto res = self.H2hWrite(peer, src_block_ids);
+            auto res = self.H2hWrite(peer, src_block_ids, dst_block_ids);
             if (!res.ok()) return res.status();
             return std::make_pair(
                 res.value().first,
                 tpu_raiden::RaidenFuture{std::move(res.value().second)});
           },
-          nb::arg("peer"), nb::arg("src_block_ids"))
+          nb::arg("peer"), nb::arg("src_block_ids"),
+          nb::arg("dst_block_ids") = std::vector<int>())
 
       .def(
           "h2h_read",
@@ -201,6 +205,30 @@ NB_MODULE(_tpu_raiden_jax, m) {
                            const>(
                &tpu_raiden::kv_cache::jax::KVCacheManager::GetHostPointer),
            nb::arg("layer_idx"), nb::arg("shard_idx"))
+      .def(
+          "read_host_bytes",
+          [](tpu_raiden::kv_cache::jax::KVCacheManager& self, size_t layer_idx,
+             size_t shard_idx, size_t nbytes) {
+            if (nbytes > self.GetHostSize(layer_idx, shard_idx)) {
+              throw std::invalid_argument(
+                  "read_host_bytes: nbytes exceeds the host buffer size");
+            }
+            const uint8_t* p = self.GetHostPointer(layer_idx, shard_idx);
+            return nb::bytes(reinterpret_cast<const char*>(p), nbytes);
+          },
+          nb::arg("layer_idx"), nb::arg("shard_idx"), nb::arg("nbytes"))
+      .def(
+          "write_host_bytes",
+          [](tpu_raiden::kv_cache::jax::KVCacheManager& self, size_t layer_idx,
+             size_t shard_idx, nb::bytes data) {
+            if (data.size() > self.GetHostSize(layer_idx, shard_idx)) {
+              throw std::invalid_argument(
+                  "write_host_bytes: data size exceeds the host buffer size");
+            }
+            uint8_t* p = self.GetHostPointer(layer_idx, shard_idx);
+            std::memcpy(p, data.c_str(), data.size());
+          },
+          nb::arg("layer_idx"), nb::arg("shard_idx"), nb::arg("data"))
       .def_prop_ro("num_layers",
                    &tpu_raiden::kv_cache::jax::KVCacheManager::num_layers)
       .def_prop_ro("num_shards",
