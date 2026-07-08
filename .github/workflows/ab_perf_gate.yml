@@ -30,6 +30,18 @@ on:
         description: "baseline ref to compare against (the SUSPECT's parent, e.g. sha of 012d1f0~1)"
         required: true
 
+  push:
+    branches:
+      - regression_probing
+
+      
+  pull_request:
+    branches:
+      - regression_probing
+  schedule:
+    - cron: "0 0 * * *"  # Runs at 00:00 UTC every day test
+
+
 permissions:
   contents: read
   pull-requests: write
