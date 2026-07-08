@@ -1,0 +1,12 @@
+# APPEND this target to the existing tpu_raiden/benchmarks/roofline/BUILD
+# (keep the roofline_sweep target that is already there; just add this below it).
+
+py_binary(
+    name = "dist_sweep",
+    testonly = True,
+    srcs = ["dist_sweep.py"],
+    deps = [
+        "//tpu_raiden/benchmarks:perf_core",
+        "@pypi//numpy",
+    ],
+)
