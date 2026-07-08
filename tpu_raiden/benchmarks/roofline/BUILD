@@ -23,3 +23,10 @@ py_binary(
     srcs = ["roofline_sweep.py"],
     deps = ["//tpu_raiden/benchmarks:perf_core"],
 )
+
+py_binary(
+    name = "dist_sweep",
+    testonly = True,
+    srcs = ["dist_sweep.py"],
+    deps = ["//tpu_raiden/benchmarks:perf_core"],
+)
