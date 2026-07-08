@@ -12,15 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Self-contained window sweep: which commit made D2H/H2D worse?
-
-For each first-parent commit in the last DAYS on BRANCH, extracts that commit's
-FULL tree with `git archive | tar` into a clean dir (this sidesteps the sparse /
-partial working tree that plain `git checkout` leaves in BAP's checkout),
-overlays today's .bazelrc + torch_tpu_stub from BRANCH so old commits build,
-injects a tiny measure package, and builds+runs the float32 L64 measurement.
-Each unique commit is built once (cached). All on one machine.
-"""
+"""Self-contained window sweep: which commit made D2H/H2D worse?"""
 import os
 import re
 import shutil
@@ -28,15 +20,18 @@ import subprocess
 import sys
 
 # ============================ EDIT THE WINDOW HERE ============================
-DAYS = os.environ.get('DAYS', '7')                 # days back to sweep (past week)
-BRANCH = os.environ.get('BRANCH', 'origin/main')   # history to walk + infra source
-THRESH_PCT = float(os.environ.get('THRESH_PCT', '5'))  # drop % that flags a commit
+DAYS = os.environ.get('DAYS', '7')
+BRANCH = os.environ.get('BRANCH', 'origin/main')
+THRESH_PCT = float(os.environ.get('THRESH_PCT', '5'))
+CLONE_URL = os.environ.get('CLONE_URL', 'https://github.com/google/tpu-raiden.git')
 # =============================================================================
 
-_SRC = '/tmp/probe_src'               # clean extraction dir for the commit tree
-_OB = '/tmp/probe_ob'                 # isolated output_base for the inner builds
+_OB = '/tmp/probe_ob'
+_FULL = '/tmp/full_repo'
+_KEEP_RC = '/tmp/keep.bazelrc'
+_KEEP_STUB = '/tmp/keep_torch_tpu_stub'
 _RUN_PKG = 'tpu_raiden/benchmarks/probe_run'
-_STUB_PATH = 'third_party/torch_tpu_stub'   # referenced by .bazelrc oss config
+_STUB_PATH = 'third_party/torch_tpu_stub'
 
 _MEASURE_PY = '''\
 import sys
@@ -59,69 +54,62 @@ py_binary(
 
 
 def _measure_at(sha, env, cache):
-  """Extract sha's tree, build+measure the L64 config; cache (None if broken)."""
+  # runs inside the full clone (cwd == _FULL)
   if sha in cache:
     return cache[sha]
   res = None
   try:
-    shutil.rmtree(_SRC, ignore_errors=True)
-    os.makedirs(_SRC)
-    # Full commit tree, independent of the working tree's sparse/partial state.
-    subprocess.run(f'git archive {sha} | tar -x -C {_SRC}', shell=True, check=True,
-                   env=env, stderr=subprocess.DEVNULL)
-    if not os.path.exists(os.path.join(_SRC, 'tpu_raiden/benchmarks/BUILD')):
-      print(f'  [warn] {sha[:9]}: benchmarks/BUILD missing in archive', flush=True)
-    # Overlay today's build infra from BRANCH (old commits lack the oss config /
-    # the stub). Pulled from git objects, not the working tree.
-    rc = subprocess.run(['git', 'show', f'{BRANCH}:.bazelrc'], env=env,
-                        capture_output=True, text=True)
-    if rc.returncode == 0:
-      with open(os.path.join(_SRC, '.bazelrc'), 'w') as f:
-        f.write(rc.stdout)
-    subprocess.run(f'git archive {BRANCH} {_STUB_PATH} | tar -x -C {_SRC}',
-                   shell=True, env=env, stderr=subprocess.DEVNULL)
-    # Inject the measure package.
-    run_dir = os.path.join(_SRC, _RUN_PKG)
-    os.makedirs(run_dir, exist_ok=True)
-    with open(os.path.join(run_dir, 'measure.py'), 'w') as f:
+    subprocess.run(['git', 'checkout', '--force', sha], check=True, env=env,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not os.path.exists('tpu_raiden/benchmarks/BUILD'):
+      print(f'  [warn] {sha[:9]}: benchmarks/BUILD missing after checkout', flush=True)
+    if os.path.exists(_KEEP_RC):
+      shutil.copy(_KEEP_RC, '.bazelrc')
+    if os.path.isdir(_KEEP_STUB):
+      shutil.copytree(_KEEP_STUB, _STUB_PATH, dirs_exist_ok=True)
+    os.makedirs(_RUN_PKG, exist_ok=True)
+    with open(os.path.join(_RUN_PKG, 'measure.py'), 'w') as f:
       f.write(_MEASURE_PY)
-    with open(os.path.join(run_dir, 'BUILD'), 'w') as f:
+    with open(os.path.join(_RUN_PKG, 'BUILD'), 'w') as f:
       f.write(_BUILD_INJECT)
     t = '//tpu_raiden/benchmarks/probe_run:measure'
     subprocess.run(['bazel', f'--output_base={_OB}', 'build', '-c', 'opt',
-                    '--config=oss', '--config=ci', t], check=True, env=env, cwd=_SRC)
+                    '--config=oss', '--config=ci', t], check=True, env=env)
     out = subprocess.run(['bazel', f'--output_base={_OB}', 'run', '-c', 'opt',
                           '--config=oss', '--config=ci', t], check=True, env=env,
-                         cwd=_SRC, capture_output=True, text=True).stdout
+                         capture_output=True, text=True).stdout
     m = re.search(r'd2h=([0-9.]+) h2d=([0-9.]+)', out)
     if m:
       res = (float(m.group(1)), float(m.group(2)))
   except subprocess.CalledProcessError:
     res = None
   finally:
-    shutil.rmtree(_SRC, ignore_errors=True)
+    shutil.rmtree(_RUN_PKG, ignore_errors=True)
   cache[sha] = res
   return res
 
 
-_FULL = '/tmp/full_repo'              # complete clone (BAP's checkout is partial)
-
-
 def main():
-  ws = os.environ.get('BUILD_WORKSPACE_DIRECTORY') or os.getcwd()
-  os.chdir(ws)
   env = dict(os.environ)
 
-  # BAP's checkout is shallow+partial: many blob/tree objects are not local, and
-  # git archive/show do NOT backfill them, so they yield incomplete trees. Do a
-  # full clone of the same remote (reusing whatever URL/creds BAP configured) and
-  # run every git operation there.
-  url = subprocess.run(['git', 'remote', 'get-url', 'origin'], check=True, env=env,
-                       capture_output=True, text=True).stdout.strip()
+  # Fresh FULL clone from the public URL (BAP's local checkout is partial, and
+  # cloning its local origin gave another partial repo -> missing objects).
   shutil.rmtree(_FULL, ignore_errors=True)
-  subprocess.run(['git', 'clone', '--no-single-branch', url, _FULL],
+  subprocess.run(['git', 'clone', '--no-single-branch', CLONE_URL, _FULL],
                  check=True, env=env)
   os.chdir(_FULL)
+
+  have_build = os.path.exists('tpu_raiden/benchmarks/BUILD')
+  have_rc = os.path.exists('.bazelrc')
+  print(f'[diag] fresh clone HEAD: benchmarks/BUILD={have_build} .bazelrc={have_rc}',
+        flush=True)
+
+  # Stash today's build infra from the freshly-cloned main HEAD.
+  if have_rc:
+    shutil.copy('.bazelrc', _KEEP_RC)
+  if os.path.isdir(_STUB_PATH):
+    shutil.rmtree(_KEEP_STUB, ignore_errors=True)
+    shutil.copytree(_STUB_PATH, _KEEP_STUB)
 
   shas = subprocess.run(
       ['git', 'log', f'--since={DAYS} days ago', '--first-parent', '--reverse',
