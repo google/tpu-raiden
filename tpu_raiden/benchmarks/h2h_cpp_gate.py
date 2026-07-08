@@ -175,8 +175,12 @@ def _run_cpp(cc, bs, nb, p, port):
   p90_ms, p99_ms, integrity (bool). gbs is -1.0 on failure.
   """
   base = [cc, '--data_interface=lo', f'--peer_control_port={port}',
-          f'--block_size={bs}', f'--num_blocks={nb}', f'--parallelism={p}',
-          f'--iterations={_ITERS.value}']
+          f'--block_size={bs}', f'--num_blocks={nb}', f'--parallelism={p}']
+  # 50 is the runner's built-in default; only pass --iterations when overriding,
+  # so the correctness gate works against a runner that lacks the flag. Custom
+  # iters (e.g. analyze --iters=500) does require the runner's --iterations support.
+  if _ITERS.value != 50:
+    base.append(f'--iterations={_ITERS.value}')
   # Receiver: capture its stdout so we can read the integrity verdict.
   recv = subprocess.Popen(
       base + ['--role=receiver', f'--numa_node={_RECEIVER_NUMA.value}'],
@@ -388,39 +392,27 @@ def main(_):
           f'(sigma_k={k}, cap={cap*100:.0f}%) -> {out_path}', flush=True)
     return
 
-  # Gate mode: measured median vs recorded floor, plus integrity.
-  bpath = _baselines_path()
-  try:
-    with open(bpath) as f:
-      base = json.load(f)
-  except (OSError, ValueError) as e:
-    print(f'GATE ERROR: cannot read baselines {bpath}: {e}', file=sys.stderr)
-    sys.exit(1)
-
+  # Gate mode: CORRECTNESS ONLY. On a single machine H2H runs over loopback, so
+  # the throughput is not a product metric -- pass/fail is the receiver's
+  # byte-integrity check alone. Throughput is printed + emitted for observability
+  # but never fails the build, and no baseline/floor is needed (integrity
+  # self-checks against the runner's deterministic byte pattern).
   bad = []
-  print(f'\nH2H C++ gate: median vs floor (median - {base.get("sigma_k", 3.5)} '
-        f'MADsigma, capped at {base.get("max_margin", 0.03)*100:.0f}%) + integrity\n')
-  print('config                  baseline    floor   measured   drop  integ  verdict')
-  print('-' * 76)
+  print('\nH2H C++ correctness gate (single-machine loopback; throughput is informational only)\n')
+  print('config                    median   integrity  verdict')
+  print('-' * 58)
   for label, r in results.items():
-    b = base.get('configs', {}).get(label, {})
-    baseline = float(b.get('baseline_gbs', 0.0))
-    floor = float(b.get('floor_gbs', 0.0))
-    med = r['gbs']
     integ = r['integrity']
-    slow = (med < floor) and floor > 0
-    ok = integ and not slow
-    drop = (baseline - med) / baseline * 100 if baseline > 0 else 0.0
-    reason = '' if ok else (' <-- CORRUPT' if not integ else ' <-- REGRESSION')
-    print(f'{label:<22} {baseline:8.3f} {floor:8.3f} {med:8.3f} {drop:6.1f}%  '
-          f'{"OK" if integ else "CORRUPT":<7} {"PASS" if ok else "FAIL"}{reason}')
-    if not ok:
+    print(f'{label:<22} {r["gbs"]:8.3f}  {"OK" if integ else "CORRUPT":<9} '
+          f'{"PASS" if integ else "FAIL"}{"" if integ else " <-- DATA CORRUPTION"}')
+    if not integ:
       bad.append(label)
 
   if bad:
-    print(f'\nGATE FAIL: {len(bad)} config(s): {bad}', file=sys.stderr)
+    print(f'\nGATE FAIL: byte-integrity failed on {len(bad)} config(s): {bad}',
+          file=sys.stderr)
     sys.exit(1)
-  print('\nGATE PASS: all configs at/above floor and integrity intact.', flush=True)
+  print('\nGATE PASS: all configs byte-exact.', flush=True)
 
 
 if __name__ == '__main__':
