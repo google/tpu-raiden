@@ -114,10 +114,28 @@ def _label(bs, nb, p):
   return f'{bs}B_x{nb}_P{p}'
 
 
+def _runfiles_root():
+  """Runfiles ROOT, not just this binary's dir. The C++ runner is a data dep in
+  a SIBLING tree (_main/examples/microbenchmarks/), so searching from
+  dirname(__file__) (=.../benchmarks) misses it. Walk up to the enclosing
+  '<name>.runfiles' (covers every repo) or the '_main' workspace root."""
+  if os.environ.get('RUNFILES_DIR'):
+    return os.environ['RUNFILES_DIR']
+  d = os.path.dirname(os.path.abspath(__file__))
+  main_root = None
+  while d != os.path.dirname(d):
+    if d.endswith('.runfiles'):
+      return d
+    if os.path.basename(d) == '_main':
+      main_root = d
+    d = os.path.dirname(d)
+  return main_root or os.path.dirname(os.path.abspath(__file__))
+
+
 def _locate(basename):
   """Find the C++ runner binary in the bazel runfiles by basename."""
-  root = os.environ.get('RUNFILES_DIR') or os.path.dirname(os.path.abspath(__file__))
-  for dirpath, _, files in os.walk(root):
+  root = _runfiles_root()
+  for dirpath, _, files in os.walk(root, followlinks=True):
     if basename in files:
       cand = os.path.join(dirpath, basename)
       if os.access(cand, os.X_OK):
