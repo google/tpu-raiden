@@ -90,6 +90,12 @@ class BlockTransportDelegate : public RawBufferTransportDelegate {
   virtual absl::StatusOr<std::vector<int>> AllocateBlocks(
       size_t num_blocks, uint64_t uuid = 0) = 0;
 
+  // Rewrites any placeholder (-1) dst_block_id in the plan `uuid`'s schedule to
+  // the (freshly worker-allocated) dst_ids, in order, so GetBlockChunks can
+  // locate the destination after an auto-allocated remote-fetch receive.
+  virtual void UpdatePlanDstBlocks(uint64_t uuid,
+                                   const std::vector<int>& dst_ids) {}
+
   virtual absl::Status OnLayerReceived(size_t layer_idx, uint64_t uuid) {
     return absl::OkStatus();
   }
