@@ -12,31 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Perf-regression localization workloads. Both ship measure.py / BUILD.inject /
-# run_one.sh as runfiles data and inject them into each checked-out commit; the
-# per-commit build happens inside with an isolated --output_base. py_binary (no
-# rules_shell dependency).
+# Window sweep: measure EVERY commit in the last DAYS vs its parent on one
+# machine. sweep_window ships measure.py / BUILD.inject as runfiles data and
+# injects them into each checked-out commit; the per-commit build happens inside
+# with an isolated --output_base.
 load("@rules_python//python:defs.bzl", "py_binary")
 
-# Path A: confirm ONE suspect commit (parent vs suspect), one click in the UI.
 py_binary(
-    name = "confirm_commit",
+    name = "sweep_window",
     testonly = True,
-    srcs = ["confirm_commit.py"],
+    srcs = ["sweep_window.py"],
     data = [
         "measure.py",
-        "BUILD.inject",
-    ],
-)
-
-# Path B: automated full-range git-bisect.
-py_binary(
-    name = "run_bisect",
-    testonly = True,
-    srcs = ["run_bisect.py"],
-    data = [
-        "measure.py",
-        "run_one.sh",
         "BUILD.inject",
     ],
 )
