@@ -1,0 +1,55 @@
+# Copyright 2026 Google LLC.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# METHOD 2: automated full-range bisect. One BAP workload runs the whole
+# `git bisect` on one TPU machine and reports the first bad commit. Use when the
+# single-suspect check (ab_perf_gate.yml) does not nail it.
+#
+# OPEN ITEM: confirm with the BAP team that a workload may run a git-bisect that
+# builds per commit (nested bazel; isolated via --output_base) and that the repo
+# is checked out with full history. run_bisect.py already tries git fetch
+# --unshallow as a fallback.
+
+name: Perf Bisect (find the regressing commit)
+
+on:
+  workflow_dispatch:
+    inputs:
+      good_sha:
+        description: "known-FAST commit before the regression (L64 d2h ~816)"
+        required: true
+      bad_sha:
+        description: "known-SLOW commit (e.g. current main, L64 d2h ~701)"
+        required: true
+        default: "main"
+      thresh:
+        description: "d2h Gbps cutoff; good if measured >= this"
+        required: false
+        default: "760"
+
+permissions:
+  contents: read
+
+jobs:
+  bisect:
+    name: H2D/D2H perf bisect
+    uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@affd28b492f67c242afa8b119e590b25816b7b88
+    with:
+      registry_file: "tpu_raiden/benchmarks/benchmark_registry_bisect.pbtxt"
+      ml_actions_ref: "affd28b492f67c242afa8b119e590b25816b7b88"
+      runner: "linux-x86-n2-32"
+      publish_metrics: false
+      pub_sub_gcp_project_id: "ml-oss-benchmarking-production"
+      pub_sub_gcp_topic_id: "public-results-prod"
+      custom_env_vars: "GOOD_SHA=${{ inputs.good_sha }} BAD_SHA=${{ inputs.bad_sha }} THRESH=${{ inputs.thresh }}"
