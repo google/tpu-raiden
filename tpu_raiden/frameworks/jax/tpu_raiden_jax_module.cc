@@ -16,6 +16,7 @@
 #include <cstring>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -218,22 +219,24 @@ NB_MODULE(_tpu_raiden_jax, m) {
       // can safely read what the transport actually wrote (mirrors the C++ runner).
       .def(
           "read_host_bytes",
-          [](const tpu_raiden::kv_cache::jax::KVCacheManager& self,
-             size_t layer_idx, size_t shard_idx, size_t nbytes) {
+          [](tpu_raiden::kv_cache::jax::KVCacheManager& self, size_t layer_idx,
+             size_t shard_idx, size_t nbytes) {
+            if (nbytes > self.GetHostSize(layer_idx, shard_idx)) {
+              throw std::invalid_argument(
+                  "read_host_bytes: nbytes exceeds the host buffer size");
+            }
             const uint8_t* p = self.GetHostPointer(layer_idx, shard_idx);
             return nb::bytes(reinterpret_cast<const char*>(p), nbytes);
           },
           nb::arg("layer_idx"), nb::arg("shard_idx"), nb::arg("nbytes"))
-      // Symmetric to read_host_bytes: copy `data` INTO the manager's host buffer
-      // (non-const GetHostPointer), also entirely in C++. Needed because the fill
-      // written to the JAX arrays passed at construction does NOT reach the
-      // manager's H2H transmit buffer -- so without this the sender ships zeros and
-      // the receiver-side byte-integrity check fails. Mirrors the C++ runner, which
-      // fills via GetHostPointer before sending.
       .def(
           "write_host_bytes",
           [](tpu_raiden::kv_cache::jax::KVCacheManager& self, size_t layer_idx,
              size_t shard_idx, nb::bytes data) {
+            if (data.size() > self.GetHostSize(layer_idx, shard_idx)) {
+              throw std::invalid_argument(
+                  "write_host_bytes: data size exceeds the host buffer size");
+            }
             uint8_t* p = self.GetHostPointer(layer_idx, shard_idx);
             std::memcpy(p, data.c_str(), data.size());
           },
