@@ -19,14 +19,24 @@
 
 name: Probe Window (all parent-child pairs, last week)
 
+
 on:
   workflow_dispatch:
+
   push:
     branches:
       - regression_probing
+      
+  pull_request:
+    branches:
+      - regression_probing
+
+  schedule:
+    - cron: "0 0 * * *"  # Runs at 00:00 UTC every day test
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   probe:
