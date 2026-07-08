@@ -28,5 +28,8 @@ py_binary(
     name = "dist_sweep",
     testonly = True,
     srcs = ["dist_sweep.py"],
-    deps = ["//tpu_raiden/benchmarks:perf_core"],
+    deps = [
+        "//tpu_raiden/benchmarks:perf_core",
+        "@pypi//numpy",
+    ],
 )
