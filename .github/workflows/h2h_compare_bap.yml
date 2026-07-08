@@ -24,12 +24,12 @@ on:
 
   push:
     branches:
-      - V8
+      - V9
 
       
   pull_request:
     branches:
-      - V8
+      - V9
   schedule:
     - cron: "0 0 * * *"  # Runs at 00:00 UTC every day test
 
