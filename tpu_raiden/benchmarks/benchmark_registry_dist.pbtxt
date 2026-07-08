@@ -1,0 +1,35 @@
+# Copyright 2026 Google LLC.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Distribution sweep: all 10 configs x 200 iters -> per-config noise + raw
+# samples. Runs the current checkout only, so BAP builds it directly.
+
+benchmarks {
+  name: "dist"
+  description: "All 10 configs x 200 iters -> distribution / noise per config"
+  owner: "raiden-dev"
+
+  workload {
+    action: "./ml_actions/actions/workload_executors/bazel"
+    action_inputs { key: "target" value: "//tpu_raiden/benchmarks/roofline:dist_sweep" }
+    action_inputs { key: "runtime_flags" value: "" }
+  }
+
+  environment_configs {
+    id: "tpu-v5e-single-node"
+    runner_label: "linux-x86-ct5lp-224-8tpu"
+    container_image: "us-central1-docker.pkg.dev/wyzhang-dev/quickstart-docker-repo/ml-build:939285342"
+    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci" }
+  }
+}
