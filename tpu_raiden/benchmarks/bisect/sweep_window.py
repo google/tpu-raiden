@@ -72,6 +72,9 @@ def _measure_at(sha, env, cache):
   try:
     subprocess.run(['git', 'checkout', '--force', sha], check=True, env=env,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not os.path.exists('tpu_raiden/benchmarks/BUILD'):
+      print(f'  [warn] {sha[:9]}: tpu_raiden/benchmarks/BUILD missing after checkout',
+            flush=True)
     # Old commits predate the `oss`/`ci` .bazelrc configs; force today's rc.
     if os.path.exists(_KEEP_RC):
       shutil.copy(_KEEP_RC, '.bazelrc')
@@ -115,6 +118,12 @@ def main():
   subprocess.run(['git', 'fetch', '--unshallow'], env=env,
                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
   subprocess.run(['git', 'fetch', '--all', '--tags'], env=env,
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+  # BAP's checkout may be sparse (only some paths materialized), which leaves
+  # tpu_raiden/benchmarks/BUILD absent after a checkout. Disable it -> full tree.
+  subprocess.run(['git', 'sparse-checkout', 'disable'], env=env,
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+  subprocess.run(['git', 'config', 'core.sparseCheckout', 'false'], env=env,
                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
   shas = subprocess.run(
