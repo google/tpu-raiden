@@ -1,0 +1,47 @@
+# Copyright 2026 Google LLC.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# A/B registry: run the measure-only D2H/H2D workload so BAP ab_mode can compare
+# a baseline ref against an experiment ref and report per-config deltas. Used by
+# .github/workflows/ab_perf_gate.yml with ab_mode: true.
+
+benchmarks {
+  name: "h2d_d2h_ab"
+  description: "A/B check: baseline vs experiment H2D/D2H, compared by BAP ab_analyzer"
+  owner: "raiden-dev"
+
+  workload {
+    action: "./ml_actions/actions/workload_executors/bazel"
+    action_inputs { key: "target" value: "//tpu_raiden/benchmarks:h2d_d2h_ab_measure" }
+    action_inputs { key: "runtime_flags" value: "" }
+  }
+
+  environment_configs {
+    id: "tpu-v5e-single-node"
+    runner_label: "linux-x86-ct5lp-224-8tpu"
+    container_image: "us-central1-docker.pkg.dev/wyzhang-dev/quickstart-docker-repo/ml-build:939285342"
+    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci" }
+  }
+
+  metrics { name: "int32_L8_8x128x1024x128/d2h_gbps" unit: "Gbps" stats { stat: MEAN } }
+  metrics { name: "int32_L8_8x128x1024x128/h2d_gbps" unit: "Gbps" stats { stat: MEAN } }
+  metrics { name: "int32_L4_8x128x1024x128/d2h_gbps" unit: "Gbps" stats { stat: MEAN } }
+  metrics { name: "int32_L4_8x128x1024x128/h2d_gbps" unit: "Gbps" stats { stat: MEAN } }
+  metrics { name: "int32_L2_8x128x1024x128/d2h_gbps" unit: "Gbps" stats { stat: MEAN } }
+  metrics { name: "int32_L2_8x128x1024x128/h2d_gbps" unit: "Gbps" stats { stat: MEAN } }
+  metrics { name: "float32_L1_8x128x1024x128/d2h_gbps" unit: "Gbps" stats { stat: MEAN } }
+  metrics { name: "float32_L1_8x128x1024x128/h2d_gbps" unit: "Gbps" stats { stat: MEAN } }
+  metrics { name: "float32_L64_16x128x8x2x128/d2h_gbps" unit: "Gbps" stats { stat: MEAN } }
+  metrics { name: "float32_L64_16x128x8x2x128/h2d_gbps" unit: "Gbps" stats { stat: MEAN } }
+}

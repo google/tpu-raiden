@@ -1,0 +1,37 @@
+# Copyright 2026 Google LLC.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Bisect registry: run the whole git-bisect as one BAP workload on the v5e TPU
+# env (one job == one physical machine, required for a reliable perf judge).
+# Used by .github/workflows/perf_bisect.yml. No metrics{}: the result is the
+# culprit commit written to the workload artifacts, not a tracked metric.
+
+benchmarks {
+  name: "h2d_d2h_bisect"
+  description: "Bisect the H2D/D2H (float32 L64) regression to a single commit"
+  owner: "raiden-dev"
+
+  workload {
+    action: "./ml_actions/actions/workload_executors/bazel"
+    action_inputs { key: "target" value: "//tpu_raiden/benchmarks/bisect:run_bisect" }
+    action_inputs { key: "runtime_flags" value: "" }
+  }
+
+  environment_configs {
+    id: "tpu-v5e-single-node"
+    runner_label: "linux-x86-ct5lp-224-8tpu"
+    container_image: "us-central1-docker.pkg.dev/wyzhang-dev/quickstart-docker-repo/ml-build:939285342"
+    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci" }
+  }
+}

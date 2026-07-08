@@ -1,0 +1,15 @@
+# APPEND these targets to tpu_raiden/benchmarks/BUILD (do not replace the file).
+# They mirror the existing style there: rules_python py_binary, testonly = True,
+# perf_core + absl deps.
+
+py_binary(
+    name = "h2d_d2h_ab_measure",
+    testonly = True,
+    srcs = ["h2d_d2h_ab_measure.py"],
+    data = ["gating_baselines.json"],
+    deps = [
+        ":perf_core",
+        "@com_google_absl_py//absl:app",
+        "@com_google_absl_py//absl/flags",
+    ],
+)
