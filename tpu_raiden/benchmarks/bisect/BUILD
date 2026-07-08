@@ -13,17 +13,13 @@
 # limitations under the License.
 
 # Window sweep: measure EVERY commit in the last DAYS vs its parent on one
-# machine. sweep_window ships measure.py / BUILD.inject as runfiles data and
-# injects them into each checked-out commit; the per-commit build happens inside
-# with an isolated --output_base.
+# machine. Fully self-contained -- the per-commit measure.py + BUILD are embedded
+# as strings inside sweep_window.py, so there are no runfiles `data` deps (BAP's
+# manifest-mode runfiles do not expose them).
 load("@rules_python//python:defs.bzl", "py_binary")
 
 py_binary(
     name = "sweep_window",
     testonly = True,
     srcs = ["sweep_window.py"],
-    data = [
-        "measure.py",
-        "BUILD.inject",
-    ],
 )

@@ -12,18 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""BAP workload: sweep EVERY commit in a window, each vs its parent, one machine.
+"""Self-contained window sweep: which commit made D2H/H2D worse?
 
-Lists the first-parent commits from the last DAYS on BRANCH, measures the
-float32 L64 d2h/h2d at each commit and its parent on the SAME machine (one job,
-each unique commit built once and cached), and prints a table with the per-commit
-drop vs its parent, flagging any that exceed THRESH_PCT.
+Walks every first-parent commit from the last DAYS on BRANCH, oldest to newest,
+measures the float32 L64 d2h/h2d at each commit and its parent on the SAME
+machine (one job, each commit built once and cached), and prints a table plus
+the first commit that stepped down.
 
-Env in:
-  DAYS        (default 8)          window length in days
-  BRANCH      (default origin/main) history to walk
-  THRESH_PCT  (default 5.0)        drop percent that flags a commit
-Writes $WORKLOAD_ARTIFACTS_DIR/probe_result.txt and the job log.
+Self-contained on purpose: the per-commit measure.py and its BUILD are embedded
+as strings below (no runfiles `data`, which BAP's manifest-mode runfiles do not
+expose), and the window is set by the constants right here (BAP's custom_env_vars
+is not reliably split into separate vars). To change the window, edit DAYS /
+BRANCH / THRESH_PCT below.
 """
 import os
 import re
@@ -31,17 +31,39 @@ import shutil
 import subprocess
 import sys
 
-_OB = '/tmp/probe_ob'
+# ============================ EDIT THE WINDOW HERE ============================
+DAYS = os.environ.get('DAYS', '7')                 # days back to sweep (past week)
+BRANCH = os.environ.get('BRANCH', 'origin/main')   # history to walk
+THRESH_PCT = float(os.environ.get('THRESH_PCT', '5'))  # drop % that flags a commit
+# =============================================================================
+
+_OB = '/tmp/probe_ob'                 # isolated output_base for the inner builds
 _RUN = 'tpu_raiden/benchmarks/probe_run'
-_KEEP_RC = '/tmp/keep.bazelrc'   # today's .bazelrc, forced onto every old commit
+_KEEP_RC = '/tmp/keep.bazelrc'        # today's .bazelrc, forced onto every commit
 
+# The judge, injected+built at each commit (float32 L64 == the sensitive config).
+_MEASURE_PY = '''\
+import sys
+from tpu_raiden.benchmarks import perf_core
+r = perf_core.measure(shape=[16, 128, 8, 2, 128], num_layers=64, dtype='float32',
+                      shard_axis=2, iters=15, warmup=3)
+print(f'BISECT d2h={r["d2h_gbps"]:.1f} h2d={r["h2d_gbps"]:.1f}')
+sys.stdout.flush()
+'''
 
-def _here():
-  return os.path.dirname(os.path.abspath(__file__))
+_BUILD_INJECT = '''\
+load("@rules_python//python:defs.bzl", "py_binary")
+py_binary(
+    name = "measure",
+    testonly = True,
+    srcs = ["measure.py"],
+    deps = ["//tpu_raiden/benchmarks:perf_core"],
+)
+'''
 
 
 def _measure_at(sha, env, cache):
-  """Build+measure the L64 config at sha once; cache result (or None if broken)."""
+  """Build+measure the L64 config at sha once; cache result (None if broken)."""
   if sha in cache:
     return cache[sha]
   res = None
@@ -53,13 +75,15 @@ def _measure_at(sha, env, cache):
       shutil.copy(_KEEP_RC, '.bazelrc')
     shutil.rmtree(_RUN, ignore_errors=True)
     os.makedirs(_RUN)
-    shutil.copy(os.path.join(_here(), 'measure.py'), os.path.join(_RUN, 'measure.py'))
-    shutil.copy(os.path.join(_here(), 'BUILD.inject'), os.path.join(_RUN, 'BUILD'))
+    with open(os.path.join(_RUN, 'measure.py'), 'w') as f:
+      f.write(_MEASURE_PY)
+    with open(os.path.join(_RUN, 'BUILD'), 'w') as f:
+      f.write(_BUILD_INJECT)
     t = '//tpu_raiden/benchmarks/probe_run:measure'
     subprocess.run(['bazel', f'--output_base={_OB}', 'build', '-c', 'opt',
-                    '--config=oss', t], check=True, env=env)
+                    '--config=oss', '--config=ci', t], check=True, env=env)
     out = subprocess.run(['bazel', f'--output_base={_OB}', 'run', '-c', 'opt',
-                          '--config=oss', t], check=True, env=env,
+                          '--config=oss', '--config=ci', t], check=True, env=env,
                          capture_output=True, text=True).stdout
     m = re.search(r'd2h=([0-9.]+) h2d=([0-9.]+)', out)
     if m:
@@ -75,9 +99,6 @@ def _measure_at(sha, env, cache):
 def main():
   ws = os.environ.get('BUILD_WORKSPACE_DIRECTORY') or os.getcwd()
   os.chdir(ws)
-  days = os.environ.get('DAYS', '8')
-  branch = os.environ.get('BRANCH', 'origin/main')
-  thresh = float(os.environ.get('THRESH_PCT', '5.0'))
   env = dict(os.environ)
 
   if os.path.exists('.bazelrc'):
@@ -88,10 +109,10 @@ def main():
                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
   shas = subprocess.run(
-      ['git', 'log', f'--since={days} days ago', '--first-parent', '--reverse',
-       '--format=%H', branch],
+      ['git', 'log', f'--since={DAYS} days ago', '--first-parent', '--reverse',
+       '--format=%H', BRANCH],
       check=True, env=env, capture_output=True, text=True).stdout.split()
-  print(f'{len(shas)} commits in the last {days} days on {branch}', flush=True)
+  print(f'{len(shas)} commits in the last {DAYS} days on {BRANCH}', flush=True)
 
   cache = {}
   rows = []
@@ -107,13 +128,12 @@ def main():
       continue
     dd = (ps[0] - cs[0]) / ps[0] * 100
     dh = (ps[1] - cs[1]) / ps[1] * 100
-    flag = 'REGRESSION <--' if (dd > thresh or dh > thresh) else ''
+    flag = 'REGRESSION <--' if (dd > THRESH_PCT or dh > THRESH_PCT) else ''
     rows.append((sha[:9], f'{cs[0]:.1f}/{cs[1]:.1f}',
-                 f'{dd:+.1f}%', f'{dh:+.1f}%', f'{flag}  {subj}'))
+                 f'{dd:+.1f}%', f'{dh:+.1f}%', f'{flag}  {subj}'.strip()))
     print(f'  {sha[:9]}  d2h {cs[0]:.1f} ({dd:+.1f}%)  h2d {cs[1]:.1f} ({dh:+.1f}%)'
           f'  {flag}', flush=True)
 
-  # oldest -> newest walk; the first row that steps down is the culprit.
   hdr = f"{'#':3}{'commit':11}{'d2h/h2d':16}{'d2h_drop':10}{'h2d_drop':10}verdict / subject"
   table = [hdr, '-' * len(hdr)]
   for i, r in enumerate(rows):
@@ -121,14 +141,14 @@ def main():
 
   first = next((r for r in rows if 'REGRESSION' in r[4]), None)
   bad = [r[0] for r in rows if 'REGRESSION' in r[4]]
-  headline = (f'==> FIRST COMMIT THAT REGRESSED: {first[0]}  ({first[4].split("  ", 1)[-1]})'
-              if first else '==> no commit dropped more than '
-              f'{thresh:.0f}% in this window')
+  headline = (f'==> FIRST COMMIT THAT REGRESSED: {first[0]}  '
+              f'({first[4].split("  ", 1)[-1]})' if first
+              else f'==> no commit dropped more than {THRESH_PCT:.0f}% in this window')
 
   lines = ['', headline, '',
            f'walked {len(rows)} commits oldest -> newest '
-           f'(float32 L64, threshold {thresh:.0f}%):', ''] + table
-  lines += ['', f'all flagged commits (drop > {thresh:.0f}%): '
+           f'(float32 L64, threshold {THRESH_PCT:.0f}%):', ''] + table
+  lines += ['', f'all flagged commits (drop > {THRESH_PCT:.0f}%): '
             + (', '.join(bad) or 'none')]
   report = '\n'.join(lines) + '\n'
 
