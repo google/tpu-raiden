@@ -21,13 +21,13 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include "third_party/grpc/include/grpcpp/create_channel.h"
-#include "third_party/grpc/include/grpcpp/security/credentials.h"
-#include "third_party/grpc/include/grpcpp/security/server_credentials.h"
-#include "third_party/grpc/include/grpcpp/server.h"
-#include "third_party/grpc/include/grpcpp/server_builder.h"
-#include "third_party/grpc/include/grpcpp/server_context.h"
-#include "third_party/grpc/include/grpcpp/support/status.h"
+#include "grpcpp/create_channel.h"
+#include "grpcpp/security/credentials.h"
+#include "grpcpp/security/server_credentials.h"
+#include "grpcpp/server.h"
+#include "grpcpp/server_builder.h"
+#include "grpcpp/server_context.h"
+#include "grpcpp/support/status.h"
 #include "tpu_raiden/rpc/coordination.grpc.pb.h"
 #include "tpu_raiden/rpc/coordination.pb.h"
 

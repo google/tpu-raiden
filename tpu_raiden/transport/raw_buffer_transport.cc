@@ -498,7 +498,9 @@ void RawBufferTransport::ConnectionWorker(int client_fd) {
     }
     if (ret == 0) continue;
 
-    if (!ProcessSingleRequest(client_fd).ok()) {
+    absl::Status s = ProcessSingleRequest(client_fd);
+    if (!s.ok()) {
+      LOG(ERROR) << "ConnectionWorker: ProcessSingleRequest failed: " << s;
       break;
     }
   }

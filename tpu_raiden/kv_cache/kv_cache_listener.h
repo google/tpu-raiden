@@ -27,7 +27,8 @@ class KVCacheManagerBase;
 
 class KVCacheListener final {
  public:
-  KVCacheListener(KVCacheManagerBase* engine, int listener_port);
+  KVCacheListener(KVCacheManagerBase* engine, int listener_port,
+                  int controller_port = -1);
   ~KVCacheListener();
 
   KVCacheListener(const KVCacheListener&) = delete;
@@ -42,6 +43,7 @@ class KVCacheListener final {
 
   KVCacheManagerBase* engine_;
   int listener_port_;
+  int controller_port_;
   int server_fd_ = -1;
   std::atomic<bool> stopping_{false};
 

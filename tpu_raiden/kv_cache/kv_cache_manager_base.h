@@ -102,6 +102,18 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       size_t layer_idx, size_t shard_idx, int block_id, uint64_t uuid,
       transport::BlockTransportDelegate::HostBlockReadyCallback cb) override;
 
+  using BlocksReceivedCallback =
+      std::function<void(const std::vector<int>& block_ids, uint64_t uuid)>;
+  void SetBlocksReceivedCallback(BlocksReceivedCallback cb) {
+    blocks_received_cb_ = std::move(cb);
+  }
+
+  absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
+                                uint64_t uuid = 0) override;
+
+  void UpdatePlanDstBlocks(uint64_t uuid,
+                           const std::vector<int>& dst_ids) override;
+
   // Async on-chip H2D offloads returning PJRT copy future E2E
   virtual absl::StatusOr<raiden::PjRtCopyFuture> H2d(
       const std::vector<int64_t>& src_offsets_major_dim = {},
@@ -151,6 +163,9 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   // Blocks until all pending asynchronous transfers/copies are complete.
   virtual absl::Status WaitForPendingWork() { return absl::OkStatus(); }
+
+  // Unlocks the specified physical staging blocks on host.
+  virtual absl::Status UnlockBlocks(const std::vector<int>& block_ids);
 
   virtual absl::StatusOr<raiden::PjRtCopyFuture> H2hReadExplicit(
       std::string peer, const std::vector<int>& src_block_ids,
@@ -283,6 +298,8 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   absl::Mutex recv_mu_;
   absl::flat_hash_map<int, RecvCallback> recv_callbacks_
       ABSL_GUARDED_BY(recv_mu_);
+
+  BlocksReceivedCallback blocks_received_cb_;
 
   mutable absl::Mutex plans_mu_;
   struct RegisteredPlan {
