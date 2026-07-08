@@ -14,16 +14,12 @@
 
 """Self-contained window sweep: which commit made D2H/H2D worse?
 
-Walks every first-parent commit from the last DAYS on BRANCH, oldest to newest,
-measures the float32 L64 d2h/h2d at each commit and its parent on the SAME
-machine (one job, each commit built once and cached), and prints a table plus
-the first commit that stepped down.
-
-Self-contained on purpose: the per-commit measure.py and its BUILD are embedded
-as strings below (no runfiles `data`, which BAP's manifest-mode runfiles do not
-expose), and the window is set by the constants right here (BAP's custom_env_vars
-is not reliably split into separate vars). To change the window, edit DAYS /
-BRANCH / THRESH_PCT below.
+For each first-parent commit in the last DAYS on BRANCH, extracts that commit's
+FULL tree with `git archive | tar` into a clean dir (this sidesteps the sparse /
+partial working tree that plain `git checkout` leaves in BAP's checkout),
+overlays today's .bazelrc + torch_tpu_stub from BRANCH so old commits build,
+injects a tiny measure package, and builds+runs the float32 L64 measurement.
+Each unique commit is built once (cached). All on one machine.
 """
 import os
 import re
@@ -33,17 +29,15 @@ import sys
 
 # ============================ EDIT THE WINDOW HERE ============================
 DAYS = os.environ.get('DAYS', '7')                 # days back to sweep (past week)
-BRANCH = os.environ.get('BRANCH', 'origin/main')   # history to walk
+BRANCH = os.environ.get('BRANCH', 'origin/main')   # history to walk + infra source
 THRESH_PCT = float(os.environ.get('THRESH_PCT', '5'))  # drop % that flags a commit
 # =============================================================================
 
+_SRC = '/tmp/probe_src'               # clean extraction dir for the commit tree
 _OB = '/tmp/probe_ob'                 # isolated output_base for the inner builds
-_RUN = 'tpu_raiden/benchmarks/probe_run'
-_KEEP_RC = '/tmp/keep.bazelrc'        # today's .bazelrc, forced onto every commit
+_RUN_PKG = 'tpu_raiden/benchmarks/probe_run'
 _STUB_PATH = 'third_party/torch_tpu_stub'   # referenced by .bazelrc oss config
-_KEEP_STUB = '/tmp/keep_torch_tpu_stub'     # today's stub, forced onto every commit
 
-# The judge, injected+built at each commit (float32 L64 == the sensitive config).
 _MEASURE_PY = '''\
 import sys
 from tpu_raiden.benchmarks import perf_core
@@ -65,42 +59,47 @@ py_binary(
 
 
 def _measure_at(sha, env, cache):
-  """Build+measure the L64 config at sha once; cache result (None if broken)."""
+  """Extract sha's tree, build+measure the L64 config; cache (None if broken)."""
   if sha in cache:
     return cache[sha]
   res = None
   try:
-    subprocess.run(['git', 'checkout', '--force', sha], check=True, env=env,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if not os.path.exists('tpu_raiden/benchmarks/BUILD'):
-      print(f'  [warn] {sha[:9]}: tpu_raiden/benchmarks/BUILD missing after checkout',
-            flush=True)
-    # Old commits predate the `oss`/`ci` .bazelrc configs; force today's rc.
-    if os.path.exists(_KEEP_RC):
-      shutil.copy(_KEEP_RC, '.bazelrc')
-    # The oss config's --override_module points at third_party/torch_tpu_stub;
-    # commits that lack it break at module resolution, so force today's stub in.
-    if os.path.isdir(_KEEP_STUB):
-      shutil.copytree(_KEEP_STUB, _STUB_PATH, dirs_exist_ok=True)
-    shutil.rmtree(_RUN, ignore_errors=True)
-    os.makedirs(_RUN)
-    with open(os.path.join(_RUN, 'measure.py'), 'w') as f:
+    shutil.rmtree(_SRC, ignore_errors=True)
+    os.makedirs(_SRC)
+    # Full commit tree, independent of the working tree's sparse/partial state.
+    subprocess.run(f'git archive {sha} | tar -x -C {_SRC}', shell=True, check=True,
+                   env=env, stderr=subprocess.DEVNULL)
+    if not os.path.exists(os.path.join(_SRC, 'tpu_raiden/benchmarks/BUILD')):
+      print(f'  [warn] {sha[:9]}: benchmarks/BUILD missing in archive', flush=True)
+    # Overlay today's build infra from BRANCH (old commits lack the oss config /
+    # the stub). Pulled from git objects, not the working tree.
+    rc = subprocess.run(['git', 'show', f'{BRANCH}:.bazelrc'], env=env,
+                        capture_output=True, text=True)
+    if rc.returncode == 0:
+      with open(os.path.join(_SRC, '.bazelrc'), 'w') as f:
+        f.write(rc.stdout)
+    subprocess.run(f'git archive {BRANCH} {_STUB_PATH} | tar -x -C {_SRC}',
+                   shell=True, env=env, stderr=subprocess.DEVNULL)
+    # Inject the measure package.
+    run_dir = os.path.join(_SRC, _RUN_PKG)
+    os.makedirs(run_dir, exist_ok=True)
+    with open(os.path.join(run_dir, 'measure.py'), 'w') as f:
       f.write(_MEASURE_PY)
-    with open(os.path.join(_RUN, 'BUILD'), 'w') as f:
+    with open(os.path.join(run_dir, 'BUILD'), 'w') as f:
       f.write(_BUILD_INJECT)
     t = '//tpu_raiden/benchmarks/probe_run:measure'
     subprocess.run(['bazel', f'--output_base={_OB}', 'build', '-c', 'opt',
-                    '--config=oss', '--config=ci', t], check=True, env=env)
+                    '--config=oss', '--config=ci', t], check=True, env=env, cwd=_SRC)
     out = subprocess.run(['bazel', f'--output_base={_OB}', 'run', '-c', 'opt',
                           '--config=oss', '--config=ci', t], check=True, env=env,
-                         capture_output=True, text=True).stdout
+                         cwd=_SRC, capture_output=True, text=True).stdout
     m = re.search(r'd2h=([0-9.]+) h2d=([0-9.]+)', out)
     if m:
       res = (float(m.group(1)), float(m.group(2)))
   except subprocess.CalledProcessError:
     res = None
   finally:
-    shutil.rmtree(_RUN, ignore_errors=True)
+    shutil.rmtree(_SRC, ignore_errors=True)
   cache[sha] = res
   return res
 
@@ -110,20 +109,9 @@ def main():
   os.chdir(ws)
   env = dict(os.environ)
 
-  if os.path.exists('.bazelrc'):
-    shutil.copy('.bazelrc', _KEEP_RC)  # stash today's rc for the old commits
-  if os.path.isdir(_STUB_PATH):        # stash today's torch_tpu stub too
-    shutil.rmtree(_KEEP_STUB, ignore_errors=True)
-    shutil.copytree(_STUB_PATH, _KEEP_STUB)
   subprocess.run(['git', 'fetch', '--unshallow'], env=env,
                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
   subprocess.run(['git', 'fetch', '--all', '--tags'], env=env,
-                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-  # BAP's checkout may be sparse (only some paths materialized), which leaves
-  # tpu_raiden/benchmarks/BUILD absent after a checkout. Disable it -> full tree.
-  subprocess.run(['git', 'sparse-checkout', 'disable'], env=env,
-                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-  subprocess.run(['git', 'config', 'core.sparseCheckout', 'false'], env=env,
                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
   shas = subprocess.run(
