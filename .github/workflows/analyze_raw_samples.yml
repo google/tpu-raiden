@@ -1,4 +1,4 @@
-# Copyright 2026 Google LLC
+# Copyright 2026 Google LLC.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,37 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Run Benchmarks
+# Manual raw-sample data collection for d2h, h2d AND H2H C++. Each workload runs
+# in --analyze mode and writes a per-sample CSV into WORKLOAD_ARTIFACTS_DIR; BAP
+# uploads them as downloadable artifacts (d2h_h2d_samples.csv, h2h_samples.csv)
+# for your own offline analysis. MANUAL ONLY -- no push/PR/cron.
+name: Analyze Raw Samples
 
 on:
   workflow_dispatch:
 
-  push:
-    branches:
-      - V9
-      
-  pull_request:
-    branches:
-      - V9
-
-  schedule:
-    - cron: "0 0 * * *"  # Runs at 00:00 UTC every day test
-
-
 permissions:
   contents: read
-  pull-requests: write
 
-
-
-
-
-jobs: 
-  run_benchmarks:
-    name: Run TPU Raiden H2D D2H Benchmarks
+jobs:
+  analyze:
+    name: Dump raw d2h/h2d/H2H samples as artifacts
     uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@affd28b492f67c242afa8b119e590b25816b7b88
     with:
-      registry_file: "tpu_raiden/benchmarks/benchmark_registry.pbtxt"
+      registry_file: "tpu_raiden/benchmarks/benchmark_registry_analyze.pbtxt"
       ml_actions_ref: "affd28b492f67c242afa8b119e590b25816b7b88"
       runner: "linux-x86-n2-32"
       publish_metrics: false
