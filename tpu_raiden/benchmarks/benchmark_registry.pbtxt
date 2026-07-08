@@ -43,13 +43,13 @@ benchmarks {
 }
 
 benchmarks {
-  name: "h2h_gating"
-  description: "H2H push perf gate: single-host cross-socket, fail if median GB/s drops below the recorded normal-core floor (capped at 3%) in h2h_gating_baselines.json"
+  name: "h2h_cpp_gate"
+  description: "C++ H2H perf+integrity gate: a thin Python driver spawns the C++ h2h_benchmark_runner (NO JAX bindings), fails if median GB/s drops below the floor in h2h_cpp_baselines.json or the receiver's byte-integrity check fails."
   owner: "raiden-dev"
 
   workload {
     action: "./ml_actions/actions/workload_executors/bazel"
-    action_inputs { key: "target" value: "//tpu_raiden/benchmarks:h2h_benchmark_gating" }
+    action_inputs { key: "target" value: "//tpu_raiden/benchmarks:h2h_cpp_gate" }
     action_inputs { key: "runtime_flags" value: "" }
   }
 
@@ -60,9 +60,6 @@ benchmarks {
     workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci" }
   }
 
-  metrics { name: "1048576B_x64_P1/h2h_gbs" unit: "GB/s" stats { stat: MEAN } }
-  metrics { name: "1048576B_x64_P8/h2h_gbs" unit: "GB/s" stats { stat: MEAN } }
-  metrics { name: "16777216B_x64_P1/h2h_gbs" unit: "GB/s" stats { stat: MEAN } }
-  metrics { name: "16777216B_x64_P8/h2h_gbs" unit: "GB/s" stats { stat: MEAN } }
-  metrics { name: "134217728B_x64_P8/h2h_gbs" unit: "GB/s" stats { stat: MEAN } }
+  metrics { name: "1048576B_x64_P1/cpp_gbs" unit: "GB/s" stats { stat: MEAN } }
+  metrics { name: "1048576B_x64_P8/cpp_gbs" unit: "GB/s" stats { stat: MEAN } }
 }

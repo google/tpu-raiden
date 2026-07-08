@@ -1,0 +1,7 @@
+{
+  "margin": 0.03,
+  "configs": {
+    "1048576B_x64_P1": {"gbs": 0.0, "integrity": true},
+    "1048576B_x64_P8": {"gbs": 0.0, "integrity": true}
+  }
+}
