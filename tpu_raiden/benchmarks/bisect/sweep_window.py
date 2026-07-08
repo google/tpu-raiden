@@ -40,6 +40,8 @@ THRESH_PCT = float(os.environ.get('THRESH_PCT', '5'))  # drop % that flags a com
 _OB = '/tmp/probe_ob'                 # isolated output_base for the inner builds
 _RUN = 'tpu_raiden/benchmarks/probe_run'
 _KEEP_RC = '/tmp/keep.bazelrc'        # today's .bazelrc, forced onto every commit
+_STUB_PATH = 'third_party/torch_tpu_stub'   # referenced by .bazelrc oss config
+_KEEP_STUB = '/tmp/keep_torch_tpu_stub'     # today's stub, forced onto every commit
 
 # The judge, injected+built at each commit (float32 L64 == the sensitive config).
 _MEASURE_PY = '''\
@@ -73,6 +75,10 @@ def _measure_at(sha, env, cache):
     # Old commits predate the `oss`/`ci` .bazelrc configs; force today's rc.
     if os.path.exists(_KEEP_RC):
       shutil.copy(_KEEP_RC, '.bazelrc')
+    # The oss config's --override_module points at third_party/torch_tpu_stub;
+    # commits that lack it break at module resolution, so force today's stub in.
+    if os.path.isdir(_KEEP_STUB):
+      shutil.copytree(_KEEP_STUB, _STUB_PATH, dirs_exist_ok=True)
     shutil.rmtree(_RUN, ignore_errors=True)
     os.makedirs(_RUN)
     with open(os.path.join(_RUN, 'measure.py'), 'w') as f:
@@ -103,6 +109,9 @@ def main():
 
   if os.path.exists('.bazelrc'):
     shutil.copy('.bazelrc', _KEEP_RC)  # stash today's rc for the old commits
+  if os.path.isdir(_STUB_PATH):        # stash today's torch_tpu stub too
+    shutil.rmtree(_KEEP_STUB, ignore_errors=True)
+    shutil.copytree(_STUB_PATH, _KEEP_STUB)
   subprocess.run(['git', 'fetch', '--unshallow'], env=env,
                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
   subprocess.run(['git', 'fetch', '--all', '--tags'], env=env,
