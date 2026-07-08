@@ -23,11 +23,11 @@ on:
 
   push:
     branches:
-      - V9roof
+      - V9
       
   pull_request:
     branches:
-      - V9roof
+      - V9
 
   schedule:
     - cron: "0 0 * * *"  # Runs at 00:00 UTC every day test
