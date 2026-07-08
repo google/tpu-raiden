@@ -1,0 +1,46 @@
+# Copyright 2026 Google LLC.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# One-shot investigation: from the regression_probing branch, sweep every commit
+# that landed on origin/main in the last 7 days (each vs its parent) on one
+# machine, and report which commit made D2H/H2D worse. Auto-runs on push to
+# regression_probing (no clicking). The branch it STUDIES is origin/main, set in
+# sweep_window.py -- independent of this trigger branch.
+# Result: probe_result.txt in the workload artifacts.
+
+name: Probe Window (find the regressing commit)
+
+on:
+  workflow_dispatch:          # optional manual button
+  push:
+    branches:
+      - regression_probing    # push this branch -> auto-runs, sweeps origin/main
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Sweep last-week commits vs parents
+    uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@affd28b492f67c242afa8b119e590b25816b7b88
+    with:
+      registry_file: "tpu_raiden/benchmarks/benchmark_registry_probe.pbtxt"
+      ml_actions_ref: "affd28b492f67c242afa8b119e590b25816b7b88"
+      runner: "linux-x86-n2-32"
+      publish_metrics: false
+      pub_sub_gcp_project_id: "ml-oss-benchmarking-production"
+      pub_sub_gcp_topic_id: "public-results-prod"
+      # The window (DAYS / BRANCH / THRESH_PCT) is set at the top of
+      # tpu_raiden/benchmarks/bisect/sweep_window.py -- edit it there.
+      # (BAP's custom_env_vars is not reliably split into separate vars.)
