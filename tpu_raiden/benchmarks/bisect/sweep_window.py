@@ -104,15 +104,24 @@ def _measure_at(sha, env, cache):
   return res
 
 
+_FULL = '/tmp/full_repo'              # complete clone (BAP's checkout is partial)
+
+
 def main():
   ws = os.environ.get('BUILD_WORKSPACE_DIRECTORY') or os.getcwd()
   os.chdir(ws)
   env = dict(os.environ)
 
-  subprocess.run(['git', 'fetch', '--unshallow'], env=env,
-                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-  subprocess.run(['git', 'fetch', '--all', '--tags'], env=env,
-                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+  # BAP's checkout is shallow+partial: many blob/tree objects are not local, and
+  # git archive/show do NOT backfill them, so they yield incomplete trees. Do a
+  # full clone of the same remote (reusing whatever URL/creds BAP configured) and
+  # run every git operation there.
+  url = subprocess.run(['git', 'remote', 'get-url', 'origin'], check=True, env=env,
+                       capture_output=True, text=True).stdout.strip()
+  shutil.rmtree(_FULL, ignore_errors=True)
+  subprocess.run(['git', 'clone', '--no-single-branch', url, _FULL],
+                 check=True, env=env)
+  os.chdir(_FULL)
 
   shas = subprocess.run(
       ['git', 'log', f'--since={DAYS} days ago', '--first-parent', '--reverse',
