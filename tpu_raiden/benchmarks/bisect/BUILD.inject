@@ -1,0 +1,11 @@
+# Copied in as BUILD next to measure.py at each bisected commit (see run_one.sh).
+# Must be self-contained: the injected package (bisect_run) only references
+# //tpu_raiden/benchmarks:perf_core, which exists on every commit in the window.
+load("@rules_python//python:defs.bzl", "py_binary")
+
+py_binary(
+    name = "measure",
+    testonly = True,
+    srcs = ["measure.py"],
+    deps = ["//tpu_raiden/benchmarks:perf_core"],
+)
