@@ -333,8 +333,7 @@ def run_sender():
 
   def one_write():
     t0 = time.perf_counter()
-    _alloc, fut = manager.h2h_write(peer=peer, src_block_ids=block_ids,
-                                    dst_block_ids=dst_block_ids)
+    _alloc, fut = manager.h2h_write(peer=peer, src_block_ids=block_ids)
     fut.Await()
     return time.perf_counter() - t0
 
