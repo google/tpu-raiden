@@ -46,7 +46,10 @@ from absl import flags
 _SENDER_NUMA = flags.DEFINE_integer('sender_numa', 0, 'NUMA node for the sender.')
 _RECEIVER_NUMA = flags.DEFINE_integer('receiver_numa', 1,
                                       'NUMA node for the receiver.')
-_TIMEOUT_S = flags.DEFINE_integer('timeout_s', 300, 'Per-process hard timeout.')
+_TIMEOUT_S = flags.DEFINE_integer(
+    'timeout_s', 900,
+    'Per-process hard timeout. High-parallelism configs contend on a single '
+    'loopback and can take several minutes for 50 iterations.')
 _RECORD = flags.DEFINE_bool('record', False,
                             'Record baselines to --baselines instead of gating.')
 _BASELINES = flags.DEFINE_string(
@@ -61,9 +64,14 @@ _CONTROL_PORT = flags.DEFINE_integer('control_port', 9099,
                                      'Base control port for the C++ handshake.')
 _RUNS = flags.DEFINE_integer(
     'runs', 1,
-    'Repeat each config N times. Each run is one C++ invocation (median of the '
-    'runner\'s fixed 50 internal iters). Use a large N (e.g. 500) to build a '
-    'run-to-run distribution for analysis; record/gate use the median across runs.')
+    'Repeat each config N times (N separate C++ processes). Total raw samples = '
+    'runs * iters. Prefer raising --iters over --runs: one process amortizes the '
+    'handshake/warmup. --runs is only for run-to-run (process-to-process) spread.')
+_ITERS = flags.DEFINE_integer(
+    'iters', 50,
+    'Timed iterations PER run, passed to the C++ runner as --iterations. One '
+    'process emits this many raw H2H_ITER_MS samples. e.g. --iters=500 --runs=1 '
+    'gives 500 raw samples in a single handshake.')
 _DUMP = flags.DEFINE_string(
     'dump', None,
     'CSV to write every sample for your own analysis (config,run,iter,gbs,'
@@ -167,7 +175,8 @@ def _run_cpp(cc, bs, nb, p, port):
   p90_ms, p99_ms, integrity (bool). gbs is -1.0 on failure.
   """
   base = [cc, '--data_interface=lo', f'--peer_control_port={port}',
-          f'--block_size={bs}', f'--num_blocks={nb}', f'--parallelism={p}']
+          f'--block_size={bs}', f'--num_blocks={nb}', f'--parallelism={p}',
+          f'--iterations={_ITERS.value}']
   # Receiver: capture its stdout so we can read the integrity verdict.
   recv = subprocess.Popen(
       base + ['--role=receiver', f'--numa_node={_RECEIVER_NUMA.value}'],
@@ -178,12 +187,28 @@ def _run_cpp(cc, bs, nb, p, port):
       base + ['--role=sender', '--peer_control_ip=127.0.0.1',
               f'--numa_node={_SENDER_NUMA.value}'],
       _TIMEOUT_S.value)
-  try:
-    recv.terminate()
-    recv_out = recv.communicate(timeout=15)[0].decode('utf-8', 'replace')
-  except Exception:  # pylint: disable=broad-exception-caught
-    recv.kill()
-    recv_out = ''
+  # After the sender finishes, the receiver runs a byte-by-byte integrity check
+  # over the whole 2GB buffer, prints PASSED/FAILED, then exits on its own.
+  # Terminating it immediately races that check -> false CORRUPT. In record/gate
+  # we wait for it to finish and self-exit; in analyze we don't gate on integrity,
+  # so skip the (slow) wait and kill it right away.
+  if _ANALYZE.value:
+    try:
+      recv.terminate()
+      recv_out = recv.communicate(timeout=15)[0].decode('utf-8', 'replace')
+    except Exception:  # pylint: disable=broad-exception-caught
+      recv.kill()
+      recv_out = ''
+  else:
+    try:
+      recv_out = recv.communicate(timeout=_TIMEOUT_S.value)[0].decode('utf-8', 'replace')
+    except subprocess.TimeoutExpired:
+      recv.terminate()
+      try:
+        recv_out = recv.communicate(timeout=15)[0].decode('utf-8', 'replace')
+      except Exception:  # pylint: disable=broad-exception-caught
+        recv.kill()
+        recv_out = ''
 
   integrity_ok = (_INTEG_PASS in recv_out) and (_INTEG_FAIL not in recv_out)
   p50 = _f(_CPP_P50_RE, sender_out)
@@ -204,10 +229,14 @@ def _run_cpp(cc, bs, nb, p, port):
   elif mean_gbs > 0:
     gbs = mean_gbs
 
-  if gbs < 0 or not integrity_ok:
-    print(f'[cpp] {_label(bs, nb, p)} FAILED (rc={rc}, integrity_ok={integrity_ok});'
-          f' sender output:\n{sender_out}\n--- receiver tail ---\n{recv_out[-2000:]}',
-          flush=True)
+  # In analyze mode the receiver is killed before its integrity check finishes,
+  # so integrity_ok is expectedly False -- that is NOT a failure here; only a
+  # missing throughput reading is. In record/gate, bad integrity IS a failure.
+  failed = gbs < 0 or (not _ANALYZE.value and not integrity_ok)
+  if failed:
+    print(f'[cpp] {_label(bs, nb, p)} FAILED (rc={rc}, gbs={gbs:.3f}, '
+          f'integrity_ok={integrity_ok}); sender output:\n{sender_out}\n'
+          f'--- receiver tail ---\n{recv_out[-2000:]}', flush=True)
   return {'gbs': gbs, 'mean_gbs': mean_gbs, 'p50_ms': p50, 'p90_ms': p90,
           'p99_ms': p99, 'integrity': integrity_ok, 'raw_gbs': raw_gbs}
 
@@ -315,7 +344,8 @@ def main(_):
             f'p10={_pct(series, 10):7.3f}  p90={_pct(series, 90):7.3f}  '
             f'min={min(series):7.3f}  max={max(series):7.3f}  '
             f'stdev={statistics.pstdev(series):6.3f} GB/s  '
-            f'integrity={"OK" if integ_all else "CORRUPT"}', flush=True)
+            f'integrity={"n/a" if _ANALYZE.value else ("OK" if integ_all else "CORRUPT")}',
+            flush=True)
     else:
       med = -1.0
       print(f'[measured] {label}: ALL {runs} run(s) failed', flush=True)
