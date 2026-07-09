@@ -6,78 +6,23 @@
   "configs": [
     {
       "dtype": "int32",
-      "num_layers": 8,
-      "shape": [
-        8,
-        128,
-        1024,
-        128
-      ],
+      "num_layers": 1,
+      "shape": [8, 128, 1024, 128],
       "shard_axis": 2,
-      "baseline_d2h": 929.9,
-      "baseline_h2d": 893.7,
-      "floor_d2h": 924.1,
-      "floor_h2d": 889.4
-    },
-    {
-      "dtype": "int32",
-      "num_layers": 4,
-      "shape": [
-        8,
-        128,
-        1024,
-        128
-      ],
-      "shard_axis": 2,
-      "baseline_d2h": 918.0,
-      "baseline_h2d": 883.0,
-      "floor_d2h": 908.2,
-      "floor_h2d": 873.9
-    },
-    {
-      "dtype": "int32",
-      "num_layers": 2,
-      "shape": [
-        8,
-        128,
-        1024,
-        128
-      ],
-      "shard_axis": 2,
-      "baseline_d2h": 895.0,
-      "baseline_h2d": 869.0,
-      "floor_d2h": 881.4,
-      "floor_h2d": 856.1
+      "baseline_d2h": 835.4,
+      "baseline_h2d": 800.1,
+      "floor_d2h": 813.8,
+      "floor_h2d": 776.1
     },
     {
       "dtype": "float32",
       "num_layers": 1,
-      "shape": [
-        8,
-        128,
-        1024,
-        128
-      ],
+      "shape": [8, 128, 1024, 128],
       "shard_axis": 2,
-      "baseline_d2h": 857.3,
-      "baseline_h2d": 833.4,
-      "floor_d2h": 831.5,
-      "floor_h2d": 808.4
-    },
-    {
-      "dtype": "float32",
-      "num_layers": 64,
-      "shape": [
-        16,
-        128,
-        8,
-        2,
-        128
-      ],
-      "shard_axis": 2,
-      "baseline_d2h": 816.0,
-      "baseline_h2d": 787.7,      "floor_d2h": 791.6,
-      "floor_h2d": 764.1
+      "baseline_d2h": 849.0,
+      "baseline_h2d": 810.9,
+      "floor_d2h": 823.5,
+      "floor_h2d": 789.9
     }
   ]
-  }
+}
