@@ -41,8 +41,8 @@ Each `(block_size, num_blocks, parallelism)` reaches something the others cannot
 | block_size | num_blocks | parallelism | Bug class it catches |
 |---|---|---|---|
 | 1 MiB | 64 | **1** | baseline block mapping / offset / copy correctness |
-| 1 MiB | 64 | **8** | **races, write interleaving, ordering, stream partitioning** — impossible at P1 |
-| 1 MiB − 3 B | 64 | **4** | **alignment / boundary / partial-write** off-by-one that round sizes hide |
+| 1 MiB | 64 | **8** | **races, write interleaving, ordering, stream partitioning**  |
+| 1 MiB − 3 B | 64 | **4** | **alignment / boundary / partial-write**  |
 
 - **parallelism (P1 → P8) is the primary axis.** The push splits blocks across
   `N = parallelism` streams; concurrency bugs only appear with `P > 1`. P1 proves
