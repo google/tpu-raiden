@@ -90,6 +90,7 @@ _SHARDS = 1    # C++ kNumShards (fixed in the runner)
 _CONFIGS = [
     (1048576, 64, 1),
     (1048576, 64, 8),
+    (1048573, 64, 4),
 ]
 
 _CPP_P50_RE = re.compile(r'p50:\s*([0-9.]+)')          # "p50:   X ms"
