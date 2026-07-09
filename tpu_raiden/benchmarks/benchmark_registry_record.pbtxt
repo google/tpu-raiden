@@ -14,20 +14,3 @@ benchmarks {
     workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci" }
   }
 }
-
-benchmarks {
-  name: "h2h_cpp_record"
-  description: "Re-measure and emit h2h_cpp_baselines.json (C++ H2H baselines+floors) as a workload artifact."
-  owner: "raiden-dev"
-  workload {
-    action: "./ml_actions/actions/workload_executors/bazel"
-    action_inputs { key: "target" value: "//tpu_raiden/benchmarks:h2h_cpp_gate" }
-    action_inputs { key: "runtime_flags" value: "--record" }
-  }
-  environment_configs {
-    id: "tpu-v5e-single-node"
-    runner_label: "linux-x86-ct5lp-224-8tpu"
-    container_image: "us-central1-docker.pkg.dev/wyzhang-dev/quickstart-docker-repo/ml-build:939285342"
-    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci" }
-  }
-}
