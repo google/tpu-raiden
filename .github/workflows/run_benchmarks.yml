@@ -19,14 +19,14 @@ on:
 
   push:
     branches:
-      - Presubmit-Test-Single-Host
+      - main
       
   pull_request:
     branches:
-      - Presubmit-Test-Single-Host
+      - main
 
   schedule:
-    - cron: "0 0 * * *"  # Runs at 00:00 UTC every day test
+    - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
 
 
 permissions:
