@@ -1,0 +1,85 @@
+// Copyright 2026 Google LLC.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package tpu_raiden.proto;
+
+import "third_party/tpu_raiden/tpu_raiden/rpc/raiden_service.proto";
+
+// Service providing a gRPC communication channel between Raiden Controller and
+// Transfer Workers for buffer allocation and memory management.
+//
+// Assumption: The WorkerService runs on every KV cache manager instance or
+// weight sync instance and is managed exclusively by its local controller.
+// There is no concurrent multi-caller access or contention on buffer indices
+// across separate controllers.
+// TODO(justinlu): Investigate enforcing this contract by restricting RPC access
+// so that only the local controller is permitted to invoke these methods.
+service WorkerService {
+  // Allocates a list of sharded buffers on the transfer worker.
+  rpc CreateBuffers(CreateBuffersRequest) returns (CreateBuffersResponse);
+
+  // Deallocates previously allocated sharded buffers on the transfer worker.
+  rpc DeleteBuffers(DeleteBuffersRequest) returns (DeleteBuffersResponse);
+}
+
+// Uniquely identifies a buffer handle on a worker.
+message BufferHandleProto {
+  uint64 handle = 1;
+}
+
+// Represents a sharded buffer composed of multiple shard buffer handles.
+message BufferProto {
+  repeated BufferHandleProto buffer_handles = 1;
+}
+
+// Specification for creating/allocating a sharded buffer in host RAM.
+message CreateBufferSpec {
+  // Number of shard partitions for this sharded buffer.
+  int32 num_shards = 1;
+  // Size of each buffer shard allocation in bytes.
+  int64 size_bytes = 2;
+}
+
+// Request to allocate one or more sharded buffers on a transfer worker.
+message CreateBuffersRequest {
+  // Target Raiden work unit (job/replica identifier).
+  tpu_raiden.rpc.RaidenIdProto unit = 1;
+  // List of sharded buffer specifications to allocate.
+  repeated CreateBufferSpec buffers = 2;
+}
+
+// Response from allocating sharded buffers.
+message CreateBuffersResponse {
+  bool success = 1;
+  string message = 2;
+  // Created sharded buffers, ordered corresponding to the request specs.
+  repeated BufferProto buffers = 3;
+}
+
+// Request to deallocate previously allocated sharded buffers on a transfer
+// worker.
+message DeleteBuffersRequest {
+  // Target Raiden work unit (job/replica identifier).
+  tpu_raiden.rpc.RaidenIdProto unit = 1;
+  // List of sharded buffers to deallocate.
+  repeated BufferProto sharded_buffers = 2;
+}
+
+// Response from deallocating sharded buffers.
+message DeleteBuffersResponse {
+  bool success = 1;
+  string message = 2;
+}
