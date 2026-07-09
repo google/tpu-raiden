@@ -77,6 +77,30 @@ absl::Status ValidateOffsetsAndSizes(const std::vector<int64_t>& src_offsets,
   return absl::OkStatus();
 }
 
+// Coalesce runs of adjacent copies into one, so a run of N consecutive
+// 1-block copies becomes one N-block copy.
+void CoalesceMajorDimCopies(const std::vector<int64_t>& src_offsets,
+                            const std::vector<int64_t>& dst_offsets,
+                            const std::vector<int64_t>& sizes,
+                            std::vector<int64_t>& out_src,
+                            std::vector<int64_t>& out_dst,
+                            std::vector<int64_t>& out_sizes) {
+  out_src.clear();
+  out_dst.clear();
+  out_sizes.clear();
+  for (size_t i = 0; i < src_offsets.size(); ++i) {
+    if (!out_src.empty() &&
+        src_offsets[i] == out_src.back() + out_sizes.back() &&
+        dst_offsets[i] == out_dst.back() + out_sizes.back()) {
+      out_sizes.back() += sizes[i];
+    } else {
+      out_src.push_back(src_offsets[i]);
+      out_dst.push_back(dst_offsets[i]);
+      out_sizes.push_back(sizes[i]);
+    }
+  }
+}
+
 }  // namespace
 
 KVCacheManagerBase::KVCacheManagerBase(
@@ -318,7 +342,10 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
   if (target_shard_idx.has_value() && *target_shard_idx >= num_shards_) {
     return absl::OutOfRangeError("layer or shard index out of range");
   }
-  bool is_partial = !src_offsets_major_dim.empty();
+  std::vector<int64_t> src_c, dst_c, sizes_c;
+  CoalesceMajorDimCopies(src_offsets_major_dim, dst_offsets_major_dim,
+                         copy_sizes_major_dim, src_c, dst_c, sizes_c);
+  bool is_partial = !src_c.empty();
 
   std::vector<raiden::PjRtCopyFuture> logical_futures(num_layers_ *
                                                       num_shards_);
@@ -367,8 +394,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
       VLOG(1) << "H2d: Executing inline dispatch for NUMA node " << node
               << ", works count: " << works.size();
       auto status_or_local_futures =
-          DispatchH2dWork(works, slot_idx, is_partial, src_offsets_major_dim,
-                          dst_offsets_major_dim, copy_sizes_major_dim);
+          DispatchH2dWork(works, slot_idx, is_partial, src_c, dst_c, sizes_c);
       if (!status_or_local_futures.ok()) {
         VLOG(1) << "H2d: Inline dispatch failed: "
                 << status_or_local_futures.status().ToString();
@@ -391,11 +417,9 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
               << ", works count: " << works.size();
       auto future = dma_pool_->Schedule(
           node >= 0 ? std::make_optional(node) : std::nullopt,
-          [this, works, is_partial, src_offsets_major_dim,
-           dst_offsets_major_dim, copy_sizes_major_dim, slot_idx]() {
-            return DispatchH2dWork(works, slot_idx, is_partial,
-                                   src_offsets_major_dim, dst_offsets_major_dim,
-                                   copy_sizes_major_dim);
+          [this, works, is_partial, src_c, dst_c, sizes_c, slot_idx]() {
+            return DispatchH2dWork(works, slot_idx, is_partial, src_c, dst_c,
+                                   sizes_c);
           });
       pending_futures.push_back({std::move(future), works});
     }
@@ -453,7 +477,10 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
   if (target_shard_idx.has_value() && *target_shard_idx >= num_shards_) {
     return absl::OutOfRangeError("layer or shard index out of range");
   }
-  bool is_partial = !src_offsets.empty();
+  std::vector<int64_t> src_c, dst_c, sizes_c;
+  CoalesceMajorDimCopies(src_offsets, dst_offsets, copy_sizes, src_c, dst_c,
+                         sizes_c);
+  bool is_partial = !src_c.empty();
 
   std::vector<raiden::PjRtCopyFuture> logical_futures(num_layers_ *
                                                       num_shards_);
@@ -503,8 +530,8 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
     for (const auto& [node, works] : grouped_work) {
       VLOG(1) << "DispatchD2hChunks: Executing inline dispatch for NUMA node "
               << node << ", works count: " << works.size();
-      auto status_or_local_futures = DispatchD2hWork(
-          works, slot_idx, is_partial, src_offsets, dst_offsets, copy_sizes);
+      auto status_or_local_futures =
+          DispatchD2hWork(works, slot_idx, is_partial, src_c, dst_c, sizes_c);
       if (!status_or_local_futures.ok()) {
         VLOG(1) << "DispatchD2hChunks: Inline dispatch failed: "
                 << status_or_local_futures.status().ToString();
@@ -528,10 +555,9 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
               << ", works count: " << works.size();
       auto future = dma_pool_->Schedule(
           node >= 0 ? std::make_optional(node) : std::nullopt,
-          [this, works, is_partial, src_offsets, dst_offsets, copy_sizes,
-           slot_idx]() {
-            return DispatchD2hWork(works, slot_idx, is_partial, src_offsets,
-                                   dst_offsets, copy_sizes);
+          [this, works, is_partial, src_c, dst_c, sizes_c, slot_idx]() {
+            return DispatchD2hWork(works, slot_idx, is_partial, src_c, dst_c,
+                                   sizes_c);
           });
       pending_futures.push_back({std::move(future), works});
     }
