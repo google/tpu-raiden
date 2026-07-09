@@ -4,9 +4,6 @@
 # Manual-only (workflow_dispatch); do NOT put on push/cron.
 #
 #   d2h/h2d : Python, in-process -> --iters=500 gives 500 TRUE raw samples/dir.
-#   h2h C++ : subprocess -> --runs=N. With the runner's H2H_ITER_MS print, one
-#             run = 50 raw samples (so --runs=10 -> 500); without it, --runs=N
-#             gives N medians (slow). See h2h_benchmark_runner.cc.
 
 benchmarks {
   name: "h2d_d2h_analyze"
@@ -25,22 +22,3 @@ benchmarks {
   }
 }
 
-benchmarks {
-  name: "h2h_cpp_analyze"
-  description: "Dump raw H2H C++ throughput samples to a CSV artifact (50/run if the runner prints H2H_ITER_MS)."
-  owner: "raiden-dev"
-  workload {
-    action: "./ml_actions/actions/workload_executors/bazel"
-    action_inputs { key: "target" value: "//tpu_raiden/benchmarks:h2h_cpp_gate" }
-    # --iters=500 in ONE process (one handshake) -> 500 raw samples. P8 is slow on
-    # a single loopback; if it hits the timeout, lower --iters for it or bump
-    # --timeout_s. P1 still dumps its 500.
-    action_inputs { key: "runtime_flags" value: "--analyze --iters=500 --runs=1 --dump=h2h_samples.csv" }
-  }
-  environment_configs {
-    id: "tpu-v5e-single-node"
-    runner_label: "linux-x86-ct5lp-224-8tpu"
-    container_image: "us-central1-docker.pkg.dev/wyzhang-dev/quickstart-docker-repo/ml-build:939285342"
-    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci" }
-  }
-}
