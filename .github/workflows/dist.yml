@@ -29,7 +29,7 @@ on:
       - V9roof
 
   schedule:
-    - cron: "0 0 * * *"  # Runs at 00:00 UTC every day test
+    - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
 
 
 permissions:
