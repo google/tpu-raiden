@@ -19,11 +19,11 @@ on:
 
   push:
     branches:
-      - Presubmit-Test-Single-Host
+      - no-ci
       
   pull_request:
     branches:
-      - Presubmit-Test-Single-Host
+      - no-ci
 
   schedule:
     - cron: "0 0 * * *"  # Runs at 00:00 UTC every day test
