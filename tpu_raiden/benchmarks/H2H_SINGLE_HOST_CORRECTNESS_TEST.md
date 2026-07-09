@@ -1,4 +1,4 @@
-# H2H Single-Host Test
+# H2H Single-Host Correctness Test
 
 A presubmit gate that verifies the **correctness** of the host-to-host (H2H)
 KV-cache push path on a single machine.
