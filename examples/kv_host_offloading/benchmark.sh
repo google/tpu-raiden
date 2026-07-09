@@ -43,22 +43,9 @@ RANDOM_OUTPUT_LEN="${RANDOM_OUTPUT_LEN:-128}"
 NUM_PROMPTS="${NUM_PROMPTS:-75}"
 REQUEST_RATE="${REQUEST_RATE:-4}"
 
-# Path to tpu-inference's benchmark_serving.py. Defaults to the copy inside the
-# installed tpu_inference repo; override with BENCH_SCRIPT if needed. (A sentinel
-# prefix is used because importing tpu_inference prints banner logs to stdout.)
-if [ -z "${BENCH_SCRIPT:-}" ]; then
-  BENCH_SCRIPT="$(python -c 'import os, tpu_inference; print("BENCHPATH:" + os.path.join(os.path.dirname(os.path.dirname(tpu_inference.__file__)), "scripts/vllm/benchmarking/benchmark_serving.py"))' 2>/dev/null | sed -n 's/^BENCHPATH://p')"
-fi
-if [ -z "${BENCH_SCRIPT}" ] || [ ! -f "${BENCH_SCRIPT}" ]; then
-  echo "ERROR: could not find tpu-inference's benchmark_serving.py." >&2
-  echo "       Set BENCH_SCRIPT=/path/to/benchmark_serving.py" >&2
-  exit 1
-fi
-
 echo "benchmark.sh --> ${RANDOM_PREFIX_LEN}-token shared-prefix benchmark | model=${MODEL}"
-echo "  benchmark script: ${BENCH_SCRIPT}"
 
-exec python3 "${BENCH_SCRIPT}" \
+vllm bench serve \
   --backend vllm \
   --model "${MODEL}" \
   --host 127.0.0.1 \
