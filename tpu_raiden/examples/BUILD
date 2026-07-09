@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_python//python:defs.bzl", "py_binary")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -23,5 +23,20 @@ py_binary(
     deps = [
         "//tpu_raiden/api/torch:kv_cache_manager_host_py",
         "//tpu_raiden/rpc:raiden_service_py_pb2",
+    ],
+)
+
+py_test(
+    name = "reshard_stage1_local_primitive_test",
+    srcs = ["reshard_stage1_local_primitive_test.py"],
+    main = "reshard_stage1_local_primitive_test.py",
+    tags = [
+        "cpu:4",
+        "notap",
+    ],
+    deps = [
+        "//tpu_raiden/api/torch:kv_cache_manager_host_py",
+        "//tpu_raiden/rpc:raiden_service_py_pb2",
+        "@com_google_absl_py//absl/testing:absltest",
     ],
 )

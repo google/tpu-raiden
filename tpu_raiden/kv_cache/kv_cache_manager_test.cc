@@ -43,6 +43,29 @@ TEST(KVCacheManagerTest, CompilesAndLinksSuccessfully) {
   EXPECT_TRUE(true);
 }
 
+TEST(KVCacheManagerTest, UnregisterActivePlanAllowsUuidReuse) {
+  TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
+                             /*slice_byte_size=*/128);
+  tpu_raiden::rpc::StartTransferRequest request;
+  request.set_uuid(112233);
+  request.set_is_sender(true);
+
+  absl::Status status = manager.UnregisterActivePlan(112233);
+  EXPECT_EQ(status.code(), absl::StatusCode::kNotFound);
+
+  status = manager.RegisterActivePlan(112233, request, /*is_sender=*/true);
+  EXPECT_TRUE(status.ok()) << status.ToString();
+
+  status = manager.RegisterActivePlan(112233, request, /*is_sender=*/true);
+  EXPECT_EQ(status.code(), absl::StatusCode::kAlreadyExists);
+
+  status = manager.UnregisterActivePlan(112233);
+  EXPECT_TRUE(status.ok()) << status.ToString();
+
+  status = manager.RegisterActivePlan(112233, request, /*is_sender=*/true);
+  EXPECT_TRUE(status.ok()) << status.ToString();
+}
+
 TEST(KVCacheManagerTest, D2hFailsWithMismatchedCopySpecLengths) {
   TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
                              /*slice_byte_size=*/128);
