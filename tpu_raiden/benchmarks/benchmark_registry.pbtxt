@@ -45,7 +45,7 @@ benchmarks {
   workload {
     action: "./ml_actions/actions/workload_executors/bazel"
     action_inputs { key: "target" value: "//tpu_raiden/benchmarks:h2h_cpp_gate" }
-    action_inputs { key: "runtime_flags" value: "" }
+    action_inputs { key: "runtime_flags" value: "--iters=5" }
   }
 
   environment_configs {
