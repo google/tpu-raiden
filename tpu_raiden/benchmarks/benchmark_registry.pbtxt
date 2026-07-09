@@ -39,7 +39,7 @@ benchmarks {
 
 benchmarks {
   name: "h2h_cpp_gate"
-  description: "C++ H2H perf+integrity gate: a thin Python driver spawns the C++ h2h_benchmark_runner (NO JAX bindings), fails if median GB/s drops below the floor in h2h_cpp_baselines.json or the receiver's byte-integrity check fails."
+  description: "C++ H2H perf+integrity gate: a thin Python driver spawns the C++ h2h_benchmark_runner (NO JAX bindings), fails if the receiver's byte-integrity check fails."
   owner: "raiden-dev"
 
   workload {
