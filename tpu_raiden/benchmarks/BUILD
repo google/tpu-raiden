@@ -44,7 +44,7 @@ py_binary(
     name = "h2d_d2h_benchmark_gating",
     testonly = True,
     srcs = ["h2d_d2h_benchmark_gating.py"],
-    data = ["gating_baselines.json"],
+    data = ["h2d_d2h_gating_baselines.json"],
     deps = [
         ":perf_core",
         "@com_google_absl_py//absl:app",
