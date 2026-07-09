@@ -52,16 +52,11 @@ py_binary(
     ],
 )
 
-# C++-only H2H record/gate. A THIN Python orchestrator: it only spawns the C++
-# h2h_benchmark_runner (a runfiles data dep, so `bazel run` builds and ships it)
-# and parses its stdout -- it does NOT import the JAX bindings, so this needs no
-# change to //tpu_raiden/frameworks/jax:_tpu_raiden_jax.
 py_binary(
     name = "h2h_cpp_gate",
     testonly = True,
     srcs = ["h2h_cpp_gate.py"],
     data = [
-        "h2h_cpp_baselines.json",
         "//examples/microbenchmarks:h2h_benchmark_runner",
     ],
     deps = [
