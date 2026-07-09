@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BASELINES="${SCRIPT_DIR}/gating_baselines.json"
+BASELINES="${SCRIPT_DIR}/h2d_d2h_gating_baselines.json"
 BAZEL_CONFIG="${BAZEL_CONFIG:--c opt --config=oss --config=ci}"
 RECORD_ITERS="${RECORD_ITERS:-1000}"   # many samples -> stable MAD/floor
 
