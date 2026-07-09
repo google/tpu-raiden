@@ -26,7 +26,7 @@ from tpu_raiden.benchmarks import perf_core
 
 _BASELINES = flags.DEFINE_string(
     'baselines', None,
-    'Path to gating_baselines.json. Default: alongside this binary (runfiles).')
+    'Path to h2d_d2h_gating_baselines.json. Default: alongside this binary (runfiles).')
 _RECORD = flags.DEFINE_bool(
     'record', False,
     'Re-measure and OVERWRITE baselines/floors instead of gating.')
