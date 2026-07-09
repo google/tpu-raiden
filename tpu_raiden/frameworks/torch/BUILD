@@ -151,7 +151,10 @@ cc_library(
         "//tpu_raiden/core:utils",
         "//tpu_raiden/core:xla_raw_transfer_headers",
         "//tpu_raiden/kv_cache:kv_cache_listener",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
         "@torch_tpu//shims/torch:aten_headers",
     ],
 )
@@ -176,12 +179,37 @@ nanobind_extension(
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/kv_cache:kv_cache_manager_base",
         "//tpu_raiden/kv_cache:kv_cache_store",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings:string_view",
         "@nanobind",
         "@torch_tpu//shims/torch:aten_headers",
+    ],
+)
+
+nanobind_extension(
+    name = "_tpu_raiden_host",
+    srcs = ["tpu_raiden_host_module.cc"],
+    copts = [
+        "-std=c++20",
+        "-fexceptions",
+        "-march=x86-64-v2",
+    ],
+    features = [
+        "-use_header_modules",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tpu_raiden/core:kv_cache_manager_with_transfer",
+        "//tpu_raiden/kv_cache:kv_cache_manager_base",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@nanobind",
     ],
 )
 

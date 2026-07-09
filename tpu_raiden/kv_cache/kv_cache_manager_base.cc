@@ -1226,6 +1226,18 @@ absl::Status KVCacheManagerBase::RegisterActivePlan(
   return absl::OkStatus();
 }
 
+absl::Status KVCacheManagerBase::UnregisterActivePlan(uint64_t uuid) {
+  absl::MutexLock l(plans_mu_);
+  auto it = active_plans_.find(uuid);
+  if (it == active_plans_.end()) {
+    return absl::NotFoundError(
+        absl::StrCat("Plan with UUID ", uuid, " is not registered"));
+  }
+  active_plans_.erase(it);
+  VLOG(1) << "UnregisterActivePlan: Removed plan for UUID " << uuid;
+  return absl::OkStatus();
+}
+
 bool KVCacheManagerBase::IsDramDestination(uint64_t uuid) const {
   absl::MutexLock l(plans_mu_);
   auto it = active_plans_.find(uuid);

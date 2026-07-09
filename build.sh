@@ -196,6 +196,7 @@ PY
   DEFINE_FLAGS+=" --define=TORCH_SOURCE=local"
   TORCH_REPO_ENV_FLAGS+=("--repo_env=TORCH_SOURCE=${TORCH_SOURCE}")
   BAZEL_TARGETS+=(
+    "//tpu_raiden/frameworks/torch:_tpu_raiden_host"
     "//tpu_raiden/frameworks/torch:_tpu_raiden_torch"
   )
 else
@@ -244,6 +245,9 @@ fi
 
 if [ "$BUILD_TORCH" = true ]; then
   echo "Copying Torch artifacts..."
+  HOST_SO="${WORKSPACE_DIR}/tpu_raiden/frameworks/torch/_tpu_raiden_host.so"
+  cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/frameworks/torch/_tpu_raiden_host.so" "${HOST_SO}"
+
   TORCH_SO="${WORKSPACE_DIR}/tpu_raiden/frameworks/torch/_tpu_raiden_torch.so"
   cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/frameworks/torch/_tpu_raiden_torch.so" "${TORCH_SO}"
   chmod u+w "${TORCH_SO}"

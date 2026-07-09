@@ -213,6 +213,8 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       uint64_t uuid, const tpu_raiden::rpc::StartTransferRequest& request,
       bool is_sender);
 
+  virtual absl::Status UnregisterActivePlan(uint64_t uuid);
+
   virtual absl::Status RegisterRecv(uint64_t uuid, const std::string& req_id,
                                     int64_t expected_block_count) {
     return absl::UnimplementedError(

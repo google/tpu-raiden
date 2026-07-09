@@ -28,15 +28,35 @@
 
 """High-performance PyTorch KV Cache Manager (repurposed as TransferEngine)."""
 
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from tpu_raiden.api.torch import torch_tpu_common_loader
+_HOST_IMPL = None
+_TORCH_IMPL = None
 
-torch_tpu_common_loader.load_torch_tpu_common()
 
-# pylint: disable=g-import-not-at-top
-from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _impl
-# pylint: enable=g-import-not-at-top
+def _host_impl():
+  """Returns the host-only extension without importing torch_tpu."""
+  global _HOST_IMPL
+  if _HOST_IMPL is None:
+    # pylint: disable=g-import-not-at-top
+    from tpu_raiden.frameworks.torch import _tpu_raiden_host as impl
+    # pylint: enable=g-import-not-at-top
+    _HOST_IMPL = impl
+  return _HOST_IMPL
+
+
+def _torch_impl():
+  """Returns the torch-backed extension, loading torch_tpu runtime first."""
+  global _TORCH_IMPL
+  if _TORCH_IMPL is None:
+    # pylint: disable=g-import-not-at-top
+    from tpu_raiden.api.torch import torch_tpu_common_loader
+
+    torch_tpu_common_loader.load_torch_tpu_common()
+    from tpu_raiden.frameworks.torch import _tpu_raiden_torch as impl
+    # pylint: enable=g-import-not-at-top
+    _TORCH_IMPL = impl
+  return _TORCH_IMPL
 
 
 class KVCacheManager:
@@ -76,8 +96,9 @@ class KVCacheManager:
       listener_port: Sockets server port for incoming C++ KVCacheListener
         commands.
     """
+    impl = _torch_impl()
     if host_blocks_to_allocate is not None:
-      self._impl = _impl.KVCacheManager(
+      self._impl = impl.KVCacheManager(
           kv_caches,
           local_control_port if local_control_port > 0 else None,
           host_blocks_to_allocate,
@@ -90,7 +111,7 @@ class KVCacheManager:
             "Must specify either (max_blocks, num_slots) or"
             " host_blocks_to_allocate."
         )
-      self._impl = _impl.KVCacheManager(
+      self._impl = impl.KVCacheManager(
           kv_caches=kv_caches,
           node_id=node_id,
           local_control_port=local_control_port,
@@ -101,6 +122,31 @@ class KVCacheManager:
           listener_port=listener_port,
           parallelism=parallelism,
       )
+
+  @classmethod
+  def create_host_only(
+      cls,
+      *,
+      num_layers: int,
+      num_shards: int = 1,
+      slice_byte_size: int,
+      node_id: int,
+      local_port: Optional[int] = None,
+      host_blocks: int,
+      parallelism: int = 4,
+  ) -> "KVCacheManager":
+    """Creates a CPU-only manager backed by Raiden-owned host memory."""
+    obj = cls.__new__(cls)
+    obj._impl = _host_impl().KVCacheManager(
+        num_layers=num_layers,
+        num_shards=num_shards,
+        slice_byte_size=slice_byte_size,
+        node_id=node_id,
+        local_port=local_port,
+        host_blocks_to_allocate=host_blocks,
+        parallelism=parallelism,
+    )
+    return obj
 
   @property
   def node_id(self) -> int:
@@ -130,6 +176,47 @@ class KVCacheManager:
   def listener_address(self) -> str:
     """Returns the formatted control listener endpoint string (host:port)."""
     return self._impl.listener_address
+
+  def register_active_plan(self, uuid: int, request: Union[bytes, Any],
+                           is_sender: bool) -> None:
+    """Registers a serialized StartTransferRequest for strided push."""
+    if hasattr(request, "SerializeToString"):
+      request = request.SerializeToString()
+    if not isinstance(request, (bytes, bytearray)):
+      raise TypeError("request must be bytes or a protobuf message")
+    self._impl.register_active_plan(uuid, bytes(request), is_sender)
+
+  def unregister_active_plan(self, uuid: int) -> None:
+    """Removes a previously registered strided push plan."""
+    self._impl.unregister_active_plan(uuid)
+
+  def push_registered_plan(
+      self,
+      uuid: int,
+      peer: str,
+      src_block_ids: Sequence[int],
+      dst_block_ids: Sequence[int],
+      layer_idx: int = -1,
+      parallelism: int = 1,
+  ) -> None:
+    """Synchronously pushes host blocks using an already registered plan."""
+    self._impl.push_registered_plan(
+        uuid,
+        peer,
+        list(src_block_ids),
+        list(dst_block_ids),
+        layer_idx,
+        parallelism,
+    )
+
+  def read_block_bytes(self, layer_idx: int, block_id: int) -> bytes:
+    """Returns one host block as bytes."""
+    return self._impl.read_block_bytes(layer_idx, block_id)
+
+  def write_block_bytes(self, layer_idx: int, block_id: int,
+                        payload: bytes) -> None:
+    """Overwrites one host block with bytes."""
+    self._impl.write_block_bytes(layer_idx, block_id, payload)
 
   def register_recv(
       self, uuid: int, req_id: str, expected_block_count: int

@@ -32,7 +32,19 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":torch_tpu_common_loader",
+        "//tpu_raiden/frameworks/torch:_tpu_raiden_host",
         "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",
+        "//tpu_raiden/rpc:raiden_service_py_pb2",
+    ],
+)
+
+py_library(
+    name = "kv_cache_manager_host_py",
+    srcs = ["kv_cache_manager.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tpu_raiden/frameworks/torch:_tpu_raiden_host",
+        "//tpu_raiden/rpc:raiden_service_py_pb2",
     ],
 )
 
