@@ -148,7 +148,7 @@ def main(_):
     out_path = path
     adir = os.environ.get('WORKLOAD_ARTIFACTS_DIR')
     if adir:
-      out_path = os.path.join(adir, 'gating_baselines.json')
+      out_path = os.path.join(adir, 'h2d_d2h_gating_baselines.json')
     with open(out_path, 'w') as f:
       json.dump(cfg, f, indent=2)
     print(f'Recorded {len(results)} baselines+floors '
