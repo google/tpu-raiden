@@ -49,7 +49,7 @@ def _baselines_path():
   if _BASELINES.value:
     return _BASELINES.value
   return os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                      'gating_baselines.json')
+                      'h2d_d2h_gating_baselines.json')
 
 
 def _core_floor(samples, k, max_margin):
