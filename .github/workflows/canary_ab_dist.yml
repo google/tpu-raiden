@@ -1,0 +1,52 @@
+# Copyright 2026 Google LLC.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Same-machine A/B distribution probe for the canary configs. Manual trigger.
+#
+# Same-machine is guaranteed by BAP: ab_mode: true + `ab_strategy: COLOCATED`
+# (in benchmark_registry_dist.pbtxt) make BAP provision ONE runner and run the
+# baseline then the experiment sequentially on the SAME host. We point BOTH refs
+# at the same commit, so there is no code change: the baseline run is "A" and the
+# experiment run is "B", both on that one host. Each run uploads its own
+# dist_samples.json as Artifacts -> download both and plot locally.
+
+name: Canary same-machine A/B distribution
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit/branch to run twice (baseline == experiment). Default: the dispatched SHA."
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  canary_ab_dist:
+    name: canary same-machine A/B distribution (COLOCATED)
+    uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@affd28b492f67c242afa8b119e590b25816b7b88
+    with:
+      registry_file: "tpu_raiden/benchmarks/benchmark_registry_dist.pbtxt"
+      ml_actions_ref: "affd28b492f67c242afa8b119e590b25816b7b88"
+      runner: "linux-x86-n2-32"
+      ab_mode: true
+      # same ref on both sides -> identical code run twice, COLOCATED = same host.
+      baseline_ref: "${{ github.event.inputs.ref || github.sha }}"
+      experiment_ref: "${{ github.event.inputs.ref || github.sha }}"
+      post_pr_comment: false
+      publish_metrics: false
+      pub_sub_gcp_project_id: "ml-oss-benchmarking-production"
+      pub_sub_gcp_topic_id: "public-results-prod"
