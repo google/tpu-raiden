@@ -17,8 +17,6 @@ import os
 import pathlib
 from typing import Any
 
-import torch_tpu
-from torch_tpu import _loader as _torch_tpu_loader
 
 Path = pathlib.Path
 
