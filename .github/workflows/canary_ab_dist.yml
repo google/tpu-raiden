@@ -54,7 +54,7 @@ jobs:
     uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@affd28b492f67c242afa8b119e590b25816b7b88
     with:
       registry_file: "tpu_raiden/benchmarks/benchmark_registry_dist.pbtxt"
-      ml_actions_ref: "affd28b492f67c242afa8b119e590b25816b7b88"
+      ml_actions_ref: "e34d5b724ee5daac083881a891d25964081a9f6a"
       runner: "linux-x86-n2-32"
       ab_mode: true
       # same ref on both sides -> identical code run twice, COLOCATED = same host.
