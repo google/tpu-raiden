@@ -8,7 +8,7 @@
       "num_layers": 1,
       "shape": [8, 128, 1024, 128],
       "shard_axis": 2,
-      "baseline_d2h": 2000, # intentional larage value to see if will block PR 
+      "baseline_d2h": 2000,  
       "baseline_h2d": 800.1,
       "floor_d2h": 813.8,
       "floor_h2d": 750.7
