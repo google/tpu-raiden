@@ -50,6 +50,8 @@ class KVCacheManager:
       host_blocks_to_allocate: Optional[int] = None,
       parallelism: int = 4,
       node_id: int = 0,
+      grpc_port: int = 0,
+      start_grpc_server: bool = False,
   ):
     """Instantiates the TransferEngine-based KVCacheManager.
 
@@ -65,6 +67,9 @@ class KVCacheManager:
         pool.
       parallelism: Number of parallel network copies per layer.
       node_id: Unique identifier for this host/node in the distributed mesh.
+      grpc_port: Optional port for WorkerService gRPC server.
+      start_grpc_server: Whether to start WorkerService gRPC server (default
+        False).
     """
     if host_blocks_to_allocate is not None:
       self._impl = _impl.KVCacheManager(
@@ -73,6 +78,8 @@ class KVCacheManager:
           host_blocks_to_allocate,
           unsafe_skip_buffer_lock,
           parallelism,
+          grpc_port,
+          start_grpc_server,
       )
     else:
       if max_blocks is None or num_slots is None:
@@ -89,7 +96,13 @@ class KVCacheManager:
           timeout_s=timeout_s,
           unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
           parallelism=parallelism,
+          grpc_port=grpc_port,
+          start_grpc_server=start_grpc_server,
       )
+
+  def get_grpc_port(self) -> int:
+    """Returns the gRPC server port if running, or 0."""
+    return self._impl.get_grpc_port()
 
   def get_local_endpoints(self) -> List[Dict[str, Any]]:
     """Returns the active Raiden endpoint descriptors."""

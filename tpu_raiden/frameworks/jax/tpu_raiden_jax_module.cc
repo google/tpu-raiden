@@ -105,19 +105,21 @@ NB_MODULE(_tpu_raiden_jax, m) {
       .def("is_ready", &tpu_raiden::RaidenFuture::IsReady);
 
   nb::class_<tpu_raiden::kv_cache::jax::KVCacheManager>(m, "KVCacheManager")
-      .def(nb::init<nb::list, std::optional<int>, std::optional<int>, bool,
-                    int>(),
+      .def(nb::init<nb::list, std::optional<int>, std::optional<int>, bool, int,
+                    int, bool>(),
            nb::arg("device_arrays"), nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
-           nb::arg("parallelism") = 1)
+           nb::arg("parallelism") = 1, nb::arg("grpc_port") = 0,
+           nb::arg("start_grpc_server") = false)
       .def(nb::init<nanobind::list, int64_t, int64_t, int64_t, int64_t, double,
-                    bool, int>(),
+                    bool, int, int, bool>(),
            nb::arg("kv_caches"), nb::arg("node_id") = 0,
            nb::arg("local_control_port"), nb::arg("max_blocks"),
            nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
            nb::arg("unsafe_skip_buffer_lock") = true,
-           nb::arg("parallelism") = 4)
+           nb::arg("parallelism") = 4, nb::arg("grpc_port") = 0,
+           nb::arg("start_grpc_server") = false)
 
       // Use lambdas to wrap the returned raiden::PjRtCopyFuture into
       // KVCacheManagerFuture
@@ -197,6 +199,8 @@ NB_MODULE(_tpu_raiden_jax, m) {
           nb::arg("peer"), nb::arg("src_block_ids"))
 
       .def("local_port", &tpu_raiden::kv_cache::jax::KVCacheManager::local_port)
+      .def("get_grpc_port",
+           &tpu_raiden::kv_cache::jax::KVCacheManager::GetGrpcPort)
       .def("get_host_pointer",
            static_cast<const uint8_t* (
                tpu_raiden::kv_cache::jax::KVCacheManager::*)(size_t, size_t)

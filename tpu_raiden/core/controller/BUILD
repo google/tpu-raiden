@@ -51,6 +51,22 @@ cc_library(
 )
 
 cc_library(
+    name = "worker_service_server",
+    srcs = ["worker_service_server.cc"],
+    hdrs = ["worker_service_server.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":worker_service_impl",
+        "//tpu_raiden/core:host_memory_allocator",
+        "@com_github_grpc_grpc//:grpc++",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/synchronization",
+    ],
+)
+
+cc_library(
     name = "raiden_controller",
     srcs = ["raiden_controller.cc"],
     hdrs = ["raiden_controller.h"],
@@ -161,6 +177,21 @@ cc_test(
         "//tpu_raiden/proto:controller_service_cc_proto",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/status",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "worker_service_server_test",
+    srcs = ["worker_service_server_test.cc"],
+    deps = [
+        ":worker_service_client",
+        ":worker_service_server",
+        "//tpu_raiden/proto:worker_service_cc_proto",
+        "@com_github_grpc_grpc//:grpc++",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
+        "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
 )

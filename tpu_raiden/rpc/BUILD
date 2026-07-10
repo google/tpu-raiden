@@ -64,6 +64,7 @@ cc_proto_library(
 cc_grpc_library(
     name = "coordination_cc_grpc",
     srcs = [":coordination_proto"],
+    grpc_only = True,
     deps = [":coordination_cc_proto"],
 )
 

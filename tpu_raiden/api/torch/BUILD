@@ -54,6 +54,8 @@ py_library(
     deps = [
         ":torch_tpu_common_loader",
         "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",
+        "@torch_tpu//torch_tpu",
+        "@torch_tpu//torch_tpu:_loader",
     ],
 )
 

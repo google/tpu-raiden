@@ -17,7 +17,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <string>
 #include <utility>
 
 #include "absl/container/flat_hash_map.h"
@@ -29,7 +28,6 @@
 #include "grpcpp/support/status.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
-#include "tpu_raiden/rpc/raiden_service.pb.h"
 
 namespace tpu_raiden {
 namespace controller {

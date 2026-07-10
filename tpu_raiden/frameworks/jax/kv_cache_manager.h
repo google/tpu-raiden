@@ -19,8 +19,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
+#include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -29,6 +32,8 @@
 #endif
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
+#include "tpu_raiden/core/controller/worker_service_server.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 #include "tpu_raiden/core/tpu_utils.h"
 
@@ -49,39 +54,40 @@ struct UnpackedCache {
 #endif
 };
 
-class KVCacheManager {
+class NumaAwareKVCacheManager {
  public:
-  KVCacheManager(const KVCacheManager&) = delete;
-  KVCacheManager& operator=(const KVCacheManager&) = delete;
-  KVCacheManager(KVCacheManager&&) = default;
-  KVCacheManager& operator=(KVCacheManager&&) = default;
+  NumaAwareKVCacheManager(const NumaAwareKVCacheManager&) = delete;
+  NumaAwareKVCacheManager& operator=(const NumaAwareKVCacheManager&) = delete;
+  NumaAwareKVCacheManager(NumaAwareKVCacheManager&&) = default;
+  NumaAwareKVCacheManager& operator=(NumaAwareKVCacheManager&&) = default;
 
 #ifndef WITHOUT_PYTHON
   // JAX sharded constructor E2E (cache-only by default)
-  KVCacheManager(nanobind::list device_arrays,
-                 std::optional<int> local_port = std::nullopt,
-                 std::optional<int> host_blocks_to_allocate = std::nullopt,
-                 bool unsafe_skip_buffer_lock = false, int parallelism = 1);
+  NumaAwareKVCacheManager(
+      nanobind::list device_arrays,
+      std::optional<int> local_port = std::nullopt,
+      std::optional<int> host_blocks_to_allocate = std::nullopt,
+      bool unsafe_skip_buffer_lock = false, int parallelism = 1);
 
   // New transfer-enabled constructor (flat list of arrays, single shard per
   // layer)
-  KVCacheManager(nanobind::list kv_caches, int64_t node_id,
-                 int64_t local_control_port, int64_t max_blocks,
-                 int64_t num_slots, double timeout_s,
-                 bool unsafe_skip_buffer_lock, int parallelism);
+  NumaAwareKVCacheManager(nanobind::list kv_caches, int64_t node_id,
+                          int64_t local_control_port, int64_t max_blocks,
+                          int64_t num_slots, double timeout_s,
+                          bool unsafe_skip_buffer_lock, int parallelism);
 #endif
 
   // FFI metadata constructor (cache-only by default)
-  KVCacheManager(size_t num_layers, size_t num_shards, size_t slice_byte_size,
-                 std::optional<int> local_port,
-                 std::optional<int> host_blocks_to_allocate,
-                 int parallelism = 1);
+  NumaAwareKVCacheManager(size_t num_layers, size_t num_shards,
+                          size_t slice_byte_size, std::optional<int> local_port,
+                          std::optional<int> host_blocks_to_allocate,
+                          int parallelism = 1);
 
   // Test-only constructor for sub-manager mock injection
-  explicit KVCacheManager(
+  explicit NumaAwareKVCacheManager(
       std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> sub_managers);
 
-  ~KVCacheManager();
+  ~NumaAwareKVCacheManager();
 
 #ifndef WITHOUT_PYTHON
   nanobind::list kv_caches() const {
@@ -130,10 +136,6 @@ class KVCacheManager {
              std::vector<std::string>>
   CompleteReadRaw();
 
-  // Unlocks host staging blocks (allocated+locked by D2hAutoAllocate) across
-  // all sub-managers, making them reclaimable. `block_ids` are the chunk ids
-  // returned by D2hAutoAllocate; sub-managers allocate in lockstep so the same
-  // ids are unlocked on each.
   absl::Status UnlockBlocks(const std::vector<int>& block_ids);
 
   std::string DumpMetricsToString() const;
@@ -178,16 +180,14 @@ class KVCacheManager {
 
  private:
 #ifndef WITHOUT_PYTHON
-  // Private constructor for sharded (cache-only)
-  KVCacheManager(UnpackedCache&& cache, std::optional<int> local_port,
-                 std::optional<int> host_blocks_to_allocate,
-                 bool unsafe_skip_buffer_lock, int parallelism);
+  NumaAwareKVCacheManager(UnpackedCache&& cache, std::optional<int> local_port,
+                          std::optional<int> host_blocks_to_allocate,
+                          bool unsafe_skip_buffer_lock, int parallelism);
 
-  // Private constructor for flat (transfer-enabled)
-  KVCacheManager(UnpackedCache&& cache, int64_t node_id,
-                 int64_t local_control_port, int64_t max_blocks,
-                 int64_t num_slots, double timeout_s,
-                 bool unsafe_skip_buffer_lock, int parallelism);
+  NumaAwareKVCacheManager(UnpackedCache&& cache, int64_t node_id,
+                          int64_t local_control_port, int64_t max_blocks,
+                          int64_t num_slots, double timeout_s,
+                          bool unsafe_skip_buffer_lock, int parallelism);
 
   std::optional<nanobind::list> device_arrays_;
 #endif
@@ -212,6 +212,189 @@ class KVCacheManager {
   std::map<std::string, int> req_expected_counts_;
   std::set<std::string> failed_recving_set_;
   std::shared_ptr<MetricsCollector> metrics_collector_;
+};
+
+class KVCacheManager {
+ public:
+  KVCacheManager(const KVCacheManager&) = delete;
+  KVCacheManager& operator=(const KVCacheManager&) = delete;
+  KVCacheManager(KVCacheManager&&) = default;
+  KVCacheManager& operator=(KVCacheManager&&) = default;
+
+#ifndef WITHOUT_PYTHON
+  // JAX sharded constructor E2E (cache-only by default)
+  KVCacheManager(nanobind::list device_arrays,
+                 std::optional<int> local_port = std::nullopt,
+                 std::optional<int> host_blocks_to_allocate = std::nullopt,
+                 bool unsafe_skip_buffer_lock = false, int parallelism = 1,
+                 int grpc_port = 0, bool start_grpc_server = false);
+
+  // New transfer-enabled constructor (flat list of arrays, single shard per
+  // layer)
+  KVCacheManager(nanobind::list kv_caches, int64_t node_id,
+                 int64_t local_control_port, int64_t max_blocks,
+                 int64_t num_slots, double timeout_s,
+                 bool unsafe_skip_buffer_lock, int parallelism,
+                 int grpc_port = 0, bool start_grpc_server = false);
+#endif
+
+  // FFI metadata constructor (cache-only by default)
+  KVCacheManager(size_t num_layers, size_t num_shards, size_t slice_byte_size,
+                 std::optional<int> local_port,
+                 std::optional<int> host_blocks_to_allocate,
+                 int parallelism = 1, int grpc_port = 0,
+                 bool start_grpc_server = false);
+
+  // Test-only constructor for sub-manager mock injection
+  explicit KVCacheManager(
+      std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> sub_managers,
+      int grpc_port = 0, bool start_grpc_server = false);
+
+  ~KVCacheManager();
+
+  NumaAwareKVCacheManager* numa_manager() const { return numa_manager_.get(); }
+  int GetGrpcPort() const;
+
+#ifndef WITHOUT_PYTHON
+  nanobind::list kv_caches() const { return numa_manager_->kv_caches(); }
+#endif
+
+  // Forwarding methods delegating to sub_managers_
+  size_t num_layers() const { return numa_manager_->num_layers(); }
+  size_t num_shards() const { return numa_manager_->num_shards(); }
+  size_t slice_byte_size() const { return numa_manager_->slice_byte_size(); }
+
+  std::optional<int> local_port() const { return numa_manager_->local_port(); }
+  int local_control_port() const { return numa_manager_->local_control_port(); }
+  int64_t node_id() const { return numa_manager_->node_id(); }
+
+  uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) {
+    return numa_manager_->GetHostPointer(layer_idx, shard_idx);
+  }
+  const uint8_t* GetHostPointer(size_t layer_idx, size_t shard_idx) const {
+    return numa_manager_->GetHostPointer(layer_idx, shard_idx);
+  }
+  size_t GetHostSize(size_t layer_idx, size_t shard_idx) {
+    return numa_manager_->GetHostSize(layer_idx, shard_idx);
+  }
+
+  int64_t NotifyForRead(const std::string& req_id, uint64_t uuid,
+                        const std::vector<int64_t>& block_ids) {
+    return numa_manager_->NotifyForRead(req_id, uuid, block_ids);
+  }
+
+  void StartRead(
+      const std::string& req_id, uint64_t uuid,
+      const std::string& remote_endpoint,
+      const std::vector<int64_t>& remote_block_ids,
+      const std::vector<int64_t>& local_block_ids, int parallelism = 1,
+      std::optional<std::vector<int64_t>> local_host_block_ids = std::nullopt) {
+    numa_manager_->StartRead(req_id, uuid, remote_endpoint, remote_block_ids,
+                             local_block_ids, parallelism,
+                             local_host_block_ids);
+  }
+
+  std::vector<EndpointDescriptor> get_local_endpoints() const {
+    return numa_manager_->get_local_endpoints();
+  }
+
+  void SetSubmanagerShardsForTesting(
+      const std::vector<std::vector<int64_t>>& assignment) {
+    numa_manager_->SetSubmanagerShardsForTesting(assignment);
+  }
+
+  void StartRead(
+      const std::string& req_id, uint64_t uuid,
+      const std::vector<EndpointDescriptor>& remote_descriptors,
+      const std::vector<int64_t>& remote_block_ids,
+      const std::vector<int64_t>& local_block_ids, int parallelism = 1,
+      std::optional<std::vector<int64_t>> local_host_block_ids = std::nullopt) {
+    numa_manager_->StartRead(req_id, uuid, remote_descriptors, remote_block_ids,
+                             local_block_ids, parallelism,
+                             local_host_block_ids);
+  }
+
+  std::tuple<std::vector<std::string>, std::vector<std::string>,
+             std::vector<std::string>>
+  CompleteReadRaw() {
+    return numa_manager_->CompleteReadRaw();
+  }
+
+  // Unlocks host staging blocks (allocated+locked by D2hAutoAllocate) across
+  // all sub-managers, making them reclaimable. `block_ids` are the chunk ids
+  // returned by D2hAutoAllocate; sub-managers allocate in lockstep so the same
+  // ids are unlocked on each.
+  absl::Status UnlockBlocks(const std::vector<int>& block_ids) {
+    return numa_manager_->UnlockBlocks(block_ids);
+  }
+
+  std::string DumpMetricsToString() const {
+    return numa_manager_->DumpMetricsToString();
+  }
+
+  absl::StatusOr<raiden::PjRtCopyFuture> H2d(
+      const std::vector<int64_t>& src_offsets_major_dim = {},
+      const std::vector<int64_t>& dst_offsets_major_dim = {},
+      const std::vector<int64_t>& copy_sizes_major_dim = {},
+      std::optional<int64_t> slot_idx = std::nullopt,
+      std::optional<size_t> layer_idx = std::nullopt,
+      std::optional<size_t> shard_idx = std::nullopt) {
+    return numa_manager_->H2d(src_offsets_major_dim, dst_offsets_major_dim,
+                              copy_sizes_major_dim, slot_idx, layer_idx,
+                              shard_idx);
+  }
+
+  absl::StatusOr<raiden::PjRtCopyFuture> D2h(
+      const std::vector<int64_t>& src_offsets_major_dim = {},
+      const std::vector<int64_t>& dst_offsets_major_dim = {},
+      const std::vector<int64_t>& copy_sizes_major_dim = {},
+      std::optional<int64_t> slot_idx = std::nullopt,
+      std::optional<size_t> layer_idx = std::nullopt,
+      std::optional<size_t> shard_idx = std::nullopt) {
+    return numa_manager_->D2h(src_offsets_major_dim, dst_offsets_major_dim,
+                              copy_sizes_major_dim, slot_idx, layer_idx,
+                              shard_idx);
+  }
+
+  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
+  D2hAutoAllocate(const std::vector<int64_t>& src_offsets_major_dim = {},
+                  const std::vector<int64_t>& copy_sizes_major_dim = {}) {
+    return numa_manager_->D2hAutoAllocate(src_offsets_major_dim,
+                                          copy_sizes_major_dim);
+  }
+
+  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hWrite(
+      std::string peer, const std::vector<int>& src_block_ids,
+      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
+      int layer_idx = -1) {
+    return numa_manager_->H2hWrite(std::move(peer), src_block_ids,
+                                   dst_block_ids, uuid, layer_idx);
+  }
+
+  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hWrite(
+      const std::vector<EndpointDescriptor>& remote_descriptors,
+      const std::vector<int>& src_block_ids,
+      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
+      int layer_idx = -1) {
+    return numa_manager_->H2hWrite(remote_descriptors, src_block_ids,
+                                   dst_block_ids, uuid, layer_idx);
+  }
+
+  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hRead(
+      std::string peer, const std::vector<int>& src_block_ids) {
+    return numa_manager_->H2hRead(std::move(peer), src_block_ids);
+  }
+
+  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hRead(
+      const std::vector<EndpointDescriptor>& remote_descriptors,
+      const std::vector<int>& src_block_ids) {
+    return numa_manager_->H2hRead(remote_descriptors, src_block_ids);
+  }
+
+ private:
+  void StartGrpcServer(int grpc_port, bool start_grpc_server);
+
+  std::unique_ptr<NumaAwareKVCacheManager> numa_manager_;
 };
 
 }  // namespace jax

@@ -261,6 +261,25 @@ TEST(KVCacheManagerWrapperTest, StartReadInputVectorValidation) {
   EXPECT_TRUE(ptr0->start_read_calls.empty());
 }
 
+TEST(KVCacheManagerWrapperTest, GrpcServerOptionalAndOffByDefault) {
+  std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> subs1;
+  subs1.push_back(std::make_unique<MockSubManager>());
+  KVCacheManager mgr_default(std::move(subs1));
+  EXPECT_EQ(mgr_default.GetGrpcPort(), 0);
+
+  std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> subs2;
+  subs2.push_back(std::make_unique<MockSubManager>());
+  KVCacheManager mgr_explicit_off(std::move(subs2), /*grpc_port=*/0,
+                                  /*start_grpc_server=*/false);
+  EXPECT_EQ(mgr_explicit_off.GetGrpcPort(), 0);
+
+  std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> subs3;
+  subs3.push_back(std::make_unique<MockSubManager>());
+  KVCacheManager mgr_started(std::move(subs3), /*grpc_port=*/0,
+                             /*start_grpc_server=*/true);
+  EXPECT_GT(mgr_started.GetGrpcPort(), 0);
+}
+
 }  // namespace
 }  // namespace jax
 }  // namespace kv_cache

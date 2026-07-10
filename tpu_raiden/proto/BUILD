@@ -35,6 +35,7 @@ cc_proto_library(
 cc_grpc_library(
     name = "worker_service_cc_grpc",
     srcs = [":worker_service_proto"],
+    grpc_only = True,
     visibility = ["//visibility:public"],
     deps = [":worker_service_cc_proto"],
 )
@@ -67,6 +68,7 @@ cc_grpc_library(
     name = "controller_service_cc_grpc",
     srcs = [":controller_service_proto"],
     generate_mocks = True,
+    grpc_only = True,
     visibility = ["//visibility:public"],
     deps = [":controller_service_cc_proto"],
 )
