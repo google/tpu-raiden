@@ -30,7 +30,48 @@
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+_HOST_IMPL = None
 _TORCH_IMPL = None
+
+
+def _layout_kind_id(kind: Any) -> int:
+  # pylint: disable=g-import-not-at-top
+  from tpu_raiden.api.torch import hybrid_layout
+  # pylint: enable=g-import-not-at-top
+
+  if kind == hybrid_layout.LayerKind.FULL_ATTENTION:
+    return 0
+  if kind == hybrid_layout.LayerKind.MAMBA_STATE:
+    return 1
+  if kind == hybrid_layout.LayerKind.OPAQUE:
+    return 2
+  raise ValueError(f"unknown layer kind: {kind!r}")
+
+
+def _layout_to_native_tuple(layout: Any) -> tuple[int, int, list[tuple]]:
+  return (
+      _layout_kind_id(layout.kind),
+      int(layout.slot_bytes),
+      [(
+          region.name,
+          int(region.offset_bytes),
+          int(region.stride_bytes),
+          int(region.unit_bytes),
+          int(region.num_units),
+          int(region.units_per_stride),
+      ) for region in layout.regions],
+  )
+
+
+def _host_impl():
+  """Returns the host-only extension without importing torch_tpu."""
+  global _HOST_IMPL
+  if _HOST_IMPL is None:
+    # pylint: disable=g-import-not-at-top
+    from tpu_raiden.frameworks.torch import _tpu_raiden_host as impl
+    # pylint: enable=g-import-not-at-top
+    _HOST_IMPL = impl
+  return _HOST_IMPL
 
 
 def _torch_impl():
@@ -84,6 +125,8 @@ class KVCacheManager:
       listener_port: Sockets server port for incoming C++ KVCacheListener
         commands.
     """
+    self._block_layouts = None
+    self._admission_summary = None
     impl = _torch_impl()
     if host_blocks_to_allocate is not None:
       self._impl = impl.KVCacheManager(
@@ -110,6 +153,33 @@ class KVCacheManager:
           listener_port=listener_port,
           parallelism=parallelism,
       )
+
+  @classmethod
+  def create_host_only(
+      cls,
+      *,
+      num_layers: int,
+      num_shards: int = 1,
+      slice_byte_size: int,
+      node_id: int,
+      local_port: Optional[int] = None,
+      host_blocks: int,
+      parallelism: int = 4,
+  ) -> "KVCacheManager":
+    """Creates a CPU-only manager backed by Raiden-owned host memory."""
+    obj = cls.__new__(cls)
+    obj._block_layouts = None
+    obj._admission_summary = None
+    obj._impl = _host_impl().KVCacheManager(
+        num_layers=num_layers,
+        num_shards=num_shards,
+        slice_byte_size=slice_byte_size,
+        node_id=node_id,
+        local_port=local_port,
+        host_blocks_to_allocate=host_blocks,
+        parallelism=parallelism,
+    )
+    return obj
 
   @property
   def node_id(self) -> int:
@@ -182,6 +252,129 @@ class KVCacheManager:
   ) -> None:
     """Overwrites one host block with bytes."""
     self._impl.write_block_bytes(layer_idx, block_id, payload)
+
+  def set_block_layouts(self, layouts: Sequence[Any]) -> None:
+    """Registers one hybrid block layout per wrapped layer."""
+    # pylint: disable=g-import-not-at-top
+    from tpu_raiden.api.torch import hybrid_layout
+    # pylint: enable=g-import-not-at-top
+
+    coerced = tuple(hybrid_layout.coerce_layer_layout(layout)
+                    for layout in layouts)
+    expected_layers = int(self._impl.num_layers)
+    if len(coerced) != expected_layers:
+      raise ValueError(
+          "layout count must match manager layer count: "
+          f"got {len(coerced)}, expected {expected_layers}")
+    for layer_idx, layout in enumerate(coerced):
+      manager_slot_bytes = self._manager_slot_byte_size(layer_idx)
+      try:
+        layout.validate(manager_slot_bytes)
+      except Exception as exc:
+        raise ValueError(
+            f"invalid block layout for layer {layer_idx}: {exc}") from exc
+    if hasattr(self._impl, "set_block_layouts_native"):
+      self._impl.set_block_layouts_native(
+          [_layout_to_native_tuple(layout) for layout in coerced])
+    self._block_layouts = coerced
+
+  def _manager_slot_byte_size(self, layer_idx: int) -> int:
+    if hasattr(self._impl, "layer_block_byte_size"):
+      return int(self._impl.layer_block_byte_size(layer_idx))
+    return int(self._impl.slice_byte_size)
+
+  def get_block_ref(
+      self, layer_idx: int, block_id: int, shard_idx: int = 0
+  ) -> Dict[str, Any]:
+    """Returns a typed reference descriptor for one host-side hybrid block."""
+    if self._block_layouts is None:
+      raise RuntimeError("block layouts are not set")
+    if hasattr(self._impl, "get_hybrid_block_ref_native"):
+      return dict(
+          self._impl.get_hybrid_block_ref_native(
+              layer_idx=layer_idx, shard_idx=shard_idx, block_id=block_id))
+    if layer_idx < 0 or layer_idx >= len(self._block_layouts):
+      raise IndexError("layer index out of range")
+    layout = self._block_layouts[layer_idx]
+    ptr = int(
+        self._impl.get_block_host_pointer(
+            layer_idx=layer_idx, shard_idx=shard_idx, block_id=block_id))
+    return {
+        "ptr": ptr,
+        "slot_bytes": layout.slot_bytes,
+        "kind": layout.kind.value,
+        "layer_idx": layer_idx,
+        "shard_idx": shard_idx,
+        "block_id": block_id,
+        "regions": [region.to_dict() for region in layout.regions],
+    }
+
+  def fa_layer_indices(self) -> List[int]:
+    """Returns the registered full-attention layer indices."""
+    if self._block_layouts is None:
+      return []
+    if hasattr(self._impl, "layer_indices_of_kind_native"):
+      # 0 is LayerKind::kFullAttention in the native binding.
+      return [int(layer_idx)
+              for layer_idx in self._impl.layer_indices_of_kind_native(0)]
+    # pylint: disable=g-import-not-at-top
+    from tpu_raiden.api.torch import hybrid_layout
+    # pylint: enable=g-import-not-at-top
+
+    return [
+        layer_idx for layer_idx, layout in enumerate(self._block_layouts)
+        if layout.kind == hybrid_layout.LayerKind.FULL_ATTENTION
+    ]
+
+  def admit_qwen35_kv_cache(self, spec: Any) -> Dict[str, Any]:
+    """Admits a Qwen3.5 hybrid KV cache layout into this manager."""
+    # pylint: disable=g-import-not-at-top
+    from tpu_raiden.api.torch import hybrid_layout
+    # pylint: enable=g-import-not-at-top
+
+    if not isinstance(spec, hybrid_layout.Qwen35AdmissionSpec):
+      raise TypeError("spec must be a Qwen35AdmissionSpec")
+    if int(self._impl.num_layers) != spec.num_layers:
+      raise ValueError(
+          "Qwen3.5 admission layer count mismatch: "
+          f"manager={int(self._impl.num_layers)} spec={spec.num_layers}")
+    layouts = tuple(hybrid_layout.coerce_layer_layout(layout)
+                    for layout in spec.layouts)
+    mismatched_layer_sizes = []
+    for layer_idx, layout in enumerate(layouts):
+      manager_slot_bytes = self._manager_slot_byte_size(layer_idx)
+      allowed_slot_bytes = {int(layout.slot_bytes)}
+      if layout.kind == hybrid_layout.LayerKind.MAMBA_STATE:
+        allowed_slot_bytes.add(int(spec.gdn_used_bytes))
+      if manager_slot_bytes not in allowed_slot_bytes:
+        mismatched_layer_sizes.append((layer_idx, manager_slot_bytes))
+    if mismatched_layer_sizes:
+      layer_idx, manager_slot_bytes = mismatched_layer_sizes[0]
+      raise ValueError(
+          "Qwen3.5 admission slot byte size mismatch: "
+          f"layer={layer_idx} manager={manager_slot_bytes} "
+          f"spec={spec.slot_bytes} gdn_used={spec.gdn_used_bytes}")
+    self.set_block_layouts(layouts)
+    fa_layers = self.fa_layer_indices()
+    summary = {
+        "admitted": True,
+        "topology": spec.topology,
+        "model_server_role": spec.model_server_role,
+        "num_layers": spec.num_layers,
+        "fa_layers": len(fa_layers),
+        "gdn_layers": spec.num_layers - len(fa_layers),
+        "block_tokens": spec.block_tokens,
+        "slot_bytes": spec.slot_bytes,
+        "gdn_used_bytes": spec.gdn_used_bytes,
+    }
+    self._admission_summary = dict(summary)
+    return summary
+
+  def admission_summary(self) -> Dict[str, Any]:
+    """Returns the last successful Qwen3.5 admission summary."""
+    if self._admission_summary is None:
+      return {"admitted": False}
+    return dict(self._admission_summary)
 
   def register_recv(
       self, uuid: int, req_id: str, expected_block_count: int

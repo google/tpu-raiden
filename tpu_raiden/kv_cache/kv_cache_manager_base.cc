@@ -101,31 +101,89 @@ void CoalesceMajorDimCopies(const std::vector<int64_t>& src_offsets,
   }
 }
 
+bool RegionCoversOffset(const RegionSpec& region, size_t offset,
+                        size_t* covered_end) {
+  if (region.num_units <= 0) return false;
+  const size_t region_offset = static_cast<size_t>(region.offset_bytes);
+  const size_t stride = static_cast<size_t>(region.stride_bytes);
+  const size_t packed_bytes = static_cast<size_t>(region.unit_bytes) *
+                              static_cast<size_t>(region.units_per_stride);
+  const size_t num_units = static_cast<size_t>(region.num_units);
+  if (offset < region_offset || packed_bytes == 0) return false;
+
+  size_t unit_idx = 0;
+  if (num_units > 1) {
+    if (stride == 0) return false;
+    unit_idx = (offset - region_offset) / stride;
+    if (unit_idx >= num_units) return false;
+  }
+  const size_t segment_start = region_offset + unit_idx * stride;
+  const size_t segment_end = segment_start + packed_bytes;
+  if (offset < segment_start || offset >= segment_end) return false;
+  *covered_end = segment_end;
+  return true;
+}
+
+bool LayoutCoversRange(const LayerBlockLayout& layout, size_t start,
+                       size_t end) {
+  size_t cursor = start;
+  while (cursor < end) {
+    size_t next = cursor;
+    for (const RegionSpec& region : layout.regions) {
+      size_t covered_end = 0;
+      if (RegionCoversOffset(region, cursor, &covered_end)) {
+        next = std::max(next, std::min(covered_end, end));
+      }
+    }
+    if (next == cursor) {
+      return false;
+    }
+    cursor = next;
+  }
+  return true;
+}
+
 }  // namespace
 
 KVCacheManagerBase::KVCacheManagerBase(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     bool unsafe_skip_buffer_lock, int parallelism,
-    HostBufferAllocator host_allocator, std::optional<std::string> bind_ip)
+    HostBufferAllocator host_allocator, std::optional<std::string> bind_ip,
+    std::optional<size_t> logical_slice_byte_size,
+    std::vector<int64_t> logical_dimensions,
+    std::optional<size_t> logical_physical_size,
+    std::optional<int> assigned_numa_node_override)
     : RaidenManagerBase(layer_buffers.size(),
                         layer_buffers.empty() ? 0 : layer_buffers[0].size(),
-                        layer_buffers.empty() ? 0
-                                              : raiden::GetMajorSliceByteSize(
-                                                    layer_buffers[0][0]),
+                        logical_slice_byte_size.has_value() &&
+                                *logical_slice_byte_size > 0
+                            ? *logical_slice_byte_size
+                            : (layer_buffers.empty()
+                                   ? 0
+                                   : raiden::GetMajorSliceByteSize(
+                                         layer_buffers[0][0])),
                         local_port, parallelism, bind_ip),
       host_allocator_(host_allocator) {
   if (num_layers_ == 0 || num_shards_ == 0) {
     return;
   }
 
-  DetectAndAssignNumaNode(layer_buffers);
+  if (assigned_numa_node_override.has_value()) {
+    assigned_numa_node_ = assigned_numa_node_override;
+  } else {
+    DetectAndAssignNumaNode(layer_buffers);
+  }
 
   xla::PjRtBuffer* first_buffer = layer_buffers[0][0];
   const xla::Shape& shape = first_buffer->on_device_shape();
   LOG(ERROR) << "KVCacheManagerBase: on_device_shape: " << shape.ToString();
 
-  is_blocked_layout_ = (shape.dimensions().size() == 5);
+  const bool has_logical_dimensions =
+      !logical_dimensions.empty() && logical_dimensions[0] > 0;
+  is_blocked_layout_ = has_logical_dimensions
+                           ? (logical_dimensions.size() == 5)
+                           : (shape.dimensions().size() == 5);
 
   // max_physical_size_ will be set to the max across all layers below.
   max_physical_size_ = 0;
@@ -134,7 +192,9 @@ KVCacheManagerBase::KVCacheManagerBase(
 
   int num_host_blocks = host_blocks_to_allocate.value_or(64);
   host_block_manager_ = std::make_unique<LogicalBlockManager>(num_host_blocks);
-  if (!shape.dimensions().empty()) {
+  if (has_logical_dimensions) {
+    major_dim_size_ = logical_dimensions[0];
+  } else if (!shape.dimensions().empty()) {
     major_dim_size_ = shape.dimensions(0);
   }
   semaphore_ = std::make_unique<xla::Semaphore>(std::max<int>(4, parallelism));
@@ -153,8 +213,18 @@ KVCacheManagerBase::KVCacheManagerBase(
     // Store the per-layer on-device buffer size.  For uniform models
     // every layer has the same value; for hybrid (HMA) models they
     // may differ (e.g. mamba conv_state bf16 vs ssm_state f32).
-    device_info.physical_size =
+    const size_t buffer_physical_size =
         layer_buffers[layer_idx][0]->GetOnDeviceSizeInBytes().value();
+    device_info.physical_size =
+        logical_physical_size.has_value() && *logical_physical_size > 0
+            ? *logical_physical_size
+            : buffer_physical_size;
+    if (major_dim_size_ > 0 && device_info.physical_size % major_dim_size_ != 0) {
+      throw std::runtime_error(absl::StrCat(
+          "Device buffer physical size is not divisible by major dimension: "
+          "physical_size=", device_info.physical_size,
+          ", major_dim_size=", major_dim_size_));
+    }
     max_physical_size_ =
         std::max(max_physical_size_, device_info.physical_size);
     VLOG(1) << "KVCacheManagerBase: layer " << layer_idx << " on_device_shape: "
@@ -945,6 +1015,165 @@ absl::StatusOr<KVCacheHostSpan> KVCacheManagerBase::HostSpan(
 }
 
 size_t KVCacheManagerBase::bytes_per_block() const { return slice_byte_size_; }
+
+int64_t KVCacheManagerBase::LayerBlockByteSize(size_t layer_idx) const {
+  if (layer_idx >= num_layers_) {
+    return -1;
+  }
+  if (layer_idx < buffer_holds_.size()) {
+    return layer_block_byte_size(layer_idx);
+  }
+  return static_cast<int64_t>(slice_byte_size_);
+}
+
+absl::Status KVCacheManagerBase::SetBlockLayouts(
+    std::vector<LayerBlockLayout> layouts) {
+  if (layouts.size() != num_layers_) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "layout count must match manager layer count: got ", layouts.size(),
+        ", expected ", num_layers_));
+  }
+  {
+    absl::MutexLock l(plans_mu_);
+    if (!active_plans_.empty()) {
+      return absl::FailedPreconditionError(
+          "block layouts cannot be changed while active plans are registered");
+    }
+  }
+  for (size_t layer_idx = 0; layer_idx < layouts.size(); ++layer_idx) {
+    const int64_t manager_slot_bytes = LayerBlockByteSize(layer_idx);
+    if (manager_slot_bytes <= 0) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "invalid manager slot byte size for layer ", layer_idx, ": ",
+          manager_slot_bytes));
+    }
+    absl::Status status = layouts[layer_idx].Validate(manager_slot_bytes);
+    if (!status.ok()) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "invalid block layout for layer ", layer_idx, ": ",
+          status.message()));
+    }
+  }
+  block_layouts_ = std::move(layouts);
+  return absl::OkStatus();
+}
+
+absl::StatusOr<HybridBlockRef> KVCacheManagerBase::GetHybridBlockRef(
+    size_t layer_idx, size_t shard_idx, int64_t block_id) const {
+  if (block_layouts_.empty()) {
+    return absl::FailedPreconditionError("block layouts are not set");
+  }
+  if (block_id < 0) {
+    return absl::InvalidArgumentError("block_id must be non-negative");
+  }
+  if (layer_idx >= block_layouts_.size() || layer_idx >= num_layers_ ||
+      shard_idx >= num_shards_) {
+    return absl::OutOfRangeError("layer or shard index out of range");
+  }
+  if (layer_idx >= layers_.size() ||
+      shard_idx >= layers_[layer_idx].shards.size()) {
+    return absl::OutOfRangeError("layer or shard index out of range");
+  }
+  const size_t host_block_bytes = bytes_per_block();
+  const auto& shard_info = layers_[layer_idx].shards[shard_idx];
+  const size_t host_size = shard_info.host_size;
+  const uint8_t* base = shard_info.host_ptr;
+  if (base == nullptr) {
+    return absl::OutOfRangeError("layer or shard index out of range");
+  }
+  const size_t block = static_cast<size_t>(block_id);
+  if (host_block_bytes == 0 || block >= host_size / host_block_bytes ||
+      block * host_block_bytes + host_block_bytes > host_size) {
+    return absl::OutOfRangeError("block range exceeds host buffer");
+  }
+  return HybridBlockRef{
+      .ptr = const_cast<uint8_t*>(base) + block * host_block_bytes,
+      .slot_bytes = block_layouts_[layer_idx].slot_bytes,
+      .layout = &block_layouts_[layer_idx],
+      .layer_idx = layer_idx,
+      .shard_idx = shard_idx,
+      .block_id = block_id,
+  };
+}
+
+const LayerBlockLayout* KVCacheManagerBase::block_layout(
+    size_t layer_idx) const {
+  if (block_layouts_.empty() || layer_idx >= block_layouts_.size()) {
+    return nullptr;
+  }
+  return &block_layouts_[layer_idx];
+}
+
+std::vector<size_t> KVCacheManagerBase::LayerIndicesOfKind(
+    LayerKind kind) const {
+  std::vector<size_t> result;
+  for (size_t layer_idx = 0; layer_idx < block_layouts_.size(); ++layer_idx) {
+    if (block_layouts_[layer_idx].kind == kind) {
+      result.push_back(layer_idx);
+    }
+  }
+  return result;
+}
+
+void KVCacheManagerBase::SetBlockChunkRegionValidation(
+    tpu_raiden::transport::BlockChunkRegionValidationMode mode) {
+  block_chunk_region_validation_mode_ = mode;
+}
+
+tpu_raiden::transport::BlockChunkRegionValidationMode
+KVCacheManagerBase::block_chunk_region_validation_mode() const {
+  return block_chunk_region_validation_mode_;
+}
+
+absl::Status KVCacheManagerBase::ValidateBlockChunksInRegions(
+    size_t layer_idx, size_t shard_idx,
+    const std::vector<tpu_raiden::transport::BlockChunk>& chunks) {
+  if (block_layouts_.empty()) {
+    return absl::OkStatus();
+  }
+  if (layer_idx >= block_layouts_.size() || layer_idx >= num_layers_ ||
+      shard_idx >= num_shards_) {
+    return absl::OutOfRangeError("layer or shard index out of range");
+  }
+  uint8_t* base = GetHostPointer(layer_idx, shard_idx);
+  const size_t host_size = GetHostSize(layer_idx, shard_idx);
+  if (base == nullptr) {
+    return absl::FailedPreconditionError("host pointer is null");
+  }
+  const size_t host_block_bytes = bytes_per_block();
+  if (host_block_bytes == 0) {
+    return absl::FailedPreconditionError("bytes_per_block must be positive");
+  }
+  const LayerBlockLayout& layout = block_layouts_[layer_idx];
+  const uintptr_t base_addr = reinterpret_cast<uintptr_t>(base);
+  for (const auto& chunk : chunks) {
+    if (chunk.size == 0) continue;
+    const uintptr_t chunk_addr = reinterpret_cast<uintptr_t>(chunk.ptr);
+    if (chunk_addr < base_addr || chunk_addr - base_addr > host_size ||
+        chunk.size > host_size - (chunk_addr - base_addr)) {
+      return absl::OutOfRangeError("chunk is outside host buffer");
+    }
+    size_t relative_offset = chunk_addr - base_addr;
+    size_t remaining = chunk.size;
+    while (remaining > 0) {
+      const size_t block_offset = relative_offset % host_block_bytes;
+      const size_t bytes_in_block =
+          std::min(remaining, host_block_bytes - block_offset);
+      if (block_offset + bytes_in_block >
+              static_cast<size_t>(layout.slot_bytes) ||
+          !LayoutCoversRange(layout, block_offset,
+                             block_offset + bytes_in_block)) {
+        return absl::FailedPreconditionError(absl::StrCat(
+            "chunk crosses non-live bytes for layer ", layer_idx,
+            ", shard ", shard_idx, ", block_offset ", block_offset,
+            ", size ", bytes_in_block));
+      }
+      relative_offset += bytes_in_block;
+      remaining -= bytes_in_block;
+    }
+  }
+  return absl::OkStatus();
+}
 
 bool KVCacheManagerBase::use_block_chunks(uint64_t uuid) const {
   absl::MutexLock l(plans_mu_);

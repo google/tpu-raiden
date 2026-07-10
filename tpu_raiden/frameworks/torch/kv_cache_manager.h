@@ -15,6 +15,7 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_API_TORCH_KV_CACHE_MANAGER_H_
 #define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_API_TORCH_KV_CACHE_MANAGER_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -83,6 +84,10 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
   absl::StatusOr<std::string> ReadBlockBytes(size_t layer_idx, int block_id,
                                              size_t shard_idx = 0);
 
+  absl::StatusOr<uintptr_t> GetBlockHostPointerValue(size_t layer_idx,
+                                                     size_t shard_idx,
+                                                     int block_id);
+
   absl::Status WriteBlockBytes(size_t layer_idx, int block_id,
                                absl::string_view payload, size_t shard_idx = 0);
 
@@ -93,6 +98,10 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
     std::vector<std::vector<xla::PjRtBuffer*>> buffers;
     std::vector<torch_tpu::DeviceBufferRef> refs;
     xla::PjRtClient* client = nullptr;
+    std::vector<int64_t> logical_dimensions;
+    size_t logical_slice_byte_size = 0;
+    size_t logical_physical_size = 0;
+    bool has_logical_metadata = false;
   };
   static UnpackedLayers UnpackLayers(
       const std::vector<std::vector<at::Tensor>>& device_tensors);

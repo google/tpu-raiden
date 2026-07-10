@@ -70,6 +70,38 @@ TEST_F(KVCacheManagerTorchTest, ConstructorSucceedsWithMocks) {
   EXPECT_EQ(manager.bytes_per_block(), 1024 * sizeof(float));
 }
 
+TEST_F(KVCacheManagerTorchTest, ConstructorUsesLogicalRawStorageViewMetadata) {
+  constexpr int64_t kNumBlocks = 16;
+  constexpr int64_t kSlotBytes = 4 * 1024;
+  constexpr int64_t kPhysicalBytes = kNumBlocks * kSlotBytes;
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      xla::PjRtMemorySpace * memory_space,
+      client_->addressable_devices()[0]->default_memory_space());
+  std::vector<int8_t> data(kPhysicalBytes, 1);
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto pjrt_buffer, client_->BufferFromHostBuffer(
+                            data.data(), xla::S8, {kPhysicalBytes},
+                            /*byte_strides=*/std::nullopt,
+                            xla::PjRtClient::HostBufferSemantics::
+                                kImmutableUntilTransferCompletes,
+                            /*on_done_with_host_buffer=*/nullptr, memory_space,
+                            /*device_layout=*/nullptr));
+
+  at::Tensor raw = ::torch::zeros({kPhysicalBytes}, ::torch::kInt8);
+  at::Tensor block_view = raw.view({kNumBlocks, kSlotBytes});
+
+  RegisterMockTensor(block_view, pjrt_buffer.get());
+
+  std::vector<std::vector<at::Tensor>> device_tensors = {{block_view}};
+  KVCacheManager manager(device_tensors,
+                         /*local_port=*/std::nullopt,
+                         /*host_blocks_to_allocate=*/1);
+
+  EXPECT_EQ(manager.bytes_per_block(), kSlotBytes);
+  EXPECT_EQ(manager.LayerBlockByteSize(/*layer_idx=*/0), kSlotBytes);
+}
+
 }  // namespace
 }  // namespace torch
 }  // namespace tpu_raiden

@@ -38,6 +38,7 @@
 #include "tpu_raiden/core/numa_thread_pool.h"
 #include "tpu_raiden/core/raiden_manager_base.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
+#include "tpu_raiden/kv_cache/hybrid_block_layout.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
 #include "tpu_raiden/transport/block_transport.h"
@@ -85,7 +86,11 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<int> host_blocks_to_allocate = std::nullopt,
       bool unsafe_skip_buffer_lock = false, int parallelism = 1,
       HostBufferAllocator host_allocator = nullptr,
-      std::optional<std::string> bind_ip = std::nullopt);
+      std::optional<std::string> bind_ip = std::nullopt,
+      std::optional<size_t> logical_slice_byte_size = std::nullopt,
+      std::vector<int64_t> logical_dimensions = {},
+      std::optional<size_t> logical_physical_size = std::nullopt,
+      std::optional<int> assigned_numa_node_override = std::nullopt);
 
   // Standard CPU-only Constructor for remote workers E2E
   KVCacheManagerBase(size_t num_layers, size_t num_shards,
@@ -207,7 +212,29 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   size_t bytes_per_block() const override;
 
+  int64_t LayerBlockByteSize(size_t layer_idx) const;
+
+  absl::Status SetBlockLayouts(std::vector<LayerBlockLayout> layouts);
+
+  absl::StatusOr<HybridBlockRef> GetHybridBlockRef(size_t layer_idx,
+                                                   size_t shard_idx,
+                                                   int64_t block_id) const;
+
+  const LayerBlockLayout* block_layout(size_t layer_idx) const;
+
+  std::vector<size_t> LayerIndicesOfKind(LayerKind kind) const;
+
   bool use_block_chunks(uint64_t uuid) const override;
+
+  void SetBlockChunkRegionValidation(
+      tpu_raiden::transport::BlockChunkRegionValidationMode mode);
+
+  tpu_raiden::transport::BlockChunkRegionValidationMode
+  block_chunk_region_validation_mode() const override;
+
+  absl::Status ValidateBlockChunksInRegions(
+      size_t layer_idx, size_t shard_idx,
+      const std::vector<tpu_raiden::transport::BlockChunk>& chunks) override;
 
   virtual absl::Status RegisterActivePlan(
       uint64_t uuid, const tpu_raiden::rpc::StartTransferRequest& request,
@@ -253,6 +280,10 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
     size_t physical_size = 0;
   };
   std::vector<LayerDeviceInfo> buffer_holds_;
+  std::vector<LayerBlockLayout> block_layouts_;
+  tpu_raiden::transport::BlockChunkRegionValidationMode
+      block_chunk_region_validation_mode_ =
+          tpu_raiden::transport::BlockChunkRegionValidationMode::kDisabled;
 
   // Returns the per-block byte size for a given layer.  Uses the layer's
   // actual physical_size when available (device-backed path); falls back

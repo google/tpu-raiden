@@ -42,6 +42,23 @@ cc_test(
 )
 
 cc_library(
+    name = "hybrid_block_layout",
+    srcs = ["hybrid_block_layout.cc"],
+    hdrs = ["hybrid_block_layout.h"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_library(
     name = "kv_cache_manager_base",
     srcs = [
         "kv_cache_manager_base.cc",
@@ -56,6 +73,7 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":hybrid_block_layout",
         ":logical_block_manager",
         "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:numa_thread_pool",

@@ -85,6 +85,19 @@ absl::Status ValidateChunks(BlockTransportDelegate* delegate, size_t l,
       }
     }
   }
+  const BlockChunkRegionValidationMode region_mode =
+      delegate->block_chunk_region_validation_mode();
+  if (region_mode != BlockChunkRegionValidationMode::kDisabled) {
+    absl::Status status =
+        delegate->ValidateBlockChunksInRegions(l, sh, chunks);
+    if (!status.ok()) {
+      if (region_mode == BlockChunkRegionValidationMode::kFail) {
+        return status;
+      }
+      LOG(WARNING) << "Block chunk region validation warning: "
+                   << status.ToString();
+    }
+  }
   return absl::OkStatus();
 }
 

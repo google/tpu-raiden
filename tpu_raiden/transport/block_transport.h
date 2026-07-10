@@ -55,12 +55,33 @@ struct BlockChunk {
   size_t size;
 };
 
+enum class BlockChunkRegionValidationMode {
+  kDisabled = 0,
+  kWarn = 1,
+  kFail = 2,
+};
+
 // Delegate interface for BlockTransport inheriting raw memory primitives.
 class BlockTransportDelegate : public RawBufferTransportDelegate {
  public:
   ~BlockTransportDelegate() override = default;
 
   virtual bool use_block_chunks(uint64_t uuid) const { return false; }
+
+  // Optional second-pass validation for chunked transfers. The transport always
+  // validates chunks against the flat host buffer first. Delegates with
+  // per-layer interior-layout knowledge can additionally reject or warn on
+  // chunks that target padding or otherwise non-live bytes.
+  virtual BlockChunkRegionValidationMode block_chunk_region_validation_mode()
+      const {
+    return BlockChunkRegionValidationMode::kDisabled;
+  }
+
+  virtual absl::Status ValidateBlockChunksInRegions(
+      size_t layer_idx, size_t shard_idx,
+      const std::vector<BlockChunk>& chunks) {
+    return absl::OkStatus();
+  }
 
   // Returns the active node ID (rank) of the worker.
   virtual int64_t node_id() const { return -1; }

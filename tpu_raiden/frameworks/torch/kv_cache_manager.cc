@@ -68,6 +68,10 @@ KVCacheManager::UnpackedLayers KVCacheManager::UnpackLayers(
   UnpackedLayers unpacked;
   unpacked.buffers = std::move(u.buffers);
   unpacked.refs = std::move(u.refs);
+  unpacked.logical_dimensions = std::move(u.logical_dimensions);
+  unpacked.logical_slice_byte_size = u.logical_slice_byte_size;
+  unpacked.logical_physical_size = u.logical_physical_size;
+  unpacked.has_logical_metadata = u.has_logical_metadata;
   if (!unpacked.buffers.empty() && !unpacked.buffers[0].empty()) {
     unpacked.client = unpacked.buffers[0][0]->device()->client();
   }
@@ -93,8 +97,13 @@ KVCacheManager::KVCacheManager(UnpackedLayers unpacked,
                                double timeout_s,
                                std::vector<at::Tensor> kv_caches)
     : KVCacheManagerWithTransfer(
-          std::move(unpacked.buffers), local_port, host_blocks_to_allocate,
-          unsafe_skip_buffer_lock, parallelism,
+          unpacked.buffers,
+          unpacked.has_logical_metadata ? unpacked.logical_slice_byte_size : 0,
+          unpacked.has_logical_metadata ? unpacked.logical_dimensions
+                                        : std::vector<int64_t>{},
+          unpacked.has_logical_metadata ? unpacked.logical_physical_size : 0,
+          local_port, host_blocks_to_allocate, unsafe_skip_buffer_lock,
+          parallelism,
           tpu_raiden::CreateHostMemoryAllocator(
               unpacked.client, max_blocks,
               (unpacked.buffers.empty() || unpacked.buffers[0].empty() ||
@@ -221,6 +230,25 @@ absl::StatusOr<std::string> KVCacheManager::ReadBlockBytes(size_t layer_idx,
   }
   const char* ptr = reinterpret_cast<const char*>(base + block * block_bytes);
   return std::string(ptr, block_bytes);
+}
+
+absl::StatusOr<uintptr_t> KVCacheManager::GetBlockHostPointerValue(
+    size_t layer_idx, size_t shard_idx, int block_id) {
+  if (block_id < 0) {
+    return absl::InvalidArgumentError("block_id must be non-negative");
+  }
+  const size_t block_bytes = bytes_per_block();
+  const size_t host_size = GetHostSize(layer_idx, shard_idx);
+  const uint8_t* base = GetHostPointer(layer_idx, shard_idx);
+  if (base == nullptr) {
+    return absl::OutOfRangeError("layer or shard index out of range");
+  }
+  const size_t block = static_cast<size_t>(block_id);
+  if (block_bytes == 0 || block > host_size / block_bytes ||
+      block * block_bytes + block_bytes > host_size) {
+    return absl::OutOfRangeError("block range exceeds host buffer");
+  }
+  return reinterpret_cast<uintptr_t>(base + block * block_bytes);
 }
 
 absl::Status KVCacheManager::WriteBlockBytes(size_t layer_idx, int block_id,

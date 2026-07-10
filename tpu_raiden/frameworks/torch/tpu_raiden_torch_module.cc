@@ -32,6 +32,7 @@
 #include "absl/strings/string_view.h"
 #include "tpu_raiden/core/raiden_future.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
+#include "tpu_raiden/frameworks/torch/hybrid_layout_nanobind.h"
 #include "tpu_raiden/frameworks/torch/kv_cache_manager.h"
 #include "tpu_raiden/frameworks/torch/torch_nanobind_utils.h"
 #include "tpu_raiden/frameworks/torch/weight_synchronizer.h"
@@ -215,6 +216,21 @@ NB_MODULE(_tpu_raiden_torch, m) {
           },
           nb::arg("layer_idx"), nb::arg("block_id"), nb::arg("payload"))
       .def(
+          "get_block_host_pointer",
+          [](KVCacheManager& self, size_t layer_idx, size_t shard_idx,
+             int block_id) {
+            auto status_or =
+                self.GetBlockHostPointerValue(layer_idx, shard_idx, block_id);
+            if (!status_or.ok()) {
+              throw std::runtime_error(
+                  "KVCacheManager get_block_host_pointer failed: " +
+                  std::string(status_or.status().message()));
+            }
+            return status_or.value();
+          },
+          nb::arg("layer_idx"), nb::arg("shard_idx") = 0,
+          nb::arg("block_id") = 0)
+      .def(
           "RegisterRecv",
           [](KVCacheManager& self, uint64_t uuid, const std::string& req_id,
              int expected_block_count) {
@@ -378,7 +394,43 @@ NB_MODULE(_tpu_raiden_torch, m) {
         auto [done_sending, done_recving, failed_recving] =
             self.CompleteReadRaw();
         return nb::make_tuple(done_sending, done_recving, failed_recving);
-      });
+      })
+      .def(
+          "set_block_layouts_native",
+          [](KVCacheManager& self,
+             const std::vector<tpu_raiden::torch_bindings::LayoutTuple>&
+                 layouts) {
+            tpu_raiden::torch_bindings::ThrowIfNotOk(
+                self.SetBlockLayouts(
+                    tpu_raiden::torch_bindings::LayoutsFromTuples(layouts)),
+                "KVCacheManager set_block_layouts failed");
+          },
+          nb::arg("layouts"))
+      .def(
+          "get_hybrid_block_ref_native",
+          [](KVCacheManager& self, size_t layer_idx, size_t shard_idx,
+             int64_t block_id) {
+            auto status_or =
+                self.GetHybridBlockRef(layer_idx, shard_idx, block_id);
+            if (!status_or.ok()) {
+              throw std::runtime_error(
+                  "KVCacheManager get_hybrid_block_ref failed: " +
+                  std::string(status_or.status().message()));
+            }
+            return tpu_raiden::torch_bindings::HybridBlockRefToDict(
+                status_or.value());
+          },
+          nb::arg("layer_idx"), nb::arg("shard_idx") = 0,
+          nb::arg("block_id") = 0)
+      .def(
+          "layer_indices_of_kind_native",
+          [](KVCacheManager& self, int kind_id) {
+            return self.LayerIndicesOfKind(
+                tpu_raiden::torch_bindings::LayerKindFromId(kind_id));
+          },
+          nb::arg("kind_id"))
+      .def("layer_block_byte_size", &KVCacheManager::LayerBlockByteSize,
+           nb::arg("layer_idx"));
 
   // =========================================================================
   // 3. Bind WeightSynchronizer

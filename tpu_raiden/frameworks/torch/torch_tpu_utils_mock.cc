@@ -17,6 +17,7 @@
 #include <optional>
 #include <stdexcept>
 #include <unordered_map>
+#include <vector>
 
 #include "ATen/core/TensorBody.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -29,6 +30,15 @@ namespace {
 std::unordered_map<void*, xla::PjRtBuffer*>& GetMockMap() {
   static auto* m = new std::unordered_map<void*, xla::PjRtBuffer*>();
   return *m;
+}
+
+std::vector<int64_t> TensorDimensions(const at::Tensor& tensor) {
+  std::vector<int64_t> dimensions;
+  dimensions.reserve(tensor.dim());
+  for (int64_t dim = 0; dim < tensor.dim(); ++dim) {
+    dimensions.push_back(tensor.size(dim));
+  }
+  return dimensions;
 }
 }  // namespace
 
@@ -43,7 +53,18 @@ UnpackedTensor UnpackTorchTensor(const at::Tensor& tensor) {
         "Mock tensor not registered. Call RegisterMockTensor first.");
   }
   // Mock has no real materialization, hence no DeviceBufferRef to hand back.
-  return UnpackedTensor{it->second, std::nullopt};
+  if (tensor.dim() == 0 || tensor.size(0) <= 0) {
+    return UnpackedTensor{.buffer = it->second, .ref = std::nullopt};
+  }
+  const size_t logical_physical_size = static_cast<size_t>(tensor.nbytes());
+  return UnpackedTensor{
+      .buffer = it->second,
+      .ref = std::nullopt,
+      .logical_dimensions = TensorDimensions(tensor),
+      .logical_slice_byte_size =
+          logical_physical_size / static_cast<size_t>(tensor.size(0)),
+      .logical_physical_size = logical_physical_size,
+  };
 }
 
 }  // namespace torch

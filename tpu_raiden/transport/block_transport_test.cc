@@ -22,6 +22,7 @@
 #include <string>
 #include <thread>  // NOLINT
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -103,6 +104,27 @@ class MockDelegate : public BlockTransportDelegate {
     return buffers_[BufferIndex(layer_idx, shard_idx)].size();
   }
 
+  BlockChunkRegionValidationMode block_chunk_region_validation_mode()
+      const override {
+    return region_validation_mode_;
+  }
+
+  absl::Status ValidateBlockChunksInRegions(
+      size_t layer_idx, size_t shard_idx,
+      const std::vector<BlockChunk>& chunks) override {
+    ++region_validation_calls_;
+    return region_validation_status_;
+  }
+
+  void set_region_validation(BlockChunkRegionValidationMode mode,
+                             absl::Status status) {
+    region_validation_mode_ = mode;
+    region_validation_status_ = std::move(status);
+    region_validation_calls_ = 0;
+  }
+
+  int region_validation_calls() const { return region_validation_calls_; }
+
   int GetRemoteReadBlockId(int base_remote_id, int chunk_k) override {
     return base_remote_id + chunk_k;
   }
@@ -138,6 +160,10 @@ class MockDelegate : public BlockTransportDelegate {
   bool on_single_block_received_called_ = false;
   int received_block_id_ = -1;
   size_t received_size_bytes_ = 0;
+  BlockChunkRegionValidationMode region_validation_mode_ =
+      BlockChunkRegionValidationMode::kDisabled;
+  absl::Status region_validation_status_;
+  int region_validation_calls_ = 0;
   absl::Mutex wait_events_mu_;
   std::vector<std::tuple<size_t, size_t, int>> wait_events_;
 };
@@ -177,6 +203,48 @@ TEST(BlockTransportTest, PushAndPullCorrectness) {
   // Verify pull parity
   EXPECT_EQ(delegate2.data()[0], 0xAB);
   EXPECT_EQ(delegate2.data()[size - 1], 0xAB);
+}
+
+TEST(BlockTransportTest, RegionValidationFailModeRejectsPushChunks) {
+  size_t size = 1024;
+  MockDelegate delegate1(size);
+  MockDelegate delegate2(size);
+  delegate1.set_region_validation(
+      BlockChunkRegionValidationMode::kFail,
+      absl::FailedPreconditionError("chunk crosses padding"));
+
+  BlockTransport transport1(&delegate1, 0);
+  BlockTransport transport2(&delegate2, 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::string peer2 = "localhost:" + std::to_string(transport2.local_port());
+  auto push_res = transport1.Push(peer2, {0});
+
+  ASSERT_FALSE(push_res.ok());
+  EXPECT_EQ(push_res.status().code(), absl::StatusCode::kFailedPrecondition);
+  EXPECT_EQ(delegate1.region_validation_calls(), 1);
+}
+
+TEST(BlockTransportTest, RegionValidationWarnModeAllowsPushChunks) {
+  size_t size = 1024;
+  MockDelegate delegate1(size);
+  MockDelegate delegate2(size);
+  std::memset(delegate1.data(), 0xCD, size);
+  delegate1.set_region_validation(
+      BlockChunkRegionValidationMode::kWarn,
+      absl::FailedPreconditionError("chunk crosses padding"));
+
+  BlockTransport transport1(&delegate1, 0);
+  BlockTransport transport2(&delegate2, 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::string peer2 = "localhost:" + std::to_string(transport2.local_port());
+  auto push_res = transport1.Push(peer2, {0});
+
+  ASSERT_TRUE(push_res.ok()) << push_res.status().message();
+  EXPECT_EQ(delegate1.region_validation_calls(), 1);
+  EXPECT_EQ(delegate2.data()[0], 0xCD);
+  EXPECT_EQ(delegate2.data()[size - 1], 0xCD);
 }
 
 TEST(BlockTransportTest, PushAndPullWithoutConnectionPool) {

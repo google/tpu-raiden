@@ -42,6 +42,28 @@ message NDSliceProto {
   repeated NDSliceDimensionProto dimensions = 1;
 }
 
+enum LayerKindProto {
+  LAYER_KIND_UNSPECIFIED = 0;
+  LAYER_KIND_FULL_ATTENTION = 1;
+  LAYER_KIND_MAMBA_STATE = 2;
+  LAYER_KIND_OPAQUE = 3;
+}
+
+message RegionSpecProto {
+  string name = 1;
+  int64 offset_bytes = 2;
+  int64 stride_bytes = 3;
+  int64 unit_bytes = 4;
+  int64 num_units = 5;
+  int64 units_per_stride = 6;
+}
+
+message LayerBlockLayoutProto {
+  LayerKindProto kind = 1;
+  int64 slot_bytes = 2;
+  repeated RegionSpecProto regions = 3;
+}
+
 message RegisterWorkUnitRequest {
   RaidenIdProto unit = 1;
   repeated string shards = 2;
@@ -50,6 +72,7 @@ message RegisterWorkUnitRequest {
   repeated int64 mesh_shape = 6;
   repeated int32 layout = 7;
   repeated int64 global_shape = 8;
+  repeated LayerBlockLayoutProto layer_block_layouts = 9;
 }
 
 // Defines an explicit 1D linear memory push operation from a local source to a

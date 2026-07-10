@@ -27,12 +27,30 @@ py_library(
 )
 
 py_library(
+    name = "hybrid_layout",
+    srcs = ["hybrid_layout.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "kv_cache_manager_torch_py",
     srcs = ["kv_cache_manager.py"],
     visibility = ["//visibility:public"],
     deps = [
+        ":hybrid_layout",
         ":torch_tpu_common_loader",
         "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",
+        "//tpu_raiden/rpc:raiden_service_py_pb2",
+    ],
+)
+
+py_library(
+    name = "kv_cache_manager_host_py",
+    srcs = ["kv_cache_manager.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":hybrid_layout",
+        "//tpu_raiden/frameworks/torch:_tpu_raiden_host",
         "//tpu_raiden/rpc:raiden_service_py_pb2",
     ],
 )

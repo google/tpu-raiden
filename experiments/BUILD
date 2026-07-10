@@ -26,8 +26,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_python//python:defs.bzl", "py_test")
-load("//third_party/bazel_rules/rules_python/python:py_binary.bzl", "py_binary")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -52,6 +51,21 @@ py_test(
     deps = [
         "//tpu_raiden/experimental:kv_cache_manager_host_py",
         "//tpu_raiden/rpc:raiden_service_py_pb2",
+        "@com_google_absl_py//absl/testing:absltest",
+    ],
+)
+
+py_test(
+    name = "reshard_stage2_hybrid_block_acceptance_test",
+    srcs = ["reshard_stage2_hybrid_block_acceptance_test.py"],
+    main = "reshard_stage2_hybrid_block_acceptance_test.py",
+    tags = [
+        "cpu:4",
+        "notap",
+    ],
+    deps = [
+        "//tpu_raiden/api/torch:hybrid_layout",
+        "//tpu_raiden/api/torch:kv_cache_manager_host_py",
         "@com_google_absl_py//absl/testing:absltest",
     ],
 )

@@ -31,14 +31,52 @@ namespace {
 class TestKVCacheManager : public KVCacheManagerBase {
  public:
   TestKVCacheManager(size_t num_layers, size_t num_shards,
-                     size_t slice_byte_size)
-      : KVCacheManagerBase(num_layers, num_shards, slice_byte_size) {
+                     size_t slice_byte_size, int host_blocks = 0)
+      : KVCacheManagerBase(
+            num_layers, num_shards, slice_byte_size, /*local_port=*/std::nullopt,
+            host_blocks > 0 ? std::make_optional(host_blocks) : std::nullopt) {
     buffer_holds_.resize(num_layers);
     for (size_t l = 0; l < num_layers; ++l) {
       buffer_holds_[l].holds.resize(num_shards);
     }
   }
+
+  void SetLayerPhysicalSizeForTest(size_t layer_idx, size_t physical_size,
+                                   int64_t major_dim_size) {
+    buffer_holds_[layer_idx].physical_size = physical_size;
+    major_dim_size_ = major_dim_size;
+  }
 };
+
+LayerBlockLayout FullAttentionLayout(int64_t slot_bytes) {
+  return LayerBlockLayout{
+      .kind = LayerKind::kFullAttention,
+      .slot_bytes = slot_bytes,
+      .regions = {RegionSpec{
+          .name = "fa_payload",
+          .offset_bytes = 0,
+          .stride_bytes = 64,
+          .unit_bytes = 32,
+          .num_units = 2,
+          .units_per_stride = 1,
+      }},
+  };
+}
+
+LayerBlockLayout MambaLayout(int64_t slot_bytes) {
+  return LayerBlockLayout{
+      .kind = LayerKind::kMambaState,
+      .slot_bytes = slot_bytes,
+      .regions = {RegionSpec{
+          .name = "gdn_ssm",
+          .offset_bytes = 0,
+          .stride_bytes = 64,
+          .unit_bytes = 64,
+          .num_units = 2,
+          .units_per_stride = 1,
+      }},
+  };
+}
 
 TEST(KVCacheManagerTest, CompilesAndLinksSuccessfully) {
   EXPECT_TRUE(true);
@@ -79,6 +117,184 @@ TEST(KVCacheManagerTest, D2hFailsWithMismatchedCopySpecLengths) {
   EXPECT_EQ(status.status().code(), absl::StatusCode::kInvalidArgument);
   EXPECT_THAT(status.status().message(),
               testing::HasSubstr("must have the same length"));
+}
+
+TEST(KVCacheManagerTest, HybridLayoutProtoRoundTrip) {
+  LayerBlockLayout layout = FullAttentionLayout(/*slot_bytes=*/128);
+  tpu_raiden::rpc::LayerBlockLayoutProto proto = ToProto(layout);
+
+  auto parsed = LayerBlockLayoutFromProto(proto);
+  ASSERT_TRUE(parsed.ok()) << parsed.status().ToString();
+  EXPECT_EQ(parsed->kind, LayerKind::kFullAttention);
+  EXPECT_EQ(parsed->slot_bytes, 128);
+  ASSERT_EQ(parsed->regions.size(), 1);
+  EXPECT_EQ(parsed->regions[0].name, "fa_payload");
+  EXPECT_EQ(parsed->regions[0].offset_bytes, 0);
+  EXPECT_EQ(parsed->regions[0].stride_bytes, 64);
+  EXPECT_EQ(parsed->regions[0].unit_bytes, 32);
+  EXPECT_EQ(parsed->regions[0].num_units, 2);
+  EXPECT_EQ(parsed->regions[0].units_per_stride, 1);
+  EXPECT_TRUE(parsed->Validate(/*manager_slot_bytes=*/128).ok());
+}
+
+TEST(KVCacheManagerTest, HybridLayoutValidationRejectsBadRegions) {
+  LayerBlockLayout overflow = FullAttentionLayout(/*slot_bytes=*/128);
+  overflow.regions[0].offset_bytes = 96;
+  overflow.regions[0].num_units = 2;
+  overflow.regions[0].stride_bytes = 64;
+  absl::Status status = overflow.Validate(/*manager_slot_bytes=*/128);
+  EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(status.message(), testing::HasSubstr("exceeds slot bytes"));
+
+  LayerBlockLayout wrong_slot = FullAttentionLayout(/*slot_bytes=*/64);
+  status = wrong_slot.Validate(/*manager_slot_bytes=*/128);
+  EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(status.message(), testing::HasSubstr("slot_bytes"));
+
+  LayerBlockLayout compact_mamba = MambaLayout(/*slot_bytes=*/160);
+  status = compact_mamba.Validate(/*manager_slot_bytes=*/128);
+  EXPECT_TRUE(status.ok()) << status.ToString();
+
+  status = compact_mamba.Validate(/*manager_slot_bytes=*/96);
+  EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(status.message(), testing::HasSubstr("exceeds slot bytes"));
+
+  status = compact_mamba.Validate(/*manager_slot_bytes=*/192);
+  EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(status.message(), testing::HasSubstr("slot_bytes"));
+
+  LayerBlockLayout negative = FullAttentionLayout(/*slot_bytes=*/128);
+  negative.regions[0].offset_bytes = -1;
+  status = negative.Validate(/*manager_slot_bytes=*/128);
+  EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(status.message(), testing::HasSubstr("offset_bytes"));
+
+  negative = FullAttentionLayout(/*slot_bytes=*/128);
+  negative.regions[0].num_units = -1;
+  status = negative.Validate(/*manager_slot_bytes=*/128);
+  EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(status.message(), testing::HasSubstr("num_units"));
+}
+
+TEST(KVCacheManagerTest, SetBlockLayoutsAndGetHybridBlockRef) {
+  TestKVCacheManager manager(/*num_layers=*/2, /*num_shards=*/1,
+                             /*slice_byte_size=*/128, /*host_blocks=*/2);
+  std::vector<LayerBlockLayout> layouts = {
+      MambaLayout(/*slot_bytes=*/128),
+      FullAttentionLayout(/*slot_bytes=*/128),
+  };
+
+  absl::Status status = manager.SetBlockLayouts(layouts);
+  ASSERT_TRUE(status.ok()) << status.ToString();
+
+  std::vector<size_t> fa_layers =
+      manager.LayerIndicesOfKind(LayerKind::kFullAttention);
+  EXPECT_THAT(fa_layers, testing::ElementsAre(1));
+
+  const LayerBlockLayout* layer0 = manager.block_layout(0);
+  ASSERT_NE(layer0, nullptr);
+  EXPECT_EQ(layer0->kind, LayerKind::kMambaState);
+
+  auto ref = manager.GetHybridBlockRef(/*layer_idx=*/1, /*shard_idx=*/0,
+                                       /*block_id=*/1);
+  ASSERT_TRUE(ref.ok()) << ref.status().ToString();
+  EXPECT_EQ(ref->slot_bytes, 128);
+  EXPECT_EQ(ref->layout->kind, LayerKind::kFullAttention);
+  EXPECT_EQ(ref->layer_idx, 1);
+  EXPECT_EQ(ref->shard_idx, 0);
+  EXPECT_EQ(ref->block_id, 1);
+  EXPECT_EQ(ref->ptr, manager.GetHostPointer(/*layer_idx=*/1, /*shard_idx=*/0) +
+                      128);
+
+  auto out_of_range = manager.GetHybridBlockRef(/*layer_idx=*/1,
+                                                /*shard_idx=*/0,
+                                                /*block_id=*/2);
+  EXPECT_EQ(out_of_range.status().code(), absl::StatusCode::kOutOfRange);
+}
+
+TEST(KVCacheManagerTest, HybridBlockRefUsesHostStrideAndReportsLayerSlot) {
+  TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
+                             /*slice_byte_size=*/256, /*host_blocks=*/2);
+  manager.SetLayerPhysicalSizeForTest(/*layer_idx=*/0,
+                                      /*physical_size=*/128,
+                                      /*major_dim_size=*/1);
+
+  ASSERT_TRUE(
+      manager.SetBlockLayouts({FullAttentionLayout(/*slot_bytes=*/128)}).ok());
+  EXPECT_EQ(manager.bytes_per_block(), 256);
+  EXPECT_EQ(manager.LayerBlockByteSize(/*layer_idx=*/0), 128);
+
+  auto ref = manager.GetHybridBlockRef(/*layer_idx=*/0, /*shard_idx=*/0,
+                                       /*block_id=*/1);
+  ASSERT_TRUE(ref.ok()) << ref.status().ToString();
+  EXPECT_EQ(ref->slot_bytes, 128);
+  EXPECT_EQ(ref->ptr, manager.GetHostPointer(/*layer_idx=*/0,
+                                             /*shard_idx=*/0) +
+                      256);
+}
+
+TEST(KVCacheManagerTest, SetBlockLayoutsFailsAfterActivePlanRegistered) {
+  TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
+                             /*slice_byte_size=*/128, /*host_blocks=*/1);
+  tpu_raiden::rpc::StartTransferRequest request;
+  request.set_uuid(445566);
+  request.set_is_sender(true);
+
+  absl::Status status =
+      manager.RegisterActivePlan(445566, request, /*is_sender=*/true);
+  ASSERT_TRUE(status.ok()) << status.ToString();
+
+  status = manager.SetBlockLayouts({FullAttentionLayout(/*slot_bytes=*/128)});
+  EXPECT_EQ(status.code(), absl::StatusCode::kFailedPrecondition);
+  EXPECT_THAT(status.message(), testing::HasSubstr("active plans"));
+}
+
+TEST(KVCacheManagerTest, RegionAwareChunkValidationAcceptsStridedLiveChunks) {
+  TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
+                             /*slice_byte_size=*/128, /*host_blocks=*/2);
+  ASSERT_TRUE(
+      manager.SetBlockLayouts({FullAttentionLayout(/*slot_bytes=*/128)}).ok());
+  manager.SetBlockChunkRegionValidation(
+      transport::BlockChunkRegionValidationMode::kFail);
+  EXPECT_EQ(manager.block_chunk_region_validation_mode(),
+            transport::BlockChunkRegionValidationMode::kFail);
+
+  uint8_t* base = manager.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
+  std::vector<transport::BlockChunk> chunks = {
+      {.ptr = base, .size = 32},
+      {.ptr = base + 64, .size = 32},
+      {.ptr = base + 128 + 64, .size = 32},
+  };
+
+  absl::Status status = manager.ValidateBlockChunksInRegions(
+      /*layer_idx=*/0, /*shard_idx=*/0, chunks);
+  EXPECT_TRUE(status.ok()) << status.ToString();
+}
+
+TEST(KVCacheManagerTest, RegionAwareChunkValidationRejectsPaddingChunks) {
+  TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
+                             /*slice_byte_size=*/128, /*host_blocks=*/1);
+  ASSERT_TRUE(
+      manager.SetBlockLayouts({FullAttentionLayout(/*slot_bytes=*/128)}).ok());
+  manager.SetBlockChunkRegionValidation(
+      transport::BlockChunkRegionValidationMode::kFail);
+
+  uint8_t* base = manager.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
+  std::vector<transport::BlockChunk> tail_padding = {
+      {.ptr = base + 96, .size = 16},
+  };
+  absl::Status status = manager.ValidateBlockChunksInRegions(
+      /*layer_idx=*/0, /*shard_idx=*/0, tail_padding);
+  EXPECT_EQ(status.code(), absl::StatusCode::kFailedPrecondition);
+  EXPECT_THAT(status.message(), testing::HasSubstr("non-live bytes"));
+
+  std::vector<transport::BlockChunk> crosses_stride_gap = {
+      {.ptr = base, .size = 96},
+  };
+  status = manager.ValidateBlockChunksInRegions(
+      /*layer_idx=*/0, /*shard_idx=*/0, crosses_stride_gap);
+  EXPECT_EQ(status.code(), absl::StatusCode::kFailedPrecondition);
+  EXPECT_THAT(status.message(), testing::HasSubstr("non-live bytes"));
 }
 
 TEST(KVCacheManagerTest, H2dFailsWithNegativeOffsets) {

@@ -43,6 +43,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
+#include "tpu_raiden/frameworks/torch/hybrid_layout_nanobind.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
 #include "tpu_raiden/transport/block_transport.h"
 
@@ -132,6 +133,26 @@ class HostKVCacheManager : public KVCacheManagerWithTransfer {
     }
     const char* ptr = reinterpret_cast<const char*>(base + block * block_bytes);
     return std::string(ptr, block_bytes);
+  }
+
+  absl::StatusOr<uintptr_t> GetBlockHostPointerValue(size_t layer_idx,
+                                                     size_t shard_idx,
+                                                     int block_id) {
+    if (block_id < 0) {
+      return absl::InvalidArgumentError("block_id must be non-negative");
+    }
+    const size_t block_bytes = bytes_per_block();
+    const size_t host_size = GetHostSize(layer_idx, shard_idx);
+    const uint8_t* base = GetHostPointer(layer_idx, shard_idx);
+    if (base == nullptr) {
+      return absl::OutOfRangeError("layer or shard index out of range");
+    }
+    const size_t block = static_cast<size_t>(block_id);
+    if (block_bytes == 0 || block > host_size / block_bytes ||
+        block * block_bytes + block_bytes > host_size) {
+      return absl::OutOfRangeError("block range exceeds host buffer");
+    }
+    return reinterpret_cast<uintptr_t>(base + block * block_bytes);
   }
 
   absl::Status WriteBlockBytes(size_t layer_idx, int block_id,
@@ -253,7 +274,58 @@ NB_MODULE(_tpu_raiden_host, m) {
             ThrowIfError(self.WriteBlockBytes(layer_idx, block_id, payload_str),
                          "KVCacheManager write_block_bytes failed");
           },
-          nb::arg("layer_idx"), nb::arg("block_id"), nb::arg("payload"));
+          nb::arg("layer_idx"), nb::arg("block_id"), nb::arg("payload"))
+      .def(
+          "get_block_host_pointer",
+          [](HostKVCacheManager& self, size_t layer_idx, size_t shard_idx,
+             int block_id) {
+            auto status_or =
+                self.GetBlockHostPointerValue(layer_idx, shard_idx, block_id);
+            if (!status_or.ok()) {
+              throw std::runtime_error(absl::StrCat(
+                  "KVCacheManager get_block_host_pointer failed: ",
+                  status_or.status().message()));
+            }
+            return status_or.value();
+          },
+          nb::arg("layer_idx"), nb::arg("shard_idx") = 0,
+          nb::arg("block_id") = 0)
+      .def(
+          "set_block_layouts_native",
+          [](HostKVCacheManager& self,
+             const std::vector<tpu_raiden::torch_bindings::LayoutTuple>&
+                 layouts) {
+            tpu_raiden::torch_bindings::ThrowIfNotOk(
+                self.SetBlockLayouts(
+                    tpu_raiden::torch_bindings::LayoutsFromTuples(layouts)),
+                "KVCacheManager set_block_layouts failed");
+          },
+          nb::arg("layouts"))
+      .def(
+          "get_hybrid_block_ref_native",
+          [](HostKVCacheManager& self, size_t layer_idx, size_t shard_idx,
+             int64_t block_id) {
+            auto status_or =
+                self.GetHybridBlockRef(layer_idx, shard_idx, block_id);
+            if (!status_or.ok()) {
+              throw std::runtime_error(absl::StrCat(
+                  "KVCacheManager get_hybrid_block_ref failed: ",
+                  status_or.status().message()));
+            }
+            return tpu_raiden::torch_bindings::HybridBlockRefToDict(
+                status_or.value());
+          },
+          nb::arg("layer_idx"), nb::arg("shard_idx") = 0,
+          nb::arg("block_id") = 0)
+      .def(
+          "layer_indices_of_kind_native",
+          [](HostKVCacheManager& self, int kind_id) {
+            return self.LayerIndicesOfKind(
+                tpu_raiden::torch_bindings::LayerKindFromId(kind_id));
+          },
+          nb::arg("kind_id"))
+      .def("layer_block_byte_size", &HostKVCacheManager::LayerBlockByteSize,
+           nb::arg("layer_idx"));
 }
 
 }  // namespace tpu_raiden
