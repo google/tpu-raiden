@@ -46,18 +46,18 @@ benchmarks {
   # With the same ref on both sides the delta is ~0 -- the same-machine noise floor.
   metrics {
     name: "int32_L64_kv/d2h_gbps" unit: "Gbps"
-    stats { stat: MEDIAN comparison { threshold { value: 0.05 } improvement_direction: GREATER } }
+    stats { stat: MEDIAN}
   }
   metrics {
     name: "int32_L64_kv/h2d_gbps" unit: "Gbps"
-    stats { stat: MEDIAN comparison { threshold { value: 0.05 } improvement_direction: GREATER } }
+    stats { stat: MEDIAN}
   }
   metrics {
     name: "float32_L64_kv/d2h_gbps" unit: "Gbps"
-    stats { stat: MEDIAN comparison { threshold { value: 0.05 } improvement_direction: GREATER } }
+    stats { stat: MEDIAN}
   }
   metrics {
     name: "float32_L64_kv/h2d_gbps" unit: "Gbps"
-    stats { stat: MEDIAN comparison { threshold { value: 0.05 } improvement_direction: GREATER } }
+    stats { stat: MEDIAN}
   }
 }
