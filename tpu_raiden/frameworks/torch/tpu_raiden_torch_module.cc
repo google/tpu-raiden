@@ -58,8 +58,10 @@ std::vector<std::string> ToStdStringVector(
 
 class KVCacheStoreWrapper {
  public:
-  explicit KVCacheStoreWrapper(size_t lru_capacity) {
-    controller_ = std::make_unique<KVCacheStore>(lru_capacity);
+  explicit KVCacheStoreWrapper(size_t lru_capacity,
+                               std::string global_registry_address = "") {
+    controller_ =
+        std::make_unique<KVCacheStore>(lru_capacity, global_registry_address);
   }
   KVCacheStore* operator->() { return controller_.get(); }
   KVCacheStore& operator*() { return *controller_; }
@@ -393,13 +395,14 @@ NB_MODULE(_tpu_raiden_torch, m) {
               &tpu_raiden::kv_cache::RaidenId::data_replica_idx);
 
   nb::class_<tpu_raiden::kv_cache::KVCacheStoreWrapper>(m, "KVCacheStore")
-      .def(nb::init<size_t>(), nb::arg("capacity"))
+      .def(nb::init<size_t, std::string>(), nb::arg("capacity"),
+           nb::arg("global_registry_address") = "")
       .def(
           "lookup",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
-             const std::vector<nb::bytes>& block_hashes) {
+             const std::vector<nb::bytes>& block_hashes, bool enable_global) {
             auto hashes = ToStdStringVector(block_hashes);
-            auto res = self->Lookup(hashes);
+            auto res = self->Lookup(hashes, enable_global);
             if (!res.ok()) {
               throw std::runtime_error("KVCacheStore lookup failed: " +
                                        std::string(res.status().message()));
@@ -415,7 +418,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
             }
             return py_res;
           },
-          nb::arg("block_hashes"),
+          nb::arg("block_hashes"), nb::arg("enable_global") = false,
           "Checks the LRU directory for cached block hashes. Returns a list of "
           "all matched replica pairs prior to the first miss.")
       .def(

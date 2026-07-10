@@ -16,7 +16,7 @@ import unittest
 
 from absl.testing import absltest
 
-from tpu_raiden.api.jax import kv_cache_store
+from tpu_raiden.api.torch import kv_cache_store
 
 
 class KVCacheStoreTest(absltest.TestCase):

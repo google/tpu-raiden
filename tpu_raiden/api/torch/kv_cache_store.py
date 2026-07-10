@@ -12,9 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Python wrapper for the compiled C++ KVCacheStore."""
-
+import ctypes
+import os
+import pathlib
 from typing import Any
+
+import torch_tpu
+from torch_tpu import _loader as _torch_tpu_loader
+
+Path = pathlib.Path
+
 
 from tpu_raiden.api.torch import torch_tpu_common_loader
 
@@ -69,23 +76,27 @@ class RaidenId:
 class KVCacheStore:
   """Wrapper around compiled C++ KVCacheStore."""
 
-  def __init__(self, capacity: int):
-    self._impl = _impl.KVCacheStore(capacity=capacity)
+  def __init__(self, capacity: int, global_registry_address: str = ""):
+    self._impl = _impl.KVCacheStore(
+        capacity=capacity, global_registry_address=global_registry_address
+    )
 
   def lookup(
       self,
       block_hashes: list[bytes],
+      enable_global: bool = False,
   ) -> list[tuple[bytes, list[RaidenId]]]:
     """Checks the LRU directory for cached block hashes.
 
     Args:
       block_hashes: Incoming block hashes to check.
+      enable_global: Whether to fallback to global registry on miss.
 
     Returns:
       A list of tuples containing the block hash and a list of matching RaidenId
       replicas, halting immediately upon the first cache miss.
     """
-    raw_res = self._impl.lookup(block_hashes)
+    raw_res = self._impl.lookup(block_hashes, enable_global)
     final_res = []
     for hash_val, raw_slices in raw_res:
       wrapped_slices = [RaidenId(impl=rs) for rs in raw_slices]

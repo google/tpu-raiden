@@ -23,7 +23,7 @@
 
 #include "absl/status/status.h"
 #include "absl/strings/string_view.h"
-#include "third_party/grpc/include/grpcpp/channel.h"
+#include "grpcpp/channel.h"
 #include "tpu_raiden/proto/controller_service.grpc.pb.h"
 #include "tpu_raiden/proto/controller_service.pb.h"
 

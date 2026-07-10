@@ -33,6 +33,10 @@
 namespace tpu_raiden {
 namespace kv_cache {
 
+namespace global_registry {
+class GlobalRegistryClient;
+}
+
 // Represents a microservice slice identifier / entity address hosting a replica
 // of a Key-Value cache block.
 struct RaidenId {
@@ -53,7 +57,8 @@ struct RaidenId {
 // nodes and microservice slices.
 class KVCacheStore {
  public:
-  explicit KVCacheStore(size_t capacity);
+  explicit KVCacheStore(size_t capacity,
+                        std::string global_registry_address = "");
 
   ~KVCacheStore();
 
@@ -65,8 +70,11 @@ class KVCacheStore {
   // Checks the LRU directory for cached block hashes. Returns a list of all
   // matched replica pairs (block hash and vector of RaidenIds) encountered
   // in sequence prior to the first miss.
+  // If enable_global is true, it will query the global registry for any
+  // misses after the local lookup.
   absl::StatusOr<std::vector<std::pair<std::string, std::vector<RaidenId>>>>
-  Lookup(const std::vector<std::string>& block_hashes);
+  Lookup(const std::vector<std::string>& block_hashes,
+         bool enable_global = false);
 
   // Caches sharded buffers into host-RAM/HBM backing store.
   // Returns:
@@ -99,6 +107,7 @@ class KVCacheStore {
   mutable absl::Mutex mutex_;
   mutable LRUCache<std::string, std::vector<RaidenId>> lru_cache_
       ABSL_GUARDED_BY(mutex_);
+  std::unique_ptr<global_registry::GlobalRegistryClient> registry_client_;
 };
 
 }  // namespace kv_cache

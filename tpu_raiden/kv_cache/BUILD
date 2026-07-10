@@ -173,8 +173,11 @@ cc_library(
     deps = [
         ":lru_cache",
         "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/kv_cache/global_registry:global_registry_client_cc",
+        "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/synchronization",
@@ -193,6 +196,9 @@ cc_test(
     deps = [
         ":kv_cache_store",
         "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/kv_cache/global_registry:global_registry_client_cc",
+        "//tpu_raiden/kv_cache/global_registry:global_registry_server_lib",
+        "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/status:statusor",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

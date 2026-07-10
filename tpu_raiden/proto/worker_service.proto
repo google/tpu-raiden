@@ -16,7 +16,7 @@ syntax = "proto3";
 
 package tpu_raiden.proto;
 
-import "third_party/tpu_raiden/tpu_raiden/rpc/raiden_service.proto";
+import "tpu_raiden/rpc/raiden_service.proto";
 
 // Service providing a gRPC communication channel between Raiden Controller and
 // Transfer Workers for buffer allocation and memory management.

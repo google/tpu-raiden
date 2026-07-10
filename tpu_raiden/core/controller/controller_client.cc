@@ -21,10 +21,10 @@
 
 #include "absl/status/status.h"
 #include "absl/strings/string_view.h"
-#include "third_party/grpc/include/grpcpp/client_context.h"
-#include "third_party/grpc/include/grpcpp/create_channel.h"
-#include "third_party/grpc/include/grpcpp/security/credentials.h"
-#include "third_party/grpc/include/grpcpp/support/status.h"
+#include "grpcpp/client_context.h"
+#include "grpcpp/create_channel.h"
+#include "grpcpp/security/credentials.h"
+#include "grpcpp/support/status.h"
 #include "tpu_raiden/proto/controller_service.grpc.pb.h"
 #include "tpu_raiden/proto/controller_service.pb.h"
 

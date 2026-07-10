@@ -53,6 +53,9 @@ class LRUCache {
   // Returns the number of elements currently stored in the cache.
   size_t size() const { return map_.size(); }
 
+  // Returns the available space (free + evictable capacity).
+  size_t available_space() const { return capacity_ - pinned_list_.size(); }
+
   // Returns true if the cache is completely empty.
   bool empty() const { return map_.empty(); }
 

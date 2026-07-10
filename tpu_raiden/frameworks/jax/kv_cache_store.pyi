@@ -17,10 +17,12 @@ class KVCacheStore:
   def __init__(
       self,
       capacity: int,
+      global_registry_address: str = '',
   ) -> None: ...
   def lookup(
       self,
       block_hashes: list[bytes],
+      enable_global: bool = False,
   ) -> list[tuple[bytes, list[RaidenId]]]:
     """Checks the LRU directory for cached block hashes. Returns a list of all matched replica pairs prior to the first miss."""
     ...

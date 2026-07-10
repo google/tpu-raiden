@@ -32,7 +32,7 @@
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
-#include "third_party/grpc/include/grpcpp/security/credentials.h"
+#include "grpcpp/security/credentials.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_client.h"

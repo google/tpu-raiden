@@ -25,8 +25,8 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
-#include "third_party/grpc/include/grpcpp/server_context.h"
-#include "third_party/grpc/include/grpcpp/support/status.h"
+#include "grpcpp/server_context.h"
+#include "grpcpp/support/status.h"
 #include "tpu_raiden/proto/controller_service.pb.h"
 
 namespace tpu_raiden {

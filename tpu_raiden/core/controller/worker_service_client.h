@@ -18,7 +18,7 @@
 #include <memory>
 
 #include "absl/status/statusor.h"
-#include "third_party/grpc/include/grpcpp/channel.h"
+#include "grpcpp/channel.h"
 #include "tpu_raiden/proto/worker_service.grpc.pb.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
 

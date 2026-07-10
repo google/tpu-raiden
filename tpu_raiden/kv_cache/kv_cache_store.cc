@@ -14,36 +14,80 @@
 
 #include "tpu_raiden/kv_cache/kv_cache_store.h"
 
+#include <algorithm>
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "grpcpp/create_channel.h"
+#include "grpcpp/grpcpp.h"
+#include "absl/log/log.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
+#include "grpcpp/security/credentials.h"
+#include "tpu_raiden/kv_cache/global_registry/global_registry_client.h"
 #include "tpu_raiden/kv_cache/lru_cache.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
 
-KVCacheStore::KVCacheStore(size_t capacity) : lru_cache_(capacity) {}
+KVCacheStore::KVCacheStore(size_t capacity, std::string global_registry_address)
+    : lru_cache_(capacity) {
+  if (!global_registry_address.empty()) {
+    auto channel = grpc::CreateChannel(global_registry_address,
+                                       grpc::InsecureChannelCredentials());
+    registry_client_ =
+        std::make_unique<global_registry::GlobalRegistryClient>(channel);
+  }
+}
 
 KVCacheStore::~KVCacheStore() = default;
 
 absl::StatusOr<std::vector<std::pair<std::string, std::vector<RaidenId>>>>
-KVCacheStore::Lookup(const std::vector<std::string>& block_hashes) {
-  absl::MutexLock lock(mutex_);
-
+KVCacheStore::Lookup(const std::vector<std::string>& block_hashes,
+                     bool enable_global) {
   std::vector<std::pair<std::string, std::vector<RaidenId>>> results;
-  results.reserve(block_hashes.size());
 
-  for (const std::string& hash : block_hashes) {
-    std::vector<RaidenId>* existing = lru_cache_.Get(hash);
-    if (!existing || existing->empty()) {
-      break;
+  size_t local_hits = 0;
+  size_t limit = 0;
+  {
+    absl::MutexLock lock(mutex_);
+    limit = std::min(block_hashes.size(), lru_cache_.available_space());
+    results.reserve(limit);
+    for (size_t i = 0; i < limit; ++i) {
+      const std::string& hash = block_hashes[i];
+      std::vector<RaidenId>* existing = lru_cache_.Get(hash);
+      if (!existing || existing->empty()) {
+        break;
+      }
+      results.push_back(std::make_pair(hash, *existing));
+      local_hits++;
     }
-    results.push_back(std::make_pair(hash, *existing));
+  }
+
+  if (enable_global && local_hits < limit && registry_client_) {
+    std::vector<std::string> remaining_hashes(block_hashes.begin() + local_hits,
+                                              block_hashes.begin() + limit);
+    auto global_results_or = registry_client_->Lookup(remaining_hashes);
+    if (global_results_or.ok()) {
+      const auto& global_results = global_results_or.value();
+      for (size_t i = 0; i < global_results.size(); ++i) {
+        const auto& metadata = global_results[i];
+        RaidenId remote_id;
+        remote_id.job_name = metadata.host_address();
+        remote_id.job_replica_id = "0";
+        remote_id.data_name = "kv_cache";
+        remote_id.data_replica_idx = metadata.block_id();
+        results.push_back(std::make_pair(remaining_hashes[i],
+                                         std::vector<RaidenId>{remote_id}));
+      }
+    } else {
+      LOG(WARNING) << "Global registry lookup failed: "
+                   << global_results_or.status().message();
+    }
   }
 
   return results;

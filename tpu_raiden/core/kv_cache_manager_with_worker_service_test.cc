@@ -21,8 +21,8 @@
 #include <utility>
 
 #include <gtest/gtest.h>
-#include "third_party/grpc/include/grpcpp/create_channel.h"
-#include "third_party/grpc/include/grpcpp/security/credentials.h"
+#include "grpcpp/create_channel.h"
+#include "grpcpp/security/credentials.h"
 #include "xla/tsl/platform/test.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"

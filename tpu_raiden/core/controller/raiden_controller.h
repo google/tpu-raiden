@@ -25,7 +25,7 @@
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
-#include "third_party/grpc/include/grpcpp/channel.h"
+#include "grpcpp/channel.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
 #include "tpu_raiden/proto/worker_service.pb.h"

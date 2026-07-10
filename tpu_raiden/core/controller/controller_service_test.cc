@@ -23,11 +23,11 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
-#include "third_party/grpc/include/grpcpp/create_channel.h"
-#include "third_party/grpc/include/grpcpp/security/credentials.h"
-#include "third_party/grpc/include/grpcpp/security/server_credentials.h"
-#include "third_party/grpc/include/grpcpp/server.h"
-#include "third_party/grpc/include/grpcpp/server_builder.h"
+#include "grpcpp/create_channel.h"
+#include "grpcpp/security/credentials.h"
+#include "grpcpp/security/server_credentials.h"
+#include "grpcpp/server.h"
+#include "grpcpp/server_builder.h"
 #include "tpu_raiden/core/controller/controller_client.h"
 
 namespace tpu_raiden {
