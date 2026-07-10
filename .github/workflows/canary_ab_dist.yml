@@ -30,9 +30,23 @@ on:
         description: "Commit/branch to run twice (baseline == experiment). Default: the dispatched SHA."
         required: false
 
+  push:
+    branches:
+      - PostSubmitAbAnalysis
+      
+  pull_request:
+    branches:
+      - PostSubmitAbAnalysis
+
+  schedule:
+    - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
+
+
 permissions:
   contents: read
   pull-requests: write
+
+
 
 jobs:
   canary_ab_dist:
