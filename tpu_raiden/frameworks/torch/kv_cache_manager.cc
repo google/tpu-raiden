@@ -15,14 +15,19 @@
 #include "tpu_raiden/frameworks/torch/kv_cache_manager.h"
 
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 #include "tpu_raiden/core/utils.h"
@@ -121,6 +126,19 @@ KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
   }
 }
 
+KVCacheManager::KVCacheManager(size_t num_layers, size_t num_shards,
+                               size_t slice_byte_size, int64_t node_id,
+                               std::optional<int> local_port,
+                               std::optional<int> host_blocks_to_allocate,
+                               int parallelism)
+    : KVCacheManagerWithTransfer(
+          num_layers, num_shards, slice_byte_size, local_port,
+          host_blocks_to_allocate, parallelism, node_id,
+          /*local_control_port=*/-1,
+          /*max_blocks=*/host_blocks_to_allocate.value_or(0),
+          /*num_slots=*/0, /*timeout_s=*/120.0),
+      kv_caches_({}) {}
+
 KVCacheManager::~KVCacheManager() = default;
 
 std::optional<int> KVCacheManager::listener_port() const {
@@ -147,6 +165,88 @@ std::string KVCacheManager::listener_address() const {
   auto port = listener_port();
   if (!port.has_value()) return "";
   return FormatAddressWithPort(local_ip(), *port);
+}
+
+absl::Status KVCacheManager::PushRegisteredPlan(
+    uint64_t uuid, const std::string& peer,
+    const std::vector<int>& src_block_ids,
+    const std::vector<int>& dst_block_ids, int layer_idx, int parallelism) {
+  if (peer.empty()) {
+    return absl::InvalidArgumentError("peer must not be empty");
+  }
+  if (src_block_ids.empty()) {
+    return absl::InvalidArgumentError("src_block_ids must not be empty");
+  }
+  if (src_block_ids.size() != dst_block_ids.size()) {
+    return absl::InvalidArgumentError(
+        "src_block_ids and dst_block_ids must have the same length");
+  }
+  InitTransportServer();
+  // Copy the transport pointer and release server_init_mu_ before the blocking
+  // Push: holding the lock across it serializes concurrent pushes from the
+  // same manager (one per destination peer).
+  tpu_raiden::transport::BlockTransport* transport = nullptr;
+  {
+    absl::MutexLock lock(server_init_mu_);
+    transport = server_.get();
+  }
+  if (!transport) {
+    return absl::FailedPreconditionError("Transport server is not running");
+  }
+  auto status_or = transport->Push(
+      peer, src_block_ids, dst_block_ids, parallelism,
+      tpu_raiden::transport::MajorOrder::kLayerMajor, uuid, layer_idx);
+  if (!status_or.ok()) {
+    return status_or.status();
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<std::string> KVCacheManager::ReadBlockBytes(size_t layer_idx,
+                                                           int block_id,
+                                                           size_t shard_idx) {
+  if (block_id < 0) {
+    return absl::InvalidArgumentError("block_id must be non-negative");
+  }
+  const size_t block_bytes = bytes_per_block();
+  const size_t host_size = GetHostSize(layer_idx, shard_idx);
+  const uint8_t* base = GetHostPointer(layer_idx, shard_idx);
+  if (base == nullptr) {
+    return absl::OutOfRangeError("layer or shard index out of range");
+  }
+  const size_t block = static_cast<size_t>(block_id);
+  if (block_bytes == 0 || block > host_size / block_bytes ||
+      block * block_bytes + block_bytes > host_size) {
+    return absl::OutOfRangeError("block range exceeds host buffer");
+  }
+  const char* ptr = reinterpret_cast<const char*>(base + block * block_bytes);
+  return std::string(ptr, block_bytes);
+}
+
+absl::Status KVCacheManager::WriteBlockBytes(size_t layer_idx, int block_id,
+                                             absl::string_view payload,
+                                             size_t shard_idx) {
+  if (block_id < 0) {
+    return absl::InvalidArgumentError("block_id must be non-negative");
+  }
+  const size_t block_bytes = bytes_per_block();
+  if (payload.size() != block_bytes) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("payload size must equal block size: got ", payload.size(),
+                     ", expected ", block_bytes));
+  }
+  const size_t host_size = GetHostSize(layer_idx, shard_idx);
+  uint8_t* base = GetHostPointer(layer_idx, shard_idx);
+  if (base == nullptr) {
+    return absl::OutOfRangeError("layer or shard index out of range");
+  }
+  const size_t block = static_cast<size_t>(block_id);
+  if (block_bytes == 0 || block > host_size / block_bytes ||
+      block * block_bytes + block_bytes > host_size) {
+    return absl::OutOfRangeError("block range exceeds host buffer");
+  }
+  std::memcpy(base + block * block_bytes, payload.data(), block_bytes);
+  return absl::OkStatus();
 }
 
 }  // namespace torch

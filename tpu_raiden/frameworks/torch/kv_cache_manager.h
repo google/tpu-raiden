@@ -18,9 +18,13 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "torch_tpu/eager/tensor_to_buffer.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
@@ -50,6 +54,11 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
                  bool unsafe_skip_buffer_lock, int parallelism = 4,
                  std::optional<int> listener_port = std::nullopt);
 
+  // Metadata-only constructor for host-memory Stage 1 resharding tests.
+  KVCacheManager(size_t num_layers, size_t num_shards, size_t slice_byte_size,
+                 int64_t node_id, std::optional<int> local_port,
+                 std::optional<int> host_blocks_to_allocate, int parallelism);
+
   ~KVCacheManager() override;
 
   // Transfer-specific methods merged from TransferEngine
@@ -65,6 +74,17 @@ class KVCacheManager : public KVCacheManagerWithTransfer {
 
   std::string transfer_address() const;
   std::string listener_address() const;
+
+  absl::Status PushRegisteredPlan(uint64_t uuid, const std::string& peer,
+                                  const std::vector<int>& src_block_ids,
+                                  const std::vector<int>& dst_block_ids,
+                                  int layer_idx = -1, int parallelism = 1);
+
+  absl::StatusOr<std::string> ReadBlockBytes(size_t layer_idx, int block_id,
+                                             size_t shard_idx = 0);
+
+  absl::Status WriteBlockBytes(size_t layer_idx, int block_id,
+                               absl::string_view payload, size_t shard_idx = 0);
 
  private:
   // Buffers unpacked from a 2D tensor list, together with the owning

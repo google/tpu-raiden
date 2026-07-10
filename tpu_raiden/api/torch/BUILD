@@ -33,6 +33,7 @@ py_library(
     deps = [
         ":torch_tpu_common_loader",
         "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",
+        "//tpu_raiden/rpc:raiden_service_py_pb2",
     ],
 )
 
