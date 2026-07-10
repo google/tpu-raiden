@@ -12,15 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Same-machine A/B distribution probe for the unsaturated canary configs.
+# Same-machine (COLOCATED) A/B distribution probe for the unsaturated canary
+# configs. Requires the workflow to pin BAP at e34d5b724ee5daac083881a891d25964081a9f6a
+# or newer -- that is the commit where AbStrategy/COLOCATED landed (older refs,
+# e.g. affd28b, have no ab_strategy field and validate_registry rejects this).
 #
-# ab_strategy: COLOCATED is what GUARANTEES same-machine. Per the BAP doc, A/B
-# mode defaults to SEPARATE machines; COLOCATED makes BAP "provision a single
-# runner and execute baseline followed by experiment sequentially on the same
-# host" (and it defaults teardown: "true" for state isolation between the two
-# runs). The workflow (canary_ab_dist.yml) sets baseline_ref == experiment_ref,
-# so BAP runs the identical workload twice on that one host -> the two runs are
-# the A and B of the distribution. Manual trigger only.
+# ab_strategy: COLOCATED makes BAP provision ONE runner and run baseline then
+# experiment sequentially on the SAME physical host (teardown defaults to "true"
+# between them). The workflow sets baseline_ref == experiment_ref, so BAP runs the
+# identical workload twice on that host -> the two runs are the A and B of the
+# distribution. Manual trigger only.
 
 benchmarks {
   name: "canary_ab_dist"
@@ -42,22 +43,9 @@ benchmarks {
     workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci" }
   }
 
-  # Optional: gives ab_analyzer per-config numbers to diff (baseline vs experiment).
-  # With the same ref on both sides the delta is ~0 -- the same-machine noise floor.
-  metrics {
-    name: "int32_L64_kv/d2h_gbps" unit: "Gbps"
-    stats { stat: MEDIAN}
-  }
-  metrics {
-    name: "int32_L64_kv/h2d_gbps" unit: "Gbps"
-    stats { stat: MEDIAN}
-  }
-  metrics {
-    name: "float32_L64_kv/d2h_gbps" unit: "Gbps"
-    stats { stat: MEDIAN}
-  }
-  metrics {
-    name: "float32_L64_kv/h2d_gbps" unit: "Gbps"
-    stats { stat: MEDIAN}
-  }
+  # NO metrics{}: the container image has neither tensorboardX nor torch, so the
+  # workload cannot emit TB metrics for ab_analyzer to read. This probe only needs
+  # the raw samples (dist_samples.json Artifacts), which we plot locally. ab_mode +
+  # COLOCATED still runs the workload twice on the same host (baseline + experiment);
+  # we take the two runs' artifacts as the A and B of the distribution.
 }
