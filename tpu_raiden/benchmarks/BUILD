@@ -64,3 +64,13 @@ py_binary(
         "@com_google_absl_py//absl/flags",
     ],
 )
+
+py_binary(
+    name = "canary_ab_dist",
+    testonly = True,
+    srcs = ["canary_ab_dist.py"],
+    deps = [
+        ":perf_core",
+        "@pypi//numpy",
+    ],
+)
