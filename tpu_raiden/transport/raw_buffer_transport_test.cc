@@ -16,7 +16,7 @@
 
 #include <signal.h>
 
-#include <chrono>
+#include <chrono>  // NOLINT
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
