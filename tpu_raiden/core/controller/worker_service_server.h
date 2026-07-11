@@ -23,6 +23,7 @@
 #include "grpcpp/server.h"
 #include "tpu_raiden/core/controller/worker_service_impl.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
+#include "tpu_raiden/core/kv_manager_holder.h"
 
 namespace tpu_raiden {
 namespace controller {
@@ -35,9 +36,17 @@ class WorkerServiceServer {
   static WorkerServiceServer& GetInstance();
 
   // Starts the gRPC server hosting WorkerServiceImpl on the specified port.
-  // If the server is already started, this is a no-op and returns OkStatus().
+  // If the server is already started, updates the transfer manager (if
+  // provided) and returns OkStatus().
   absl::Status StartServer(std::shared_ptr<HostMemoryAllocator> host_allocator,
-                           int port);
+                           int port) {
+    return StartServer(std::move(host_allocator), KVManagerHolder(), port);
+  }
+
+  absl::Status StartServer(std::shared_ptr<HostMemoryAllocator> host_allocator,
+                           KVManagerHolder transfer_manager, int port);
+
+  void SetTransferManager(KVManagerHolder transfer_manager);
 
   // Returns the port the gRPC server is listening on. Returns 0 if the server
   // is not running or failed to start.

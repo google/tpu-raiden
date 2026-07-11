@@ -40,6 +40,7 @@ cc_library(
         ":utils",
         "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
+        "//tpu_raiden/core:kv_manager_holder",
         "//tpu_raiden/core:metrics_collector",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core:status_macros",

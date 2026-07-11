@@ -21,15 +21,18 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>  // NOLINT(build/c++11)
+#include <tuple>
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"  // IWYU pragma: keep
@@ -39,6 +42,7 @@
 #include "tpu_raiden/core/controller/worker_service_server.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
+#include "tpu_raiden/core/kv_manager_holder.h"
 #include "tpu_raiden/core/metrics_collector.h"  // IWYU pragma: keep
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/status_macros.h"
@@ -849,7 +853,8 @@ void KVCacheManager::StartGrpcServer(int grpc_port, bool start_grpc_server) {
   }
   absl::Status status =
       controller::WorkerServiceServer::GetInstance().StartServer(
-          /*host_allocator=*/nullptr, grpc_port);
+          /*host_allocator=*/nullptr, KVManagerHolder(numa_manager_.get()),
+          grpc_port);
   if (!status.ok()) {
     throw std::runtime_error(absl::StrCat(
         "Failed to start gRPC server in KVCacheManager: ", status.message()));

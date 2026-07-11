@@ -16,8 +16,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
@@ -27,15 +29,34 @@
 #include "grpcpp/server_context.h"
 #include "grpcpp/support/status.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
+#include "tpu_raiden/core/kv_manager_holder.h"
+#include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
 
 namespace tpu_raiden {
 namespace controller {
+namespace {
+
+bool IsD2H(const proto::TransferBufferSpec& transfer) {
+  return transfer.src_mem_type() == rpc::MEMORY_TYPE_HBM &&
+         (transfer.dst_mem_type() == rpc::MEMORY_TYPE_DRAM ||
+          transfer.dst_mem_type() == rpc::MEMORY_TYPE_UNSPECIFIED);
+}
+
+bool IsH2D(const proto::TransferBufferSpec& transfer) {
+  return (transfer.src_mem_type() == rpc::MEMORY_TYPE_DRAM ||
+          transfer.src_mem_type() == rpc::MEMORY_TYPE_UNSPECIFIED) &&
+         transfer.dst_mem_type() == rpc::MEMORY_TYPE_HBM;
+}
+
+}  // namespace
 
 WorkerServiceImpl::WorkerServiceImpl(
-    std::shared_ptr<HostMemoryAllocator> allocator)
+    std::shared_ptr<HostMemoryAllocator> allocator,
+    KVManagerHolder transfer_manager)
     : allocator_(allocator ? std::move(allocator)
-                           : std::make_shared<MallocHostMemoryAllocator>()) {}
+                           : std::make_shared<MallocHostMemoryAllocator>()),
+      transfer_manager_(std::move(transfer_manager)) {}
 
 grpc::Status WorkerServiceImpl::CreateBuffers(
     grpc::ServerContext* context, const proto::CreateBuffersRequest* request,
@@ -91,6 +112,79 @@ grpc::Status WorkerServiceImpl::DeleteBuffers(
   }
   response->set_success(true);
   response->set_message("Buffers deleted successfully");
+  return grpc::Status::OK;
+}
+
+grpc::Status WorkerServiceImpl::TransferBuffers(
+    grpc::ServerContext* context, const proto::TransferBuffersRequest* request,
+    proto::TransferBuffersResponse* response) {
+  absl::MutexLock lock(mutex_);
+  const auto& transfer = request->transfer();
+  bool is_d2h = IsD2H(transfer);
+  bool is_h2d = IsH2D(transfer);
+  if (!is_d2h && !is_h2d) {
+    response->set_success(false);
+    response->set_message(
+        "Only device to host (D2H) and host to device (H2D) transfers are "
+        "currently supported");
+    return grpc::Status::OK;
+  }
+  if (transfer.src_offsets_size() == 0 ||
+      transfer.src_offsets_size() != transfer.dst_offsets_size()) {
+    response->set_success(false);
+    response->set_message(
+        "Source and destination offsets must have the same non-zero length");
+    return grpc::Status::OK;
+  }
+  if (transfer.copy_sizes_size() > 0 &&
+      transfer.copy_sizes_size() != transfer.src_offsets_size()) {
+    response->set_success(false);
+    response->set_message(
+        "copy_sizes, if provided, must match the length of src_offsets");
+    return grpc::Status::OK;
+  }
+
+  if (!transfer_manager_) {
+    response->set_success(false);
+    response->set_message(
+        "Transfer manager is not configured on WorkerService");
+    return grpc::Status::OK;
+  }
+
+  std::vector<int64_t> src_offsets(transfer.src_offsets().begin(),
+                                   transfer.src_offsets().end());
+  std::vector<int64_t> dst_offsets(transfer.dst_offsets().begin(),
+                                   transfer.dst_offsets().end());
+  std::vector<int64_t> copy_sizes;
+  if (transfer.copy_sizes_size() > 0) {
+    copy_sizes.assign(transfer.copy_sizes().begin(),
+                      transfer.copy_sizes().end());
+  } else {
+    copy_sizes.assign(src_offsets.size(), 1);
+  }
+
+  absl::StatusOr<raiden::PjRtCopyFuture> future_or;
+  if (is_d2h) {
+    future_or = transfer_manager_.D2h(src_offsets, dst_offsets, copy_sizes);
+  } else {
+    future_or = transfer_manager_.H2d(src_offsets, dst_offsets, copy_sizes);
+  }
+  if (!future_or.ok()) {
+    response->set_success(false);
+    response->set_message(absl::StrCat(
+        is_d2h ? "D2H" : "H2D",
+        " transfer dispatch failed: ", future_or.status().message()));
+    return grpc::Status::OK;
+  }
+  absl::Status status = future_or->Await();
+  if (!status.ok()) {
+    response->set_success(false);
+    response->set_message(
+        absl::StrCat("Transfer execution failed: ", status.message()));
+    return grpc::Status::OK;
+  }
+  response->set_success(true);
+  response->set_message("Buffers transferred successfully");
   return grpc::Status::OK;
 }
 

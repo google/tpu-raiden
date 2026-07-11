@@ -56,5 +56,19 @@ absl::StatusOr<proto::DeleteBuffersResponse> WorkerServiceClient::DeleteBuffers(
   return response;
 }
 
+absl::StatusOr<proto::TransferBuffersResponse>
+WorkerServiceClient::TransferBuffers(
+    const proto::TransferBuffersRequest& request) {
+  proto::TransferBuffersResponse response;
+  grpc::ClientContext context;
+
+  grpc::Status status = stub_->TransferBuffers(&context, request, &response);
+  if (!status.ok()) {
+    return absl::InternalError(
+        absl::StrCat("TransferBuffers RPC failed: ", status.error_message()));
+  }
+  return response;
+}
+
 }  // namespace controller
 }  // namespace tpu_raiden

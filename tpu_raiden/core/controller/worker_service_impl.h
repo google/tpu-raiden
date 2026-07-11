@@ -27,9 +27,9 @@
 #include "grpcpp/server_context.h"
 #include "grpcpp/support/status.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
+#include "tpu_raiden/core/kv_manager_holder.h"
 #include "tpu_raiden/proto/worker_service.grpc.pb.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
-#include "tpu_raiden/rpc/raiden_service.pb.h"
 
 namespace tpu_raiden {
 namespace controller {
@@ -37,13 +37,21 @@ namespace controller {
 using BufferHandle = uint64_t;
 
 // Implementation of the WorkerService gRPC service running on transfer workers.
-// Manages allocation and deallocation of sharded host memory buffers.
+// Manages allocation and deallocation of sharded host memory buffers, and
+// executes D2H and H2D transfers via KVManagerHolder.
 class WorkerServiceImpl final : public proto::WorkerService::Service {
  public:
-  // Constructs a WorkerServiceImpl with the given host memory allocator. If
-  // allocator is nullptr, defaults to MallocHostMemoryAllocator.
+  // Constructs a WorkerServiceImpl with the given host memory allocator and
+  // transfer manager. If allocator is nullptr, defaults to
+  // MallocHostMemoryAllocator.
   explicit WorkerServiceImpl(
-      std::shared_ptr<HostMemoryAllocator> allocator = nullptr);
+      std::shared_ptr<HostMemoryAllocator> allocator = nullptr,
+      KVManagerHolder transfer_manager = KVManagerHolder());
+
+  void SetTransferManager(KVManagerHolder transfer_manager) {
+    absl::MutexLock lock(mutex_);
+    transfer_manager_ = std::move(transfer_manager);
+  }
 
   grpc::Status CreateBuffers(grpc::ServerContext* context,
                              const proto::CreateBuffersRequest* request,
@@ -52,6 +60,14 @@ class WorkerServiceImpl final : public proto::WorkerService::Service {
   grpc::Status DeleteBuffers(grpc::ServerContext* context,
                              const proto::DeleteBuffersRequest* request,
                              proto::DeleteBuffersResponse* response) override;
+
+  // Transfers (copies) disjoint memory regions across memory spaces on the
+  // worker. The transfer specification applies uniformly across all buffers,
+  // i.e., all shards and major dimensions (layers or blocks).
+  grpc::Status TransferBuffers(
+      grpc::ServerContext* context,
+      const proto::TransferBuffersRequest* request,
+      proto::TransferBuffersResponse* response) override;
 
   // Retrieves an allocated buffer shard for inspection or transfer operations.
   // Returns NotFoundError if the buffer handle is invalid.
@@ -73,6 +89,7 @@ class WorkerServiceImpl final : public proto::WorkerService::Service {
   uint64_t next_buffer_handle_ ABSL_GUARDED_BY(mutex_) = 1;
   absl::flat_hash_map<BufferHandle, HostBufferAllocation> buffers_
       ABSL_GUARDED_BY(mutex_);
+  KVManagerHolder transfer_manager_ ABSL_GUARDED_BY(mutex_);
 };
 
 }  // namespace controller

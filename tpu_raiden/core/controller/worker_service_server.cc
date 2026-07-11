@@ -25,6 +25,7 @@
 #include "grpcpp/server_builder.h"
 #include "tpu_raiden/core/controller/worker_service_impl.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
+#include "tpu_raiden/core/kv_manager_holder.h"
 
 namespace tpu_raiden {
 namespace controller {
@@ -35,19 +36,23 @@ WorkerServiceServer& WorkerServiceServer::GetInstance() {
 }
 
 absl::Status WorkerServiceServer::StartServer(
-    std::shared_ptr<HostMemoryAllocator> host_allocator, int port) {
+    std::shared_ptr<HostMemoryAllocator> host_allocator,
+    KVManagerHolder transfer_manager, int port) {
   if (port < 0) {
     return absl::InvalidArgumentError(
         absl::StrCat("Invalid gRPC port: ", port));
   }
 
-  absl::MutexLock lock(&mutex_);
+  absl::MutexLock lock(mutex_);
   if (started_) {
+    if (transfer_manager && worker_service_) {
+      worker_service_->SetTransferManager(std::move(transfer_manager));
+    }
     return absl::OkStatus();
   }
 
-  worker_service_ =
-      std::make_unique<WorkerServiceImpl>(std::move(host_allocator));
+  worker_service_ = std::make_unique<WorkerServiceImpl>(
+      std::move(host_allocator), std::move(transfer_manager));
 
   std::string server_address = absl::StrCat("[::]:", port);
   grpc::ServerBuilder builder;
@@ -70,8 +75,15 @@ absl::Status WorkerServiceServer::StartServer(
   return absl::OkStatus();
 }
 
+void WorkerServiceServer::SetTransferManager(KVManagerHolder transfer_manager) {
+  absl::MutexLock lock(mutex_);
+  if (worker_service_) {
+    worker_service_->SetTransferManager(std::move(transfer_manager));
+  }
+}
+
 int WorkerServiceServer::GetGrpcPort() const {
-  absl::MutexLock lock(&mutex_);
+  absl::MutexLock lock(mutex_);
   return grpc_port_;
 }
 

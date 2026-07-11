@@ -230,6 +230,18 @@ cc_library(
 )
 
 cc_library(
+    name = "kv_manager_holder",
+    hdrs = ["kv_manager_holder.h"],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":raw_transfer_core",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+    ],
+)
+
+cc_library(
     name = "kv_cache_manager_with_transfer",
     srcs = [
         "kv_cache_manager_with_transfer.cc",

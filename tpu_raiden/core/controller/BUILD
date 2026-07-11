@@ -38,6 +38,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//tpu_raiden/core:host_memory_allocator",
+        "//tpu_raiden/core:kv_manager_holder",
+        "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/proto:worker_service_cc_grpc",
         "//tpu_raiden/proto:worker_service_cc_proto",
         "//tpu_raiden/rpc:raiden_service_cc_proto",
@@ -58,6 +60,7 @@ cc_library(
     deps = [
         ":worker_service_impl",
         "//tpu_raiden/core:host_memory_allocator",
+        "//tpu_raiden/core:kv_manager_holder",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/status",
@@ -142,6 +145,8 @@ cc_test(
         ":test_util",
         ":worker_service_client",
         ":worker_service_impl",
+        "//tpu_raiden/core:kv_manager_holder",
+        "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/proto:worker_service_cc_proto",
         "//tpu_raiden/rpc:raiden_service_cc_proto",
         "@com_google_absl//absl/status:statusor",

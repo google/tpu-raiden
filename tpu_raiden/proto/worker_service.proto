@@ -33,6 +33,12 @@ service WorkerService {
 
   // Deallocates previously allocated sharded buffers on the transfer worker.
   rpc DeleteBuffers(DeleteBuffersRequest) returns (DeleteBuffersResponse);
+
+  // Transfers (copies) data across memory spaces on the transfer worker.
+  // The transfer specification specifies disjoint memory regions in one buffer.
+  // The transfer applies uniformly to all buffers, i.e., all shards across all
+  // major dimensions (such as layers or blocks).
+  rpc TransferBuffers(TransferBuffersRequest) returns (TransferBuffersResponse);
 }
 
 // Uniquely identifies a buffer handle on a worker.
@@ -80,6 +86,37 @@ message DeleteBuffersRequest {
 
 // Response from deallocating sharded buffers.
 message DeleteBuffersResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Specification for copying disjoint memory regions in one buffer.
+// The transfer applies uniformly to all buffers, i.e., across all shards and
+// all major dimensions (such as layers or blocks).
+message TransferBufferSpec {
+  // Source block offsets.
+  repeated int64 src_offsets = 1;
+  // Destination block offsets.
+  repeated int64 dst_offsets = 2;
+  // Number of contiguous blocks to copy per segment (defaults to 1 per segment
+  // if not specified).
+  repeated int64 copy_sizes = 3;
+  // Memory type of the source buffer (e.g., HBM for D2H, DRAM for H2D).
+  tpu_raiden.rpc.MemoryType src_mem_type = 4;
+  // Memory type of the destination buffer (e.g., DRAM for D2H, HBM for H2D).
+  tpu_raiden.rpc.MemoryType dst_mem_type = 5;
+}
+
+// Request to transfer data across memory spaces on a transfer worker.
+// The transfer specification applies to all buffers (all shards and major
+// dimensions).
+message TransferBuffersRequest {
+  // Transfer specification to execute across all buffers.
+  TransferBufferSpec transfer = 1;
+}
+
+// Response from transferring sharded buffers.
+message TransferBuffersResponse {
   bool success = 1;
   string message = 2;
 }

@@ -16,6 +16,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -23,6 +25,8 @@
 #include "tpu_raiden/core/controller/test_util.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
 #include "tpu_raiden/core/controller/worker_service_impl.h"
+#include "tpu_raiden/core/kv_manager_holder.h"
+#include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
 
@@ -30,7 +34,38 @@ namespace tpu_raiden {
 namespace controller {
 namespace {
 
+using ::testing::ElementsAre;
 using ::testing::HasSubstr;
+
+struct MockTransferManager {
+  int d2h_calls = 0;
+  int h2d_calls = 0;
+  std::vector<int64_t> last_src_offsets;
+  std::vector<int64_t> last_dst_offsets;
+  std::vector<int64_t> last_copy_sizes;
+
+  absl::StatusOr<raiden::PjRtCopyFuture> D2h(
+      const std::vector<int64_t>& src_offsets,
+      const std::vector<int64_t>& dst_offsets,
+      const std::vector<int64_t>& copy_sizes) {
+    d2h_calls++;
+    last_src_offsets = src_offsets;
+    last_dst_offsets = dst_offsets;
+    last_copy_sizes = copy_sizes;
+    return raiden::PjRtCopyFuture();
+  }
+
+  absl::StatusOr<raiden::PjRtCopyFuture> H2d(
+      const std::vector<int64_t>& src_offsets,
+      const std::vector<int64_t>& dst_offsets,
+      const std::vector<int64_t>& copy_sizes) {
+    h2d_calls++;
+    last_src_offsets = src_offsets;
+    last_dst_offsets = dst_offsets;
+    last_copy_sizes = copy_sizes;
+    return raiden::PjRtCopyFuture();
+  }
+};
 
 class WorkerServiceTest : public ::testing::Test {
  protected:
@@ -109,6 +144,121 @@ TEST_F(WorkerServiceTest, DeleteNonExistentBufferFails) {
   ASSERT_TRUE(delete_resp_or.ok());
   EXPECT_FALSE(delete_resp_or->success());
   EXPECT_THAT(delete_resp_or->message(), HasSubstr("not found"));
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersDramToDramFails) {
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->add_src_offsets(0);
+  transfer->add_dst_offsets(0);
+
+  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
+  ASSERT_TRUE(transfer_resp_or.ok());
+  EXPECT_FALSE(transfer_resp_or->success());
+  EXPECT_THAT(transfer_resp_or->message(),
+              HasSubstr("Only device to host (D2H) and host to device (H2D) "
+                        "transfers are currently supported"));
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersWithoutTransferManagerFails) {
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_HBM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->add_src_offsets(10);
+  transfer->add_dst_offsets(20);
+
+  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
+  ASSERT_TRUE(transfer_resp_or.ok());
+  EXPECT_FALSE(transfer_resp_or->success());
+  EXPECT_THAT(transfer_resp_or->message(),
+              HasSubstr("Transfer manager is not configured on WorkerService"));
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersOffsetsMismatchFails) {
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_HBM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->add_src_offsets(10);
+  transfer->add_dst_offsets(20);
+  transfer->add_dst_offsets(30);
+
+  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
+  ASSERT_TRUE(transfer_resp_or.ok());
+  EXPECT_FALSE(transfer_resp_or->success());
+  EXPECT_THAT(transfer_resp_or->message(),
+              HasSubstr("Source and destination offsets must have the same "
+                        "non-zero length"));
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersCopySizesMismatchFails) {
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_HBM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->add_src_offsets(10);
+  transfer->add_dst_offsets(20);
+  transfer->add_copy_sizes(1);
+  transfer->add_copy_sizes(2);
+
+  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
+  ASSERT_TRUE(transfer_resp_or.ok());
+  EXPECT_FALSE(transfer_resp_or->success());
+  EXPECT_THAT(
+      transfer_resp_or->message(),
+      HasSubstr(
+          "copy_sizes, if provided, must match the length of src_offsets"));
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersD2HSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_HBM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->add_src_offsets(10);
+  transfer->add_src_offsets(30);
+  transfer->add_dst_offsets(20);
+  transfer->add_dst_offsets(40);
+  transfer->add_copy_sizes(1);
+  transfer->add_copy_sizes(2);
+
+  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
+  ASSERT_TRUE(transfer_resp_or.ok());
+  EXPECT_TRUE(transfer_resp_or->success());
+  EXPECT_EQ(transfer_resp_or->message(), "Buffers transferred successfully");
+  EXPECT_EQ(mock_mgr.d2h_calls, 1);
+  EXPECT_EQ(mock_mgr.h2d_calls, 0);
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(10, 30));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(20, 40));
+  EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1, 2));
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersH2DSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_HBM);
+  transfer->add_src_offsets(100);
+  transfer->add_dst_offsets(200);
+
+  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
+  ASSERT_TRUE(transfer_resp_or.ok());
+  EXPECT_TRUE(transfer_resp_or->success());
+  EXPECT_EQ(transfer_resp_or->message(), "Buffers transferred successfully");
+  EXPECT_EQ(mock_mgr.d2h_calls, 0);
+  EXPECT_EQ(mock_mgr.h2d_calls, 1);
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
+  EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
 }
 
 }  // namespace
