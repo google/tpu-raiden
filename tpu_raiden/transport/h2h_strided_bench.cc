@@ -64,23 +64,25 @@
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
+#include <chrono>  // NOLINT
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
-#include <thread>
+#include <thread>  // NOLINT
 #include <utility>
 #include <vector>
 
 #include "absl/status/status.h"
 #include "absl/types/span.h"
-#include "tpu_raiden/transport/raw_buffer_transport.h"
+#include "tpu_raiden/transport/socket_util.h"
 
 namespace {
 
-using tpu_raiden::transport::RawBufferTransport;
+using tpu_raiden::transport::ReadExact;
+using tpu_raiden::transport::WriteExact;
+using tpu_raiden::transport::WriteVExact;
 
 // ---------------------------------------------------------------------------
 // Qwen3.5-397B-A17B geometry (fp8 KV, hybrid unified block pool).
@@ -290,8 +292,7 @@ int RunSource(const std::string& peer, const Geometry& g, int iters, int warmup,
                          static_cast<uint32_t>(streams),
                          static_cast<uint32_t>(scale)};
     static_assert(sizeof(hello) == kHelloSize);
-    CheckOk(RawBufferTransport::WriteExact(fds[i], hello, sizeof(hello)),
-            "hello");
+    CheckOk(WriteExact(fds[i], hello, sizeof(hello)), "hello");
   }
   std::printf(
       "[source] connected to %s with %d stream(s), scale=%d, "
@@ -318,11 +319,9 @@ int RunSource(const std::string& peer, const Geometry& g, int iters, int warmup,
               PackHeader(header, static_cast<uint8_t>(v), plan.layer,
                          plan.block, static_cast<uint16_t>(it),
                          static_cast<uint32_t>(g.payload_per_block));
-              absl::Status st =
-                  RawBufferTransport::WriteExact(fds[i], header, kHeaderSize);
+              absl::Status st = WriteExact(fds[i], header, kHeaderSize);
               if (st.ok()) {
-                st = RawBufferTransport::WriteVExact(
-                    fds[i], absl::MakeConstSpan(plan.iov));
+                st = WriteVExact(fds[i], absl::MakeConstSpan(plan.iov));
               }
               if (!st.ok()) {
                 std::fprintf(stderr, "FATAL stream %d send: %s\n", i,
@@ -333,7 +332,7 @@ int RunSource(const std::string& peer, const Geometry& g, int iters, int warmup,
             }
           }
           uint8_t ack;
-          absl::Status st = RawBufferTransport::ReadExact(fds[i], &ack, 1);
+          absl::Status st = ReadExact(fds[i], &ack, 1);
           if (!st.ok() || ack != 1) {
             std::fprintf(stderr, "FATAL stream %d ack: %s\n", i,
                          st.ToString().c_str());
@@ -414,8 +413,7 @@ int ReceiveStream(int fd, const Geometry& g, int iters, int warmup,
   for (int it = 0; it < warmup + iters && !*failed; ++it) {
     for (int v = 0; v < 2; ++v) {
       for (uint32_t m = 0; m < msgs_this_stream * scale; ++m) {
-        absl::Status st =
-            RawBufferTransport::ReadExact(fd, header, kHeaderSize);
+        absl::Status st = ReadExact(fd, header, kHeaderSize);
         uint32_t size = 0;
         uint64_t uuid = 0;
         if (st.ok()) {
@@ -427,7 +425,7 @@ int ReceiveStream(int fd, const Geometry& g, int iters, int warmup,
           }
         }
         if (st.ok()) {
-          st = RawBufferTransport::ReadExact(fd, payload.data(), size);
+          st = ReadExact(fd, payload.data(), size);
         }
         if (!st.ok()) {
           std::fprintf(stderr, "FATAL recv (it=%d v=%d m=%u): %s\n", it, v, m,
@@ -441,7 +439,7 @@ int ReceiveStream(int fd, const Geometry& g, int iters, int warmup,
           Verify(g, v, dest_rank, layer, payload);
         }
       }
-      absl::Status st = RawBufferTransport::WriteExact(fd, &ack, 1);
+      absl::Status st = WriteExact(fd, &ack, 1);
       if (!st.ok()) {
         *failed = true;
         return 1;
@@ -479,7 +477,7 @@ int RunDestination(int port) {
     if (fd < 0) Die("accept");
     SetNodelay(fd);
     uint32_t hello[8];
-    CheckOk(RawBufferTransport::ReadExact(fd, hello, sizeof(hello)), "hello");
+    CheckOk(ReadExact(fd, hello, sizeof(hello)), "hello");
     if (conns.empty()) {
       // Context length is a source-side concern (it only sets how many
       // messages exist); the receive loop is driven by per-stream hello
