@@ -21,9 +21,9 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
-#include <optional>
+#include <memory>
 #include <string>
-#include <thread>
+#include <thread>  // NOLINT
 #include <utility>
 #include <vector>
 
@@ -48,12 +48,7 @@ using BlockReceivedCallback = std::function<absl::Status(
     size_t layer_idx, size_t shard_idx, int block_id, size_t size_bytes)>;
 
 // Represents a contiguous span of memory within a block transport operation.
-struct BlockChunk {
-  // Pointer to the local host memory address of this chunk.
-  uint8_t* ptr;
-  // Length of this memory chunk in bytes.
-  size_t size;
-};
+using BlockChunk = struct iovec;
 
 // Delegate interface for BlockTransport inheriting raw memory primitives.
 class BlockTransportDelegate : public RawBufferTransportDelegate {
@@ -198,11 +193,6 @@ class BlockTransport : public RawBufferTransport {
                 on_block_received, uuid);
   }
 
-  // Write a single block of data directly from a host pointer to a remote block
-  // ID.
-  absl::Status WriteBlockDirect(absl::string_view peer, int remote_block_id,
-                                const uint8_t* data_ptr, size_t size_bytes);
-
  protected:
   absl::Status HandleCustomRequest(int client_fd,
                                    const PacketHeader& header) override;
@@ -262,7 +252,7 @@ class BlockTransport : public RawBufferTransport {
   void TriggerNextSendStep(std::shared_ptr<SendStreamState> state);
   void ResolveStepCoordinates(const std::shared_ptr<SendStreamState>& state,
                               size_t* layer, size_t* shard, size_t* block_idx);
-  uint32_t GetChunksTotalSize(const std::vector<BlockChunk>& chunks);
+  size_t GetChunksTotalSize(const std::vector<BlockChunk>& chunks);
 
   absl::Mutex active_sends_mu_;
   absl::flat_hash_map<uint64_t, std::shared_ptr<SendStreamState>> active_sends_

@@ -26,25 +26,27 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
-#include <future>
+#include <future>  // NOLINT
 #include <limits>
 #include <memory>
 #include <numeric>
 #include <string>
+#include <thread>  // NOLINT
 #include <utility>
 #include <vector>
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
-#include "tpu_raiden/core/status_macros.h"
-#include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/transport/raw_buffer_transport.h"
+#include "tpu_raiden/transport/socket_util.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -61,26 +63,19 @@ constexpr uint8_t kUseBlockChunksFlag = 0x80;
 #define IOV_MAX UIO_MAXIOV
 #endif
 
-std::vector<struct iovec> ToIovec(const std::vector<BlockChunk>& chunks) {
-  std::vector<struct iovec> iov;
-  iov.reserve(chunks.size());
-  for (const auto& chunk : chunks) {
-    iov.push_back({.iov_base = chunk.ptr, .iov_len = chunk.size});
-  }
-  return iov;
-}
-
 absl::Status ValidateChunks(BlockTransportDelegate* delegate, size_t l,
                             size_t sh, const std::vector<BlockChunk>& chunks) {
   uint8_t* base = delegate->GetHostPointer(l, sh);
   if (base != nullptr) {
     size_t host_size = delegate->GetHostSize(l, sh);
     for (const auto& chunk : chunks) {
-      if (chunk.ptr < base || chunk.ptr + chunk.size > base + host_size) {
+      if (chunk.iov_base < base ||
+          static_cast<uint8_t*>(chunk.iov_base) + chunk.iov_len >
+              base + host_size) {
         return absl::OutOfRangeError(absl::StrCat(
             "Chunk out of bounds. Chunk ptr: ",
-            reinterpret_cast<uintptr_t>(chunk.ptr), ", size: ", chunk.size,
-            ", Host base: ", reinterpret_cast<uintptr_t>(base),
+            reinterpret_cast<uintptr_t>(chunk.iov_base), ", size: ",
+            chunk.iov_len, ", Host base: ", reinterpret_cast<uintptr_t>(base),
             ", Host size: ", host_size));
       }
     }
@@ -88,6 +83,7 @@ absl::Status ValidateChunks(BlockTransportDelegate* delegate, size_t l,
   return absl::OkStatus();
 }
 
+// Note: this function is never called.
 absl::Status ValidateBlockRange(BlockTransportDelegate* delegate,
                                 size_t layer_idx, size_t shard_idx,
                                 int block_id, size_t num_blocks,
@@ -277,7 +273,7 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
     src_block_ids.resize(header.count_or_size, 0);
     RETURN_IF_ERROR(ReadExact(client_fd, src_block_ids.data(),
                               header.count_or_size * sizeof(int)));
-    uint8_t ack = 1;
+    const uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
   }
 
@@ -294,7 +290,7 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
       header.count_or_size, [&](size_t l, size_t sh, size_t k) -> absl::Status {
         ABSL_DCHECK_LT(k, allocated_ids.size());
         const int dst_id = allocated_ids[k];
-        uint32_t sender_size = 0;
+        size_t sender_size = 0;
         RETURN_IF_ERROR(
             ReadExact(client_fd, &sender_size, sizeof(sender_size)));
 
@@ -317,7 +313,7 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
 
         uint32_t expected_size = 0;
         for (const auto& chunk : chunks) {
-          expected_size += chunk.size;
+          expected_size += chunk.iov_len;
         }
         if (sender_size != expected_size) {
           return absl::InternalError(absl::StrCat(
@@ -326,8 +322,7 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
               " bytes for Block ID: ", dst_id));
         }
 
-        RETURN_IF_ERROR(
-            RawBufferTransport::ReadVExact(client_fd, ToIovec(chunks)));
+        RETURN_IF_ERROR(ReadVExact(client_fd, chunks));
         return absl::OkStatus();
       }));
 
@@ -369,7 +364,7 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
             << ", numa=" << block_delegate_->node_id();
   RETURN_IF_ERROR(
       block_delegate_->OnBlocksReceived(allocated_ids, header.uuid));
-  uint8_t ack = 1;
+  const uint8_t ack = 1;
   RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
   return absl::OkStatus();
 }
@@ -473,7 +468,7 @@ void BlockTransport::TriggerNextSendStep(
             return;
           }
 
-          uint32_t total_size = GetChunksTotalSize(chunks);
+          const size_t total_size = GetChunksTotalSize(chunks);
           s = WriteExact(state->client_fd, &total_size, sizeof(total_size));
           if (!s.ok()) {
             LOG(ERROR) << "Write size failed: " << s.ToString();
@@ -483,8 +478,7 @@ void BlockTransport::TriggerNextSendStep(
             active_sends_.erase(state->uuid);
             return;
           }
-          s = RawBufferTransport::WriteVExact(state->client_fd,
-                                              ToIovec(chunks));
+          s = WriteVExact(state->client_fd, chunks);
           if (!s.ok()) {
             LOG(ERROR) << "Write payload failed: " << s.ToString();
             shutdown(state->client_fd, SHUT_RDWR);
@@ -519,11 +513,11 @@ void BlockTransport::ResolveStepCoordinates(
   }
 }
 
-uint32_t BlockTransport::GetChunksTotalSize(
+size_t BlockTransport::GetChunksTotalSize(
     const std::vector<BlockChunk>& chunks) {
-  uint32_t total = 0;
+  size_t total = 0;
   for (const auto& chunk : chunks) {
-    total += chunk.size;
+    total += chunk.iov_len;
   }
   return total;
 }
@@ -831,11 +825,10 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
 
         uint32_t total_size = 0;
         for (const auto& chunk : chunks) {
-          total_size += chunk.size;
+          total_size += chunk.iov_len;
         }
-
         RETURN_IF_ERROR(WriteExact(fd, &total_size, sizeof(total_size)));
-        return RawBufferTransport::WriteVExact(fd, ToIovec(chunks));
+        return WriteVExact(fd, chunks);
       });
   if (!s.ok()) {
     statuses[stream_idx] = s;
@@ -1004,17 +997,18 @@ void BlockTransport::H2hReadWorker(
             uint8_t* default_base = block_delegate_->GetHostPointer(l, sh);
             uint8_t* explicit_base = base_host_ptr;
             for (auto& chunk : chunks) {
-              size_t offset = chunk.ptr - default_base;
-              chunk.ptr = explicit_base + offset;
+              size_t offset =
+                  static_cast<uint8_t*>(chunk.iov_base) - default_base;
+              chunk.iov_base = explicit_base + offset;
             }
           }
 
-          uint32_t expected_size = 0;
+          size_t expected_size = 0;
           for (const auto& chunk : chunks) {
-            expected_size += chunk.size;
+            expected_size += chunk.iov_len;
           }
 
-          uint32_t sender_size = 0;
+          size_t sender_size = 0;
           RETURN_IF_ERROR(ReadExact(fd, &sender_size, sizeof(sender_size)));
 
           if (sender_size != expected_size) {
@@ -1024,7 +1018,7 @@ void BlockTransport::H2hReadWorker(
                 " bytes for Block ID: ", dst_id));
           }
 
-          RETURN_IF_ERROR(RawBufferTransport::ReadVExact(fd, ToIovec(chunks)));
+          RETURN_IF_ERROR(ReadVExact(fd, chunks));
 
           if (on_block_received != nullptr) {
             RETURN_IF_ERROR(on_block_received(l, sh, dst_id, expected_size));

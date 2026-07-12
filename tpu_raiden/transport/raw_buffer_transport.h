@@ -20,19 +20,17 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
-#include <optional>
 #include <string>
 #include <thread>  // NOLINT
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
-#include "absl/types/span.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -54,8 +52,6 @@ class RawBufferTransportDelegate {
   // Notification triggered upon verified data chunk arrival.
   virtual absl::Status OnDataReceived() { return absl::OkStatus(); }
 };
-
-
 
 // Standalone raw buffer POSIX TCP socket transport engine.
 class RawBufferTransport {
@@ -91,30 +87,19 @@ class RawBufferTransport {
                           size_t dst_shard_idx, size_t dst_offset_bytes,
                           size_t size_bytes);
 
-
-
   int local_port() const { return local_port_; }
   const std::string& bound_ip() const { return bound_ip_; }
 
-  // Shared socket IO helpers.
-  static absl::Status WriteExact(int fd, const void* buffer, size_t length);
-  static absl::Status ReadExact(int fd, void* buffer, size_t length);
-  static absl::Status WriteVExact(int fd, absl::Span<const struct iovec> iov);
-  static absl::Status ReadVExact(int fd, absl::Span<const struct iovec> iov);
-
  protected:
-  absl::StatusOr<int> ConnectToPeer(absl::string_view peer,
-                                    absl::string_view local_ip = "");
   virtual absl::StatusOr<int> AcquireConnection(
       absl::string_view peer, absl::string_view local_ip = "");
-  virtual void ReleaseConnection(absl::string_view peer, int fd,
-                                 absl::string_view local_ip = "");
+  void ReleaseConnection(absl::string_view peer, int fd,
+                         absl::string_view local_ip = "");
   void ClosePooledConnections();
 
-  virtual absl::Status ProcessSingleRequest(int client_fd);
+  absl::Status ProcessSingleRequest(int client_fd);
   virtual absl::Status HandleCustomRequest(int client_fd,
                                            const PacketHeader& header);
-
 
   void ConnectionWorker(int client_fd);
   void ListenerLoop();
@@ -127,14 +112,12 @@ class RawBufferTransport {
   std::atomic<bool> stopping_{false};
 
   absl::Mutex mu_;
-  std::vector<int> active_client_fds_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_set<int> active_client_fds_ ABSL_GUARDED_BY(mu_);
 
   absl::Mutex pool_mu_;
   absl::flat_hash_map<std::string, std::vector<int>> conn_pool_
       ABSL_GUARDED_BY(pool_mu_);
   bool pooling_enabled_ = true;
-
-
 
   std::thread listener_thread_;
   std::vector<std::thread> worker_threads_;
