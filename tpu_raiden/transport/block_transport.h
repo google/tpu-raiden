@@ -21,9 +21,9 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
-#include <optional>
+#include <memory>
 #include <string>
-#include <thread>
+#include <thread>  // NOLINT
 #include <utility>
 #include <vector>
 
