@@ -26,25 +26,27 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
-#include <future>
+#include <future>  // NOLINT
 #include <limits>
 #include <memory>
 #include <numeric>
 #include <string>
+#include <thread>  // NOLINT
 #include <utility>
 #include <vector>
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
-#include "tpu_raiden/core/status_macros.h"
-#include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/transport/raw_buffer_transport.h"
+#include "tpu_raiden/transport/socket_util.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -326,8 +328,7 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
               " bytes for Block ID: ", dst_id));
         }
 
-        RETURN_IF_ERROR(
-            RawBufferTransport::ReadVExact(client_fd, ToIovec(chunks)));
+        RETURN_IF_ERROR(ReadVExact(client_fd, ToIovec(chunks)));
         return absl::OkStatus();
       }));
 
@@ -483,8 +484,7 @@ void BlockTransport::TriggerNextSendStep(
             active_sends_.erase(state->uuid);
             return;
           }
-          s = RawBufferTransport::WriteVExact(state->client_fd,
-                                              ToIovec(chunks));
+          s = WriteVExact(state->client_fd, ToIovec(chunks));
           if (!s.ok()) {
             LOG(ERROR) << "Write payload failed: " << s.ToString();
             shutdown(state->client_fd, SHUT_RDWR);
@@ -835,7 +835,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
         }
 
         RETURN_IF_ERROR(WriteExact(fd, &total_size, sizeof(total_size)));
-        return RawBufferTransport::WriteVExact(fd, ToIovec(chunks));
+        return WriteVExact(fd, ToIovec(chunks));
       });
   if (!s.ok()) {
     statuses[stream_idx] = s;
@@ -1024,7 +1024,7 @@ void BlockTransport::H2hReadWorker(
                 " bytes for Block ID: ", dst_id));
           }
 
-          RETURN_IF_ERROR(RawBufferTransport::ReadVExact(fd, ToIovec(chunks)));
+          RETURN_IF_ERROR(ReadVExact(fd, ToIovec(chunks)));
 
           if (on_block_received != nullptr) {
             RETURN_IF_ERROR(on_block_received(l, sh, dst_id, expected_size));

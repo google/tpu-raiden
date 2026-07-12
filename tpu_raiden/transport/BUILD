@@ -19,6 +19,26 @@ load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
+    name = "socket_util",
+    srcs = ["socket_util.cc"],
+    hdrs = ["socket_util.h"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
     name = "raw_buffer_transport",
     srcs = ["raw_buffer_transport.cc"],
     hdrs = ["raw_buffer_transport.h"],
@@ -29,16 +49,17 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":socket_util",
         "//tpu_raiden/core:status_macros",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
-        "@com_google_absl//absl/types:span",
         "@xla//xla/tsl/platform:statusor",
     ],
 )
@@ -55,8 +76,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":raw_buffer_transport",
-        "//tpu_raiden/core:status_macros",
-        "//tpu_raiden/core:tpu_utils",
+        ":socket_util",
         "//tpu_raiden/core:tsl_platform_headers",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/cleanup",
@@ -64,6 +84,7 @@ cc_library(
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_macros",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
@@ -161,7 +182,7 @@ cc_binary(
     ],
     features = ["-use_header_modules"],
     deps = [
-        ":raw_buffer_transport",
+        ":socket_util",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/types:span",
     ],
