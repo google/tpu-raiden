@@ -245,11 +245,6 @@ class BlockTransport : public RawBufferTransport {
                 on_block_received, uuid);
   }
 
-  // Write a single block of data directly from a host pointer to a remote block
-  // ID.
-  absl::Status WriteBlockDirect(absl::string_view peer, int remote_block_id,
-                                const uint8_t* data_ptr, size_t size_bytes);
-
  protected:
   absl::Status HandleCustomRequest(int client_fd,
                                    const PacketHeader& header) override;

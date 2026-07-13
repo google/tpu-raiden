@@ -77,7 +77,6 @@ cc_library(
         ":raw_buffer_transport",
         ":socket_util",
         "//tpu_raiden/core:status_macros",
-        "//tpu_raiden/core:tpu_utils",
         "//tpu_raiden/core:tsl_platform_headers",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/cleanup",

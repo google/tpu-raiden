@@ -45,7 +45,6 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "tpu_raiden/core/status_macros.h"
-#include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/transport/raw_buffer_transport.h"
 #include "tpu_raiden/transport/socket_util.h"
 
@@ -114,6 +113,7 @@ absl::Status ValidateChunks(BlockTransportDelegate* delegate, size_t l,
   return absl::OkStatus();
 }
 
+#if 0  // Note: this function is not used.
 absl::Status ValidateBlockRange(BlockTransportDelegate* delegate,
                                 size_t layer_idx, size_t shard_idx,
                                 int block_id, size_t num_blocks,
@@ -153,6 +153,7 @@ absl::Status ValidateBlockRange(BlockTransportDelegate* delegate,
   }
   return absl::OkStatus();
 }
+#endif
 
 absl::StatusOr<MajorOrder> ParseMajorOrder(uint8_t value) {
   uint8_t order_val = value & ~kUseBlockChunksFlag;

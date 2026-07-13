@@ -29,13 +29,12 @@
 #include <string>
 #include <string_view>
 #include <thread>  // NOLINT
-#include <vector>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
-#include "absl/strings/str_split.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "third_party/peregrine/src/api/transport_types.h"
