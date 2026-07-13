@@ -64,3 +64,10 @@ py_binary(
         "@com_google_absl_py//absl/flags",
     ],
 )
+
+py_library(
+    name = "bap_metrics",
+    testonly = True,
+    srcs = ["bap_metrics.py"],
+    deps = ["@pypi//tensorboard"],     
+)
