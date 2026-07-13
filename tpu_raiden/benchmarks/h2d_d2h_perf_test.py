@@ -47,24 +47,15 @@ _NUMA_NODE = flags.DEFINE_integer('numa_node', 0, 'NUMA node to pin to when --nu
 
 def write_tensorboard_metrics(d2h_time, h2d_time, d2h_gbps, h2d_gbps):
   tblog_dir = os.environ.get('TENSORBOARD_OUTPUT_DIR')
-  if not tblog_dir:
-    print('TENSORBOARD_OUTPUT_DIR not set. Skipping TB.')
-    return
-  try:
-    try:
-      import tensorboardX  # pylint: disable=g-import-not-at-top
-      w = tensorboardX.SummaryWriter(log_dir=tblog_dir)
-    except ImportError:
-      import torch.utils.tensorboard as tut  # pylint: disable=g-import-not-at-top
-      w = tut.SummaryWriter(log_dir=tblog_dir)
-    w.add_scalar('d2h_time_sec', d2h_time, global_step=0)
-    w.add_scalar('h2d_time_sec', h2d_time, global_step=0)
-    w.add_scalar('d2h_throughput_gbps', d2h_gbps, global_step=0)
-    w.add_scalar('h2d_throughput_gbps', h2d_gbps, global_step=0)
-    w.close()
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    print(f'WARNING: TB write failed: {e}', file=sys.stderr)
 
+  import tensorboardX  # pylint: disable=g-import-not-at-top
+  w = tensorboardX.SummaryWriter(log_dir=tblog_dir)
+    
+  w.add_scalar('d2h_time_sec', d2h_time, global_step=0)
+  w.add_scalar('h2d_time_sec', h2d_time, global_step=0)
+  w.add_scalar('d2h_throughput_gbps', d2h_gbps, global_step=0)
+  w.add_scalar('h2d_throughput_gbps', h2d_gbps, global_step=0)
+  w.close()
 
 def main(_):
   if _NUMA_PIN.value:
