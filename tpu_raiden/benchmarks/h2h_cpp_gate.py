@@ -43,6 +43,8 @@ import time
 from absl import app
 from absl import flags
 
+from tpu_raiden.benchmarks import bap_metrics
+
 _SENDER_NUMA = flags.DEFINE_integer('sender_numa', 0, 'NUMA node for the sender.')
 _RECEIVER_NUMA = flags.DEFINE_integer('receiver_numa', 1,
                                       'NUMA node for the receiver.')
@@ -62,16 +64,16 @@ _SIGMA_K = flags.DEFINE_float(
     'sigma_k', 3.5, 'Robust sigmas (MAD) below the median for the gate floor.')
 _CONTROL_PORT = flags.DEFINE_integer('control_port', 9099,
                                      'Base control port for the C++ handshake.')
-_RUNS = flags.DEFINE_integer(
-    'runs', 1,
-    'Repeat each config N times (N separate C++ processes). Total raw samples = '
-    'runs * iters. Prefer raising --iters over --runs: one process amortizes the '
-    'handshake/warmup. --runs is only for run-to-run (process-to-process) spread.')
+_RUNS_PER_CONFIG = flags.DEFINE_integer(
+    'runs_per_config', 1,
+    'Independent C++ processes to spawn per config. Raw samples per config = '
+    'runs_per_config * iters. Prefer raising --iters: a single process amortizes '
+    'the handshake/warmup. Raise this only to measure process-to-process spread.')
 _ITERS = flags.DEFINE_integer(
     'iters', 50,
-    'Timed iterations PER run, passed to the C++ runner as --iterations. One '
-    'process emits this many raw H2H_ITER_MS samples. e.g. --iters=500 --runs=1 '
-    'gives 500 raw samples in a single handshake.')
+    'Timed iterations PER process, passed to the C++ runner as --iterations. One '
+    'process emits this many raw H2H_ITER_MS samples. e.g. --iters=500 '
+    '--runs_per_config=1 gives 500 raw samples in a single handshake.')
 _DUMP = flags.DEFINE_string(
     'dump', None,
     'CSV to write every sample for your own analysis (config,run,iter,gbs,'
@@ -246,24 +248,6 @@ def _run_cpp(cc, bs, nb, p, port):
           'p99_ms': p99, 'integrity': integrity_ok, 'raw_gbs': raw_gbs}
 
 
-def _emit(tag, value):
-  """Emit a scalar to TENSORBOARD_OUTPUT_DIR so BAP ingests it (best-effort)."""
-  tbdir = os.environ.get('TENSORBOARD_OUTPUT_DIR')
-  if not tbdir:
-    return
-  try:
-    try:
-      import tensorboardX  # pylint: disable=g-import-not-at-top
-      w = tensorboardX.SummaryWriter(log_dir=tbdir)
-    except ImportError:
-      import torch.utils.tensorboard as tut  # pylint: disable=g-import-not-at-top
-      w = tut.SummaryWriter(log_dir=tbdir)
-    w.add_scalar(tag, value, global_step=0)
-    w.close()
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    print(f'WARNING: TB write failed for {tag}: {e}', file=sys.stderr)
-
-
 def _core_floor(samples, k, max_margin):
   """Gate floor: lower edge of the normal core, capped so it is never looser
   than max_margin (mirrors the d2h/h2d _core_floor exactly).
@@ -295,8 +279,9 @@ def _pct(xs, q):
 
 def main(_):
   cc = _locate('h2h_benchmark_runner')
-  runs = max(1, _RUNS.value)
-  print(f'[cpp-gate] C++ runner: {cc}  (runs={runs} per config)', flush=True)
+  runs = max(1, _RUNS_PER_CONFIG.value)
+  print(f'[cpp-gate] C++ runner: {cc}  ({runs} process(es) per config)',
+        flush=True)
 
   writer = dump = dump_path = None
   if _DUMP.value:
@@ -315,12 +300,15 @@ def main(_):
                      'p90_ms', 'p99_ms', 'integrity'])
 
   # results[label] = representative {gbs (median across all samples), integrity}
+  # scalars[tag] = value; collected across configs and written in ONE event file
+  # after the loop (a writer per config would scatter N event files).
   results = {}
+  scalars = {}
   for i, (bs, nb, p) in enumerate(_CONFIGS):
     label = _label(bs, nb, p)
     port = _CONTROL_PORT.value + i
     series, integ_all = [], True
-    print(f'[cpp-gate] ({i + 1}/{len(_CONFIGS)}) {label}: {runs} run(s) ...',
+    print(f'[cpp-gate] ({i + 1}/{len(_CONFIGS)}) {label}: {runs} process(es) ...',
           flush=True)
     for run in range(runs):
       m = _run_cpp(cc, bs, nb, p, port)
@@ -353,14 +341,16 @@ def main(_):
             flush=True)
     else:
       med = -1.0
-      print(f'[measured] {label}: ALL {runs} run(s) failed', flush=True)
+      print(f'[measured] {label}: ALL {runs} process(es) failed', flush=True)
     results[label] = {'gbs': med, 'integrity': integ_all, 'samples': series}
-    _emit(f'{label}/cpp_gbs', med)
+    scalars[f'{label}/cpp_gbs'] = med
+
+  bap_metrics.emit(scalars)
 
   if dump:
     dump.close()
-    print(f'\nWrote samples for {len(_CONFIGS)} config(s) x {runs} run(s) -> '
-          f'{dump_path}', flush=True)
+    print(f'\nWrote samples for {len(_CONFIGS)} config(s) x {runs} process(es) '
+          f'-> {dump_path}', flush=True)
 
   if _ANALYZE.value:
     print('\nanalyze mode: data collected, no gate/baseline. Done.', flush=True)
@@ -369,7 +359,7 @@ def main(_):
   if _RECORD.value:
     # baseline = median of all samples; floor = median - k*MADsigma capped at
     # max_margin (same _core_floor as d2h/h2d). Record from MANY samples (large
-    # --runs, or the runner's raw H2H_ITER_MS) so the MAD estimate is stable.
+    # --iters, or a large --runs_per_config) so the MAD estimate is stable.
     k, cap = _SIGMA_K.value, _MAX_MARGIN.value
     cfg = {'sigma_k': k, 'max_margin': cap, 'configs': {}}
     for label, r in results.items():
