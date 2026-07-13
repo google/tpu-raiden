@@ -10,4 +10,3 @@ libtpu==0.0.42.1
 grpcio-tools
 protobuf
 requests
-tensorboardX
