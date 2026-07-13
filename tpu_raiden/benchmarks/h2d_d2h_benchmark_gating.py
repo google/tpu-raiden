@@ -22,6 +22,7 @@ from absl import app
 from absl import flags
 import numpy as np
 
+from tpu_raiden.benchmarks import bap_metrics
 from tpu_raiden.benchmarks import perf_core
 
 _BASELINES = flags.DEFINE_string(
@@ -78,25 +79,12 @@ def _core_floor(samples, k):
 def _write_tb_metrics(results):
   """Log per-config throughput to TENSORBOARD_OUTPUT_DIR so BAP ingests it.
   Each tag MUST have a matching metrics{name:...} in benchmark_registry.pbtxt."""
-  tblog_dir = os.environ.get('TENSORBOARD_OUTPUT_DIR')
-  if not tblog_dir:
-    print('TENSORBOARD_OUTPUT_DIR not set; skipping TB metrics.')
-    return
-  try:
-    try:
-      import tensorboardX  # pylint: disable=g-import-not-at-top
-      w = tensorboardX.SummaryWriter(log_dir=tblog_dir)
-    except ImportError:
-      import torch.utils.tensorboard as tut  # pylint: disable=g-import-not-at-top
-      w = tut.SummaryWriter(log_dir=tblog_dir)
-    for c, r in results:
-      label = f"{c['dtype']}_L{c['num_layers']}_{'x'.join(map(str, c['shape']))}"
-      w.add_scalar(f'{label}/d2h_gbps', r['d2h_gbps'], global_step=0)
-      w.add_scalar(f'{label}/h2d_gbps', r['h2d_gbps'], global_step=0)
-    w.close()
-    print(f'Wrote TB metrics for {len(results)} configs -> {tblog_dir}')
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    print(f'WARNING: TB metric write failed: {e}', file=sys.stderr)
+  scalars = {}
+  for c, r in results:
+    label = f"{c['dtype']}_L{c['num_layers']}_{'x'.join(map(str, c['shape']))}"
+    scalars[f'{label}/d2h_gbps'] = r['d2h_gbps']
+    scalars[f'{label}/h2d_gbps'] = r['h2d_gbps']
+  bap_metrics.emit(scalars)
 
 
 def main(_):
