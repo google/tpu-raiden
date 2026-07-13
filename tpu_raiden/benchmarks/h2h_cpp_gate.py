@@ -64,12 +64,11 @@ _CONTROL_PORT = flags.DEFINE_integer('control_port', 9099,
                                      'Base control port for the C++ handshake.')
 _RUNS_PER_CONFIG = flags.DEFINE_integer(
     'runs_per_config', 1,
-    'How many times to relaunch the H2H runner for each config, squentially'
-    'Each launch is a fresh process contributing 'iters' samples, so total raw'
-    'samples = runs_per_config * iters. To get more samples, raise -- iters (one'
-    'process amoertizes the handshake/warmup); raise this only when you '
-    'specfically want process-to-process spread.'
-)
+    'How many times to relaunch the C++ runner for each config, sequentially. '
+    'Each launch is a fresh process contributing `iters` samples, so total raw '
+    'samples = runs_per_config * iters. To get more samples, raise --iters (one '
+    'process amortizes the handshake/warmup); raise this only when you '
+    'specifically want process-to-process spread.')
 _ITERS = flags.DEFINE_integer(
     'iters', 50,
     'Timed iterations PER run, passed to the C++ runner as --iterations. One '
