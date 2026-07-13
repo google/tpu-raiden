@@ -26,6 +26,7 @@ import sys
 from absl import app
 from absl import flags
 
+from tpu_raiden.benchmarks import bap_metrics
 from tpu_raiden.benchmarks import perf_core
 
 # --- flags (dtype/layers match the DMA benchmark's @parameterized groups) ---
@@ -45,27 +46,6 @@ _NUMA_PIN = flags.DEFINE_bool('numa_pin', False, 'Pin process to one NUMA node (
 _NUMA_NODE = flags.DEFINE_integer('numa_node', 0, 'NUMA node to pin to when --numa_pin.')
 
 
-def write_tensorboard_metrics(d2h_time, h2d_time, d2h_gbps, h2d_gbps):
-  tblog_dir = os.environ.get('TENSORBOARD_OUTPUT_DIR')
-  if not tblog_dir:
-    print('TENSORBOARD_OUTPUT_DIR not set. Skipping TB.')
-    return
-  try:
-    try:
-      import tensorboardX  # pylint: disable=g-import-not-at-top
-      w = tensorboardX.SummaryWriter(log_dir=tblog_dir)
-    except ImportError:
-      import torch.utils.tensorboard as tut  # pylint: disable=g-import-not-at-top
-      w = tut.SummaryWriter(log_dir=tblog_dir)
-    w.add_scalar('d2h_time_sec', d2h_time, global_step=0)
-    w.add_scalar('h2d_time_sec', h2d_time, global_step=0)
-    w.add_scalar('d2h_throughput_gbps', d2h_gbps, global_step=0)
-    w.add_scalar('h2d_throughput_gbps', h2d_gbps, global_step=0)
-    w.close()
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    print(f'WARNING: TB write failed: {e}', file=sys.stderr)
-
-
 def main(_):
   if _NUMA_PIN.value:
     perf_core.bind_to_numa(_NUMA_NODE.value)
@@ -80,7 +60,13 @@ def main(_):
   print(f"D2H median {r['d2h_med_t']*1000:.3f} ms -> {r['d2h_gbps']:.3f} Gbps")
   print(f"H2D median {r['h2d_med_t']*1000:.3f} ms -> {r['h2d_gbps']:.3f} Gbps")
 
-  write_tensorboard_metrics(r['d2h_med_t'], r['h2d_med_t'], r['d2h_gbps'], r['h2d_gbps'])
+  # Tags MUST match the metrics{name: ...} entries in benchmark_registry.pbtxt.
+  bap_metrics.emit({
+      'd2h_time_sec': r['d2h_med_t'],
+      'h2d_time_sec': r['h2d_med_t'],
+      'd2h_throughput_gbps': r['d2h_gbps'],
+      'h2d_throughput_gbps': r['h2d_gbps'],
+  })
 
   art = os.environ.get('WORKLOAD_ARTIFACTS_DIR')
   if art:
