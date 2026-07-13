@@ -62,11 +62,14 @@ _SIGMA_K = flags.DEFINE_float(
     'sigma_k', 3.5, 'Robust sigmas (MAD) below the median for the gate floor.')
 _CONTROL_PORT = flags.DEFINE_integer('control_port', 9099,
                                      'Base control port for the C++ handshake.')
-_RUNS = flags.DEFINE_integer(
-    'runs', 1,
-    'Repeat each config N times (N separate C++ processes). Total raw samples = '
-    'runs * iters. Prefer raising --iters over --runs: one process amortizes the '
-    'handshake/warmup. --runs is only for run-to-run (process-to-process) spread.')
+_RUNS_PER_CONFIG = flags.DEFINE_integer(
+    'runs_per_config', 1,
+    'How many times to relaunch the H2H runner for each config, squentially'
+    'Each launch is a fresh process contributing 'iters' samples, so total raw'
+    'samples = runs_per_config * iters. To get more samples, raise -- iters (one'
+    'process amoertizes the handshake/warmup); raise this only when you '
+    'specfically want process-to-process spread.'
+)
 _ITERS = flags.DEFINE_integer(
     'iters', 50,
     'Timed iterations PER run, passed to the C++ runner as --iterations. One '
@@ -295,7 +298,7 @@ def _pct(xs, q):
 
 def main(_):
   cc = _locate('h2h_benchmark_runner')
-  runs = max(1, _RUNS.value)
+  runs = max(1, _RUNS_PER_CONFIG.value)
   print(f'[cpp-gate] C++ runner: {cc}  (runs={runs} per config)', flush=True)
 
   writer = dump = dump_path = None
