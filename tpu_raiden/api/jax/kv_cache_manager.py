@@ -51,7 +51,7 @@ class KVCacheManager:
       parallelism: int = 4,
       node_id: int = 0,
       grpc_port: int = 0,
-      start_grpc_server: bool = False,
+      enable_worker_service: bool = False,
   ):
     """Instantiates the TransferEngine-based KVCacheManager.
 
@@ -68,8 +68,8 @@ class KVCacheManager:
       parallelism: Number of parallel network copies per layer.
       node_id: Unique identifier for this host/node in the distributed mesh.
       grpc_port: Optional port for WorkerService gRPC server.
-      start_grpc_server: Whether to start WorkerService gRPC server (default
-        False).
+      enable_worker_service: Whether to start WorkerService gRPC server and
+        enable host buffer allocations (default False).
     """
     if host_blocks_to_allocate is not None:
       self._impl = _impl.KVCacheManager(
@@ -79,7 +79,7 @@ class KVCacheManager:
           unsafe_skip_buffer_lock,
           parallelism,
           grpc_port,
-          start_grpc_server,
+          enable_worker_service,
       )
     else:
       if max_blocks is None or num_slots is None:
@@ -97,7 +97,7 @@ class KVCacheManager:
           unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
           parallelism=parallelism,
           grpc_port=grpc_port,
-          start_grpc_server=start_grpc_server,
+          enable_worker_service=enable_worker_service,
       )
 
   def get_grpc_port(self) -> int:

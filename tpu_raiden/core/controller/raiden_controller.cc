@@ -177,5 +177,33 @@ absl::Status RaidenController::Deallocate(
   return absl::OkStatus();
 }
 
+absl::StatusOr<proto::TransferBuffersResponse>
+RaidenController::TransferBuffers(rpc::MemoryType src_mem_type,
+                                  rpc::MemoryType dst_mem_type,
+                                  absl::Span<const int64_t> src_offsets,
+                                  absl::Span<const int64_t> dst_offsets,
+                                  absl::Span<const int64_t> copy_sizes) {
+  if (!client_) {
+    return absl::FailedPreconditionError(
+        "WorkerServiceClient is not initialized");
+  }
+  if (src_offsets.empty() || src_offsets.size() != dst_offsets.size()) {
+    return absl::InvalidArgumentError(
+        "Source and destination offsets must have the same non-zero length");
+  }
+  if (!copy_sizes.empty() && copy_sizes.size() != src_offsets.size()) {
+    return absl::InvalidArgumentError(
+        "copy_sizes, if provided, must match the length of src_offsets");
+  }
+  proto::TransferBuffersRequest request;
+  auto* transfer = request.mutable_transfer();
+  transfer->set_src_mem_type(src_mem_type);
+  transfer->set_dst_mem_type(dst_mem_type);
+  transfer->mutable_src_offsets()->Add(src_offsets.begin(), src_offsets.end());
+  transfer->mutable_dst_offsets()->Add(dst_offsets.begin(), dst_offsets.end());
+  transfer->mutable_copy_sizes()->Add(copy_sizes.begin(), copy_sizes.end());
+  return client_->TransferBuffers(request);
+}
+
 }  // namespace controller
 }  // namespace tpu_raiden

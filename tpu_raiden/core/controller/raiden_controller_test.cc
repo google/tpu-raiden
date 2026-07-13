@@ -14,11 +14,13 @@
 
 #include "tpu_raiden/core/controller/raiden_controller.h"
 
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -29,6 +31,8 @@
 namespace tpu_raiden {
 namespace controller {
 namespace {
+
+using ::testing::HasSubstr;
 
 class RaidenControllerTest : public ::testing::Test {
  protected:
@@ -128,6 +132,74 @@ TEST_F(RaidenControllerTest, ConstructorThrowsOnBufferCreationFailure) {
                                     /*num_shards=*/1, /*shard_size_bytes=*/512);
       },
       std::runtime_error);
+}
+
+TEST_F(RaidenControllerTest, TransferBuffersDelegatesToWorkerService) {
+  RaidenController controller(unit_, test_server_->channel, /*num_blocks=*/5,
+                              /*num_shards=*/1, /*shard_size_bytes=*/512);
+
+  std::vector<int64_t> src_offsets = {10};
+  std::vector<int64_t> dst_offsets = {20};
+
+  auto resp_or = controller.TransferBuffers(
+      rpc::MEMORY_TYPE_HBM, rpc::MEMORY_TYPE_DRAM, src_offsets, dst_offsets);
+  ASSERT_TRUE(resp_or.ok());
+  EXPECT_FALSE(resp_or->success());
+  EXPECT_THAT(resp_or->message(),
+              HasSubstr("Transfer manager is not configured on WorkerService"));
+}
+
+TEST_F(RaidenControllerTest, TransferBuffersValidationMismatchedOffsets) {
+  RaidenController controller(unit_, test_server_->channel, /*num_blocks=*/5,
+                              /*num_shards=*/1, /*shard_size_bytes=*/512);
+
+  std::vector<int64_t> src_offsets = {10, 20};
+  std::vector<int64_t> dst_offsets = {20};
+
+  auto resp_or = controller.TransferBuffers(
+      rpc::MEMORY_TYPE_HBM, rpc::MEMORY_TYPE_DRAM, src_offsets, dst_offsets);
+  EXPECT_FALSE(resp_or.ok());
+  EXPECT_EQ(resp_or.status().code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(
+      resp_or.status().message(),
+      HasSubstr(
+          "Source and destination offsets must have the same non-zero length"));
+}
+
+TEST_F(RaidenControllerTest, TransferBuffersValidationMismatchedCopySizes) {
+  RaidenController controller(unit_, test_server_->channel, /*num_blocks=*/5,
+                              /*num_shards=*/1, /*shard_size_bytes=*/512);
+
+  std::vector<int64_t> src_offsets = {10, 20};
+  std::vector<int64_t> dst_offsets = {20, 30};
+  std::vector<int64_t> copy_sizes = {1};
+
+  auto resp_or =
+      controller.TransferBuffers(rpc::MEMORY_TYPE_HBM, rpc::MEMORY_TYPE_DRAM,
+                                 src_offsets, dst_offsets, copy_sizes);
+  EXPECT_FALSE(resp_or.ok());
+  EXPECT_EQ(resp_or.status().code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(
+      resp_or.status().message(),
+      HasSubstr(
+          "copy_sizes, if provided, must match the length of src_offsets"));
+}
+
+TEST_F(RaidenControllerTest, TransferBuffersValidationEmptyOffsets) {
+  RaidenController controller(unit_, test_server_->channel, /*num_blocks=*/5,
+                              /*num_shards=*/1, /*shard_size_bytes=*/512);
+
+  std::vector<int64_t> src_offsets = {};
+  std::vector<int64_t> dst_offsets = {};
+
+  auto resp_or = controller.TransferBuffers(
+      rpc::MEMORY_TYPE_HBM, rpc::MEMORY_TYPE_DRAM, src_offsets, dst_offsets);
+  EXPECT_FALSE(resp_or.ok());
+  EXPECT_EQ(resp_or.status().code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(
+      resp_or.status().message(),
+      HasSubstr(
+          "Source and destination offsets must have the same non-zero length"));
 }
 
 }  // namespace

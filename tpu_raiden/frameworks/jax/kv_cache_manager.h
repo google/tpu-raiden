@@ -227,7 +227,7 @@ class KVCacheManager {
                  std::optional<int> local_port = std::nullopt,
                  std::optional<int> host_blocks_to_allocate = std::nullopt,
                  bool unsafe_skip_buffer_lock = false, int parallelism = 1,
-                 int grpc_port = 0, bool start_grpc_server = false);
+                 int grpc_port = 0, bool enable_worker_service = false);
 
   // New transfer-enabled constructor (flat list of arrays, single shard per
   // layer)
@@ -235,7 +235,7 @@ class KVCacheManager {
                  int64_t local_control_port, int64_t max_blocks,
                  int64_t num_slots, double timeout_s,
                  bool unsafe_skip_buffer_lock, int parallelism,
-                 int grpc_port = 0, bool start_grpc_server = false);
+                 int grpc_port = 0, bool enable_worker_service = false);
 #endif
 
   // FFI metadata constructor (cache-only by default)
@@ -243,12 +243,12 @@ class KVCacheManager {
                  std::optional<int> local_port,
                  std::optional<int> host_blocks_to_allocate,
                  int parallelism = 1, int grpc_port = 0,
-                 bool start_grpc_server = false);
+                 bool enable_worker_service = false);
 
   // Test-only constructor for sub-manager mock injection
   explicit KVCacheManager(
       std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> sub_managers,
-      int grpc_port = 0, bool start_grpc_server = false);
+      int grpc_port = 0, bool enable_worker_service = false);
 
   ~KVCacheManager();
 
@@ -392,7 +392,7 @@ class KVCacheManager {
   }
 
  private:
-  void StartGrpcServer(int grpc_port, bool start_grpc_server);
+  void StartGrpcServer(int grpc_port, bool enable_worker_service);
 
   std::unique_ptr<NumaAwareKVCacheManager> numa_manager_;
 };

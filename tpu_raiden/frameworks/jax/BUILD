@@ -36,7 +36,6 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        ":mock_nanobind",
         ":utils",
         "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
@@ -51,7 +50,6 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/types:span",
         "@nanobind",
         "@xla//xla/pjrt:pjrt_client",
@@ -80,7 +78,6 @@ cc_library(
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/python/ifrt",
         "@xla//xla/python/pjrt_ifrt",
-        "@xla//xla/tsl/concurrency:ref_count",
     ],
 )
 
@@ -712,6 +709,7 @@ cc_library(
     deps = [
         "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
+        "//tpu_raiden/core:kv_manager_holder",
         "//tpu_raiden/core:metrics_collector",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core:status_macros",
@@ -743,6 +741,11 @@ cc_test(
     deps = [
         ":kv_cache_manager_core_lib",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
+        "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/core/controller:raiden_controller",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
         "@xla//xla/tsl/platform:test",
         "@xla//xla/tsl/platform:test_main",
     ],

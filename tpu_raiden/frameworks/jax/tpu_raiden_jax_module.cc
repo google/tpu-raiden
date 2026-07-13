@@ -113,7 +113,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
            nb::arg("parallelism") = 1, nb::arg("grpc_port") = 0,
-           nb::arg("start_grpc_server") = false)
+           nb::arg("enable_worker_service") = false)
       .def(nb::init<nanobind::list, int64_t, int64_t, int64_t, int64_t, double,
                     bool, int, int, bool>(),
            nb::arg("kv_caches"), nb::arg("node_id") = 0,
@@ -121,7 +121,7 @@ NB_MODULE(_tpu_raiden_jax, m) {
            nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
            nb::arg("unsafe_skip_buffer_lock") = true,
            nb::arg("parallelism") = 4, nb::arg("grpc_port") = 0,
-           nb::arg("start_grpc_server") = false)
+           nb::arg("enable_worker_service") = false)
 
       // Use lambdas to wrap the returned raiden::PjRtCopyFuture into
       // KVCacheManagerFuture

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -20,9 +21,14 @@
 #include <utility>
 #include <vector>
 
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "xla/tsl/platform/test.h"
+#include "tpu_raiden/core/controller/raiden_controller.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
+#include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/frameworks/jax/kv_cache_manager.h"
+#include "tpu_raiden/rpc/raiden_service.pb.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
@@ -49,6 +55,15 @@ class MockSubManager : public KVCacheManagerWithTransfer {
   std::vector<int64_t> started_remote_blocks, started_local_blocks;
   std::vector<StartReadCall> start_read_calls;
 
+  int d2h_calls = 0;
+  int h2d_calls = 0;
+  std::vector<int64_t> last_d2h_src_offsets;
+  std::vector<int64_t> last_d2h_dst_offsets;
+  std::vector<int64_t> last_d2h_copy_sizes;
+  std::vector<int64_t> last_h2d_src_offsets;
+  std::vector<int64_t> last_h2d_dst_offsets;
+  std::vector<int64_t> last_h2d_copy_sizes;
+
   void StartRead(const std::string& req_id, uint64_t uuid,
                  const std::string& remote_endpoint,
                  const std::vector<int64_t>& remote_block_ids,
@@ -71,6 +86,34 @@ class MockSubManager : public KVCacheManagerWithTransfer {
     recving.clear();
     failed.clear();
     return res;
+  }
+
+  absl::StatusOr<raiden::PjRtCopyFuture> D2h(
+      const std::vector<int64_t>& src_offsets_major_dim = {},
+      const std::vector<int64_t>& dst_offsets_major_dim = {},
+      const std::vector<int64_t>& copy_sizes_major_dim = {},
+      std::optional<int64_t> slot_idx = std::nullopt,
+      std::optional<size_t> layer_idx = std::nullopt,
+      std::optional<size_t> shard_idx = std::nullopt) override {
+    d2h_calls++;
+    last_d2h_src_offsets = src_offsets_major_dim;
+    last_d2h_dst_offsets = dst_offsets_major_dim;
+    last_d2h_copy_sizes = copy_sizes_major_dim;
+    return raiden::PjRtCopyFuture();
+  }
+
+  absl::StatusOr<raiden::PjRtCopyFuture> H2d(
+      const std::vector<int64_t>& src_offsets_major_dim = {},
+      const std::vector<int64_t>& dst_offsets_major_dim = {},
+      const std::vector<int64_t>& copy_sizes_major_dim = {},
+      std::optional<int64_t> slot_idx = std::nullopt,
+      std::optional<size_t> layer_idx = std::nullopt,
+      std::optional<size_t> shard_idx = std::nullopt) override {
+    h2d_calls++;
+    last_h2d_src_offsets = src_offsets_major_dim;
+    last_h2d_dst_offsets = dst_offsets_major_dim;
+    last_h2d_copy_sizes = copy_sizes_major_dim;
+    return raiden::PjRtCopyFuture();
   }
 };
 
@@ -270,14 +313,64 @@ TEST(KVCacheManagerWrapperTest, GrpcServerOptionalAndOffByDefault) {
   std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> subs2;
   subs2.push_back(std::make_unique<MockSubManager>());
   KVCacheManager mgr_explicit_off(std::move(subs2), /*grpc_port=*/0,
-                                  /*start_grpc_server=*/false);
+                                  /*enable_worker_service=*/false);
   EXPECT_EQ(mgr_explicit_off.GetGrpcPort(), 0);
 
   std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> subs3;
   subs3.push_back(std::make_unique<MockSubManager>());
   KVCacheManager mgr_started(std::move(subs3), /*grpc_port=*/0,
-                             /*start_grpc_server=*/true);
+                             /*enable_worker_service=*/true);
   EXPECT_GT(mgr_started.GetGrpcPort(), 0);
+}
+
+TEST(KVCacheManagerWrapperTest, RaidenControllerTransferBuffersIntegration) {
+  auto sub0 = std::make_unique<MockSubManager>();
+  MockSubManager* ptr0 = sub0.get();
+
+  std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> subs;
+  subs.push_back(std::move(sub0));
+
+  KVCacheManager mgr(std::move(subs), /*grpc_port=*/0,
+                     /*enable_worker_service=*/true);
+  int port = mgr.GetGrpcPort();
+  ASSERT_GT(port, 0);
+
+  rpc::RaidenIdProto unit;
+  unit.set_job_name("test_job");
+  unit.set_job_replica_id("0");
+  unit.set_data_name("test_data");
+
+  std::string server_address = absl::StrCat("localhost:", port);
+
+  controller::RaidenController controller(unit, server_address,
+                                          /*num_blocks=*/5, /*num_shards=*/1,
+                                          /*shard_size_bytes=*/512);
+
+  std::vector<int64_t> src_offsets = {10, 30};
+  std::vector<int64_t> dst_offsets = {20, 40};
+  std::vector<int64_t> copy_sizes = {1, 2};
+
+  auto resp_d2h_or =
+      controller.TransferBuffers(rpc::MEMORY_TYPE_HBM, rpc::MEMORY_TYPE_DRAM,
+                                 src_offsets, dst_offsets, copy_sizes);
+  ASSERT_TRUE(resp_d2h_or.ok());
+  EXPECT_TRUE(resp_d2h_or->success());
+  EXPECT_EQ(ptr0->d2h_calls, 1);
+  EXPECT_EQ(ptr0->h2d_calls, 0);
+  EXPECT_EQ(ptr0->last_d2h_src_offsets, src_offsets);
+  EXPECT_EQ(ptr0->last_d2h_dst_offsets, dst_offsets);
+  EXPECT_EQ(ptr0->last_d2h_copy_sizes, copy_sizes);
+
+  auto resp_h2d_or =
+      controller.TransferBuffers(rpc::MEMORY_TYPE_DRAM, rpc::MEMORY_TYPE_HBM,
+                                 src_offsets, dst_offsets, copy_sizes);
+  ASSERT_TRUE(resp_h2d_or.ok());
+  EXPECT_TRUE(resp_h2d_or->success());
+  EXPECT_EQ(ptr0->d2h_calls, 1);
+  EXPECT_EQ(ptr0->h2d_calls, 1);
+  EXPECT_EQ(ptr0->last_h2d_src_offsets, src_offsets);
+  EXPECT_EQ(ptr0->last_h2d_dst_offsets, dst_offsets);
+  EXPECT_EQ(ptr0->last_h2d_copy_sizes, copy_sizes);
 }
 
 }  // namespace

@@ -806,22 +806,22 @@ KVCacheManager::KVCacheManager(nb::list device_arrays,
                                std::optional<int> local_port,
                                std::optional<int> host_blocks_to_allocate,
                                bool unsafe_skip_buffer_lock, int parallelism,
-                               int grpc_port, bool start_grpc_server)
+                               int grpc_port, bool enable_worker_service)
     : numa_manager_(std::make_unique<NumaAwareKVCacheManager>(
           std::move(device_arrays), local_port, host_blocks_to_allocate,
           unsafe_skip_buffer_lock, parallelism)) {
-  StartGrpcServer(grpc_port, start_grpc_server);
+  StartGrpcServer(grpc_port, enable_worker_service);
 }
 
 KVCacheManager::KVCacheManager(nanobind::list kv_caches, int64_t node_id,
                                int64_t local_control_port, int64_t max_blocks,
                                int64_t num_slots, double timeout_s,
                                bool unsafe_skip_buffer_lock, int parallelism,
-                               int grpc_port, bool start_grpc_server)
+                               int grpc_port, bool enable_worker_service)
     : numa_manager_(std::make_unique<NumaAwareKVCacheManager>(
           std::move(kv_caches), node_id, local_control_port, max_blocks,
           num_slots, timeout_s, unsafe_skip_buffer_lock, parallelism)) {
-  StartGrpcServer(grpc_port, start_grpc_server);
+  StartGrpcServer(grpc_port, enable_worker_service);
 }
 #endif
 
@@ -830,25 +830,26 @@ KVCacheManager::KVCacheManager(size_t num_layers, size_t num_shards,
                                std::optional<int> local_port,
                                std::optional<int> host_blocks_to_allocate,
                                int parallelism, int grpc_port,
-                               bool start_grpc_server)
+                               bool enable_worker_service)
     : numa_manager_(std::make_unique<NumaAwareKVCacheManager>(
           num_layers, num_shards, slice_byte_size, local_port,
           host_blocks_to_allocate, parallelism)) {
-  StartGrpcServer(grpc_port, start_grpc_server);
+  StartGrpcServer(grpc_port, enable_worker_service);
 }
 
 KVCacheManager::KVCacheManager(
     std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> sub_managers,
-    int grpc_port, bool start_grpc_server)
+    int grpc_port, bool enable_worker_service)
     : numa_manager_(
           std::make_unique<NumaAwareKVCacheManager>(std::move(sub_managers))) {
-  StartGrpcServer(grpc_port, start_grpc_server);
+  StartGrpcServer(grpc_port, enable_worker_service);
 }
 
 KVCacheManager::~KVCacheManager() = default;
 
-void KVCacheManager::StartGrpcServer(int grpc_port, bool start_grpc_server) {
-  if (!start_grpc_server) {
+void KVCacheManager::StartGrpcServer(int grpc_port,
+                                     bool enable_worker_service) {
+  if (!enable_worker_service) {
     return;
   }
   absl::Status status =
