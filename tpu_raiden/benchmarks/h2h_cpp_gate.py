@@ -251,19 +251,11 @@ def _run_cpp(cc, bs, nb, p, port):
 def _emit(tag, value):
   """Emit a scalar to TENSORBOARD_OUTPUT_DIR so BAP ingests it (best-effort)."""
   tbdir = os.environ.get('TENSORBOARD_OUTPUT_DIR')
-  if not tbdir:
-    return
-  try:
-    try:
-      import tensorboardX  # pylint: disable=g-import-not-at-top
-      w = tensorboardX.SummaryWriter(log_dir=tbdir)
-    except ImportError:
-      import torch.utils.tensorboard as tut  # pylint: disable=g-import-not-at-top
-      w = tut.SummaryWriter(log_dir=tbdir)
-    w.add_scalar(tag, value, global_step=0)
-    w.close()
-  except Exception as e:  # pylint: disable=broad-exception-caught
-    print(f'WARNING: TB write failed for {tag}: {e}', file=sys.stderr)
+ 
+  import tensorboardX  # pylint: disable=g-import-not-at-top
+  w = tensorboardX.SummaryWriter(log_dir=tbdir)
+  w.add_scalar(tag, value, global_step=0)
+  w.close()
 
 
 def _core_floor(samples, k, max_margin):
