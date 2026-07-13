@@ -381,7 +381,7 @@ absl::Status KVCacheStoreInternal::LookupAndFetchRemote(
 
   for (size_t idx = 0; idx < lookup_results.size(); ++idx) {
     const auto& meta = lookup_results[idx];
-    std::string peer = meta.host_address();
+    std::string peer = meta.raiden_id().job_name();
     int start_remote_id = meta.block_id();
     int needed = copy_sizes_major_dim[idx];
 
@@ -498,7 +498,7 @@ absl::Status KVCacheStoreInternal::RegisterBlocksInGlobalRegistry(
   for (size_t i = 0; i < block_hashes.size(); ++i) {
     global_registry::Registration meta;
     meta.prefix_hash = std::to_string(block_hashes[i]);
-    meta.host_address = local_address_;
+    meta.raiden_id = RaidenId{.job_name = local_address_};
     meta.block_id = allocated_block_ids[block_idx];
     metadata_list.push_back(std::move(meta));
 

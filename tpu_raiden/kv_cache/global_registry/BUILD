@@ -22,6 +22,7 @@ package(default_visibility = ["//visibility:public"])
 proto_library(
     name = "global_registry_proto",
     srcs = ["global_registry.proto"],
+    deps = ["//tpu_raiden/rpc:raiden_service_proto"],
 )
 
 cc_proto_library(
@@ -44,9 +45,11 @@ cc_library(
     deps = [
         ":global_registry_cc_grpc",
         ":global_registry_cc_proto",
+        "//tpu_raiden/kv_cache:raiden_id",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
     ],
@@ -73,6 +76,7 @@ cc_library(
     deps = [
         ":global_registry_cc_grpc",
         ":global_registry_cc_proto",
+        "//tpu_raiden/kv_cache:raiden_id",
         "@boringssl//:crypto",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/status",
@@ -88,6 +92,7 @@ cc_test(
     deps = [
         ":global_registry_client_cc",
         ":global_registry_server_lib",
+        "//tpu_raiden/kv_cache:raiden_id",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest_main",

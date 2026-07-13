@@ -16,6 +16,8 @@ syntax = "proto3";
 
 package tpu_raiden.kv_cache.global_registry;
 
+import "tpu_raiden/rpc/raiden_service.proto";
+
 option java_multiple_files = true;
 option java_outer_classname = "GlobalRegistry";
 
@@ -37,9 +39,8 @@ service GlobalRegistryService {
 }
 
 message KVBlockMetadata {
-  // String representing the host address. Typically in the format "IP:port" or
-  // "hostname:port". Must uniquely identify the host instance.
-  string host_address = 1;
+  // Logical owner identity.
+  tpu_raiden.rpc.RaidenIdProto raiden_id = 1;
   // Identifier for the cache block on the host. Must be non-negative (>= 0),
   // representing the logical index in the host's physical block allocation
   // pool.
@@ -103,7 +104,7 @@ message LookupResponse {
 
 message UnregisterRequest {
   repeated string prefix_hashes = 1;
-  string host_address = 2;
+  tpu_raiden.rpc.RaidenIdProto raiden_id = 2;
 }
 
 message UnregisterResponse {

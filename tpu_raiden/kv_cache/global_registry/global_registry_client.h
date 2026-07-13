@@ -29,6 +29,7 @@
 #include "grpcpp/channel.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry.grpc.pb.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry.pb.h"
+#include "tpu_raiden/kv_cache/raiden_id.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
@@ -36,7 +37,7 @@ namespace global_registry {
 
 struct Registration {
   std::string prefix_hash;
-  std::string host_address;
+  RaidenId raiden_id;
   int32_t block_id;
   absl::Duration ttl = absl::ZeroDuration();
 };
@@ -61,7 +62,7 @@ class GlobalRegistryClient {
 
   // Unregisters a batch of KV cache entries for a host.
   absl::Status Unregister(const std::vector<std::string>& prefix_hashes,
-                          absl::string_view host_address);
+                          const RaidenId& raiden_id);
 
  private:
   std::unique_ptr<GlobalRegistryService::Stub> stub_;

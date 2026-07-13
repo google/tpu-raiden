@@ -1157,6 +1157,14 @@ void KVCacheManagerBase::RegisterBlockReadinessCallback(
   cb(absl::OkStatus());
 }
 
+absl::Status KVCacheManagerBase::OnBlocksReceived(
+    const std::vector<int>& block_ids, uint64_t uuid) {
+  if (blocks_received_cb_) {
+    blocks_received_cb_(block_ids, uuid);
+  }
+  return absl::OkStatus();
+}
+
 absl::Status KVCacheManagerBase::PushKVCacheResharded(
     const tpu_raiden::rpc::StartTransferRequest& request) {
   // 1. Register the active plan so GetBlockChunks can use it
@@ -1169,10 +1177,7 @@ absl::Status KVCacheManagerBase::PushKVCacheResharded(
             << ": uuid=" << request.uuid() << ", numa=" << numa;
   }
 
-  // 2. D2H to copy from device to host.
-  ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2h());
-
-  // 3. Group entries by dst_peer and collect unique block IDs
+  // 2. Group entries by dst_peer and collect unique block IDs
   std::map<std::string, std::vector<std::pair<int, int>>> peer_transfers;
   for (const auto& [shard_idx, schedule] : request.shard_push_schedules()) {
     for (const auto& entry : schedule.entries()) {
@@ -1181,13 +1186,7 @@ absl::Status KVCacheManagerBase::PushKVCacheResharded(
     }
   }
 
-  d2h_future.OnReady([this, request, peer_transfers, numa](auto status_or) {
-    if (!status_or.ok()) {
-      LOG(ERROR) << "D2H copy failed for resharded push uuid " << request.uuid()
-                 << ": " << status_or.status().ToString();
-      return;
-    }
-
+  auto do_push = [this, request, peer_transfers, numa]() {
     for (size_t l = 0; l < num_layers_; ++l) {
       VLOG(1) << "StartPushInternal (H2H start layer " << l
               << "): uuid=" << request.uuid() << ", numa=" << numa;
@@ -1231,6 +1230,31 @@ absl::Status KVCacheManagerBase::PushKVCacheResharded(
             }
           });
     }
+  };
+
+  if (request.src_mem_type() == tpu_raiden::rpc::MEMORY_TYPE_DRAM ||
+      buffer_holds_.empty()) {
+    VLOG(1) << "Skipping D2H for resharded push uuid " << request.uuid()
+            << " (Src is DRAM or CPU-only manager)";
+    do_push();
+    return absl::OkStatus();
+  }
+
+  for (size_t l = 0; l < num_layers_; ++l) {
+    VLOG(1) << "StartPushInternal (D2H start) layer " << l
+            << ": uuid=" << request.uuid() << ", numa=" << numa;
+  }
+
+  // 3. D2H to copy from device to host.
+  ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2h());
+
+  d2h_future.OnReady([request, do_push](auto status_or) {
+    if (!status_or.ok()) {
+      LOG(ERROR) << "D2H copy failed for resharded push uuid " << request.uuid()
+                 << ": " << status_or.status().ToString();
+      return;
+    }
+    do_push();
   });
 
   return absl::OkStatus();
@@ -1348,8 +1372,21 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
     } else {
       int found_src_shard = -1;
       if (sender_node_id != -1) {
-        found_src_shard = static_cast<int>(sender_node_id);
-      } else {
+        auto it = schedules.find(static_cast<int>(sender_node_id));
+        if (it != schedules.end()) {
+          for (const auto& entry : it->second.entries()) {
+            if (static_cast<size_t>(entry.dst_shard_idx()) == shard_idx &&
+                static_cast<size_t>(entry.dst_block_id()) == block_id &&
+                (src_block_id == -1 ||
+                 static_cast<size_t>(entry.src_block_id()) == src_block_id)) {
+              found_src_shard = static_cast<int>(sender_node_id);
+              break;
+            }
+          }
+        }
+      }
+
+      if (found_src_shard == -1) {
         // If src_block_id is provided, we use it to disambiguate which source
         // block we are receiving. This is crucial for heterogeneous block sizes
         // (merging) where multiple source blocks target the same dst_block_id.

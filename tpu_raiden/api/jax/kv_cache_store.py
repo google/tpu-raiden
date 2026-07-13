@@ -118,6 +118,64 @@ class RaidenBlockID:
     )
 
 
+class RemoteFetchConfig:
+  """Wrapper around compiled C++ RemoteFetchConfig."""
+
+  def __init__(self, impl: Any = None):
+    if impl is not None:
+      self._impl = impl
+    else:
+      self._impl = _impl.RemoteFetchConfig()
+
+  @property
+  def orchestrator_address(self) -> str:
+    return self._impl.orchestrator_address
+
+  @orchestrator_address.setter
+  def orchestrator_address(self, val: str):
+    self._impl.orchestrator_address = val
+
+  @property
+  def controller_port(self) -> int:
+    return self._impl.controller_port
+
+  @controller_port.setter
+  def controller_port(self, val: int):
+    self._impl.controller_port = val
+
+  @property
+  def local_worker_port(self) -> int:
+    return self._impl.local_worker_port
+
+  @local_worker_port.setter
+  def local_worker_port(self, val: int):
+    self._impl.local_worker_port = val
+
+  @property
+  def bytes_per_block(self) -> int:
+    return self._impl.bytes_per_block
+
+  @bytes_per_block.setter
+  def bytes_per_block(self, val: int):
+    self._impl.bytes_per_block = val
+
+  @property
+  def num_shards(self) -> int:
+    return self._impl.num_shards
+
+  @num_shards.setter
+  def num_shards(self, val: int):
+    self._impl.num_shards = val
+
+  @property
+  def num_listeners(self) -> int:
+    return self._impl.num_listeners
+
+  @num_listeners.setter
+  def num_listeners(self, val: int):
+    self._impl.num_listeners = val
+
+
 class KVCacheStore:
   """Wrapper around compiled C++ KVCacheStore."""
 
@@ -126,14 +184,25 @@ class KVCacheStore:
       capacity: int,
       global_registry_address: str = "",
       raiden_id: RaidenId | None = None,
+      remote_config: Any | None = None,
   ):
     raw_raiden_id = _impl.RaidenId()
     if raiden_id is not None:
       raw_raiden_id = raiden_id._impl  # pylint: disable=protected-access
+
+    raw_remote_config = None
+    if remote_config is not None:
+      # Assuming remote_config is RemoteFetchConfig wrapper or raw impl
+      if hasattr(remote_config, "_impl"):
+        raw_remote_config = remote_config._impl
+      else:
+        raw_remote_config = remote_config  # If it is directly the _impl type
+
     self._impl = _impl.KVCacheStore(
         capacity=capacity,
         global_registry_address=global_registry_address,
         raiden_id=raw_raiden_id,
+        remote_config=raw_remote_config,
     )
 
   @property
@@ -305,3 +374,17 @@ class KVCacheStore:
   def release(self, block_hashes: list[bytes]) -> None:
     """Releases previously pinned block hashes, making them eligible for LRU eviction when capacity is exceeded."""
     self._impl.release(block_hashes)
+
+  def fetch_remote(self, block_hashes: list[bytes]) -> dict[bytes, Any]:
+    """Initiates remote fetch for the given block hashes."""
+    # We return the raw _impl futures for now, or we could wrap them if needed.
+    return self._impl.fetch_remote(block_hashes)
+
+  def poll_fetch_remote_status(
+      self,
+  ) -> tuple[list[bytes], list[bytes], list[bytes]]:
+    """Polls the status of remote fetches.
+
+    Returns (done, failed, pending) block hashes.
+    """
+    return self._impl.poll_fetch_remote_status()

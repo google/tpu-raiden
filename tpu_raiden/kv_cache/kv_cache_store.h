@@ -17,17 +17,22 @@
 
 #include <cstdint>
 #include <memory>
+#include <queue>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/synchronization/notification.h"
 #include "absl/types/span.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/kv_cache/lru_cache.h"
+#include "tpu_raiden/kv_cache/raiden_id.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
@@ -35,22 +40,6 @@ namespace kv_cache {
 namespace global_registry {
 class GlobalRegistryClient;
 }
-
-// Represents a microservice slice identifier / entity address hosting a replica
-// of a Key-Value cache block.
-struct RaidenId {
-  std::string job_name;
-  std::string job_replica_id;
-  std::string data_name;
-  int data_replica_idx = 0;
-
-  bool operator==(const RaidenId& other) const {
-    return job_name == other.job_name &&
-           job_replica_id == other.job_replica_id &&
-           data_name == other.data_name &&
-           data_replica_idx == other.data_replica_idx;
-  }
-};
 
 enum class BlockStatus {
   INIT,
@@ -78,18 +67,128 @@ struct RaidenBlockID {
 using BlockSliceList =
     std::vector<std::pair<std::string, std::vector<RaidenBlockID>>>;
 
+struct FetchRequestItem {
+  RaidenId src_raiden_id;
+  std::vector<std::string> block_hashes;
+  std::vector<int> dst_block_ids;
+};
+
+using FetchRequest = std::vector<FetchRequestItem>;
+
+struct FetchCompletionItem {
+  std::string block_hash;
+  int host_block_id;
+  bool success;
+  std::string error_message;
+};
+
+using FetchCompletion = std::vector<FetchCompletionItem>;
+
+template <typename T>
+class ThreadSafeQueue {
+ public:
+  ThreadSafeQueue() = default;
+  ~ThreadSafeQueue() = default;
+
+  ThreadSafeQueue(const ThreadSafeQueue&) = delete;
+  ThreadSafeQueue& operator=(const ThreadSafeQueue&) = delete;
+
+  void Push(T item) {
+    absl::MutexLock lock(&mutex_);
+    queue_.push(std::move(item));
+    cond_.Signal();
+  }
+
+  bool Pop(T& item) {
+    absl::MutexLock lock(&mutex_);
+    while (queue_.empty() && !stopping_) {
+      cond_.Wait(&mutex_);
+    }
+    if (stopping_ && queue_.empty()) {
+      return false;
+    }
+    item = std::move(queue_.front());
+    queue_.pop();
+    return true;
+  }
+
+  bool Empty() const {
+    absl::MutexLock lock(&mutex_);
+    return queue_.empty();
+  }
+
+  void Stop() {
+    absl::MutexLock lock(&mutex_);
+    stopping_ = true;
+    cond_.SignalAll();
+  }
+
+ private:
+  mutable absl::Mutex mutex_;
+  std::queue<T> queue_ ABSL_GUARDED_BY(mutex_);
+  absl::CondVar cond_;
+  bool stopping_ = false;
+};
+
+using FetchWorkQueue = ThreadSafeQueue<FetchRequest>;
+using FetchCompletionQueue = ThreadSafeQueue<FetchCompletion>;
+
+class RaidenControllerEmbedded;
+
+struct RemoteFetchConfig {
+  std::string orchestrator_address;
+  int controller_port = 0;
+  int local_worker_port = 0;
+  size_t bytes_per_block = 0;
+  size_t num_shards = 0;
+  size_t num_listeners = 1;
+};
+
 // KV Store that manages the indices and routing of prefix cache across serving
 // nodes and microservice slices.
 class KVCacheStore {
  public:
-  explicit KVCacheStore(size_t capacity,
-                        std::string global_registry_address = "",
-                        RaidenId raiden_id = {});
+  struct FetchState {
+    uint64_t fetch_id;
+    std::string block_hash;
+    absl::flat_hash_set<int> pending_blocks;
+    bool failed = false;
+    std::string error_message;
+    absl::Notification notification;
+  };
+
+  class FetchFuture {
+   public:
+    FetchFuture() = default;
+    explicit FetchFuture(std::shared_ptr<FetchState> state)
+        : state_(std::move(state)) {}
+
+    absl::Status Await();
+    bool IsDone() const;
+
+   private:
+    std::shared_ptr<FetchState> state_;
+  };
+
+  explicit KVCacheStore(
+      size_t capacity, std::string global_registry_address = "",
+      RaidenId raiden_id = {},
+      std::optional<RemoteFetchConfig> remote_config = std::nullopt);
 
   ~KVCacheStore();
 
   KVCacheStore(const KVCacheStore&) = delete;
   KVCacheStore& operator=(const KVCacheStore&) = delete;
+
+  // Dedicated Fetch function to trigger remote fetching.
+  absl::flat_hash_map<std::string, FetchFuture> FetchRemote(
+      const std::vector<std::string>& block_hashes);
+
+  // Polls the status of all active fetches.
+  // Returns {done_block_hashes, failed_block_hashes, pending_block_hashes}
+  std::tuple<std::vector<std::string>, std::vector<std::string>,
+             std::vector<std::string>>
+  PollFetchRemoteStatus();
 
   // Authoritative KVCacheStore API implementations
 
@@ -151,12 +250,35 @@ class KVCacheStore {
 
   const RaidenId& raiden_id() const { return raiden_id_; }
 
+  // Fetch Queue Accessors
+  bool PopFetchWork(FetchRequest& req) { return work_queue_.Pop(req); }
+  void PushFetchCompletion(FetchCompletion completion) {
+    completion_queue_.Push(std::move(completion));
+  }
+  void PushFetchWork(FetchRequest req) { work_queue_.Push(std::move(req)); }
+  bool PopFetchCompletion(FetchCompletion& completion) {
+    return completion_queue_.Pop(completion);
+  }
+
  private:
   mutable absl::Mutex mutex_;
   mutable LRUCache<std::string, std::vector<RaidenBlockID>> lru_cache_
       ABSL_GUARDED_BY(mutex_);
-  std::unique_ptr<global_registry::GlobalRegistryClient> registry_client_;
+  std::shared_ptr<global_registry::GlobalRegistryClient> registry_client_;
   RaidenId raiden_id_;
+  FetchWorkQueue work_queue_;
+  FetchCompletionQueue completion_queue_;
+  std::unique_ptr<RaidenControllerEmbedded> controller_;
+  void CompletionPollerLoop();
+  std::thread completion_poller_thread_;
+
+  mutable absl::Mutex fetch_mu_;
+  uint64_t next_fetch_id_ ABSL_GUARDED_BY(fetch_mu_) = 1;
+  absl::flat_hash_map<uint64_t, std::shared_ptr<FetchState>> active_fetches_
+      ABSL_GUARDED_BY(fetch_mu_);
+  absl::flat_hash_map<int, uint64_t> block_to_fetch_ ABSL_GUARDED_BY(fetch_mu_);
+  std::vector<std::string> done_fetches_ ABSL_GUARDED_BY(fetch_mu_);
+  std::vector<std::string> failed_fetches_ ABSL_GUARDED_BY(fetch_mu_);
 };
 
 }  // namespace kv_cache
