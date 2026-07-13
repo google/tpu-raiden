@@ -38,6 +38,15 @@ py_library(
 )
 
 py_library(
+    name = "kv_cache_manager_host_py",
+    srcs = ["kv_cache_manager_host.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tpu_raiden/frameworks/torch:_tpu_raiden_host",
+    ],
+)
+
+py_library(
     name = "weight_synchronizer_torch_py",
     srcs = ["weight_synchronizer.py"],
     visibility = ["//visibility:public"],

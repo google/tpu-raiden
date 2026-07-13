@@ -36,7 +36,7 @@ py_binary(
     srcs = ["reshard_stage1_e2e.py"],
     main = "reshard_stage1_e2e.py",
     deps = [
-        "//tpu_raiden/experimental:kv_cache_manager_host_py",
+        "//tpu_raiden/api/torch:kv_cache_manager_host_py",
         "//tpu_raiden/rpc:raiden_service_py_pb2",
     ],
 )
@@ -50,7 +50,7 @@ py_test(
         "notap",
     ],
     deps = [
-        "//tpu_raiden/experimental:kv_cache_manager_host_py",
+        "//tpu_raiden/api/torch:kv_cache_manager_host_py",
         "//tpu_raiden/rpc:raiden_service_py_pb2",
         "@com_google_absl_py//absl/testing:absltest",
     ],
