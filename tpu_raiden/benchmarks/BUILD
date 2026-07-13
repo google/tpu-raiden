@@ -60,6 +60,7 @@ py_binary(
         "//examples/microbenchmarks:h2h_benchmark_runner",
     ],
     deps = [
+        "@pypi//tensorboardx",
         "@com_google_absl_py//absl:app",
         "@com_google_absl_py//absl/flags",
     ],
