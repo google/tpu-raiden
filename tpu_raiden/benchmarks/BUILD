@@ -15,6 +15,12 @@
 
 load("@rules_python//python:defs.bzl", "py_binary", "py_library")
 
+py_library(
+    name = "bap_metrics",
+    testonly = True,
+    srcs = ["bap_metrics.py"],
+    deps = ["@pypi//tensorflow"],
+)
 
 py_library(
     name = "perf_core",
@@ -23,21 +29,20 @@ py_library(
     deps = [
         "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
         "@jax//jax",
-        "@pypi//numpy",
         "@pypi//libtpu",
+        "@pypi//numpy",
     ],
 )
-
 
 py_binary(
     name = "h2d_d2h_perf_test",
     testonly = True,
     srcs = ["h2d_d2h_perf_test.py"],
     deps = [
+        ":bap_metrics",
         ":perf_core",
         "@com_google_absl_py//absl:app",
         "@com_google_absl_py//absl/flags",
-        ":bap_metrics",
     ],
 )
 
@@ -47,10 +52,10 @@ py_binary(
     srcs = ["h2d_d2h_benchmark_gating.py"],
     data = ["h2d_d2h_gating_baselines.json"],
     deps = [
+        ":bap_metrics",
         ":perf_core",
         "@com_google_absl_py//absl:app",
         "@com_google_absl_py//absl/flags",
-        ":bap_metrics",
     ],
 )
 
@@ -62,15 +67,8 @@ py_binary(
         "//examples/microbenchmarks:h2h_benchmark_runner",
     ],
     deps = [
+        ":bap_metrics",
         "@com_google_absl_py//absl:app",
         "@com_google_absl_py//absl/flags",
-        ":bap_metrics",
     ],
-)
-
-py_library(
-    name = "bap_metrics",
-    testonly = True,
-    srcs = ["bap_metrics.py"],
-    deps = ["@pypi//tensorflow"],     
 )
