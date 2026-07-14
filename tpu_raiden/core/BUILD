@@ -43,6 +43,22 @@ cc_library(
 )
 
 cc_library(
+    name = "buffer",
+    hdrs = [
+        "buffer.h",
+    ],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
     name = "raiden_manager_base",
     srcs = [
         "raiden_manager_base.cc",
@@ -324,6 +340,21 @@ cc_test(
         "@xla//xla/tsl/platform:statusor",
         "@xla//xla/tsl/platform:test",
         "@xla//xla/tsl/platform:test_main",
+    ],
+)
+
+cc_test(
+    name = "buffer_test",
+    srcs = ["buffer_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":buffer",
+        "@com_google_absl//absl/types:span",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 
