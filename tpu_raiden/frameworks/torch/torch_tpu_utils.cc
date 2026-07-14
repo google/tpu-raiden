@@ -21,6 +21,7 @@
 #include "ATen/core/TensorBody.h"
 #include "torch/headeronly/core/DeviceType.h"
 
+#include "torch_tpu/eager/materialize.h"
 #include "torch_tpu/eager/structured_log_buffer.h"
 #include "torch_tpu/eager/tensor_to_buffer.h"
 
@@ -77,6 +78,15 @@ UnpackedTensor UnpackTorchTensor(const at::Tensor& tensor) {
     throw std::invalid_argument(
         "Tensor does not span its entire base storage buffer; raw transfer "
         "requires a full reinterpret of the storage, not a partial view.");
+  }
+
+  // Materialize deferred tensor so AwaitBuffer() won't hang. No-op if already
+  // materialized.
+  if (auto status = torch_tpu::Materialize(
+          base_ref, torch_tpu::MaterializationReason::kExplicitSync);
+      !status.ok()) {
+    throw std::runtime_error("Failed to materialize base device buffer: " +
+                             std::string(status.message()));
   }
 
   auto status_or_buf = base_ref.AwaitBuffer();
