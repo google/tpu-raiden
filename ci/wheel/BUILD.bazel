@@ -83,7 +83,6 @@ JAX_DEPS = [
     "//tpu_raiden/frameworks/jax:_kv_cache_manager_ffi",
     "//tpu_raiden/frameworks/jax:_weight_synchronizer_ffi",
     "//tpu_raiden/frameworks/jax:weight_synchronizer_ffi_py",
-    "//tpu_raiden/frameworks/jax:resharding_engine",
     "//tpu_raiden/frameworks/jax:resharding_planner",
     "//tpu_raiden/frameworks/jax:jax_test_utils",
     "//tpu_raiden/api/jax:kv_cache_manager_jax_py",

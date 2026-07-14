@@ -545,51 +545,11 @@ py_library(
     ],
 )
 
-py_library(
-    name = "resharding_engine",
-    srcs = ["resharding_engine.py"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":resharding_planner",
-        ":weight_synchronizer_ffi_py",
-        "//tpu_raiden/rpc:coordination_helper",
-        "@jax//jax",
-        "@pypi//numpy",
-    ],
-)
-
-py_library(
-    name = "resharding_test_lib",
-    srcs = ["resharding_test_lib.py"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":resharding_planner",
-        "@jax//jax",
-        "@pypi//numpy",
-    ],
-)
-
 py_test(
     name = "resharding_planner_test",
     srcs = ["resharding_planner_test.py"],
     deps = [
         ":resharding_planner",
-        "@com_google_absl_py//absl/testing:absltest",
-        "@jax//jax",
-        "@pypi//numpy",
-    ],
-)
-
-py_test(
-    name = "resharding_test",
-    srcs = ["resharding_test.py"],
-    tags = [
-        "manual",
-        "notap",
-    ],
-    deps = [
-        ":resharding_engine",
-        ":resharding_test_lib",
         "@com_google_absl_py//absl/testing:absltest",
         "@jax//jax",
         "@pypi//numpy",
