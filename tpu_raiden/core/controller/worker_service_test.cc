@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -40,6 +41,8 @@ using ::testing::HasSubstr;
 struct MockTransferManager {
   int d2h_calls = 0;
   int h2d_calls = 0;
+  int h2h_calls = 0;
+  std::string last_peer;
   std::vector<int64_t> last_src_offsets;
   std::vector<int64_t> last_dst_offsets;
   std::vector<int64_t> last_copy_sizes;
@@ -64,6 +67,17 @@ struct MockTransferManager {
     last_dst_offsets = dst_offsets;
     last_copy_sizes = copy_sizes;
     return raiden::PjRtCopyFuture();
+  }
+
+  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hWrite(
+      std::string peer, const std::vector<int>& src_block_ids,
+      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
+      int layer_idx = -1) {
+    h2h_calls++;
+    last_peer = peer;
+    last_src_offsets.assign(src_block_ids.begin(), src_block_ids.end());
+    last_dst_offsets.assign(dst_block_ids.begin(), dst_block_ids.end());
+    return std::make_pair(std::vector<int>{}, raiden::PjRtCopyFuture());
   }
 };
 
@@ -146,20 +160,87 @@ TEST_F(WorkerServiceTest, DeleteNonExistentBufferFails) {
   EXPECT_THAT(delete_resp_or->message(), HasSubstr("not found"));
 }
 
-TEST_F(WorkerServiceTest, TransferBuffersDramToDramFails) {
+TEST_F(WorkerServiceTest, TransferBuffersH2hSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
   proto::TransferBuffersRequest transfer_req;
   auto* transfer = transfer_req.mutable_transfer();
   transfer->set_src_mem_type(rpc::MEMORY_TYPE_DRAM);
   transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
-  transfer->add_src_offsets(0);
-  transfer->add_dst_offsets(0);
+  transfer->add_src_offsets(10);
+  transfer->add_dst_offsets(20);
+  transfer->set_peer("localhost:8080");
+
+  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
+  ASSERT_TRUE(transfer_resp_or.ok());
+  EXPECT_TRUE(transfer_resp_or->success());
+  EXPECT_EQ(transfer_resp_or->message(), "Buffers transferred successfully");
+  EXPECT_EQ(mock_mgr.d2h_calls, 0);
+  EXPECT_EQ(mock_mgr.h2d_calls, 0);
+  EXPECT_EQ(mock_mgr.h2h_calls, 1);
+  EXPECT_EQ(mock_mgr.last_peer, "localhost:8080");
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(10));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(20));
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersH2hMissingPeerFails) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->add_src_offsets(10);
+  transfer->add_dst_offsets(20);
 
   auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
   ASSERT_TRUE(transfer_resp_or.ok());
   EXPECT_FALSE(transfer_resp_or->success());
   EXPECT_THAT(transfer_resp_or->message(),
-              HasSubstr("Only device to host (D2H) and host to device (H2D) "
-                        "transfers are currently supported"));
+              HasSubstr("Peer address must be provided"));
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersH2hInvalidCopySizeFails) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->add_src_offsets(10);
+  transfer->add_dst_offsets(20);
+  transfer->add_copy_sizes(2);
+  transfer->set_peer("localhost:8080");
+
+  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
+  ASSERT_TRUE(transfer_resp_or.ok());
+  EXPECT_FALSE(transfer_resp_or->success());
+  EXPECT_THAT(transfer_resp_or->message(),
+              HasSubstr("H2H transfers only support copy size of 1"));
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersH2hOverflowFails) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->add_src_offsets(2147483648L);
+  transfer->add_dst_offsets(20);
+  transfer->set_peer("localhost:8080");
+
+  auto transfer_resp_or = test_server_->client->TransferBuffers(transfer_req);
+  ASSERT_TRUE(transfer_resp_or.ok());
+  EXPECT_FALSE(transfer_resp_or->success());
+  EXPECT_THAT(
+      transfer_resp_or->message(),
+      HasSubstr(
+          "H2H transfer dispatch failed: Offset 2147483648 overflows int"));
 }
 
 TEST_F(WorkerServiceTest, TransferBuffersWithoutTransferManagerFails) {

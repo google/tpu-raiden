@@ -105,6 +105,8 @@ message TransferBufferSpec {
   tpu_raiden.rpc.MemoryType src_mem_type = 4;
   // Memory type of the destination buffer (e.g., DRAM for D2H, HBM for H2D).
   tpu_raiden.rpc.MemoryType dst_mem_type = 5;
+  // Optional peer address for H2H transfers.
+  string peer = 6;
 }
 
 // Request to transfer data across memory spaces on a transfer worker.

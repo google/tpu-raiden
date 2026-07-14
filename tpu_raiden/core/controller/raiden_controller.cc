@@ -182,7 +182,8 @@ RaidenController::TransferBuffers(rpc::MemoryType src_mem_type,
                                   rpc::MemoryType dst_mem_type,
                                   absl::Span<const int64_t> src_offsets,
                                   absl::Span<const int64_t> dst_offsets,
-                                  absl::Span<const int64_t> copy_sizes) {
+                                  absl::Span<const int64_t> copy_sizes,
+                                  absl::string_view peer) {
   if (!client_) {
     return absl::FailedPreconditionError(
         "WorkerServiceClient is not initialized");
@@ -202,6 +203,9 @@ RaidenController::TransferBuffers(rpc::MemoryType src_mem_type,
   transfer->mutable_src_offsets()->Add(src_offsets.begin(), src_offsets.end());
   transfer->mutable_dst_offsets()->Add(dst_offsets.begin(), dst_offsets.end());
   transfer->mutable_copy_sizes()->Add(copy_sizes.begin(), copy_sizes.end());
+  if (!peer.empty()) {
+    transfer->set_peer(std::string(peer));
+  }
   return client_->TransferBuffers(request);
 }
 

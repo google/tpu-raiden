@@ -23,6 +23,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "grpcpp/channel.h"
@@ -78,7 +79,7 @@ class RaidenController {
       rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
       absl::Span<const int64_t> src_offsets,
       absl::Span<const int64_t> dst_offsets,
-      absl::Span<const int64_t> copy_sizes = {});
+      absl::Span<const int64_t> copy_sizes = {}, absl::string_view peer = "");
 
   // Accessors for state inspection and testing.
   const rpc::RaidenIdProto& unit() const { return unit_; }

@@ -49,6 +49,11 @@ bool IsH2D(const proto::TransferBufferSpec& transfer) {
          transfer.dst_mem_type() == rpc::MEMORY_TYPE_HBM;
 }
 
+bool IsH2H(const proto::TransferBufferSpec& transfer) {
+  return transfer.src_mem_type() == rpc::MEMORY_TYPE_DRAM &&
+         transfer.dst_mem_type() == rpc::MEMORY_TYPE_DRAM;
+}
+
 }  // namespace
 
 WorkerServiceImpl::WorkerServiceImpl(
@@ -122,12 +127,28 @@ grpc::Status WorkerServiceImpl::TransferBuffers(
   const auto& transfer = request->transfer();
   bool is_d2h = IsD2H(transfer);
   bool is_h2d = IsH2D(transfer);
-  if (!is_d2h && !is_h2d) {
+  bool is_h2h = IsH2H(transfer);
+  if (!is_d2h && !is_h2d && !is_h2h) {
     response->set_success(false);
     response->set_message(
-        "Only device to host (D2H) and host to device (H2D) transfers are "
+        "Only D2H, H2D, and H2H (DRAM to DRAM) transfers are "
         "currently supported");
     return grpc::Status::OK;
+  }
+  if (is_h2h && transfer.peer().empty()) {
+    response->set_success(false);
+    response->set_message("Peer address must be provided for H2H transfers");
+    return grpc::Status::OK;
+  }
+  if (is_h2h && transfer.copy_sizes_size() > 0) {
+    for (int64_t size : transfer.copy_sizes()) {
+      if (size != 1) {
+        response->set_success(false);
+        response->set_message(
+            "H2H transfers only support copy size of 1 per segment");
+        return grpc::Status::OK;
+      }
+    }
   }
   if (transfer.src_offsets_size() == 0 ||
       transfer.src_offsets_size() != transfer.dst_offsets_size()) {
@@ -166,13 +187,16 @@ grpc::Status WorkerServiceImpl::TransferBuffers(
   absl::StatusOr<raiden::PjRtCopyFuture> future_or;
   if (is_d2h) {
     future_or = transfer_manager_.D2h(src_offsets, dst_offsets, copy_sizes);
-  } else {
+  } else if (is_h2d) {
     future_or = transfer_manager_.H2d(src_offsets, dst_offsets, copy_sizes);
+  } else {
+    future_or =
+        transfer_manager_.H2hWrite(transfer.peer(), src_offsets, dst_offsets);
   }
   if (!future_or.ok()) {
     response->set_success(false);
     response->set_message(absl::StrCat(
-        is_d2h ? "D2H" : "H2D",
+        is_d2h ? "D2H" : (is_h2d ? "H2D" : "H2H"),
         " transfer dispatch failed: ", future_or.status().message()));
     return grpc::Status::OK;
   }

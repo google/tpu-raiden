@@ -17,12 +17,17 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
+#include "tpu_raiden/core/status_macros.h"
 
 namespace tpu_raiden {
 
@@ -41,6 +46,9 @@ class KVManagerHolder {
         const std::vector<int64_t>& src_offsets,
         const std::vector<int64_t>& dst_offsets,
         const std::vector<int64_t>& copy_sizes) = 0;
+    virtual absl::StatusOr<raiden::PjRtCopyFuture> H2hWrite(
+        absl::string_view peer, const std::vector<int64_t>& src_offsets,
+        const std::vector<int64_t>& dst_offsets) = 0;
   };
 
   template <typename T>
@@ -59,8 +67,31 @@ class KVManagerHolder {
         const std::vector<int64_t>& copy_sizes) override {
       return impl_->H2d(src_offsets, dst_offsets, copy_sizes);
     }
+    absl::StatusOr<raiden::PjRtCopyFuture> H2hWrite(
+        absl::string_view peer, const std::vector<int64_t>& src_offsets,
+        const std::vector<int64_t>& dst_offsets) override {
+      ASSIGN_OR_RETURN(std::vector<int> src_ids, SafeCastOffsets(src_offsets));
+      ASSIGN_OR_RETURN(std::vector<int> dst_ids, SafeCastOffsets(dst_offsets));
+      ASSIGN_OR_RETURN(auto res,
+                       impl_->H2hWrite(std::string(peer), src_ids, dst_ids));
+      return res.second;
+    }
 
    private:
+    absl::StatusOr<std::vector<int>> SafeCastOffsets(
+        const std::vector<int64_t>& offsets) {
+      std::vector<int> ids;
+      ids.reserve(offsets.size());
+      for (int64_t offset : offsets) {
+        if (offset < std::numeric_limits<int>::min() ||
+            offset > std::numeric_limits<int>::max()) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("Offset ", offset, " overflows int"));
+        }
+        ids.push_back(static_cast<int>(offset));
+      }
+      return ids;
+    }
     T* impl_;
   };
 
@@ -90,6 +121,15 @@ class KVManagerHolder {
       return absl::InternalError("KVManagerHolder is null");
     }
     return self_->H2d(src_offsets, dst_offsets, copy_sizes);
+  }
+
+  absl::StatusOr<raiden::PjRtCopyFuture> H2hWrite(
+      absl::string_view peer, const std::vector<int64_t>& src_offsets,
+      const std::vector<int64_t>& dst_offsets) const {
+    if (!self_) {
+      return absl::InternalError("KVManagerHolder is null");
+    }
+    return self_->H2hWrite(peer, src_offsets, dst_offsets);
   }
 
   explicit operator bool() const { return self_ != nullptr; }
