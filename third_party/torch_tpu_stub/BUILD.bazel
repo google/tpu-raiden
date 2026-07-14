@@ -1,0 +1,4 @@
+# Empty stub package for the torch_tpu Bazel module.
+# Lets JAX-only / OSS builds resolve the torch_tpu bazel_dep without the real
+# (not-yet-public) torch_tpu source. The benchmark targets are pure JAX and
+# reference no @torch_tpu// targets, so an empty package is sufficient.

@@ -1,0 +1,27 @@
+{
+  "sigma_k": 3.5,
+  "iters": 20,
+  "warmup": 3,
+  "configs": [
+    {
+      "dtype": "int32",
+      "num_layers": 1,
+      "shape": [8, 128, 1024, 128],
+      "shard_axis": 2,
+      "baseline_d2h": 835.4,
+      "baseline_h2d": 800.1,
+      "floor_d2h": 813.8,
+      "floor_h2d": 750.7
+    },
+    {
+      "dtype": "float32",
+      "num_layers": 1,
+      "shape": [8, 128, 1024, 128],
+      "shard_axis": 2,
+      "baseline_d2h": 849.0,
+      "baseline_h2d": 810.9,
+      "floor_d2h": 815.7,
+      "floor_h2d": 789.9
+    }
+  ]
+}
