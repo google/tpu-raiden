@@ -25,7 +25,6 @@ py_library(
         "@jax//jax",
         "@pypi//numpy",
         "@pypi//libtpu",
-        ":bap_metrics",
     ],
 )
 
@@ -65,6 +64,7 @@ py_binary(
     deps = [
         "@com_google_absl_py//absl:app",
         "@com_google_absl_py//absl/flags",
+        ":bap_metrics",
     ],
 )
 
