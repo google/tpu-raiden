@@ -25,6 +25,16 @@
 
 namespace tpu_raiden {
 namespace torch {
+namespace {
+
+bool SameLogicalMetadata(const UnpackedTensors& out,
+                         const UnpackedTensor& tensor) {
+  return out.logical_dimensions == tensor.logical_dimensions &&
+         out.logical_slice_byte_size == tensor.logical_slice_byte_size &&
+         out.logical_physical_size == tensor.logical_physical_size;
+}
+
+}  // namespace
 
 UnpackedTensors UnpackTorchTensors(
     const std::vector<std::vector<at::Tensor>>& device_tensors) {
@@ -34,6 +44,7 @@ UnpackedTensors UnpackTorchTensors(
 
   size_t num_shards = device_tensors[0].size();
   out.buffers.reserve(num_layers);
+  bool logical_metadata_mismatch = false;
 
   for (size_t l = 0; l < num_layers; ++l) {
     if (device_tensors[l].size() != num_shards) {
@@ -45,6 +56,22 @@ UnpackedTensors UnpackTorchTensors(
     shard_buffers.reserve(num_shards);
     for (size_t sh = 0; sh < num_shards; ++sh) {
       UnpackedTensor unpacked = UnpackTorchTensor(device_tensors[l][sh]);
+      if (!logical_metadata_mismatch && unpacked.logical_slice_byte_size > 0 &&
+          unpacked.logical_physical_size > 0 &&
+          !unpacked.logical_dimensions.empty()) {
+        if (!out.has_logical_metadata) {
+          out.logical_dimensions = unpacked.logical_dimensions;
+          out.logical_slice_byte_size = unpacked.logical_slice_byte_size;
+          out.logical_physical_size = unpacked.logical_physical_size;
+          out.has_logical_metadata = true;
+        } else if (!SameLogicalMetadata(out, unpacked)) {
+          out.has_logical_metadata = false;
+          out.logical_dimensions.clear();
+          out.logical_slice_byte_size = 0;
+          out.logical_physical_size = 0;
+          logical_metadata_mismatch = true;
+        }
+      }
       shard_buffers.push_back(unpacked.buffer);
       // Retain every owning ref so view-materialized buffers survive for the
       // lifetime of `out.refs`. (The test mock returns no ref -- nullopt --

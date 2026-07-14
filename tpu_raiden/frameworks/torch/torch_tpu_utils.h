@@ -15,7 +15,10 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_TORCH_TORCH_TPU_UTILS_TORCH_TPU_UTILS_H_
 #define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_TORCH_TORCH_TPU_UTILS_TORCH_TPU_UTILS_H_
 
+#include <cstddef>
+#include <cstdint>
 #include <optional>
+#include <vector>
 
 #include "ATen/core/TensorBody.h"
 #include "torch_tpu/eager/device_buffer.h"
@@ -33,6 +36,9 @@ namespace torch {
 struct UnpackedTensor {
   xla::PjRtBuffer* buffer = nullptr;
   std::optional<torch_tpu::DeviceBufferRef> ref;
+  std::vector<int64_t> logical_dimensions;
+  size_t logical_slice_byte_size = 0;
+  size_t logical_physical_size = 0;
 };
 
 // Unpacks a single PyTorch tensor into its materialized PjRtBuffer AND the

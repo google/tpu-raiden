@@ -107,19 +107,30 @@ KVCacheManagerBase::KVCacheManagerBase(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     bool unsafe_skip_buffer_lock, int parallelism,
-    HostBufferAllocator host_allocator, std::optional<std::string> bind_ip)
-    : RaidenManagerBase(layer_buffers.size(),
-                        layer_buffers.empty() ? 0 : layer_buffers[0].size(),
-                        layer_buffers.empty() ? 0
-                                              : raiden::GetMajorSliceByteSize(
-                                                    layer_buffers[0][0]),
-                        local_port, parallelism, bind_ip),
+    HostBufferAllocator host_allocator, std::optional<std::string> bind_ip,
+    std::optional<size_t> logical_slice_byte_size,
+    std::vector<int64_t> logical_dimensions,
+    std::optional<size_t> logical_physical_size,
+    std::optional<int> assigned_numa_node_override)
+    : RaidenManagerBase(
+          layer_buffers.size(),
+          layer_buffers.empty() ? 0 : layer_buffers[0].size(),
+          logical_slice_byte_size.has_value()
+              ? *logical_slice_byte_size
+              : (layer_buffers.empty()
+                     ? 0
+                     : raiden::GetMajorSliceByteSize(layer_buffers[0][0])),
+          local_port, parallelism, bind_ip),
       host_allocator_(host_allocator) {
   if (num_layers_ == 0 || num_shards_ == 0) {
     return;
   }
 
-  DetectAndAssignNumaNode(layer_buffers);
+  if (assigned_numa_node_override.has_value()) {
+    assigned_numa_node_ = *assigned_numa_node_override;
+  } else {
+    DetectAndAssignNumaNode(layer_buffers);
+  }
 
   xla::PjRtBuffer* first_buffer = layer_buffers[0][0];
   const xla::Shape& shape = first_buffer->on_device_shape();
@@ -134,7 +145,9 @@ KVCacheManagerBase::KVCacheManagerBase(
 
   int num_host_blocks = host_blocks_to_allocate.value_or(64);
   host_block_manager_ = std::make_unique<LogicalBlockManager>(num_host_blocks);
-  if (!shape.dimensions().empty()) {
+  if (!logical_dimensions.empty()) {
+    major_dim_size_ = logical_dimensions[0];
+  } else if (!shape.dimensions().empty()) {
     major_dim_size_ = shape.dimensions(0);
   }
   semaphore_ = std::make_unique<xla::Semaphore>(std::max<int>(4, parallelism));
@@ -723,6 +736,12 @@ void KVCacheManagerBase::SetExternalHostBuffer(
       }
     }
   }
+  // Host geometry changed: drop any lazily built implicit pools so the next
+  // pool access rebuilds them against the new buffers.
+  absl::MutexLock l(pools_mu_);
+  if (!explicit_pools_) {
+    pools_.clear();
+  }
 }
 
 absl::Status KVCacheManagerBase::H2dDirect(
@@ -945,6 +964,249 @@ absl::StatusOr<KVCacheHostSpan> KVCacheManagerBase::HostSpan(
 }
 
 size_t KVCacheManagerBase::bytes_per_block() const { return slice_byte_size_; }
+
+int64_t KVCacheManagerBase::LayerBlockByteSize(size_t layer_idx) const {
+  if (layer_idx >= num_layers_) {
+    return -1;
+  }
+  if (layer_idx < buffer_holds_.size()) {
+    return layer_block_byte_size(layer_idx);
+  }
+  return static_cast<int64_t>(slice_byte_size_);
+}
+
+absl::StatusOr<uintptr_t> KVCacheManagerBase::GetBlockHostPointerValue(
+    size_t layer_idx, size_t shard_idx, int block_id) {
+  if (block_id < 0) {
+    return absl::InvalidArgumentError("block_id must be non-negative");
+  }
+  const size_t block_bytes = bytes_per_block();
+  const size_t host_size = GetHostSize(layer_idx, shard_idx);
+  const uint8_t* base = GetHostPointer(layer_idx, shard_idx);
+  if (base == nullptr) {
+    return absl::OutOfRangeError("layer or shard index out of range");
+  }
+  const size_t block = static_cast<size_t>(block_id);
+  if (block_bytes == 0 || block > host_size / block_bytes ||
+      block * block_bytes + block_bytes > host_size) {
+    return absl::OutOfRangeError("block range exceeds host buffer");
+  }
+  return reinterpret_cast<uintptr_t>(base + block * block_bytes);
+}
+
+void KVCacheManagerBase::EnsureImplicitPools() const {
+  absl::MutexLock l(pools_mu_);
+  if (explicit_pools_ || !pools_.empty()) {
+    return;
+  }
+  std::vector<PoolSpec> pools;
+  pools.reserve(num_layers_);
+  for (size_t storage_idx = 0; storage_idx < num_layers_; ++storage_idx) {
+    const int64_t stride = LayerBlockByteSize(storage_idx);
+    if (stride <= 0) {
+      continue;
+    }
+    const size_t host_size =
+        const_cast<KVCacheManagerBase*>(this)->GetHostSize(storage_idx, 0);
+    const int64_t num_blocks = static_cast<int64_t>(host_size) / stride;
+    if (num_blocks <= 0) {
+      continue;
+    }
+    pools.push_back(PoolSpec{
+        .tag = "opaque",
+        .storage_index = storage_idx,
+        .base_offset_bytes = 0,
+        .block_stride_bytes = stride,
+        .num_blocks = num_blocks,
+        .regions = {RegionSpec{
+            .name = "block",
+            .offset_bytes = 0,
+            .stride_bytes = stride,
+            .unit_bytes = stride,
+            .num_units = 1,
+            .units_per_stride = 1,
+        }},
+        .dtype_tag = "",
+    });
+  }
+  pools_ = std::move(pools);
+}
+
+absl::Status KVCacheManagerBase::EnsureHostMirrorCovers(size_t storage_idx,
+                                                        int64_t needed_bytes) {
+  if (storage_idx >= layers_.size() || needed_bytes <= 0) {
+    return absl::OkStatus();
+  }
+  for (auto& shard_info : layers_[storage_idx].shards) {
+    if (static_cast<int64_t>(shard_info.host_size) >= needed_bytes) {
+      continue;
+    }
+    const size_t alloc_size = static_cast<size_t>(needed_bytes);
+    if (host_allocator_) {
+      ASSIGN_OR_RETURN(HostBufferAllocation allocation,
+                       host_allocator_(alloc_size, nullptr));
+      if (allocation.ptr == nullptr || allocation.size < alloc_size) {
+        return absl::InternalError(absl::StrCat(
+            "host allocator returned undersized buffer for pool mirror: ",
+            "requested=", alloc_size));
+      }
+      if (shard_info.host_ptr != nullptr && shard_info.host_size > 0) {
+        std::memcpy(allocation.ptr, shard_info.host_ptr, shard_info.host_size);
+      }
+      shard_info.host_ptr = allocation.ptr;
+      shard_info.host_size = allocation.size;
+      shard_info.host_owner = std::move(allocation.owner);
+      shard_info.owned_host_buffer = {nullptr, [](void*) {}};
+    } else {
+      void* ptr = nullptr;
+      if (posix_memalign(&ptr, 64, alloc_size) != 0) {
+        return absl::InternalError(absl::StrCat(
+            "failed to allocate pool host mirror of size ", alloc_size));
+      }
+      std::memset(ptr, 0, alloc_size);
+      if (shard_info.host_ptr != nullptr && shard_info.host_size > 0) {
+        std::memcpy(ptr, shard_info.host_ptr, shard_info.host_size);
+      }
+      shard_info.owned_host_buffer =
+          std::unique_ptr<uint8_t[], void (*)(void*)>(
+              static_cast<uint8_t*>(ptr), [](void* p) { free(p); });
+      shard_info.host_ptr = shard_info.owned_host_buffer.get();
+      shard_info.host_size = alloc_size;
+      shard_info.host_owner.reset();
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::Status KVCacheManagerBase::RegisterPools(std::vector<PoolSpec> pools) {
+  if (pools.empty()) {
+    return absl::InvalidArgumentError("pool table must be non-empty");
+  }
+  {
+    absl::MutexLock l(plans_mu_);
+    if (!active_plans_.empty()) {
+      return absl::FailedPreconditionError(
+          "pools cannot be changed while active plans are registered");
+    }
+  }
+  for (size_t pool_idx = 0; pool_idx < pools.size(); ++pool_idx) {
+    const PoolSpec& pool = pools[pool_idx];
+    if (pool.storage_index >= num_layers_) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("pool ", pool_idx, " (", pool.tag, ") storage_index ",
+                       pool.storage_index, " out of range: manager wraps ",
+                       num_layers_, " storages"));
+    }
+    // Prefer the device buffer size; fall back to the host mirror; validate
+    // internal consistency only (-1) when neither is known yet.
+    int64_t storage_bytes = -1;
+    bool device_backed = false;
+    if (pool.storage_index < buffer_holds_.size() &&
+        buffer_holds_[pool.storage_index].physical_size > 0) {
+      storage_bytes =
+          static_cast<int64_t>(buffer_holds_[pool.storage_index].physical_size);
+      device_backed = true;
+    } else {
+      const size_t host_size = GetHostSize(pool.storage_index, 0);
+      if (host_size > 0) {
+        storage_bytes = static_cast<int64_t>(host_size);
+      }
+    }
+    absl::Status status = pool.Validate(storage_bytes);
+    if (!status.ok()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("invalid pool ", pool_idx, ": ", status.message()));
+    }
+    // Host staging is sized at the uniform layer-0 slice by the
+    // constructors, which can under-cover heterogeneous device storages;
+    // grow this storage's mirror so pool refs and D2H/H2D can address the
+    // whole block array at storage offsets. Host-only managers keep their
+    // caller-sized buffers (the host buffer IS the storage there).
+    if (device_backed) {
+      const int64_t array_end =
+          pool.base_offset_bytes + pool.num_blocks * pool.block_stride_bytes;
+      status = EnsureHostMirrorCovers(pool.storage_index, array_end);
+      if (!status.ok()) {
+        return status;
+      }
+    }
+  }
+  absl::MutexLock l(pools_mu_);
+  pools_ = std::move(pools);
+  explicit_pools_ = true;
+  return absl::OkStatus();
+}
+
+absl::StatusOr<PoolBlockRef> KVCacheManagerBase::GetPoolBlockRef(
+    size_t pool_idx, size_t shard_idx, int64_t block_id) const {
+  EnsureImplicitPools();
+  if (pool_idx >= pools_.size()) {
+    return absl::OutOfRangeError(absl::StrCat(
+        "pool index ", pool_idx, " out of range: ", pools_.size(), " pools"));
+  }
+  if (block_id < 0) {
+    return absl::InvalidArgumentError("block_id must be non-negative");
+  }
+  const PoolSpec& pool = pools_[pool_idx];
+  if (pool.storage_index >= num_layers_ || shard_idx >= num_shards_) {
+    return absl::OutOfRangeError("storage or shard index out of range");
+  }
+  if (pool.storage_index >= layers_.size() ||
+      shard_idx >= layers_[pool.storage_index].shards.size()) {
+    return absl::OutOfRangeError("storage or shard index out of range");
+  }
+  const auto& shard_info = layers_[pool.storage_index].shards[shard_idx];
+  const uint8_t* base = shard_info.host_ptr;
+  if (base == nullptr) {
+    return absl::FailedPreconditionError("host pointer is null");
+  }
+  if (block_id >= pool.num_blocks) {
+    return absl::OutOfRangeError(
+        absl::StrCat("block_id ", block_id, " out of range for pool ", pool_idx,
+                     " (", pool.tag, "): num_blocks=", pool.num_blocks));
+  }
+  const int64_t offset =
+      pool.base_offset_bytes + block_id * pool.block_stride_bytes;
+  if (offset + pool.block_stride_bytes >
+      static_cast<int64_t>(shard_info.host_size)) {
+    return absl::OutOfRangeError("block range exceeds host buffer");
+  }
+  return PoolBlockRef{
+      .ptr = const_cast<uint8_t*>(base) + offset,
+      .block_stride_bytes = pool.block_stride_bytes,
+      .pool = &pools_[pool_idx],
+      .pool_idx = pool_idx,
+      .shard_idx = shard_idx,
+      .block_id = block_id,
+  };
+}
+
+const PoolSpec* KVCacheManagerBase::pool(size_t pool_idx) const {
+  EnsureImplicitPools();
+  if (pool_idx >= pools_.size()) {
+    return nullptr;
+  }
+  return &pools_[pool_idx];
+}
+
+size_t KVCacheManagerBase::num_pools() const {
+  EnsureImplicitPools();
+  return pools_.size();
+}
+
+bool KVCacheManagerBase::has_explicit_pools() const { return explicit_pools_; }
+
+std::vector<size_t> KVCacheManagerBase::PoolIndicesWithTag(
+    absl::string_view tag) const {
+  EnsureImplicitPools();
+  std::vector<size_t> result;
+  for (size_t pool_idx = 0; pool_idx < pools_.size(); ++pool_idx) {
+    if (pools_[pool_idx].tag == tag) {
+      result.push_back(pool_idx);
+    }
+  }
+  return result;
+}
 
 bool KVCacheManagerBase::use_block_chunks(uint64_t uuid) const {
   absl::MutexLock l(plans_mu_);

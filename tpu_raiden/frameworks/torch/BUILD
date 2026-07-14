@@ -151,6 +151,7 @@ cc_library(
         "//tpu_raiden/core:utils",
         "//tpu_raiden/core:xla_raw_transfer_headers",
         "//tpu_raiden/kv_cache:kv_cache_listener",
+        "//tpu_raiden/kv_cache:pool_layout",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",

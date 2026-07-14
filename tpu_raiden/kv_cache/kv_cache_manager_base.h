@@ -39,6 +39,7 @@
 #include "tpu_raiden/core/raiden_manager_base.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
+#include "tpu_raiden/kv_cache/pool_layout.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
 #include "tpu_raiden/transport/block_transport.h"
 
@@ -85,7 +86,11 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<int> host_blocks_to_allocate = std::nullopt,
       bool unsafe_skip_buffer_lock = false, int parallelism = 1,
       HostBufferAllocator host_allocator = nullptr,
-      std::optional<std::string> bind_ip = std::nullopt);
+      std::optional<std::string> bind_ip = std::nullopt,
+      std::optional<size_t> logical_slice_byte_size = std::nullopt,
+      std::vector<int64_t> logical_dimensions = {},
+      std::optional<size_t> logical_physical_size = std::nullopt,
+      std::optional<int> assigned_numa_node_override = std::nullopt);
 
   // Standard CPU-only Constructor for remote workers E2E
   KVCacheManagerBase(size_t num_layers, size_t num_shards,
@@ -207,6 +212,32 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   size_t bytes_per_block() const override;
 
+  int64_t LayerBlockByteSize(size_t layer_idx) const;
+
+  // Returns the host address of one legacy (layer, shard, block) block.
+  // Shared by the framework bindings; block granularity is bytes_per_block().
+  absl::StatusOr<uintptr_t> GetBlockHostPointerValue(size_t layer_idx,
+                                                     size_t shard_idx,
+                                                     int block_id);
+
+  // Registers explicit block pools over the wrapped storages. Fails while
+  // active plans are registered. Until this is called the manager exposes one
+  // implicit pool per constructor storage (tag "opaque", base_offset 0,
+  // block_stride LayerBlockByteSize) and all legacy paths are unchanged.
+  absl::Status RegisterPools(std::vector<PoolSpec> pools);
+
+  absl::StatusOr<PoolBlockRef> GetPoolBlockRef(size_t pool_idx,
+                                               size_t shard_idx,
+                                               int64_t block_id) const;
+
+  const PoolSpec* pool(size_t pool_idx) const;
+
+  size_t num_pools() const;
+
+  bool has_explicit_pools() const;
+
+  std::vector<size_t> PoolIndicesWithTag(absl::string_view tag) const;
+
   bool use_block_chunks(uint64_t uuid) const override;
 
   virtual absl::Status RegisterActivePlan(
@@ -253,6 +284,13 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
     size_t physical_size = 0;
   };
   std::vector<LayerDeviceInfo> buffer_holds_;
+  // Pool table. Explicit after RegisterPools; otherwise lazily materialized
+  // implicit pools (one per storage, tag "opaque"). pools_mu_ guards the lazy
+  // build and replacement; hot transfer paths read the table without the lock
+  // because RegisterPools is barred while plans are active.
+  mutable absl::Mutex pools_mu_;
+  mutable std::vector<PoolSpec> pools_;
+  bool explicit_pools_ = false;
 
   // Returns the per-block byte size for a given layer.  Uses the layer's
   // actual physical_size when available (device-backed path); falls back
@@ -302,6 +340,16 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<size_t> shard_idx = std::nullopt, int64_t device_id = -1);
 
  private:
+  // Lazily materializes one implicit pool per storage when RegisterPools was
+  // never called (or the host buffers were replaced since).
+  void EnsureImplicitPools() const;
+
+  // Grows a storage's host mirror so pool D2H/H2D and block refs can address
+  // the whole block array at storage offsets. Host staging is sized at the
+  // uniform layer-0 slice by the constructors, which can under-cover
+  // heterogeneous storages.
+  absl::Status EnsureHostMirrorCovers(size_t storage_idx, int64_t needed_bytes);
+
   HostBufferAllocator host_allocator_ = nullptr;
   std::unique_ptr<xla::Semaphore> semaphore_;
 

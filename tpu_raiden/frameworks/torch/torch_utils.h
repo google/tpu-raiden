@@ -15,6 +15,8 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_TORCH_TORCH_UTILS_H_
 #define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_FRAMEWORKS_TORCH_TORCH_UTILS_H_
 
+#include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
@@ -36,6 +38,10 @@ namespace torch {
 struct UnpackedTensors {
   std::vector<std::vector<xla::PjRtBuffer*>> buffers;
   std::vector<torch_tpu::DeviceBufferRef> refs;
+  std::vector<int64_t> logical_dimensions;
+  size_t logical_slice_byte_size = 0;
+  size_t logical_physical_size = 0;
+  bool has_logical_metadata = false;
 };
 
 // Unpacks a 2D vector of PyTorch sharded tensors (the batch form of

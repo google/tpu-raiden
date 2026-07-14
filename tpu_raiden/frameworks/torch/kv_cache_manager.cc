@@ -68,6 +68,10 @@ KVCacheManager::UnpackedLayers KVCacheManager::UnpackLayers(
   UnpackedLayers unpacked;
   unpacked.buffers = std::move(u.buffers);
   unpacked.refs = std::move(u.refs);
+  unpacked.logical_dimensions = std::move(u.logical_dimensions);
+  unpacked.logical_slice_byte_size = u.logical_slice_byte_size;
+  unpacked.logical_physical_size = u.logical_physical_size;
+  unpacked.has_logical_metadata = u.has_logical_metadata;
   if (!unpacked.buffers.empty() && !unpacked.buffers[0].empty()) {
     unpacked.client = unpacked.buffers[0][0]->device()->client();
   }
@@ -93,8 +97,13 @@ KVCacheManager::KVCacheManager(UnpackedLayers unpacked,
                                double timeout_s,
                                std::vector<at::Tensor> kv_caches)
     : KVCacheManagerWithTransfer(
-          std::move(unpacked.buffers), local_port, host_blocks_to_allocate,
-          unsafe_skip_buffer_lock, parallelism,
+          unpacked.buffers,
+          unpacked.has_logical_metadata ? unpacked.logical_slice_byte_size : 0,
+          unpacked.has_logical_metadata ? unpacked.logical_dimensions
+                                        : std::vector<int64_t>{},
+          unpacked.has_logical_metadata ? unpacked.logical_physical_size : 0,
+          local_port, host_blocks_to_allocate, unsafe_skip_buffer_lock,
+          parallelism,
           tpu_raiden::CreateHostMemoryAllocator(
               unpacked.client, max_blocks,
               (unpacked.buffers.empty() || unpacked.buffers[0].empty() ||

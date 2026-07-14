@@ -26,6 +26,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Dummy change to force Kokoro retry.
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 
 #include <arpa/inet.h>
@@ -492,7 +493,13 @@ KVCacheManagerWithTransfer::KVCacheManagerWithTransfer(
     : KVCacheManagerBase(
           layer_buffers, local_port,
           host_blocks_to_allocate.value_or(num_slots * max_blocks),
-          unsafe_skip_buffer_lock, parallelism, host_allocator),
+          unsafe_skip_buffer_lock, parallelism, host_allocator,
+          /*bind_ip=*/std::nullopt,
+          slice_byte_size > 0 ? std::make_optional(slice_byte_size)
+                              : std::nullopt,
+          dimensions,
+          physical_size > 0 ? std::make_optional(physical_size) : std::nullopt,
+          assigned_numa_node),
       node_id_(node_id),
       local_control_port_(static_cast<int>(local_control_port)),
       local_data_port_(0),

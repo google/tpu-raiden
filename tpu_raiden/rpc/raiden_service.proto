@@ -42,6 +42,28 @@ message NDSliceProto {
   repeated NDSliceDimensionProto dimensions = 1;
 }
 
+// A strided run of live bytes inside one pool block.
+message RegionSpecProto {
+  string name = 1;
+  int64 offset_bytes = 2;
+  int64 stride_bytes = 3;
+  int64 unit_bytes = 4;
+  int64 num_units = 5;
+  int64 units_per_stride = 6;
+}
+
+// One block pool inside a wrapped storage. tag and dtype_tag are opaque to
+// raiden: stored, filtered, and echoed, never parsed.
+message PoolSpecProto {
+  string tag = 1;
+  int64 storage_index = 2;
+  int64 base_offset_bytes = 3;
+  int64 block_stride_bytes = 4;
+  int64 num_blocks = 5;
+  repeated RegionSpecProto regions = 6;
+  string dtype_tag = 7;
+}
+
 message RegisterWorkUnitRequest {
   RaidenIdProto unit = 1;
   repeated string shards = 2;

@@ -42,6 +42,42 @@ cc_test(
 )
 
 cc_library(
+    name = "pool_layout",
+    srcs = ["pool_layout.cc"],
+    hdrs = ["pool_layout.h"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "pool_layout_test",
+    srcs = ["pool_layout_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":pool_layout",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "kv_cache_manager_base",
     srcs = [
         "kv_cache_manager_base.cc",
@@ -57,6 +93,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":logical_block_manager",
+        ":pool_layout",
         "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:numa_thread_pool",
         "//tpu_raiden/core:raiden_manager_base",

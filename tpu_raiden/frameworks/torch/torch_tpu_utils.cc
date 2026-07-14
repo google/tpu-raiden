@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "ATen/core/TensorBody.h"
 #include "torch/headeronly/core/DeviceType.h"
@@ -26,6 +27,18 @@
 
 namespace tpu_raiden {
 namespace torch {
+namespace {
+
+std::vector<int64_t> TensorDimensions(const at::Tensor& tensor) {
+  std::vector<int64_t> dimensions;
+  dimensions.reserve(tensor.dim());
+  for (int64_t dim = 0; dim < tensor.dim(); ++dim) {
+    dimensions.push_back(tensor.size(dim));
+  }
+  return dimensions;
+}
+
+}  // namespace
 
 UnpackedTensor UnpackTorchTensor(const at::Tensor& tensor) {
   if (tensor.device().type() != at::DeviceType::PrivateUse1) {
@@ -59,14 +72,23 @@ UnpackedTensor UnpackTorchTensor(const at::Tensor& tensor) {
   }
   torch_tpu::DeviceBufferRef base_ref = std::move(status_or_ref.value());
 
+  if (tensor.dim() == 0 || tensor.size(0) <= 0) {
+    throw std::invalid_argument(
+        "Tensor must have a non-empty leading block dimension");
+  }
+
   // The base buffer is the storage and may carry different logical dimensions
-  // than the tensor's view. Raw transfer slices it by its major (block)
-  // dimension, so the tensor must map onto the base 1:1: same leading block
-  // count and same total bytes (a full, layout-preserving reinterpret of the
-  // block-major storage). A partial / differently-blocked view would address
-  // the wrong bytes -- reject it loudly rather than corrupt silently.
-  if (base_ref.dimensions().empty() ||
-      base_ref.dimensions()[0] != tensor.size(0)) {
+  // than the tensor's view. Raw transfer slices it by the tensor's logical
+  // major (block) dimension while DMAing the base storage buffer. Accept either
+  // a matching base major dimension or vLLM's raw rank-1 byte storage exposed
+  // as a full rank-2 block-major view: (num_blocks, bytes_per_block).
+  if (base_ref.dimensions().empty()) {
+    throw std::invalid_argument("Tensor base storage buffer has no dimensions");
+  }
+  const bool base_major_matches = base_ref.dimensions()[0] == tensor.size(0);
+  const bool is_rank1_raw_storage_block_view =
+      base_ref.dimensions().size() == 1 && tensor.dim() == 2;
+  if (!base_major_matches && !is_rank1_raw_storage_block_view) {
     throw std::invalid_argument(
         "Tensor's leading (block) dimension does not match its base storage "
         "buffer; raw transfer requires a layout-preserving full view of the "
@@ -78,6 +100,9 @@ UnpackedTensor UnpackTorchTensor(const at::Tensor& tensor) {
         "Tensor does not span its entire base storage buffer; raw transfer "
         "requires a full reinterpret of the storage, not a partial view.");
   }
+  const size_t logical_physical_size = static_cast<size_t>(tensor.nbytes());
+  const size_t logical_slice_byte_size =
+      logical_physical_size / static_cast<size_t>(tensor.size(0));
 
   auto status_or_buf = base_ref.AwaitBuffer();
   if (!status_or_buf.ok()) {
@@ -87,7 +112,13 @@ UnpackedTensor UnpackTorchTensor(const at::Tensor& tensor) {
   // Return the buffer AND the owning base ref. The ref pins the storage buffer
   // backing the tensor for as long as the caller keeps it (manager lifetime /
   // transfer future), so the raw PjRtBuffer* stays valid.
-  return UnpackedTensor{status_or_buf.value(), std::move(base_ref)};
+  return UnpackedTensor{
+      .buffer = status_or_buf.value(),
+      .ref = std::move(base_ref),
+      .logical_dimensions = TensorDimensions(tensor),
+      .logical_slice_byte_size = logical_slice_byte_size,
+      .logical_physical_size = logical_physical_size,
+  };
 }
 
 }  // namespace torch
