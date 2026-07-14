@@ -19,11 +19,11 @@ on:
 
   push:
     branches:
-      - main
+      - checkCL2
       
   pull_request:
     branches:
-      - main
+      - checkCL2
 
   schedule:
     - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
