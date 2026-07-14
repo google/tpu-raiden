@@ -72,3 +72,16 @@ py_binary(
         "@com_google_absl_py//absl/flags",
     ],
 )
+
+
+py_binary(
+    name = "canary_drift_probe",
+    testonly = True,
+    srcs = ["canary_drift_probe.py"],
+    deps = [
+        ":bap_metrics",
+        ":perf_core",
+        "@com_google_absl_py//absl:app",
+        "@com_google_absl_py//absl/flags",
+    ],
+)
