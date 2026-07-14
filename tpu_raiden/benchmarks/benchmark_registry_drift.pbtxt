@@ -29,7 +29,7 @@ benchmarks {
     # gate. Adjacent rounds form the (baseline, experiment) pairs -- 50 rounds give
     # 49 of them, twice what explicit pairing would yield for the same machine time,
     # because each round is the "after" of one pair and the "before" of the next.
-    action_inputs { key: "runtime_flags" value: "--rounds=50 --iters=20" }
+    action_inputs { key: "runtime_flags" value: "--rounds=50 --iters=100" }
   }
 
   environment_configs {
