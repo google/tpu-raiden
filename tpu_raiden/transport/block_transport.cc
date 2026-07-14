@@ -26,25 +26,25 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
-#include <future>  // NOLINT
+#include <future>
 #include <limits>
 #include <memory>
 #include <numeric>
 #include <string>
-#include <thread>  // NOLINT
 #include <utility>
 #include <vector>
 
+#include "opentelemetry/context/context.h"
 #include "absl/cleanup/cleanup.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
-#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "tpu_raiden/core/status_macros.h"
+#include "tpu_raiden/core/telemetry.h"
 #include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/transport/raw_buffer_transport.h"
 #include "tpu_raiden/transport/socket_util.h"
@@ -290,7 +290,6 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
   ASSIGN_OR_RETURN(MajorOrder major_order, ParseMajorOrder(header.flags));
   std::vector<int> allocated_ids;
 
-  std::vector<int> src_block_ids;
   if (header.op == 1) {
     ASSIGN_OR_RETURN(allocated_ids, block_delegate_->AllocateBlocks(
                                         header.count_or_size, header.uuid));
@@ -299,9 +298,6 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
   } else {
     allocated_ids.resize(header.count_or_size, 0);
     RETURN_IF_ERROR(ReadExact(client_fd, allocated_ids.data(),
-                              header.count_or_size * sizeof(int)));
-    src_block_ids.resize(header.count_or_size, 0);
-    RETURN_IF_ERROR(ReadExact(client_fd, src_block_ids.data(),
                               header.count_or_size * sizeof(int)));
     uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
@@ -325,15 +321,9 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
             ReadExact(client_fd, &sender_size, sizeof(sender_size)));
 
         const int64_t block_id_val = dst_id;
-        int64_t src_bid = -1;
-        if (!src_block_ids.empty()) {
-          ABSL_DCHECK_LT(k, src_block_ids.size());
-          src_bid = src_block_ids[k];
-        }
         std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
             l, sh, absl::MakeConstSpan(&block_id_val, 1), sender_size,
-            header.uuid, static_cast<int64_t>(header.remote_id),
-            /*peer=*/"", src_bid);
+            header.uuid, static_cast<int64_t>(header.remote_id));
         if (chunks.empty()) {
           return absl::NotFoundError(
               absl::StrCat("No transfer chunks found for block ", dst_id,
@@ -561,7 +551,8 @@ absl::StatusOr<std::vector<int>> BlockTransport::Push(
       std::make_shared<std::promise<absl::StatusOr<std::vector<int>>>>();
   auto future = promise->get_future();
   Push(peers, src_block_ids, dst_block_ids, parallelism, major_order, uuid,
-       layer_idx, [promise](absl::StatusOr<std::vector<int>> res) {
+       layer_idx, opentelemetry::context::RuntimeContext::GetCurrent(),
+       [promise](absl::StatusOr<std::vector<int>> res) {
          promise->set_value(std::move(res));
        });
   return future.get();
@@ -572,6 +563,7 @@ void BlockTransport::Push(
     const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, int parallelism,
     MajorOrder major_order, uint64_t uuid, int layer_idx,
+    opentelemetry::context::Context context,
     std::function<void(absl::StatusOr<std::vector<int>>)> on_complete) {
   size_t num_blocks = src_block_ids.size();
   if (num_blocks == 0) {
@@ -601,6 +593,8 @@ void BlockTransport::Push(
   const size_t remainder = num_blocks % P;
   size_t block_offset = 0;
 
+  auto parent_context = context;
+
   for (int i = 0; i < P; ++i) {
     const size_t block_count =
         base_blocks_per_stream + (static_cast<size_t>(i) < remainder ? 1 : 0);
@@ -611,11 +605,11 @@ void BlockTransport::Push(
     auto task_run = [this, i, remote_peer, local_ip, block_offset, block_count,
                      shared_src_block_ids, shared_dst_block_ids, allocated_ids,
                      statuses, remaining_workers, major_order, uuid, layer_idx,
-                     P, on_complete]() {
+                     P, on_complete, parent_context]() {
       H2hWriteWorker(i, remote_peer, local_ip, block_offset, block_count,
                      *shared_src_block_ids, *shared_dst_block_ids,
-                     *allocated_ids, *statuses, major_order, uuid, layer_idx,
-                     P);
+                     *allocated_ids, *statuses, major_order, parent_context,
+                     uuid, layer_idx, P);
 
       if (remaining_workers->fetch_sub(1) == 1) {
         absl::Status final_status = absl::OkStatus();
@@ -712,6 +706,8 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
   size_t local_block_offset = 0;
   size_t remote_block_offset = 0;
 
+  auto parent_context = opentelemetry::context::RuntimeContext::GetCurrent();
+
   for (int i = 0; i < P; ++i) {
     const size_t local_block_count =
         base_blocks_per_stream + (static_cast<size_t>(i) < remainder ? 1 : 0);
@@ -727,7 +723,7 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
         local_block_offset, local_block_count, remote_block_offset,
         remote_block_count, std::ref(src_block_ids), std::ref(allocated_ids),
         std::ref(explicit_dst_ptrs), std::ref(statuses), major_order,
-        on_block_received, uuid));
+        parent_context, on_block_received, uuid));
 
     local_block_offset += local_block_count;
     remote_block_offset += remote_block_count;
@@ -744,15 +740,34 @@ absl::StatusOr<std::vector<int>> BlockTransport::Pull(
   return allocated_ids;
 }
 
-void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
-                                    absl::string_view local_ip,
-                                    size_t block_offset, size_t block_count,
-                                    const std::vector<int>& src_block_ids,
-                                    const std::vector<int>& dst_block_ids,
-                                    std::vector<int>& allocated_ids,
-                                    std::vector<absl::Status>& statuses,
-                                    MajorOrder major_order, uint64_t uuid,
-                                    int layer_idx, int parallelism) {
+void BlockTransport::H2hWriteWorker(
+    int stream_idx, absl::string_view peer, absl::string_view local_ip,
+    size_t block_offset, size_t block_count,
+    const std::vector<int>& src_block_ids,
+    const std::vector<int>& dst_block_ids, std::vector<int>& allocated_ids,
+    std::vector<absl::Status>& statuses, MajorOrder major_order,
+    opentelemetry::context::Context context, uint64_t uuid, int layer_idx,
+    int parallelism) {
+  opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> worker_span;
+  std::unique_ptr<opentelemetry::trace::Scope> scope;
+  if (telemetry::GetTraceLevel() >= 2) {
+    opentelemetry::trace::StartSpanOptions options;
+    options.parent = context;
+    worker_span =
+        telemetry::GetTracer()->StartSpan("raiden.h2h_write_worker", options);
+    scope = std::make_unique<opentelemetry::trace::Scope>(worker_span);
+  }
+
+  auto span_ender = absl::MakeCleanup([&] {
+    if (worker_span) {
+      if (!statuses[stream_idx].ok()) {
+        worker_span->SetStatus(opentelemetry::trace::StatusCode::kError,
+                               statuses[stream_idx].ToString());
+      }
+      worker_span->End();
+    }
+  });
+
   auto status_or_fd = AcquireConnection(peer, local_ip);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
@@ -794,11 +809,6 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
   if (header.op == 6) {
     ABSL_DCHECK_LE(block_offset + block_count, dst_block_ids.size());
     s = WriteExact(fd, &dst_block_ids[block_offset], block_count * sizeof(int));
-    if (!s.ok()) {
-      statuses[stream_idx] = s;
-      return;
-    }
-    s = WriteExact(fd, &src_block_ids[block_offset], block_count * sizeof(int));
     if (!s.ok()) {
       statuses[stream_idx] = s;
       return;
@@ -884,7 +894,28 @@ void BlockTransport::H2hReadWorker(
     const std::vector<int>& allocated_ids,
     const std::vector<uint8_t*>& explicit_dst_ptrs,
     std::vector<absl::Status>& statuses, MajorOrder major_order,
+    opentelemetry::context::Context context,
     BlockReceivedCallback on_block_received, uint64_t uuid) {
+  opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> worker_span;
+  std::unique_ptr<opentelemetry::trace::Scope> scope;
+  if (telemetry::GetTraceLevel() >= 2) {
+    opentelemetry::trace::StartSpanOptions options;
+    options.parent = context;
+    worker_span =
+        telemetry::GetTracer()->StartSpan("raiden.h2h_read_worker", options);
+    scope = std::make_unique<opentelemetry::trace::Scope>(worker_span);
+  }
+
+  auto span_ender = absl::MakeCleanup([&] {
+    if (worker_span) {
+      if (!statuses[stream_idx].ok()) {
+        worker_span->SetStatus(opentelemetry::trace::StatusCode::kError,
+                               statuses[stream_idx].ToString());
+      }
+      worker_span->End();
+    }
+  });
+
   auto status_or_fd = AcquireConnection(peer, local_ip);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();

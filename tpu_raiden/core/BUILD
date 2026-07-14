@@ -75,6 +75,7 @@ cc_library(
     deps = [
         ":tpu_utils",
         ":xla_raw_transfer_headers",
+        "//third_party/opentelemetry/cpp/api",
         "//tpu_raiden/transport:block_transport",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/log",
@@ -246,6 +247,21 @@ cc_library(
 )
 
 cc_library(
+    name = "telemetry",
+    srcs = ["telemetry.cc"],
+    hdrs = ["telemetry.h"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//third_party/opentelemetry/cpp/api",
+    ],
+)
+
+cc_library(
     name = "kv_manager_holder",
     hdrs = ["kv_manager_holder.h"],
     features = ["-use_header_modules"],
@@ -279,11 +295,12 @@ cc_library(
         ":raiden_manager_base",
         ":raw_transfer_core",
         ":status_macros",
+        ":telemetry",
         ":tpu_utils",
+        "//third_party/opentelemetry/cpp/api",
         "//tpu_raiden/kv_cache:kv_cache_manager_base",
         "//tpu_raiden/transport:block_transport",
         "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
