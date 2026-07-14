@@ -60,11 +60,19 @@ class SocketTransport final : public peregrine::Transport {
   SocketTransport(const SocketTransport&) = delete;
   SocketTransport& operator=(const SocketTransport&) = delete;
 
-  // Posts a batch of asynchronous transport requests to communicate with
+  // Posts a number of asynchronous transport requests to communicate with
   // `peer`. Returns a process-unique handle to poll completion.
   absl::StatusOr<peregrine::Handle> Post(
       std::string_view peer,
       absl::Span<const peregrine::Request> requests) override;
+
+  // Posts a number of asynchronous transport requests to communicate with
+  // `peer` using the given `handle` returned by a previous `Post` call.
+  absl::Status Post(std::string_view peer,
+                    absl::Span<const peregrine::Request> requests,
+                    peregrine::Handle handle) override {
+    return absl::InvalidArgumentError("Unsupported.");
+  }
 
   // Queries the completion status of `handle`. Removes handle if completed.
   absl::StatusOr<peregrine::Status> Poll(peregrine::Handle handle) override;
