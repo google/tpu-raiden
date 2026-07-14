@@ -34,6 +34,8 @@
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
+#include "third_party/opentelemetry/cpp/api/include/opentelemetry/context/context.h"
+#include "third_party/opentelemetry/cpp/api/include/opentelemetry/context/runtime_context.h"
 #include "tpu_raiden/transport/raw_buffer_transport.h"
 
 namespace tpu_raiden {
@@ -202,6 +204,7 @@ class BlockTransport : public RawBufferTransport {
             const std::vector<int>& src_block_ids,
             const std::vector<int>& dst_block_ids, int parallelism,
             MajorOrder major_order, uint64_t uuid, int layer_idx,
+            opentelemetry::context::Context context,
             std::function<void(absl::StatusOr<std::vector<int>>)> on_complete);
 
   // Synchronous Scatter-Gather Pull (op = 2)
@@ -231,6 +234,7 @@ class BlockTransport : public RawBufferTransport {
             std::function<void(absl::StatusOr<std::vector<int>>)> on_complete) {
     Push(std::vector<std::string>{std::string(peer)}, src_block_ids,
          dst_block_ids, parallelism, major_order, uuid, layer_idx,
+         opentelemetry::context::RuntimeContext::GetCurrent(),
          std::move(on_complete));
   }
 
@@ -278,8 +282,10 @@ class BlockTransport : public RawBufferTransport {
                       const std::vector<int>& dst_block_ids,
                       std::vector<int>& allocated_ids,
                       std::vector<absl::Status>& statuses,
-                      MajorOrder major_order, uint64_t uuid = 0,
-                      int layer_idx = -1, int parallelism = 1);
+                      MajorOrder major_order,
+                      opentelemetry::context::Context context,
+                      uint64_t uuid = 0, int layer_idx = -1,
+                      int parallelism = 1);
 
   void H2hReadWorker(int stream_idx, absl::string_view peer,
                      absl::string_view local_ip, size_t local_block_offset,
@@ -290,6 +296,7 @@ class BlockTransport : public RawBufferTransport {
                      const std::vector<uint8_t*>& explicit_dst_ptrs,
                      std::vector<absl::Status>& statuses,
                      MajorOrder major_order,
+                     opentelemetry::context::Context context,
                      BlockReceivedCallback on_block_received,
                      uint64_t uuid = 0);
 

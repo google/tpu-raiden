@@ -50,8 +50,11 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "third_party/opentelemetry/cpp/api/include/opentelemetry/context/context.h"
+#include "third_party/opentelemetry/cpp/api/include/opentelemetry/trace/span.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
+#include "tpu_raiden/core/telemetry.h"
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
 #include "tpu_raiden/transport/block_transport.h"
 
@@ -253,10 +256,14 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     bool slot_released = false;
     std::chrono::steady_clock::time_point deadline;
     std::vector<raiden::PjRtCopyFuture> d2h_layer_futures;
+    std::vector<opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>>
+        d2h_layer_spans;
     std::vector<std::string> remote_data_endpoints;
     std::vector<int> src_ints;
     std::vector<int> dst_ints;
     std::atomic<size_t> remaining_h2h_layers{0};
+    opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> span;
+    opentelemetry::context::Context context;
   };
 
   struct StagingLayerReady {
@@ -360,6 +367,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     std::vector<int> accumulated_host_block_ids;
     std::chrono::steady_clock::time_point deadline;
     std::vector<raiden::PjRtCopyFuture> h2d_futures;
+    opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> span;
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
 

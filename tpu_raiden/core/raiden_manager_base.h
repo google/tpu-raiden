@@ -28,6 +28,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "third_party/opentelemetry/cpp/api/include/opentelemetry/context/context.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/transport/block_transport.h"
@@ -55,6 +56,7 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
       const std::vector<std::string>& peers,
       const std::vector<int>& src_block_ids,
       const std::vector<int>& dst_block_ids, uint64_t uuid, int layer_idx,
+      opentelemetry::context::Context context,
       std::function<void(absl::StatusOr<std::vector<int>>)> on_complete);
 
   // Direct C++ H2H network read (Pull)

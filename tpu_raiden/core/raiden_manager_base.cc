@@ -260,6 +260,7 @@ void RaidenManagerBase::H2hWriteDirectAsync(
     const std::vector<std::string>& peers,
     const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, uint64_t uuid, int layer_idx,
+    opentelemetry::context::Context context,
     std::function<void(absl::StatusOr<std::vector<int>>)> on_complete) {
   InitTransportServer();
   absl::MutexLock lock(server_init_mu_);
@@ -270,7 +271,7 @@ void RaidenManagerBase::H2hWriteDirectAsync(
   }
   server_->Push(peers, src_block_ids, dst_block_ids, parallelism_,
                 tpu_raiden::transport::MajorOrder::kLayerMajor, uuid, layer_idx,
-                std::move(on_complete));
+                context, std::move(on_complete));
 }
 
 absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hReadDirect(
