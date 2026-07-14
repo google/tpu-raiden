@@ -72,5 +72,5 @@ py_library(
     name = "bap_metrics",
     testonly = True,
     srcs = ["bap_metrics.py"],
-    deps = ["@pypi//tensorboard"],     
+    deps = ["@pypi//tensorflow"],     
 )
