@@ -154,12 +154,14 @@ fi
 
 BAZEL_TARGETS=(
   "//tpu_raiden/rpc:raiden_service_py_pb2"
+  "//tpu_raiden/rpc:controller_service_py_pb2"
   "//tpu_raiden/rpc:coordination_py_pb2"
   "//tpu_raiden/rpc:coordination_py_pb2_grpc"
 )
 DEFINE_FLAGS=""
 BAZEL_MODULE_FLAGS=()
 TORCH_REPO_ENV_FLAGS=()
+TORCH_COPT_FLAGS=()
 
 if [ "$BUILD_JAX" = true ]; then
   echo "Configuring build for JAX..."
@@ -179,6 +181,9 @@ if [ "$BUILD_TORCH" = true ]; then
   fi
   TORCH_TPU_MODULE_PATH="$(cd "${TORCH_TPU_MODULE_PATH}" && pwd)"
   BAZEL_MODULE_FLAGS+=("--override_module=torch_tpu=${TORCH_TPU_MODULE_PATH}")
+  # An external module does not inherit torch_tpu's .bazelrc defaults.
+  TORCH_REPO_ENV_FLAGS+=("--repo_env=USE_PYWRAP_RULES=1")
+  TORCH_COPT_FLAGS+=("--per_file_copt=external/torch_tpu.*[.](cc|cpp|hpp)\$@-std=c++20")
   if [[ -z "${TORCH_SOURCE:-}" ]]; then
     TORCH_SOURCE="$(python3 - <<'PY'
 import importlib.util
@@ -225,6 +230,7 @@ echo "=== Building targets with Bazel ==="
   --repo_env=PIP_CONFIG_FILE="/dev/null" \
   "${BAZEL_MODULE_FLAGS[@]}" \
   "${TORCH_REPO_ENV_FLAGS[@]}" \
+  "${TORCH_COPT_FLAGS[@]}" \
   "${BAZEL_TARGETS[@]}" \
   ${DEFINE_FLAGS} \
   --disk_cache=${BAZEL_DISK_CACHE} \
@@ -234,6 +240,7 @@ echo "=== Building targets with Bazel ==="
 
 echo "=== Copying generated protobuf Python modules ==="
 cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/rpc/raiden_service_pb2.py" "${WORKSPACE_DIR}/tpu_raiden/rpc/" 2>/dev/null || true
+cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/rpc/controller_service_pb2.py" "${WORKSPACE_DIR}/tpu_raiden/rpc/" 2>/dev/null || true
 cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/rpc/coordination_pb2.py" "${WORKSPACE_DIR}/tpu_raiden/rpc/" 2>/dev/null || true
 cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/rpc/coordination_pb2_grpc.py" "${WORKSPACE_DIR}/tpu_raiden/rpc/" 2>/dev/null || true
 
@@ -250,25 +257,6 @@ if [ "$BUILD_TORCH" = true ]; then
 
   TORCH_SO="${WORKSPACE_DIR}/tpu_raiden/frameworks/torch/_tpu_raiden_torch.so"
   cp -f "${WORKSPACE_DIR}/bazel-bin/tpu_raiden/frameworks/torch/_tpu_raiden_torch.so" "${TORCH_SO}"
-  chmod u+w "${TORCH_SO}"
-  # The torch extension statically links its own XLA and references a few
-  # torch_tpu symbols (MaterializeAndReturn, AwaitBuffer). Add a NEEDED
-  # dependency on libpywrap so those resolve in *local* scope at import time
-  # (the loader imports the extension RTLD_LOCAL, see api/torch/
-  # kv_cache_manager.py). This keeps raiden's XLA private and avoids the
-  # duplicate AllocatorFactory registration that a global libpywrap preload
-  # would trigger. torch_tpu must already be imported (libpywrap loaded) when
-  # the extension imports, so no RUNPATH is required.
-  if command -v patchelf > /dev/null; then
-    patchelf --add-needed libpywrap_torch_tpu_common.so "${TORCH_SO}"
-    echo "patchelf: added NEEDED libpywrap_torch_tpu_common.so to torch extension"
-  else
-    echo "ERROR: patchelf not found! The PyTorch extension requires patchelf" \
-         "to inject NEEDED libpywrap_torch_tpu_common.so so symbols resolve in local" \
-         "scope without duplicate XLA allocator crashes. Please install patchelf" \
-         "(e.g., 'sudo apt-get install -y patchelf') and rebuild." >&2
-    exit 1
-  fi
 fi
 
 

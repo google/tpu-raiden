@@ -217,6 +217,7 @@ nanobind_extension(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
         "@nanobind",
+        "@torch_tpu//torch_tpu/common:pywrap_torch_tpu_common_library",
         "@torch_tpu//shims/torch:aten_headers",
     ],
 )

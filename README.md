@@ -42,13 +42,6 @@ Verify the installation:
 bazel --version
 ```
 
-### Installing Patchelf (Required for PyTorch)
-To compile and link the PyTorch C++ extension (`_tpu_raiden_torch.so`), you MUST install `patchelf`:
-```bash
-sudo apt-get install -y patchelf
-```
-*Why this is necessary:* PyTorch's compiled extension requires `patchelf` to inject a `NEEDED` link on `libpywrap_torch_tpu_common.so` at build time. This ensures TPU backend symbols resolve locally during import without triggering fatal duplicate XLA allocator registration crashes.
-
 ### TPUVM Development Notes
 * **Disk Space**: Remote Bazel builds on standard TPUVMs can exhaust disk space in `/tmp`. Always point Bazel output to a directory that has enough disk space left.:
   ```bash
@@ -87,10 +80,9 @@ We provide a script to handle the build process and compile extension binaries l
 
 **What this script does:**
 1. Navigates to the workspace directory.
-2. Compiles the selected extension modules (`_tpu_raiden_jax.so` and/or `_tpu_raiden_torch.so`) using Bazel.
-3. For PyTorch builds, executes `patchelf --add-needed` on the generated shared library.
-4. Installs necessary Python dependencies listed in `requirements.txt`.
-5. Copies compiled `.so` extension binaries directly into their respective framework source packages.
+2. Compiles the selected extension modules (`_tpu_raiden_jax.so` and/or `_tpu_raiden_torch.so`) using Bazel. The Torch extension is linked against the `torch_tpu` common shared library.
+3. Installs necessary Python dependencies listed in `requirements.txt`.
+4. Copies compiled `.so` extension binaries directly into their respective framework source packages.
 
 ## Testing `tpu_raiden`
 
