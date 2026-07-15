@@ -34,6 +34,11 @@ message CoordinateTransferRequest {
   string req_id = 8;
   string src_controller_address = 9;
   string dst_controller_address = 10;
+  // Controller-owned Stage-3 FA reshard inputs. Source block IDs are looked
+  // up from the producer registry and deliberately never cross vLLM metadata.
+  repeated int64 dst_device_block_ids = 11;
+  int64 num_tokens = 12;
+  int32 parallelism = 13;
 }
 
 message ControllerRequest {

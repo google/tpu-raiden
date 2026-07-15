@@ -23,6 +23,7 @@ message RaidenIdProto {
   string job_name = 1;
   string job_replica_id = 2;
   string data_name = 3;
+  int32 data_replica_idx = 4;
 }
 
 // Coordinate intervals representing a contiguous slice along a single tensor
@@ -72,6 +73,19 @@ message RegisterWorkUnitRequest {
   repeated int64 mesh_shape = 6;
   repeated int32 layout = 7;
   repeated int64 global_shape = 8;
+  // Canonical explicit-pool manifest and physical layout identity used by the
+  // controller to fail closed before planning a raw-byte FA transfer.
+  repeated PoolSpecProto pools = 9;
+  string layout_fingerprint = 10;
+  int64 page_tokens = 11;
+  int32 transfer_parallelism = 12;
+  // Stable PCP/transfer rank. This is distinct from data_replica_idx (the DP
+  // engine identity) and defines interleaved source-slice ownership.
+  int32 transfer_rank = 13;
+  // Number of physically contiguous logical tokens stored for one rank before
+  // ownership rotates to the next transfer rank. This must divide page_tokens.
+  // page_slice_tokens == page_tokens explicitly selects whole-page striping.
+  int64 page_slice_tokens = 14;
 }
 
 // Defines an explicit 1D linear memory push operation from a local source to a
@@ -141,6 +155,32 @@ message StartTransferRequest {
   int64 num_tokens = 16;
 }
 
+message RegisterRequestBlocksRequest {
+  string req_id = 1;
+  int64 uuid = 2;
+  RaidenIdProto unit = 3;
+  repeated int64 block_ids = 4;
+}
+
+message ReleaseRequestBlocksRequest {
+  string req_id = 1;
+  int64 uuid = 2;
+  // Deliberately distinguishes administrative cleanup from the legacy
+  // per-rank release RPC, whose first caller could retire a whole PCP group.
+  bool force = 3;
+}
+
+message CompleteRequestBlocksRequest {
+  string req_id = 1;
+  int64 uuid = 2;
+  RaidenIdProto unit = 3;
+}
+
+message CancelRequestBlocksIfUnclaimedRequest {
+  string req_id = 1;
+  int64 uuid = 2;
+}
+
 message GetMetadataResponse {
   repeated RegisterWorkUnitRequest metadata = 1;
 }
@@ -153,12 +193,21 @@ message ControlRequest {
     COMMAND_REGISTER_WORK_UNIT = 3;
     COMMAND_GET_METADATA = 4;
     COMMAND_REGISTER_TRANSFER_SCHEDULE = 5;
+    COMMAND_REGISTER_REQUEST_BLOCKS = 6;
+    COMMAND_RELEASE_REQUEST_BLOCKS = 7;
+    COMMAND_CANCEL_REQUEST_BLOCKS_IF_UNCLAIMED = 8;
+    COMMAND_COMPLETE_REQUEST_BLOCKS = 9;
   }
   Command command = 1;
   repeated string peers = 2;
 
   StartTransferRequest start_transfer_request = 3;
   RegisterWorkUnitRequest register_work_unit_request = 4;
+  RegisterRequestBlocksRequest register_request_blocks_request = 5;
+  ReleaseRequestBlocksRequest release_request_blocks_request = 6;
+  CancelRequestBlocksIfUnclaimedRequest
+      cancel_request_blocks_if_unclaimed_request = 7;
+  CompleteRequestBlocksRequest complete_request_blocks_request = 8;
 }
 
 message ControlResponse {

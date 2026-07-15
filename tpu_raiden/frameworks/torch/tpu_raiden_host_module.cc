@@ -69,7 +69,8 @@ class HostKVCacheManager : public KVCacheManagerWithTransfer {
                      size_t slice_byte_size, int64_t node_id,
                      std::optional<int> local_port,
                      std::optional<int> host_blocks_to_allocate,
-                     int parallelism, std::optional<int> listener_port)
+                     int parallelism, std::optional<int> listener_port,
+                     double timeout_s)
       : KVCacheManagerWithTransfer(
             num_layers, num_shards, slice_byte_size, local_port,
             host_blocks_to_allocate, parallelism, node_id,
@@ -77,7 +78,7 @@ class HostKVCacheManager : public KVCacheManagerWithTransfer {
             // commands use the distinct KVCacheListener below.
             /*local_control_port=*/-1,
             /*max_blocks=*/host_blocks_to_allocate.value_or(0),
-            /*num_slots=*/0, /*timeout_s=*/120.0) {
+            /*num_slots=*/0, timeout_s) {
     if (listener_port.has_value()) {
       listener_ = std::make_unique<kv_cache::KVCacheListener>(
           this, *listener_port);
@@ -237,13 +238,14 @@ NB_MODULE(_tpu_raiden_host, m) {
   auto manager_cls = nb::class_<HostKVCacheManager>(m, "KVCacheManager");
   manager_cls
       .def(nb::init<size_t, size_t, size_t, int64_t, std::optional<int>,
-                    std::optional<int>, int, std::optional<int>>(),
+                    std::optional<int>, int, std::optional<int>, double>(),
            nb::arg("num_layers"), nb::arg("num_shards"),
            nb::arg("slice_byte_size"), nb::arg("node_id"),
            nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("parallelism") = 1,
-           nb::arg("listener_port") = nb::none())
+           nb::arg("listener_port") = nb::none(),
+           nb::arg("timeout_s") = 120.0)
       .def("node_id", &HostKVCacheManager::node_id)
       .def_prop_ro("local_port", &HostKVCacheManager::local_port)
       .def_prop_ro("local_control_port",
@@ -325,7 +327,12 @@ NB_MODULE(_tpu_raiden_host, m) {
             ThrowIfError(self.WriteBlockBytes(layer_idx, block_id, payload_str),
                          "KVCacheManager write_block_bytes failed");
           },
-          nb::arg("layer_idx"), nb::arg("block_id"), nb::arg("payload"));
+          nb::arg("layer_idx"), nb::arg("block_id"), nb::arg("payload"))
+      .def("complete_read", [](HostKVCacheManager& self) {
+        auto [done_sending, done_recving, failed_recving] =
+            self.CompleteReadRaw();
+        return nb::make_tuple(done_sending, done_recving, failed_recving);
+      });
   tpu_raiden::torch_bindings::BindPoolApi<HostRaidenFuture>(manager_cls);
 }
 

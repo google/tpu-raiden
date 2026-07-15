@@ -252,7 +252,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
       std::optional<std::vector<int64_t>> local_host_block_ids = std::nullopt);
 
   virtual int local_control_port() const { return local_control_port_; }
-  virtual int64_t node_id() const { return node_id_; }
+  int64_t node_id() const override { return node_id_; }
 
  protected:
   struct SendEntry {

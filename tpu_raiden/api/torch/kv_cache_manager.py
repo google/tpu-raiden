@@ -136,6 +136,7 @@ class KVCacheManager:
       host_blocks: int,
       parallelism: int = 4,
       listener_port: Optional[int] = None,
+      timeout_s: float = 120.0,
   ) -> "KVCacheManager":
     """Creates a CPU-only manager backed by Raiden-owned host memory.
 
@@ -155,6 +156,7 @@ class KVCacheManager:
         host_blocks_to_allocate=host_blocks,
         parallelism=parallelism,
         listener_port=listener_port,
+        timeout_s=timeout_s,
     )
     return obj
 

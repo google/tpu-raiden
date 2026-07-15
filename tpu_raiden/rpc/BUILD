@@ -109,6 +109,18 @@ py_test(
 )
 
 py_test(
+    name = "raiden_controller_stage3_host_test",
+    size = "medium",
+    srcs = ["raiden_controller_stage3_host_test.py"],
+    deps = [
+        ":raiden_controller",
+        "//tpu_raiden/api/torch:kv_cache_manager_host_py",
+        "//tpu_raiden/api/torch:pool_layout",
+        "@com_google_absl_py//absl/testing:absltest",
+    ],
+)
+
+py_test(
     name = "coordination_helper_test",
     srcs = ["coordination_helper_test.py"],
     deps = [

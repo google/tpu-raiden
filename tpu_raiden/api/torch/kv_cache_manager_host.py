@@ -50,6 +50,7 @@ class HostKVCacheManager:
       host_blocks: int,
       parallelism: int = 4,
       listener_port: Optional[int] = None,
+      timeout_s: float = 120.0,
   ):
     # Import lazily so importing the host-only wrapper never initializes the
     # torch_tpu runtime.
@@ -66,6 +67,7 @@ class HostKVCacheManager:
         host_blocks_to_allocate=host_blocks,
         parallelism=parallelism,
         listener_port=listener_port,
+        timeout_s=timeout_s,
     )
 
   def __getattr__(self, name: str) -> Any:

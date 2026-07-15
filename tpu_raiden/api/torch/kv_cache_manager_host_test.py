@@ -33,6 +33,7 @@ import unittest
 from tpu_raiden.api.torch import kv_cache_manager
 from tpu_raiden.api.torch import kv_cache_manager_host
 from tpu_raiden.api.torch import pool_layout
+from tpu_raiden.rpc import raiden_service_pb2
 
 
 class KVCacheManagerHostTest(unittest.TestCase):
@@ -82,6 +83,44 @@ class KVCacheManagerHostTest(unittest.TestCase):
     self.assertGreater(manager.listener_port, 0)
     self.assertTrue(manager.is_listener_active)
     self.assertEqual(manager.local_control_port, -1)
+
+  def test_host_timeout_and_poll_stats_use_native_completion_surface(self):
+    manager = kv_cache_manager.KVCacheManager.create_host_only(
+        num_layers=1,
+        num_shards=1,
+        slice_byte_size=64,
+        node_id=6,
+        host_blocks=2,
+        parallelism=1,
+        timeout_s=0.0,
+    )
+    request = raiden_service_pb2.StartTransferRequest(
+        uuid=6001,
+        req_id="host-timeout",
+        dst_mem_type=raiden_service_pb2.MEMORY_TYPE_HBM,
+        use_block_chunks=True,
+    )
+    entry = request.shard_push_schedules[0].entries.add()
+    entry.dst_peer = "127.0.0.1:1"
+    entry.src_block_id = 0
+    entry.dst_block_id = 0
+    entry.size_bytes = 8
+    entry.count = 1
+
+    manager.register_active_plan(6001, request, is_sender=False)
+    done_sending, done_recving, failed_recving = manager.poll_stats()
+
+    self.assertEqual(done_sending, [])
+    self.assertEqual(done_recving, [])
+    self.assertEqual(failed_recving, ["host-timeout"])
+
+    # Timeout polling unregisters the native plan, so the same UUID can be
+    # armed again without stale transport progress.
+    request.req_id = "host-timeout-reused"
+    manager.register_active_plan(6001, request, is_sender=False)
+    self.assertEqual(
+        manager.poll_stats(), ([], [], ["host-timeout-reused"])
+    )
 
   def test_register_refs_tags_and_admission_summary(self):
     manager = kv_cache_manager.KVCacheManager.create_host_only_for_testing(
