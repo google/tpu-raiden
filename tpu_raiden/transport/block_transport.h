@@ -34,7 +34,7 @@
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
-#include "tpu_raiden/transport/raw_buffer_transport.h"
+#include "tpu_raiden/transport/lib/raw_buffer_transport.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -62,7 +62,7 @@ enum class BlockChunkRegionValidationMode {
 };
 
 // Delegate interface for BlockTransport inheriting raw memory primitives.
-class BlockTransportDelegate : public RawBufferTransportDelegate {
+class BlockTransportDelegate : public lib::RawBufferTransportDelegate {
  public:
   ~BlockTransportDelegate() override = default;
 
@@ -179,10 +179,8 @@ class BlockTransportDelegate : public RawBufferTransportDelegate {
 };
 
 // High-speed Key-Value block transport engine extending RawBufferTransport.
-class BlockTransport : public RawBufferTransport {
+class BlockTransport : public lib::RawBufferTransport {
  public:
-  using BlockPacketHeader = RawBufferTransport::PacketHeader;
-
   BlockTransport(BlockTransportDelegate* delegate, int local_port,
                  bool enable_conn_pool = true,
                  const std::vector<std::string>& local_ips = {},

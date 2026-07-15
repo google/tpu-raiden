@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "tpu_raiden/transport/socket_transport.h"
+#include "tpu_raiden/transport/lib/socket_transport.h"
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -39,8 +39,7 @@
 #include "absl/types/span.h"
 #include "third_party/peregrine/src/api/transport_types.h"
 
-namespace tpu_raiden {
-namespace transport {
+namespace tpu_raiden::transport::lib {
 
 namespace {
 
@@ -435,5 +434,4 @@ void SocketTransport::ConnectionWorker(int client_fd) {
   close(client_fd);
 }
 
-}  // namespace transport
-}  // namespace tpu_raiden
+}  // namespace tpu_raiden::transport::lib

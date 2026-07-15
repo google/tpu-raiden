@@ -45,13 +45,18 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "tpu_raiden/core/status_macros.h"
-#include "tpu_raiden/transport/raw_buffer_transport.h"
-#include "tpu_raiden/transport/socket_util.h"
+#include "tpu_raiden/transport/lib/raw_buffer_transport.h"
+#include "tpu_raiden/transport/lib/socket_util.h"
 
 namespace tpu_raiden {
 namespace transport {
 
 namespace {
+
+using lib::ReadExact;
+using lib::ReadVExact;
+using lib::WriteExact;
+using lib::WriteVExact;
 
 constexpr uint8_t kUseBlockChunksFlag = 0x80;
 
