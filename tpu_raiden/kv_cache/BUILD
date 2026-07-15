@@ -285,3 +285,22 @@ cc_library(
         "@com_google_absl//absl/status",
     ],
 )
+
+cc_test(
+    name = "kv_cache_listener_test",
+    srcs = ["kv_cache_listener_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":kv_cache_listener",
+        ":kv_cache_manager_base",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/types:span",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

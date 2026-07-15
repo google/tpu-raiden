@@ -31,10 +31,57 @@
 import unittest
 
 from tpu_raiden.api.torch import kv_cache_manager
+from tpu_raiden.api.torch import kv_cache_manager_host
 from tpu_raiden.api.torch import pool_layout
 
 
 class KVCacheManagerHostTest(unittest.TestCase):
+
+  def test_create_host_only_owns_distinct_controller_listener(self):
+    manager = kv_cache_manager.KVCacheManager.create_host_only(
+        num_layers=1,
+        num_shards=1,
+        slice_byte_size=64,
+        node_id=3,
+        host_blocks=1,
+        parallelism=1,
+        listener_port=0,
+    )
+
+    self.assertGreater(manager.listener_port, 0)
+    self.assertTrue(manager.is_listener_active)
+    self.assertIn(str(manager.listener_port), manager.listener_address)
+    # local_control_port is the legacy pull protocol and remains disabled.
+    self.assertEqual(manager.local_control_port, -1)
+
+  def test_create_host_only_listener_is_optional(self):
+    manager = kv_cache_manager.KVCacheManager.create_host_only(
+        num_layers=1,
+        num_shards=1,
+        slice_byte_size=64,
+        node_id=4,
+        host_blocks=1,
+        parallelism=1,
+    )
+
+    self.assertIsNone(manager.listener_port)
+    self.assertFalse(manager.is_listener_active)
+    self.assertEqual(manager.listener_address, "")
+
+  def test_host_adapter_threads_listener_port(self):
+    manager = kv_cache_manager_host.HostKVCacheManager(
+        num_layers=1,
+        num_shards=1,
+        slice_byte_size=64,
+        node_id=5,
+        host_blocks=1,
+        parallelism=1,
+        listener_port=0,
+    )
+
+    self.assertGreater(manager.listener_port, 0)
+    self.assertTrue(manager.is_listener_active)
+    self.assertEqual(manager.local_control_port, -1)
 
   def test_register_refs_tags_and_admission_summary(self):
     manager = kv_cache_manager.KVCacheManager.create_host_only_for_testing(

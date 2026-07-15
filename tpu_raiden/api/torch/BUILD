@@ -46,7 +46,10 @@ py_library(
 
 py_library(
     name = "kv_cache_manager_host_py",
-    srcs = ["kv_cache_manager.py"],
+    srcs = [
+        "kv_cache_manager.py",
+        "kv_cache_manager_host.py",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         ":pool_layout",

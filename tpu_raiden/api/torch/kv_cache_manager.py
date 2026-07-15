@@ -125,7 +125,7 @@ class KVCacheManager:
       )
 
   @classmethod
-  def create_host_only_for_testing(
+  def create_host_only(
       cls,
       *,
       num_layers: int,
@@ -135,8 +135,15 @@ class KVCacheManager:
       local_port: Optional[int] = None,
       host_blocks: int,
       parallelism: int = 4,
+      listener_port: Optional[int] = None,
   ) -> "KVCacheManager":
-    """Creates a CPU-only manager backed by Raiden-owned host memory."""
+    """Creates a CPU-only manager backed by Raiden-owned host memory.
+
+    ``listener_port`` owns the protobuf controller endpoint. It is distinct
+    from both ``local_port`` (the data transport) and the legacy
+    ``local_control_port`` pull protocol, which stays disabled on this path.
+    Passing 0 requests an ephemeral listener port.
+    """
     obj = cls.__new__(cls)
     obj._admission_summary = None
     obj._impl = _host_impl().KVCacheManager(
@@ -147,8 +154,14 @@ class KVCacheManager:
         local_port=local_port,
         host_blocks_to_allocate=host_blocks,
         parallelism=parallelism,
+        listener_port=listener_port,
     )
     return obj
+
+  @classmethod
+  def create_host_only_for_testing(cls, **kwargs: Any) -> "KVCacheManager":
+    """Backward-compatible alias for :meth:`create_host_only`."""
+    return cls.create_host_only(**kwargs)
 
   @property
   def node_id(self) -> int:

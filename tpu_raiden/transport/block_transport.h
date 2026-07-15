@@ -22,6 +22,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>  // NOLINT
 #include <utility>
@@ -59,6 +60,14 @@ enum class BlockChunkRegionValidationMode {
   kDisabled = 0,
   kWarn = 1,
   kFail = 2,
+};
+
+// Receiver-side accounting for one pool-keyed Stage-3 transfer plan. The
+// transport uses expected_pushes to gate the pool completion callback and
+// expected_pools to retire all progress records once the final pool completes.
+struct PoolPushProgressSpec {
+  size_t expected_pushes = 0;
+  size_t expected_pools = 0;
 };
 
 // Delegate interface for BlockTransport inheriting raw memory primitives.
@@ -138,6 +147,20 @@ class BlockTransportDelegate : public RawBufferTransportDelegate {
       size_t num_blocks, uint64_t uuid = 0) = 0;
 
   virtual absl::Status OnLayerReceived(size_t layer_idx, uint64_t uuid) {
+    return absl::OkStatus();
+  }
+
+  // Returns a pool-keyed progress contract for a Stage-3 plan, nullopt for the
+  // legacy layer-keyed path, or an error when the plan does not admit this
+  // pool. This is resolved before any payload bytes are written.
+  virtual absl::StatusOr<std::optional<PoolPushProgressSpec>>
+  GetPoolPushProgressSpec(size_t pool_idx, uint64_t uuid) const {
+    return std::nullopt;
+  }
+
+  // Pool-keyed counterpart to OnLayerReceived. An explicit-pool index is not
+  // necessarily a constructor layer/storage index, so the default is a no-op.
+  virtual absl::Status OnPoolReceived(size_t pool_idx, uint64_t uuid) {
     return absl::OkStatus();
   }
 
@@ -296,6 +319,8 @@ class BlockTransport : public RawBufferTransport {
   };
   absl::Mutex progress_mu_;
   absl::flat_hash_map<std::pair<uint64_t, int>, LayerProgress> layer_progress_
+      ABSL_GUARDED_BY(progress_mu_);
+  absl::flat_hash_map<std::pair<uint64_t, int>, LayerProgress> pool_progress_
       ABSL_GUARDED_BY(progress_mu_);
 
   absl::Mutex scheduler_mu_;

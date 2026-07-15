@@ -126,6 +126,19 @@ message StartTransferRequest {
   // the receiving manager has explicitly registered pools, the tags must match
   // the local pools' dtype tags at plan registration.
   repeated string pool_dtype_tags = 10;
+  // Stage-3 pool-keyed receive accounting. Each listed transfer pool expects
+  // this many independent push streams before its completion callback fires.
+  // Zero preserves the legacy per-layer header.reserved accounting path.
+  int32 expected_pushes_per_pool = 11;
+  // Canonical pool indices transferred by this plan. Stage-3 FA-only plans
+  // list only pools tagged "fa"; skipped hybrid-state pools are never armed.
+  repeated int32 transfer_pool_indices = 12;
+  // Block-granular arguments consumed by the Stage-3 executor. The controller
+  // emits only the IDs relevant to the worker receiving this command.
+  repeated int64 src_block_ids = 13;
+  repeated int64 dst_device_block_ids = 14;
+  int32 parallelism = 15;
+  int64 num_tokens = 16;
 }
 
 message GetMetadataResponse {

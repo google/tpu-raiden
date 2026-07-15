@@ -29,6 +29,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -45,6 +46,7 @@
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/frameworks/torch/pool_layout_nanobind.h"
+#include "tpu_raiden/kv_cache/kv_cache_listener.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
 #include "tpu_raiden/transport/block_transport.h"
 
@@ -67,16 +69,38 @@ class HostKVCacheManager : public KVCacheManagerWithTransfer {
                      size_t slice_byte_size, int64_t node_id,
                      std::optional<int> local_port,
                      std::optional<int> host_blocks_to_allocate,
-                     int parallelism)
+                     int parallelism, std::optional<int> listener_port)
       : KVCacheManagerWithTransfer(
             num_layers, num_shards, slice_byte_size, local_port,
             host_blocks_to_allocate, parallelism, node_id,
+            // This is the legacy pull-control socket. Controller protobuf
+            // commands use the distinct KVCacheListener below.
             /*local_control_port=*/-1,
             /*max_blocks=*/host_blocks_to_allocate.value_or(0),
-            /*num_slots=*/0, /*timeout_s=*/120.0) {}
+            /*num_slots=*/0, /*timeout_s=*/120.0) {
+    if (listener_port.has_value()) {
+      listener_ = std::make_unique<kv_cache::KVCacheListener>(
+          this, *listener_port);
+    }
+  }
+
+  std::optional<int> listener_port() const {
+    if (listener_ == nullptr) return std::nullopt;
+    return listener_->listener_port();
+  }
+
+  bool is_listener_active() const {
+    return listener_ != nullptr && listener_->is_active();
+  }
 
   std::string transfer_address() const {
     std::optional<int> port = local_port();
+    if (!port.has_value()) return "";
+    return FormatAddressWithPort(local_ip(), *port);
+  }
+
+  std::string listener_address() const {
+    std::optional<int> port = listener_port();
     if (!port.has_value()) return "";
     return FormatAddressWithPort(local_ip(), *port);
   }
@@ -161,6 +185,11 @@ class HostKVCacheManager : public KVCacheManagerWithTransfer {
     std::memcpy(base + block * block_bytes, payload.data(), block_bytes);
     return absl::OkStatus();
   }
+
+ private:
+  // Destroyed before KVCacheManagerWithTransfer so listener worker threads
+  // cannot outlive the engine they dispatch into.
+  std::unique_ptr<kv_cache::KVCacheListener> listener_;
 };
 
 // Distinct C++ wrapper so the host and torch extension modules can each
@@ -208,18 +237,25 @@ NB_MODULE(_tpu_raiden_host, m) {
   auto manager_cls = nb::class_<HostKVCacheManager>(m, "KVCacheManager");
   manager_cls
       .def(nb::init<size_t, size_t, size_t, int64_t, std::optional<int>,
-                    std::optional<int>, int>(),
+                    std::optional<int>, int, std::optional<int>>(),
            nb::arg("num_layers"), nb::arg("num_shards"),
            nb::arg("slice_byte_size"), nb::arg("node_id"),
            nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
-           nb::arg("parallelism") = 1)
+           nb::arg("parallelism") = 1,
+           nb::arg("listener_port") = nb::none())
       .def("node_id", &HostKVCacheManager::node_id)
       .def_prop_ro("local_port", &HostKVCacheManager::local_port)
+      .def_prop_ro("local_control_port",
+                   &HostKVCacheManager::local_control_port)
       .def_prop_ro("num_layers", &HostKVCacheManager::num_layers)
       .def_prop_ro("num_shards", &HostKVCacheManager::num_shards)
       .def_prop_ro("slice_byte_size", &HostKVCacheManager::slice_byte_size)
       .def_prop_ro("transfer_address", &HostKVCacheManager::transfer_address)
+      .def_prop_ro("listener_port", &HostKVCacheManager::listener_port)
+      .def_prop_ro("is_listener_active",
+                   &HostKVCacheManager::is_listener_active)
+      .def_prop_ro("listener_address", &HostKVCacheManager::listener_address)
       .def("get_local_endpoints",
            [](const HostKVCacheManager& self) {
              auto eps = self.get_local_endpoints();

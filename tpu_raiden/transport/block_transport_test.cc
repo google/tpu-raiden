@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <thread>  // NOLINT
 #include <tuple>
@@ -79,6 +80,36 @@ class MockDelegate : public BlockTransportDelegate {
     return absl::OkStatus();
   }
 
+  absl::StatusOr<std::optional<PoolPushProgressSpec>>
+  GetPoolPushProgressSpec(size_t pool_idx, uint64_t uuid) const override {
+    if (!pool_progress_uuid_.has_value() || *pool_progress_uuid_ != uuid) {
+      return std::nullopt;
+    }
+    if (std::find(transfer_pool_indices_.begin(),
+                  transfer_pool_indices_.end(), pool_idx) ==
+        transfer_pool_indices_.end()) {
+      return absl::InvalidArgumentError("pool is outside transfer set");
+    }
+    return PoolPushProgressSpec{
+        .expected_pushes = expected_pushes_per_pool_,
+        .expected_pools = transfer_pool_indices_.size(),
+    };
+  }
+
+  absl::Status OnPoolReceived(size_t pool_idx, uint64_t uuid) override {
+    (void)pool_idx;
+    (void)uuid;
+    ++pool_completion_count_;
+    return absl::OkStatus();
+  }
+
+  void SetPoolPushProgress(uint64_t uuid, size_t expected_pushes_per_pool,
+                           std::vector<size_t> transfer_pool_indices) {
+    pool_progress_uuid_ = uuid;
+    expected_pushes_per_pool_ = expected_pushes_per_pool;
+    transfer_pool_indices_ = std::move(transfer_pool_indices);
+  }
+
   void RegisterBlockReadinessCallback(size_t layer_idx, size_t shard_idx,
                                       int block_id, uint64_t uuid,
                                       HostBlockReadyCallback cb) override {
@@ -133,6 +164,7 @@ class MockDelegate : public BlockTransportDelegate {
 
   int region_validation_calls() const { return region_validation_calls_; }
   int layer_completion_count() const { return layer_completion_count_.load(); }
+  int pool_completion_count() const { return pool_completion_count_.load(); }
 
   int GetRemoteReadBlockId(int base_remote_id, int chunk_k) override {
     return base_remote_id + chunk_k;
@@ -173,7 +205,11 @@ class MockDelegate : public BlockTransportDelegate {
       BlockChunkRegionValidationMode::kDisabled;
   absl::Status region_validation_status_;
   int region_validation_calls_ = 0;
+  std::optional<uint64_t> pool_progress_uuid_;
+  size_t expected_pushes_per_pool_ = 0;
+  std::vector<size_t> transfer_pool_indices_;
   std::atomic<int> layer_completion_count_{0};
+  std::atomic<int> pool_completion_count_{0};
   absl::Mutex wait_events_mu_;
   std::vector<std::tuple<size_t, size_t, int>> wait_events_;
 };
@@ -304,6 +340,72 @@ TEST(BlockTransportTest, ForgetPushProgressAllowsUuidReuse) {
   EXPECT_EQ(receiver.layer_completion_count(), 3);
   ASSERT_TRUE(push_layer(0).ok());
   EXPECT_EQ(receiver.layer_completion_count(), 4);
+}
+
+TEST(BlockTransportTest,
+     PoolProgressWaitsForEveryStreamOfEveryDeclaredPoolAndRetires) {
+  constexpr uint64_t kUuid = 903;
+  MockDelegate sender(/*slice_size=*/32, /*max_blocks=*/1,
+                      /*num_layers=*/2);
+  MockDelegate receiver(/*slice_size=*/32, /*max_blocks=*/1,
+                        /*num_layers=*/2);
+  receiver.SetPoolPushProgress(kUuid, /*expected_pushes_per_pool=*/2,
+                               /*transfer_pool_indices=*/{0, 1});
+  BlockTransport sender_transport(&sender, 0);
+  BlockTransport receiver_transport(&receiver, 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  const std::string peer =
+      "localhost:" + std::to_string(receiver_transport.local_port());
+
+  auto push_pool = [&](int pool_idx) {
+    return sender_transport.SyncPush(
+        {peer}, /*src_block_ids=*/{0}, /*dst_block_ids=*/{0},
+        /*parallelism=*/1, MajorOrder::kLayerMajor, kUuid, pool_idx);
+  };
+
+  ASSERT_TRUE(push_pool(0).ok());
+  ASSERT_TRUE(push_pool(1).ok());
+  EXPECT_EQ(receiver.pool_completion_count(), 0);
+  EXPECT_EQ(receiver.layer_completion_count(), 0);
+
+  ASSERT_TRUE(push_pool(0).ok());
+  EXPECT_EQ(receiver.pool_completion_count(), 1);
+  ASSERT_TRUE(push_pool(1).ok());
+  EXPECT_EQ(receiver.pool_completion_count(), 2);
+
+  // Completing the final declared pool retires all pool-keyed counters. The
+  // same UUID starts a fresh generation without an explicit Forget call.
+  ASSERT_TRUE(push_pool(0).ok());
+  EXPECT_EQ(receiver.pool_completion_count(), 2);
+  ASSERT_TRUE(push_pool(0).ok());
+  EXPECT_EQ(receiver.pool_completion_count(), 3);
+}
+
+TEST(BlockTransportTest, ForgetPushProgressResetsPartialPoolGeneration) {
+  constexpr uint64_t kUuid = 904;
+  MockDelegate sender(/*slice_size=*/32);
+  MockDelegate receiver(/*slice_size=*/32);
+  receiver.SetPoolPushProgress(kUuid, /*expected_pushes_per_pool=*/2,
+                               /*transfer_pool_indices=*/{0});
+  BlockTransport sender_transport(&sender, 0);
+  BlockTransport receiver_transport(&receiver, 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  const std::string peer =
+      "localhost:" + std::to_string(receiver_transport.local_port());
+
+  auto push_once = [&]() {
+    return sender_transport.SyncPush(
+        {peer}, /*src_block_ids=*/{0}, /*dst_block_ids=*/{0},
+        /*parallelism=*/1, MajorOrder::kLayerMajor, kUuid, /*layer_idx=*/0);
+  };
+
+  ASSERT_TRUE(push_once().ok());
+  EXPECT_EQ(receiver.pool_completion_count(), 0);
+  receiver_transport.ForgetPushProgress(kUuid);
+  ASSERT_TRUE(push_once().ok());
+  EXPECT_EQ(receiver.pool_completion_count(), 0);
+  ASSERT_TRUE(push_once().ok());
+  EXPECT_EQ(receiver.pool_completion_count(), 1);
 }
 
 TEST(BlockTransportTest, RegionValidationFailModeRejectsPushChunks) {

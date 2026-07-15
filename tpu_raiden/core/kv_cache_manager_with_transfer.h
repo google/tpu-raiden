@@ -50,6 +50,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/types/span.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
@@ -215,6 +216,27 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   absl::Status RegisterRecv(uint64_t uuid, const std::string& req_id,
                             int64_t expected_block_count) override;
 
+  // Stage-3 FA-only reshard executor. The controller owns topology and entry
+  // math; this boundary validates the declared pool contract before staging or
+  // network side effects.
+  absl::Status ReshardPush(const rpc::StartTransferRequest& plan,
+                           absl::Span<const int64_t> src_block_ids,
+                           int parallelism = 8) override;
+
+  absl::Status ReshardRegisterRecv(
+      const rpc::StartTransferRequest& plan,
+      absl::Span<const int64_t> chip_block_ids) override;
+
+  struct ReshardSkipSummary {
+    int transferred_fa_pools = 0;
+    int skipped_gdn_conv_pools = 0;
+    int skipped_gdn_ssm_pools = 0;
+    std::string reason = "stage3_fa_only";
+  };
+
+  absl::StatusOr<ReshardSkipSummary> GetReshardSkipSummary(
+      const std::string& req_id);
+
   absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
                                 uint64_t uuid = 0) override;
 
@@ -327,6 +349,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   void ProcessPullStream(int fd, const ControlRequestHeader& req);
   void AckRemote(const std::string& remote_endpoint, uint64_t uuid);
   absl::Status OnLayerReceived(size_t layer_idx, uint64_t uuid) override;
+  absl::Status OnPoolReceived(size_t pool_idx, uint64_t uuid) override;
   void RegisterBlockReadinessCallback(
       size_t layer_idx, size_t shard_idx, int block_id, uint64_t uuid,
       transport::BlockTransportDelegate::HostBlockReadyCallback cb) override;
@@ -357,17 +380,47 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     int32_t num_completed_layers = 0;
     bool network_completed = false;
     bool h2d_started = false;
+    bool reshard_finalizing = false;
     std::vector<int> accumulated_host_block_ids;
     std::chrono::steady_clock::time_point deadline;
     std::vector<raiden::PjRtCopyFuture> h2d_futures;
+    bool is_pool_reshard = false;
+    std::set<size_t> expected_pool_indices;
+    std::set<size_t> started_pool_indices;
+    std::set<size_t> completed_pool_indices;
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
+
+  struct ReshardSendEntry {
+    std::string req_id;
+    uint64_t uuid = 0;
+    int parallelism = 8;
+    int remaining_pool_peer_pushes = 0;
+    bool failed = false;
+    bool finalizing = false;
+    std::chrono::steady_clock::time_point deadline;
+    std::vector<int64_t> source_block_ids;
+    rpc::StartTransferRequest plan;
+    std::vector<raiden::PjRtCopyFuture> d2h_futures;
+  };
+  absl::flat_hash_map<uint64_t, std::shared_ptr<ReshardSendEntry>>
+      active_reshard_sends_;
 
   void StartPushInternal(uint64_t uuid,
                          const std::vector<std::string>& remote_data_endpoints,
                          const std::vector<int64_t>& src_block_ids,
                          const std::vector<int64_t>& dst_block_ids);
   void SendNextLayer(uint64_t uuid, size_t l);
+
+  absl::Status ValidateReshardPlan(
+      const rpc::StartTransferRequest& plan,
+      absl::Span<const int64_t> local_block_ids, bool is_sender);
+  ReshardSkipSummary BuildReshardSkipSummary(
+      const rpc::StartTransferRequest& plan) const;
+  void StartReshardPoolPush(uint64_t uuid, size_t pool_idx);
+  void FinishReshardSend(uint64_t uuid, const absl::Status& status);
+  void FinishReshardRecvPool(uint64_t uuid, size_t pool_idx,
+                             const absl::Status& status);
 
   std::chrono::steady_clock::time_point DeadlineFromNow() const;
 
@@ -393,6 +446,8 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   std::set<std::string> done_sending_;
   std::set<std::string> done_recving_;
   std::set<std::string> failed_recving_;
+  absl::flat_hash_map<std::string, ReshardSkipSummary>
+      reshard_skip_summaries_;
   // StagingReadinessState is shared because it is captured by value in the
   // async PjRt copy callbacks (e.g. OnReady). A shared_ptr is required here
   // to ensure the state stays alive even if the entry is removed from this

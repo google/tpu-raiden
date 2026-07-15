@@ -289,6 +289,7 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/time",
+        "@com_google_absl//absl/types:span",
         "@xla//xla/pjrt:pjrt_client",
         "@xla//xla/tsl/platform:errors",
     ],
@@ -572,6 +573,27 @@ cc_test(
     ],
     deps = [
         ":kv_cache_manager_with_transfer",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+# Hardware-free Stage-3 validation, lifecycle, accounting, and transport
+# regressions (matrix X1, X2, X4 and manager-level PF2 lifecycle coverage).
+cc_test(
+    name = "kv_cache_manager_with_transfer_stage3_test",
+    srcs = ["kv_cache_manager_with_transfer_stage3_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = [
+        "-use_header_modules",
+        "-layering_check",
+    ],
+    deps = [
+        ":kv_cache_manager_with_transfer",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_google_absl//absl/status",
         "@com_google_googletest//:gtest_main",
     ],
 )

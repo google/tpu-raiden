@@ -105,6 +105,19 @@ bool EncodeIp(const std::string& ip_str, uint8_t* dst) {
 
 constexpr absl::Duration kPendingWorkTimeout = absl::Seconds(30);
 
+bool StridedSpanFitsBlock(int64_t offset, int64_t stride, int64_t size,
+                          int64_t count, int64_t block_size) {
+  if (offset < 0 || stride < 0 || size <= 0 || count <= 0 ||
+      block_size <= 0 || offset > block_size || size > block_size - offset) {
+    return false;
+  }
+  if (count == 1) return true;
+
+  // Division avoids overflowing (count - 1) * stride.
+  const int64_t remaining = block_size - offset - size;
+  return stride <= remaining / (count - 1);
+}
+
 [[noreturn]] void ThrowStatus(const std::string& context,
                               const absl::Status& status) {
   throw std::runtime_error(context + ": " + std::string(status.message()));
@@ -647,7 +660,9 @@ absl::Status KVCacheManagerWithTransfer::RegisterActivePlan(
   if (!is_sender && request.dst_mem_type() == rpc::MEMORY_TYPE_HBM) {
     std::lock_guard<std::mutex> lock(mu_);
     RecvEntry recv_entry;
-    std::string req_id = absl::StrCat("resharded_transfer_", uuid);
+    std::string req_id = request.req_id().empty()
+                             ? absl::StrCat("resharded_transfer_", uuid)
+                             : request.req_id();
     recv_entry.req_id = req_id;
 
     int64_t total_blocks = 0;
@@ -702,6 +717,416 @@ absl::Status KVCacheManagerWithTransfer::RegisterRecv(
   VLOG(1)
       << "RegisterRecv (Receiver): Registered expected block count for UUID "
       << uuid << " with " << expected_block_count << " expected blocks.";
+  return absl::OkStatus();
+}
+
+KVCacheManagerWithTransfer::ReshardSkipSummary
+KVCacheManagerWithTransfer::BuildReshardSkipSummary(
+    const rpc::StartTransferRequest& plan) const {
+  ReshardSkipSummary summary;
+  for (int32_t pool_idx : plan.transfer_pool_indices()) {
+    if (pool_idx < 0) continue;
+    const kv_cache::PoolSpec* spec = pool(static_cast<size_t>(pool_idx));
+    if (spec != nullptr && spec->tag == "fa") {
+      ++summary.transferred_fa_pools;
+    }
+  }
+  summary.skipped_gdn_conv_pools =
+      static_cast<int>(PoolIndicesWithTag("gdn.conv").size());
+  summary.skipped_gdn_ssm_pools =
+      static_cast<int>(PoolIndicesWithTag("gdn.ssm").size());
+  return summary;
+}
+
+absl::StatusOr<KVCacheManagerWithTransfer::ReshardSkipSummary>
+KVCacheManagerWithTransfer::GetReshardSkipSummary(
+    const std::string& req_id) {
+  std::lock_guard<std::mutex> lock(mu_);
+  auto it = reshard_skip_summaries_.find(req_id);
+  if (it == reshard_skip_summaries_.end()) {
+    return absl::NotFoundError(
+        absl::StrCat("No Stage-3 reshard summary for request ", req_id));
+  }
+  return it->second;
+}
+
+absl::Status KVCacheManagerWithTransfer::ValidateReshardPlan(
+    const rpc::StartTransferRequest& plan,
+    absl::Span<const int64_t> local_block_ids, bool is_sender) {
+  if (!has_explicit_pools()) {
+    return absl::FailedPreconditionError(
+        "Stage-3 reshard requires explicitly registered pools");
+  }
+  if (plan.req_id().empty()) {
+    return absl::InvalidArgumentError("reshard plan req_id must be non-empty");
+  }
+  if (plan.uuid() <= 0) {
+    return absl::InvalidArgumentError("reshard plan uuid must be positive");
+  }
+  if (!plan.use_block_chunks()) {
+    return absl::InvalidArgumentError(
+        "Stage-3 reshard requires use_block_chunks=true");
+  }
+  if (plan.expected_pushes_per_pool() <= 0) {
+    return absl::InvalidArgumentError(
+        "expected_pushes_per_pool must be positive");
+  }
+  if (plan.transfer_pool_indices().empty()) {
+    return absl::InvalidArgumentError(
+        "reshard plan must declare transfer_pool_indices");
+  }
+  if (plan.pool_dtype_tags_size() != static_cast<int>(num_pools())) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "reshard plan must declare one dtype tag per pool: plan=",
+        plan.pool_dtype_tags_size(), " local=", num_pools()));
+  }
+  if (local_block_ids.empty()) {
+    return absl::InvalidArgumentError("local block ids must not be empty");
+  }
+
+  std::set<int64_t> local_ids;
+  for (int64_t block_id : local_block_ids) {
+    if (block_id < 0 || block_id > std::numeric_limits<int>::max() ||
+        !local_ids.insert(block_id).second) {
+      return absl::InvalidArgumentError(
+          "local block ids must be unique, non-negative, and fit in int");
+    }
+  }
+
+  std::set<size_t> declared_pools;
+  for (int32_t encoded_pool_idx : plan.transfer_pool_indices()) {
+    if (encoded_pool_idx < 0) {
+      return absl::InvalidArgumentError(
+          "transfer pool index must be non-negative");
+    }
+    const size_t pool_idx = static_cast<size_t>(encoded_pool_idx);
+    if (!declared_pools.insert(pool_idx).second) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("duplicate transfer pool index ", pool_idx));
+    }
+    const kv_cache::PoolSpec* spec = pool(pool_idx);
+    if (spec == nullptr) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("transfer pool index out of range: ", pool_idx));
+    }
+    if (spec->tag != "fa") {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Stage-3 FA-only plan references non-FA pool ", pool_idx, " (",
+          spec->tag, ")"));
+    }
+    if (plan.pool_dtype_tags(pool_idx) != spec->dtype_tag) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "plan dtype tag mismatch for pool ", pool_idx, " (", spec->tag,
+          "): plan=", plan.pool_dtype_tags(pool_idx),
+          " local=", spec->dtype_tag));
+    }
+    for (int64_t block_id : local_block_ids) {
+      if (block_id >= spec->num_blocks) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "local block id ", block_id, " is out of range for pool ",
+            pool_idx));
+      }
+    }
+  }
+
+  const std::vector<size_t> all_fa = PoolIndicesWithTag("fa");
+  const std::set<size_t> all_fa_set(all_fa.begin(), all_fa.end());
+  if (declared_pools != all_fa_set) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Stage-3 plan must transfer every registered FA pool: declared=",
+        declared_pools.size(), " registered_fa=", all_fa_set.size()));
+  }
+  if (plan.shard_push_schedules().empty()) {
+    return absl::InvalidArgumentError(
+        "reshard plan must contain shard push schedules");
+  }
+
+  size_t entry_count = 0;
+  std::set<int64_t> receiver_blocks_with_zero_start;
+  for (const auto& [source_rank, schedule] : plan.shard_push_schedules()) {
+    if (source_rank < 0) {
+      return absl::InvalidArgumentError(
+          "reshard schedule source rank must be non-negative");
+    }
+    for (const auto& entry : schedule.entries()) {
+      ++entry_count;
+      if (entry.dst_peer().empty()) {
+        return absl::InvalidArgumentError(
+            "reshard entry dst_peer must be non-empty");
+      }
+      if (entry.src_block_id() < 0 ||
+          entry.src_block_id() > std::numeric_limits<int>::max() ||
+          entry.dst_block_id() < 0 ||
+          entry.dst_block_id() > std::numeric_limits<int>::max() ||
+          entry.dst_shard_idx() < 0 || entry.src_offset_bytes() < 0 ||
+          entry.dst_offset_bytes() < 0 || entry.size_bytes() <= 0 ||
+          entry.src_stride_bytes() < 0 || entry.dst_stride_bytes() < 0 ||
+          entry.count() <= 0) {
+        return absl::InvalidArgumentError(
+            "reshard entry contains invalid ids, offsets, sizes, or strides");
+      }
+      if (entry.count() > 1 &&
+          (entry.src_stride_bytes() == 0 ||
+           entry.dst_stride_bytes() == 0)) {
+        return absl::InvalidArgumentError(
+            "multi-chunk reshard entries require positive strides");
+      }
+      if (!is_sender &&
+          static_cast<size_t>(entry.dst_shard_idx()) >= num_shards()) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "destination shard index ", entry.dst_shard_idx(),
+            " is out of range: receiver has ", num_shards(), " shards"));
+      }
+      const int64_t local_id =
+          is_sender ? entry.src_block_id() : entry.dst_block_id();
+      if (local_ids.find(local_id) == local_ids.end()) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            is_sender ? "source" : "destination", " block id ", local_id,
+            " is absent from the local block-id list"));
+      }
+      const int64_t local_offset =
+          is_sender ? entry.src_offset_bytes() : entry.dst_offset_bytes();
+      const int64_t local_stride =
+          is_sender ? entry.src_stride_bytes() : entry.dst_stride_bytes();
+      if (!is_sender && entry.dst_offset_bytes() == 0) {
+        receiver_blocks_with_zero_start.insert(entry.dst_block_id());
+      }
+      for (size_t pool_idx : declared_pools) {
+        const kv_cache::PoolSpec* spec = pool(pool_idx);
+        if (!StridedSpanFitsBlock(local_offset, local_stride,
+                                  entry.size_bytes(), entry.count(),
+                                  spec->block_stride_bytes)) {
+          return absl::InvalidArgumentError(absl::StrCat(
+              is_sender ? "source" : "destination",
+              " span exceeds declared pool ", pool_idx, " block ", local_id,
+              ": offset=", local_offset, " stride=", local_stride,
+              " size=", entry.size_bytes(), " count=", entry.count(),
+              " block_stride_bytes=", spec->block_stride_bytes));
+        }
+      }
+    }
+  }
+  if (entry_count == 0) {
+    return absl::InvalidArgumentError("reshard plan contains no entries");
+  }
+  if (!is_sender) {
+    for (int64_t block_id : local_ids) {
+      if (receiver_blocks_with_zero_start.find(block_id) ==
+          receiver_blocks_with_zero_start.end()) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "destination block ", block_id,
+            " has no transfer entry starting at offset 0; partial-page "
+            "destination preservation is not implemented"));
+      }
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::Status KVCacheManagerWithTransfer::ReshardPush(
+    const rpc::StartTransferRequest& plan,
+    absl::Span<const int64_t> src_block_ids, int parallelism) {
+  TF_RETURN_IF_ERROR(
+      ValidateReshardPlan(plan, src_block_ids, /*is_sender=*/true));
+  if (parallelism <= 0) {
+    return absl::InvalidArgumentError("parallelism must be positive");
+  }
+
+  auto schedule_it = plan.shard_push_schedules().find(0);
+  if (schedule_it == plan.shard_push_schedules().end()) {
+    if (plan.shard_push_schedules().size() != 1) {
+      return absl::InvalidArgumentError(
+          "sender plan must use local schedule key 0");
+    }
+    schedule_it = plan.shard_push_schedules().begin();
+  }
+  std::set<std::string> peers;
+  for (const auto& entry : schedule_it->second.entries()) {
+    peers.insert(entry.dst_peer());
+  }
+  if (peers.empty()) {
+    return absl::InvalidArgumentError("sender plan contains no peers");
+  }
+
+  InitTransportServer();
+  TF_RETURN_IF_ERROR(kv_cache::KVCacheManagerBase::RegisterActivePlan(
+      plan.uuid(), plan, /*is_sender=*/true));
+
+  auto state = std::make_shared<ReshardSendEntry>();
+  state->req_id = plan.req_id();
+  state->uuid = plan.uuid();
+  state->parallelism = parallelism;
+  state->remaining_pool_peer_pushes =
+      plan.transfer_pool_indices_size() * peers.size();
+  state->source_block_ids.assign(src_block_ids.begin(), src_block_ids.end());
+  state->plan = plan;
+  state->deadline = DeadlineFromNow();
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (active_reshard_sends_.contains(plan.uuid())) {
+      (void)kv_cache::KVCacheManagerBase::UnregisterActivePlan(plan.uuid());
+      return absl::AlreadyExistsError(
+          absl::StrCat("reshard send UUID already active: ", plan.uuid()));
+    }
+    active_reshard_sends_[plan.uuid()] = state;
+    reshard_skip_summaries_[plan.req_id()] = BuildReshardSkipSummary(plan);
+  }
+
+  for (int32_t encoded_pool_idx : plan.transfer_pool_indices()) {
+    const size_t pool_idx = static_cast<size_t>(encoded_pool_idx);
+    if (buffer_holds_.empty()) {
+      // Host-only managers already expose source bytes in their host mirrors.
+      StartReshardPoolPush(plan.uuid(), pool_idx);
+      continue;
+    }
+    auto future_or = D2hPoolBlocks(pool_idx, src_block_ids);
+    if (!future_or.ok()) {
+      FinishReshardSend(plan.uuid(), future_or.status());
+      return future_or.status();
+    }
+    raiden::PjRtCopyFuture future = std::move(future_or).value();
+    state->d2h_futures.push_back(future);
+    future.OnReady([this, uuid = static_cast<uint64_t>(plan.uuid()), pool_idx](
+                       auto status_or) {
+      if (!status_or.ok()) {
+        FinishReshardSend(uuid, status_or.status());
+        return;
+      }
+      StartReshardPoolPush(uuid, pool_idx);
+    });
+  }
+  return absl::OkStatus();
+}
+
+void KVCacheManagerWithTransfer::StartReshardPoolPush(uint64_t uuid,
+                                                       size_t pool_idx) {
+  std::shared_ptr<ReshardSendEntry> state;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = active_reshard_sends_.find(uuid);
+    if (it == active_reshard_sends_.end()) return;
+    state = it->second;
+  }
+
+  auto schedule_it = state->plan.shard_push_schedules().find(0);
+  if (schedule_it == state->plan.shard_push_schedules().end()) {
+    schedule_it = state->plan.shard_push_schedules().begin();
+  }
+  std::map<std::string, std::vector<std::pair<int, int>>> transfers_by_peer;
+  std::map<std::string, std::set<std::pair<int, int>>> seen_by_peer;
+  for (const auto& entry : schedule_it->second.entries()) {
+    const std::pair<int, int> pair{static_cast<int>(entry.src_block_id()),
+                                   static_cast<int>(entry.dst_block_id())};
+    if (seen_by_peer[entry.dst_peer()].insert(pair).second) {
+      transfers_by_peer[entry.dst_peer()].push_back(pair);
+    }
+  }
+
+  transport::BlockTransport* transport_server = nullptr;
+  {
+    absl::MutexLock lock(server_init_mu_);
+    transport_server = server_.get();
+  }
+  if (transport_server == nullptr) {
+    FinishReshardSend(
+        uuid, absl::FailedPreconditionError("transport server is not running"));
+    return;
+  }
+
+  for (const auto& [peer, transfers] : transfers_by_peer) {
+    std::vector<int> src_ids;
+    std::vector<int> dst_ids;
+    src_ids.reserve(transfers.size());
+    dst_ids.reserve(transfers.size());
+    for (const auto& [src_id, dst_id] : transfers) {
+      src_ids.push_back(src_id);
+      dst_ids.push_back(dst_id);
+    }
+    transport_server->AsyncPush(
+        {peer}, src_ids, dst_ids, state->parallelism,
+        transport::MajorOrder::kLayerMajor, uuid,
+        static_cast<int>(pool_idx),
+        [this, uuid](absl::StatusOr<std::vector<int>> result) {
+          FinishReshardSend(uuid,
+                            result.ok() ? absl::OkStatus() : result.status());
+        });
+  }
+}
+
+void KVCacheManagerWithTransfer::FinishReshardSend(
+    uint64_t uuid, const absl::Status& status) {
+  bool finished = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = active_reshard_sends_.find(uuid);
+    if (it == active_reshard_sends_.end()) return;
+    auto& state = *it->second;
+    if (state.finalizing) return;
+    if (!status.ok()) {
+      LOG(ERROR) << "Stage-3 reshard send failed uuid=" << uuid
+                 << " req_id=" << state.req_id << ": " << status;
+      state.failed = true;
+      state.finalizing = true;
+      finished = true;
+    } else if (--state.remaining_pool_peer_pushes == 0) {
+      state.finalizing = true;
+      finished = true;
+    }
+  }
+  if (finished) {
+    absl::Status unregister = UnregisterActivePlan(uuid);
+    if (!unregister.ok() && !absl::IsNotFound(unregister)) {
+      LOG(ERROR) << "Failed to unregister Stage-3 sender plan " << uuid
+                 << ": " << unregister;
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = active_reshard_sends_.find(uuid);
+    if (it == active_reshard_sends_.end()) return;
+    if (it->second->failed ||
+        (!unregister.ok() && !absl::IsNotFound(unregister))) {
+      failed_recving_.insert(it->second->req_id);
+    } else {
+      done_sending_.insert(it->second->req_id);
+    }
+    active_reshard_sends_.erase(it);
+  }
+}
+
+absl::Status KVCacheManagerWithTransfer::ReshardRegisterRecv(
+    const rpc::StartTransferRequest& plan,
+    absl::Span<const int64_t> chip_block_ids) {
+  TF_RETURN_IF_ERROR(
+      ValidateReshardPlan(plan, chip_block_ids, /*is_sender=*/false));
+  if (plan.dst_mem_type() != rpc::MEMORY_TYPE_HBM) {
+    return absl::InvalidArgumentError(
+        "reshard receiver requires dst_mem_type=HBM");
+  }
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (active_recv_entries_.contains(plan.uuid())) {
+      return absl::AlreadyExistsError(
+          absl::StrCat("reshard recv UUID already active: ", plan.uuid()));
+    }
+  }
+
+  TF_RETURN_IF_ERROR(kv_cache::KVCacheManagerBase::RegisterActivePlan(
+      plan.uuid(), plan, /*is_sender=*/false));
+  RecvEntry recv_entry;
+  recv_entry.req_id = plan.req_id();
+  recv_entry.is_pool_reshard = true;
+  recv_entry.deadline = DeadlineFromNow();
+  recv_entry.chip_block_ids.assign(chip_block_ids.begin(),
+                                   chip_block_ids.end());
+  // Pool host mirrors cover the complete block-id space, so the wire lands at
+  // chip block ids directly; no Stage-3 staging-id remap is needed.
+  for (int32_t pool_idx : plan.transfer_pool_indices()) {
+    recv_entry.expected_pool_indices.insert(static_cast<size_t>(pool_idx));
+  }
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    active_recv_entries_[plan.uuid()] = std::move(recv_entry);
+    reshard_skip_summaries_[plan.req_id()] = BuildReshardSkipSummary(plan);
+  }
   return absl::OkStatus();
 }
 
@@ -938,6 +1363,18 @@ KVCacheManagerWithTransfer::CompleteReadRaw() {
         ReleaseEntrySlotLocked(entry);
         timed_out_plan_uuids.push_back(it->first);
         it = send_entries_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    for (auto it = active_reshard_sends_.begin();
+         it != active_reshard_sends_.end();) {
+      const auto& entry = it->second;
+      if (entry->deadline <= now) {
+        failed_recving_.insert(entry->req_id);
+        timed_out_plan_uuids.push_back(it->first);
+        auto erase_it = it++;
+        active_reshard_sends_.erase(erase_it);
       } else {
         ++it;
       }
@@ -1648,23 +2085,38 @@ void KVCacheManagerWithTransfer::SendNextLayer(uint64_t uuid, size_t l) {
 }
 
 absl::Status KVCacheManagerWithTransfer::WaitForPendingWork() {
-  LOG(INFO) << "Waiting for pending H2D transfers to complete...";
+  LOG(INFO) << "Waiting for pending transfer work to complete...";
   const absl::Time start = absl::Now();
   while (true) {
     {
       std::lock_guard<std::mutex> lock(mu_);
-      if (active_recv_entries_.empty()) {
+      bool recv_pending = false;
+      for (const auto& [uuid, entry] : active_recv_entries_) {
+        (void)uuid;
+        if (!entry.is_pool_reshard || !entry.network_completed) {
+          recv_pending = true;
+          break;
+        }
+        for (const auto& future : entry.h2d_futures) {
+          if (!future.IsReady()) {
+            recv_pending = true;
+            break;
+          }
+        }
+        if (recv_pending) break;
+      }
+      if (!recv_pending && active_reshard_sends_.empty()) {
         break;
       }
       const absl::Duration elapsed = absl::Now() - start;
       if (elapsed > kPendingWorkTimeout) {
         return absl::DeadlineExceededError(
-            "Timeout waiting for pending H2D transfers");
+            "Timeout waiting for pending transfer work");
       }
     }
     absl::SleepFor(absl::Milliseconds(100));
   }
-  LOG(INFO) << "All pending H2D transfers completed.";
+  LOG(INFO) << "All pending transfer work completed.";
   return absl::OkStatus();
 }
 
@@ -1802,6 +2254,12 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
     std::lock_guard<std::mutex> lock(mu_);
     auto it = active_recv_entries_.find(uuid);
     if (it != active_recv_entries_.end()) {
+      // Stage-3 completion is pool-keyed and driven exclusively by
+      // OnPoolReceived after every expected push stream lands. Counting block
+      // notifications here would reintroduce the legacy layer multiplicity.
+      if (it->second.is_pool_reshard) {
+        return absl::OkStatus();
+      }
       it->second.num_completed_blocks += block_ids.size();
       if (it->second.num_completed_blocks == block_ids.size()) {
         if (metrics_collector_) {
@@ -1851,6 +2309,103 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
             << ", uuid=" << uuid
             << ", numa=" << assigned_numa_node().value_or(-1);
   return absl::OkStatus();
+}
+
+absl::Status KVCacheManagerWithTransfer::OnPoolReceived(size_t pool_idx,
+                                                        uint64_t uuid) {
+  std::vector<int64_t> chip_block_ids;
+  bool legacy_entry = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = active_recv_entries_.find(uuid);
+    if (it == active_recv_entries_.end()) {
+      return absl::NotFoundError(
+          absl::StrCat("no active receiver for UUID ", uuid));
+    }
+    RecvEntry& entry = it->second;
+    if (!entry.is_pool_reshard) {
+      legacy_entry = true;
+    } else if (entry.expected_pool_indices.find(pool_idx) ==
+               entry.expected_pool_indices.end()) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "received undeclared Stage-3 pool ", pool_idx, " for UUID ",
+          uuid));
+    } else if (entry.started_pool_indices.find(pool_idx) !=
+               entry.started_pool_indices.end()) {
+      return absl::AlreadyExistsError(absl::StrCat(
+          "Stage-3 pool completed more than once: ", pool_idx));
+    } else {
+      entry.started_pool_indices.insert(pool_idx);
+      chip_block_ids = entry.chip_block_ids;
+    }
+  }
+  if (legacy_entry) return OnLayerReceived(pool_idx, uuid);
+
+  if (buffer_holds_.empty()) {
+    // Host-only managers have already received into the destination mirror.
+    FinishReshardRecvPool(uuid, pool_idx, absl::OkStatus());
+    return absl::OkStatus();
+  }
+
+  auto future_or = H2dPoolBlocks(pool_idx, chip_block_ids);
+  if (!future_or.ok()) {
+    FinishReshardRecvPool(uuid, pool_idx, future_or.status());
+    return future_or.status();
+  }
+  raiden::PjRtCopyFuture future = std::move(future_or).value();
+  future.OnReady([this, uuid, pool_idx](auto status_or) {
+    FinishReshardRecvPool(
+        uuid, pool_idx,
+        status_or.ok() ? absl::OkStatus() : status_or.status());
+  });
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = active_recv_entries_.find(uuid);
+    if (it != active_recv_entries_.end()) {
+      it->second.h2d_futures.push_back(future);
+    }
+  }
+  return absl::OkStatus();
+}
+
+void KVCacheManagerWithTransfer::FinishReshardRecvPool(
+    uint64_t uuid, size_t pool_idx, const absl::Status& status) {
+  bool finished = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = active_recv_entries_.find(uuid);
+    if (it == active_recv_entries_.end()) return;
+    RecvEntry& entry = it->second;
+    if (entry.reshard_finalizing) return;
+    if (!status.ok()) {
+      entry.reshard_finalizing = true;
+      finished = true;
+    } else {
+      entry.completed_pool_indices.insert(pool_idx);
+      if (entry.completed_pool_indices == entry.expected_pool_indices) {
+        entry.reshard_finalizing = true;
+        finished = true;
+      }
+    }
+  }
+  if (finished) {
+    absl::Status unregister = UnregisterActivePlan(uuid);
+    if (!unregister.ok() && !absl::IsNotFound(unregister)) {
+      LOG(ERROR) << "Failed to unregister Stage-3 receiver plan " << uuid
+                 << ": " << unregister;
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = active_recv_entries_.find(uuid);
+    if (it == active_recv_entries_.end()) return;
+    if (!status.ok() ||
+        (!unregister.ok() && !absl::IsNotFound(unregister))) {
+      failed_recving_.insert(it->second.req_id);
+      active_recv_entries_.erase(it);
+    } else {
+      it->second.network_completed = true;
+      done_recving_.insert(it->second.req_id);
+    }
+  }
 }
 
 absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,

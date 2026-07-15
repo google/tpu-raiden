@@ -33,7 +33,11 @@ from typing import Any, Optional
 
 
 class HostKVCacheManager:
-  """Python adapter around the CPU-only nanobind manager."""
+  """Python adapter around the CPU-only nanobind manager.
+
+  ``listener_port`` is the protobuf controller endpoint; it is independent of
+  the data ``local_port`` and the disabled legacy pull-control protocol.
+  """
 
   def __init__(
       self,
@@ -45,6 +49,7 @@ class HostKVCacheManager:
       local_port: Optional[int] = None,
       host_blocks: int,
       parallelism: int = 4,
+      listener_port: Optional[int] = None,
   ):
     # Import lazily so importing the host-only wrapper never initializes the
     # torch_tpu runtime.
@@ -60,6 +65,7 @@ class HostKVCacheManager:
         local_port=local_port,
         host_blocks_to_allocate=host_blocks,
         parallelism=parallelism,
+        listener_port=listener_port,
     )
 
   def __getattr__(self, name: str) -> Any:
