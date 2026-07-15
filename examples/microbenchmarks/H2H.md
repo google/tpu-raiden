@@ -185,7 +185,8 @@ Tested on v7x two-node cluster, block size 2MB.
 
 ### End-to-End (E2E) KV Cache Transfer Bandwidth (Device-to-Device over NIC)**
 
-We measured the end-to-end performance of transfers originating and terminating on the accelerator devices (e.g., using JAX). This includes the overhead of copying data between the device and the host, as well as the network transport between sender and receiver, which is effectively the `start_send` until the blocks are received. We evaluated the impact of NUMA awareness by comparing the default behavior (multi-NIC enabled) against restricting transfers to a single NUMA node/NIC (`DISABLE_MULTI_NUMA=1`).
+<!-- disableFinding(LINE_OVER_80) -->
+We measured the end-to-end performance of transfers originating and terminating on the accelerator devices (e.g., using JAX). This includes the overhead of copying data between the device and the host, as well as the network transport between sender and receiver, which is effectively the `start_send` until the blocks are received. We evaluated the impact of NUMA awareness by comparing the default behavior (single NUMA node/NIC) against enabling multiple NUMA nodes (`ENABLE_MULTI_NUMA=1`).
 
 #### System & Host Network Tuning Prerequisites
 

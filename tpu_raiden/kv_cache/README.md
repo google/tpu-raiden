@@ -49,12 +49,29 @@ Python orchestration scripts via non-blocking tuple lambda futures.
 
 ### Host Memory Internal Buffer Allocation
 
-* **Internal Host Memory Allocation**: Added an optional `host_blocks_to_allocate` parameter to `KVCacheManager` constructors. When specified, `KVCacheManager` bypasses Python host array extraction entirely and dynamically allocates 64-byte cache-line aligned host memory buffers (`posix_memalign`) internally for each shard. This eliminates the significant latency (often >20 minutes) associated with allocating large host JAX arrays in Python during engine initialization.
+* **Internal Host Memory Allocation**: Added an optional
+  `host_blocks_to_allocate` parameter to `KVCacheManager` constructors. When
+  specified, `KVCacheManager` bypasses Python host array extraction entirely
+  and dynamically allocates 64-byte cache-line aligned host memory buffers
+  (`posix_memalign`) internally for each shard. This eliminates the
+  significant latency (often >20 minutes) associated with allocating large
+  host JAX arrays in Python during engine initialization.
 
 ### Unsafe Buffer Lock Skipping
 
-* **Exclusive Lock Skipping (`unsafe_skip_buffer_lock`)**: Added an optional `unsafe_skip_buffer_lock` parameter to `KVCacheManager` constructors. When set to `True`, it bypasses exclusive hold/lock acquisition on destination buffers during copies. This is highly optimized for disaggregated serving scenarios where the caller guarantees that no other concurrent threads will modify the buffers during the transfer loop, eliminating synchronization lock overhead entirely.
-* **Concurrent Pipeline Verification**: Implemented a multi-threaded unit test (`test_concurrent_transfer_skip_buffer_lock`) simulating concurrent LLM serving. Thread 1 repeatedly executes `h2d`/`d2h` on blocks 0:4, while Thread 2 concurrently copies unique data via `h2d` to blocks 4:8. This verifies that skipping locks allows flawless parallel transfers on different blocks without deadlocks, data races, or corruption.
+* **Exclusive Lock Skipping (`unsafe_skip_buffer_lock`)**: Added an optional
+  `unsafe_skip_buffer_lock` parameter to `KVCacheManager` constructors. When
+  set to `True`, it bypasses exclusive hold/lock acquisition on destination
+  buffers during copies. This is highly optimized for disaggregated serving
+  scenarios where the caller guarantees that no other concurrent threads will
+  modify the buffers during the transfer loop, eliminating synchronization
+  lock overhead entirely.
+* **Concurrent Pipeline Verification**: Implemented a multi-threaded unit test
+  (`test_concurrent_transfer_skip_buffer_lock`) simulating concurrent LLM
+  serving. Thread 1 repeatedly executes `h2d`/`d2h` on blocks 0:4, while
+  Thread 2 concurrently copies unique data via `h2d` to blocks 4:8. This
+  verifies that skipping locks allows flawless parallel transfers on different
+  blocks without deadlocks, data races, or corruption.
 
 ### POSIX TCP Transport Engine Framework
 
@@ -86,6 +103,17 @@ Python orchestration scripts via non-blocking tuple lambda futures.
   offset locations locally on the fly, bypassing raw virtual base addresses
   entirely. Implements automated column assignments during push streams and
   local allocations during pulling symmetrically.
+
+### NUMA and Network Performance Tuning
+
+* **Multi-NUMA Network Offloading (`ENABLE_MULTI_NUMA`)**: For single-host
+  tasks (e.g. local KV cache offloading), leaving this environment variable
+  unset (Single NUMA) provides maximum local DMA throughput (up to 195 GB/s).
+  For multi-host tasks (e.g. Prefill/Decode resharding), users should opt-in
+  by setting `ENABLE_MULTI_NUMA=1` in their environment. This activates
+  multiple NICs across NUMA nodes, unlocking 50 GB/s H2H network transfer
+  speeds, at the necessary cost of double-dispatch CPU overhead and slightly
+  reduced local DMA speed due to JAX thread pinning restrictions.
 
 ---
 

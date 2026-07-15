@@ -35,6 +35,7 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"  // IWYU pragma: keep
 #include "absl/types/span.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -247,15 +248,16 @@ void NumaAwareKVCacheManager::InitSubManagers(
   for (const auto& nic : host_nics) {
     if (nic.classification == NicClassification::kDataPlane) num_ext_nics++;
   }
-  // Flag controlling whether multi-NUMA / multi-NIC sub-managers are disabled.
-  // Set DISABLE_MULTI_NUMA=1 or true to force all shards under a single NUMA 0
-  // sub-manager.
-  bool force_single_numa = false;
-  const char* disable_multi_numa_env = std::getenv("DISABLE_MULTI_NUMA");
-  if (disable_multi_numa_env != nullptr) {
-    if (std::strcmp(disable_multi_numa_env, "true") == 0 ||
-        std::strcmp(disable_multi_numa_env, "1") == 0) {
-      force_single_numa = true;
+  // Flag controlling whether multi-NUMA / multi-NIC sub-managers are enabled.
+  // By default, we force a single NUMA 0 sub-manager to bypass JAX threading
+  // overhead. Set ENABLE_MULTI_NUMA=1 or true to acknowledge multiple NUMA
+  // nodes and spawn multiple Sub-Managers.
+  bool force_single_numa = true;
+  const char* enable_multi_numa_env = std::getenv("ENABLE_MULTI_NUMA");
+  if (enable_multi_numa_env != nullptr) {
+    if (absl::EqualsIgnoreCase(enable_multi_numa_env, "true") ||
+        absl::EqualsIgnoreCase(enable_multi_numa_env, "1")) {
+      force_single_numa = false;
     }
   }
 
