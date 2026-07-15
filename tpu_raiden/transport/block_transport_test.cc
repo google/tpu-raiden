@@ -15,6 +15,7 @@
 #include "tpu_raiden/transport/block_transport.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>  // NOLINT
 #include <cstddef>
 #include <cstdint>
@@ -71,6 +72,13 @@ class MockDelegate : public BlockTransportDelegate {
     return OnDataReceived();
   }
 
+  absl::Status OnLayerReceived(size_t layer_idx, uint64_t uuid) override {
+    (void)layer_idx;
+    (void)uuid;
+    ++layer_completion_count_;
+    return absl::OkStatus();
+  }
+
   void RegisterBlockReadinessCallback(size_t layer_idx, size_t shard_idx,
                                       int block_id, uint64_t uuid,
                                       HostBlockReadyCallback cb) override {
@@ -124,6 +132,7 @@ class MockDelegate : public BlockTransportDelegate {
   }
 
   int region_validation_calls() const { return region_validation_calls_; }
+  int layer_completion_count() const { return layer_completion_count_.load(); }
 
   int GetRemoteReadBlockId(int base_remote_id, int chunk_k) override {
     return base_remote_id + chunk_k;
@@ -164,8 +173,33 @@ class MockDelegate : public BlockTransportDelegate {
       BlockChunkRegionValidationMode::kDisabled;
   absl::Status region_validation_status_;
   int region_validation_calls_ = 0;
+  std::atomic<int> layer_completion_count_{0};
   absl::Mutex wait_events_mu_;
   std::vector<std::tuple<size_t, size_t, int>> wait_events_;
+};
+
+class SamePeerFanoutDelegate : public MockDelegate {
+ public:
+  SamePeerFanoutDelegate() : MockDelegate(/*slice_size=*/256) {}
+
+  std::vector<BlockChunk> GetBlockChunks(
+      size_t layer_idx, size_t shard_idx,
+      absl::Span<const int64_t> block_ids, size_t total_bytes, uint64_t uuid,
+      int64_t sender_node_id = -1, absl::string_view peer = "",
+      int64_t src_block_id = -1, int64_t dst_block_id = -1) override {
+    (void)layer_idx;
+    (void)shard_idx;
+    (void)block_ids;
+    (void)total_bytes;
+    (void)uuid;
+    (void)sender_node_id;
+    (void)peer;
+    (void)src_block_id;
+    if (dst_block_id < 0 || dst_block_id >= 4) {
+      return {};
+    }
+    return {{.ptr = data() + dst_block_id * 64, .size = 64}};
+  }
 };
 
 TEST(BlockTransportTest, PushAndPullCorrectness) {
@@ -209,6 +243,67 @@ TEST(BlockTransportTest, PushAndPullCorrectness) {
   // Verify pull parity
   EXPECT_EQ(delegate2.data()[0], 0xAB);
   EXPECT_EQ(delegate2.data()[size - 1], 0xAB);
+}
+
+TEST(BlockTransportTest, SamePeerFanoutFiltersEachDestinationStream) {
+  SamePeerFanoutDelegate sender;
+  MockDelegate receiver(/*slice_size=*/64, /*max_blocks=*/4);
+  for (int page = 0; page < 4; ++page) {
+    std::memset(sender.data() + page * 64, 0x31 + page, 64);
+  }
+
+  BlockTransport sender_transport(&sender, 0);
+  BlockTransport receiver_transport(&receiver, 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  const std::string peer =
+      "localhost:" + std::to_string(receiver_transport.local_port());
+
+  auto result = sender_transport.SyncPush(
+      {peer}, /*src_block_ids=*/{0, 0, 0, 0},
+      /*dst_block_ids=*/{0, 1, 2, 3}, /*parallelism=*/4,
+      MajorOrder::kLayerMajor, /*uuid=*/901, /*layer_idx=*/0);
+
+  ASSERT_TRUE(result.ok()) << result.status();
+  ASSERT_EQ(*result, std::vector<int>({0, 1, 2, 3}));
+  for (int page = 0; page < 4; ++page) {
+    EXPECT_TRUE(std::all_of(receiver.block_data(page),
+                            receiver.block_data(page) + 64,
+                            [page](uint8_t byte) {
+                              return byte == 0x31 + page;
+                            }));
+  }
+}
+
+TEST(BlockTransportTest, ForgetPushProgressAllowsUuidReuse) {
+  constexpr uint64_t kUuid = 902;
+  MockDelegate sender(/*slice_size=*/32, /*max_blocks=*/1,
+                      /*num_layers=*/2);
+  MockDelegate receiver(/*slice_size=*/32, /*max_blocks=*/1,
+                        /*num_layers=*/2);
+  BlockTransport sender_transport(&sender, 0);
+  BlockTransport receiver_transport(&receiver, 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  const std::string peer =
+      "localhost:" + std::to_string(receiver_transport.local_port());
+
+  auto push_layer = [&](int layer_idx) {
+    return sender_transport.SyncPush(
+        {peer}, /*src_block_ids=*/{0}, /*dst_block_ids=*/{0},
+        /*parallelism=*/1, MajorOrder::kLayerMajor, kUuid, layer_idx);
+  };
+
+  ASSERT_TRUE(push_layer(0).ok());
+  EXPECT_EQ(receiver.layer_completion_count(), 1);
+  receiver_transport.ForgetPushProgress(kUuid);
+  ASSERT_TRUE(push_layer(0).ok());
+  EXPECT_EQ(receiver.layer_completion_count(), 2);
+
+  // Finishing every layer retires progress automatically, so the same UUID
+  // starts clean even without an explicit ForgetPushProgress call.
+  ASSERT_TRUE(push_layer(1).ok());
+  EXPECT_EQ(receiver.layer_completion_count(), 3);
+  ASSERT_TRUE(push_layer(0).ok());
+  EXPECT_EQ(receiver.layer_completion_count(), 4);
 }
 
 TEST(BlockTransportTest, RegionValidationFailModeRejectsPushChunks) {

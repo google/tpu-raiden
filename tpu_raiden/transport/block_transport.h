@@ -112,11 +112,14 @@ class BlockTransportDelegate : public RawBufferTransportDelegate {
   // transfers.
   // If `src_block_id` is provided (not -1), it is used to resolve correct chunk
   // offsets when multiple source blocks merge into a single destination block
-  // (heterogeneous block sizes).
+  // (heterogeneous block sizes). If `dst_block_id` is provided (not -1), the
+  // sender resolution is restricted to that destination block. This is needed
+  // when one source block fans out to multiple blocks on the same peer.
   virtual std::vector<BlockChunk> GetBlockChunks(
       size_t layer_idx, size_t shard_idx, absl::Span<const int64_t> block_ids,
       size_t total_bytes, uint64_t uuid, int64_t sender_node_id = -1,
-      absl::string_view peer = "", int64_t src_block_id = -1) {
+      absl::string_view peer = "", int64_t src_block_id = -1,
+      int64_t dst_block_id = -1) {
     // Default implementation: blocks are contiguous and of uniform size.
     std::vector<BlockChunk> result;
     size_t accumulated_bytes = 0;
@@ -215,6 +218,10 @@ class BlockTransport : public RawBufferTransport {
       const std::vector<uint8_t*>& explicit_dst_ptrs = {}, int parallelism = 1,
       MajorOrder major_order = MajorOrder::kLayerMajor,
       BlockReceivedCallback on_block_received = {}, uint64_t uuid = 0);
+
+  // Drops receive-progress counters belonging to a finished, failed, or
+  // timed-out plan so the UUID can be safely reused.
+  void ForgetPushProgress(uint64_t uuid);
 
  private:
   absl::Status HandleCustomRequest(int client_fd,

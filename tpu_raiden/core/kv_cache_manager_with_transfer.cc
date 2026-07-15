@@ -927,6 +927,7 @@ KVCacheManagerWithTransfer::CompleteReadRaw() {
   std::vector<std::string> done_sending;
   std::vector<std::string> done_recving;
   std::vector<std::string> failed_recving;
+  std::vector<uint64_t> timed_out_plan_uuids;
   {
     std::lock_guard<std::mutex> lock(mu_);
     const auto now = std::chrono::steady_clock::now();
@@ -935,6 +936,7 @@ KVCacheManagerWithTransfer::CompleteReadRaw() {
       if (entry->deadline <= now) {
         done_sending_.insert(entry->req_id);
         ReleaseEntrySlotLocked(entry);
+        timed_out_plan_uuids.push_back(it->first);
         it = send_entries_.erase(it);
       } else {
         ++it;
@@ -969,6 +971,7 @@ KVCacheManagerWithTransfer::CompleteReadRaw() {
       if (entry.deadline <= now) {
         failed_recving_.insert(entry.req_id);
         ReleaseSlotLocked(entry.slot_idx);
+        timed_out_plan_uuids.push_back(it->first);
         active_recv_entries_.erase(it++);
       } else {
         ++it;
@@ -980,6 +983,13 @@ KVCacheManagerWithTransfer::CompleteReadRaw() {
     done_sending_.clear();
     done_recving_.clear();
     failed_recving_.clear();
+  }
+  for (uint64_t uuid : timed_out_plan_uuids) {
+    absl::Status status = UnregisterActivePlan(uuid);
+    if (!status.ok() && !absl::IsNotFound(status)) {
+      LOG(ERROR) << "Failed to unregister timed-out transfer plan " << uuid
+                 << ": " << status;
+    }
   }
   return {done_sending, done_recving, failed_recving};
 }

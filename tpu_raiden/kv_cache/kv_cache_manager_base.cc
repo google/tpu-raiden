@@ -1728,13 +1728,23 @@ absl::Status KVCacheManagerBase::RegisterActivePlan(
 }
 
 absl::Status KVCacheManagerBase::UnregisterActivePlan(uint64_t uuid) {
-  absl::MutexLock l(plans_mu_);
-  auto it = active_plans_.find(uuid);
-  if (it == active_plans_.end()) {
-    return absl::NotFoundError(
-        absl::StrCat("Plan with UUID ", uuid, " is not registered"));
+  {
+    absl::MutexLock l(plans_mu_);
+    auto it = active_plans_.find(uuid);
+    if (it == active_plans_.end()) {
+      return absl::NotFoundError(
+          absl::StrCat("Plan with UUID ", uuid, " is not registered"));
+    }
+    active_plans_.erase(it);
   }
-  active_plans_.erase(it);
+  transport::BlockTransport* transport_server = nullptr;
+  {
+    absl::MutexLock lock(server_init_mu_);
+    transport_server = server_.get();
+  }
+  if (transport_server != nullptr) {
+    transport_server->ForgetPushProgress(uuid);
+  }
   VLOG(1) << "UnregisterActivePlan: Removed plan for UUID " << uuid;
   return absl::OkStatus();
 }
@@ -1755,7 +1765,8 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
                                    size_t total_bytes, uint64_t uuid,
                                    int64_t sender_node_id,
                                    absl::string_view peer,
-                                   int64_t src_block_id) {
+                                   int64_t src_block_id,
+                                   int64_t dst_block_id) {
   RegisteredPlan plan;
   bool has_plan = false;
   {
@@ -1824,6 +1835,9 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
         const auto& schedule = schedule_it->second;
         for (const auto& entry : schedule.entries()) {
           if (!peer.empty() && entry.dst_peer() != peer) {
+            continue;
+          }
+          if (dst_block_id != -1 && entry.dst_block_id() != dst_block_id) {
             continue;
           }
           if (static_cast<size_t>(entry.src_block_id()) == block_id) {

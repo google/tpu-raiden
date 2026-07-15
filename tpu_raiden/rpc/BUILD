@@ -95,7 +95,7 @@ py_library(
     deps = [
         ":controller_service_py_pb2",
         ":raiden_service_py_pb2",
-        "//tpu_raiden/frameworks/jax:resharding_planner",
+        "//tpu_raiden/kv_cache:nd_slice_math",
     ],
 )
 

@@ -13,9 +13,25 @@
 # limitations under the License.
 
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("@rules_python//python:defs.bzl", "py_library")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
+
+py_library(
+    name = "nd_slice_math",
+    srcs = ["nd_slice_math.py"],
+    deps = ["//tpu_raiden/rpc:raiden_service_py_pb2"],
+)
+
+py_test(
+    name = "nd_slice_math_test",
+    srcs = ["nd_slice_math_test.py"],
+    deps = [
+        ":nd_slice_math",
+        "//tpu_raiden/rpc:raiden_controller",
+        "@com_google_absl_py//absl/testing:absltest",
+    ],
+)
 
 cc_library(
     name = "logical_block_manager",

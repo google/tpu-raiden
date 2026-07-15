@@ -802,9 +802,14 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
         const int src_id = src_block_ids[block_offset + k];
 
         const int64_t block_id_val = src_id;
+        const int64_t dst_id_val =
+            block_offset + k < dst_block_ids.size()
+                ? static_cast<int64_t>(dst_block_ids[block_offset + k])
+                : -1;
         std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
             l, sh, absl::MakeConstSpan(&block_id_val, 1),
-            block_delegate_->block_bytes(l), uuid, -1, peer);
+            block_delegate_->block_bytes(l), uuid, -1, peer,
+            /*src_block_id=*/-1, /*dst_block_id=*/dst_id_val);
         if (chunks.empty()) {
           return absl::NotFoundError(
               absl::StrCat("No transfer chunks found for block ", src_id,
@@ -833,6 +838,19 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
   }
 
   ok_to_pool = true;
+}
+
+void BlockTransport::ForgetPushProgress(uint64_t uuid) {
+  absl::MutexLock lock(progress_mu_);
+  for (auto it = layer_progress_.begin(); it != layer_progress_.end();) {
+    if (it->first.first == uuid) {
+      // absl::flat_hash_map::erase(iterator) returns void.
+      auto erase_it = it++;
+      layer_progress_.erase(erase_it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 void BlockTransport::H2hReadWorker(

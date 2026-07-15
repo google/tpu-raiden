@@ -540,7 +540,7 @@ py_library(
     srcs = ["resharding_planner.py"],
     visibility = ["//visibility:public"],
     deps = [
-        "//tpu_raiden/rpc:raiden_service_py_pb2",
+        "//tpu_raiden/kv_cache:nd_slice_math",
         "@jax//jax",
     ],
 )

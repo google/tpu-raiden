@@ -291,7 +291,8 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   std::vector<tpu_raiden::transport::BlockChunk> GetBlockChunks(
       size_t layer_idx, size_t shard_idx, absl::Span<const int64_t> block_ids,
       size_t total_bytes, uint64_t uuid, int64_t sender_node_id = -1,
-      absl::string_view peer = "", int64_t src_block_id = -1) override;
+      absl::string_view peer = "", int64_t src_block_id = -1,
+      int64_t dst_block_id = -1) override;
 
   // With explicit pools the wire index addresses a pool; otherwise the legacy
   // uniform layer addressing applies unchanged.
