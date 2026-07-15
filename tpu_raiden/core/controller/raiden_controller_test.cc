@@ -199,12 +199,12 @@ TEST_F(RaidenControllerTest, TransferBuffersDelegatesToWorkerService) {
   std::vector<int64_t> src_offsets = {10};
   std::vector<int64_t> dst_offsets = {20};
 
-  auto resp_or = controller.TransferBuffers("worker_0", rpc::MEMORY_TYPE_HBM,
+  auto status = controller.TransferBuffers("worker_0", rpc::MEMORY_TYPE_HBM,
                                             rpc::MEMORY_TYPE_DRAM, src_offsets,
-                                            dst_offsets);
-  ASSERT_TRUE(resp_or.ok());
-  EXPECT_FALSE(resp_or->success());
-  EXPECT_THAT(resp_or->message(),
+                                            dst_offsets)
+                          .Await();
+  EXPECT_FALSE(status.ok());
+  EXPECT_THAT(status.message(),
               HasSubstr("Transfer manager is not configured on WorkerService"));
 }
 
@@ -216,13 +216,57 @@ TEST_F(RaidenControllerTest, TransferBuffersValidationMismatchedOffsets) {
   std::vector<int64_t> src_offsets = {10, 30};
   std::vector<int64_t> dst_offsets = {20};
 
-  auto resp_or = controller.TransferBuffers("worker_0", rpc::MEMORY_TYPE_HBM,
+  auto status = controller.TransferBuffers("worker_0", rpc::MEMORY_TYPE_HBM,
                                             rpc::MEMORY_TYPE_DRAM, src_offsets,
-                                            dst_offsets);
-  EXPECT_FALSE(resp_or.ok());
-  EXPECT_EQ(resp_or.status().code(), absl::StatusCode::kInvalidArgument);
+                                            dst_offsets)
+                          .Await();
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
   EXPECT_THAT(
-      resp_or.status().message(),
+      status.message(),
+      HasSubstr(
+          "Source and destination offsets must have the same non-zero length"));
+}
+
+TEST_F(RaidenControllerTest, TransferBuffersValidationMismatchedCopySizes) {
+  RaidenController controller(
+      unit_, std::vector<std::string>{test_server_->server_address},
+      /*num_blocks=*/5, /*num_shards=*/1, /*shard_size_bytes=*/512);
+
+  std::vector<int64_t> src_offsets = {10, 20};
+  std::vector<int64_t> dst_offsets = {20, 30};
+  std::vector<int64_t> copy_sizes = {1};
+
+  auto status =
+      controller
+          .TransferBuffers(rpc::MEMORY_TYPE_HBM, rpc::MEMORY_TYPE_DRAM,
+                           src_offsets, dst_offsets, copy_sizes)
+          .Await();
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(
+      status.message(),
+      HasSubstr(
+          "copy_sizes, if provided, must match the length of src_offsets"));
+}
+
+TEST_F(RaidenControllerTest, TransferBuffersValidationEmptyOffsets) {
+  RaidenController controller(
+      unit_, std::vector<std::string>{test_server_->server_address},
+      /*num_blocks=*/5, /*num_shards=*/1, /*shard_size_bytes=*/512);
+
+  std::vector<int64_t> src_offsets = {};
+  std::vector<int64_t> dst_offsets = {};
+
+  auto status =
+      controller
+          .TransferBuffers(rpc::MEMORY_TYPE_HBM, rpc::MEMORY_TYPE_DRAM,
+                           src_offsets, dst_offsets)
+          .Await();
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(
+      status.message(),
       HasSubstr(
           "Source and destination offsets must have the same non-zero length"));
 }
@@ -246,9 +290,15 @@ TEST_F(RaidenControllerTest, MultiWorkerBroadcastSupport) {
     // Broadcast TransferBuffers.
     std::vector<int64_t> src_offsets = {10};
     std::vector<int64_t> dst_offsets = {20};
-    auto resp_or = controller.TransferBuffers(
-        rpc::MEMORY_TYPE_HBM, rpc::MEMORY_TYPE_DRAM, src_offsets, dst_offsets);
-    ASSERT_TRUE(resp_or.ok());
+    auto status =
+        controller
+            .TransferBuffers(rpc::MEMORY_TYPE_HBM, rpc::MEMORY_TYPE_DRAM,
+                             src_offsets, dst_offsets)
+            .Await();
+    EXPECT_FALSE(status.ok());
+    EXPECT_THAT(
+        status.message(),
+        HasSubstr("Transfer manager is not configured on WorkerService"));
   }
 
   // Buffers cleaned up on both worker servers on destructor.
@@ -268,11 +318,12 @@ TEST_F(RaidenControllerTest, TransferBuffersD2HSuccess) {
   std::vector<int64_t> dst_offsets = {20, 40};
   std::vector<int64_t> copy_sizes = {1, 2};
 
-  auto resp_or = controller.TransferBuffers("worker_0", rpc::MEMORY_TYPE_HBM,
-                                            rpc::MEMORY_TYPE_DRAM, src_offsets,
-                                            dst_offsets, copy_sizes);
-  ASSERT_TRUE(resp_or.ok());
-  EXPECT_TRUE(resp_or->success());
+  auto status = controller
+                    .TransferBuffers("worker_0", rpc::MEMORY_TYPE_HBM,
+                                     rpc::MEMORY_TYPE_DRAM, src_offsets,
+                                     dst_offsets, copy_sizes)
+                    .Await();
+  ASSERT_TRUE(status.ok());
   EXPECT_EQ(mock_mgr.d2h_calls, 1);
   EXPECT_EQ(mock_mgr.h2d_calls, 0);
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(10, 30));
@@ -291,11 +342,12 @@ TEST_F(RaidenControllerTest, TransferBuffersH2DSuccess) {
   std::vector<int64_t> src_offsets = {100};
   std::vector<int64_t> dst_offsets = {200};
 
-  auto resp_or = controller.TransferBuffers("worker_0", rpc::MEMORY_TYPE_DRAM,
-                                            rpc::MEMORY_TYPE_HBM, src_offsets,
-                                            dst_offsets);
-  ASSERT_TRUE(resp_or.ok());
-  EXPECT_TRUE(resp_or->success());
+  auto status =
+      controller
+          .TransferBuffers("worker_0", rpc::MEMORY_TYPE_DRAM,
+                           rpc::MEMORY_TYPE_HBM, src_offsets, dst_offsets)
+          .Await();
+  ASSERT_TRUE(status.ok());
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_calls, 1);
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
@@ -314,11 +366,13 @@ TEST_F(RaidenControllerTest, TransferBuffersH2HSuccess) {
   std::vector<int64_t> src_offsets = {10};
   std::vector<int64_t> dst_offsets = {20};
 
-  auto resp_or = controller.TransferBuffers(
-      "worker_0", rpc::MEMORY_TYPE_DRAM, rpc::MEMORY_TYPE_DRAM, src_offsets,
-      dst_offsets, /*copy_sizes=*/{}, "localhost:8080");
-  ASSERT_TRUE(resp_or.ok());
-  EXPECT_TRUE(resp_or->success());
+  auto status =
+      controller
+          .TransferBuffers("worker_0", rpc::MEMORY_TYPE_DRAM,
+                           rpc::MEMORY_TYPE_DRAM, src_offsets, dst_offsets,
+                           /*copy_sizes=*/{}, "localhost:8080")
+          .Await();
+  ASSERT_TRUE(status.ok());
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_calls, 0);
   EXPECT_EQ(mock_mgr.h2h_calls, 1);

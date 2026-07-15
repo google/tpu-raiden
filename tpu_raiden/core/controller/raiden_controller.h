@@ -27,6 +27,7 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "grpcpp/channel.h"
+#include "xla/tsl/concurrency/future.h"
 #include "tpu_raiden/core/controller/worker_registry.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
@@ -84,18 +85,14 @@ class RaidenController {
   // they can be reused. No gRPC call is made.
   absl::Status Deallocate(absl::Span<const proto::BufferProto> sharded_buffers);
 
-  // Transfers (copies) disjoint memory regions across memory spaces on the
-  // specified remote transfer worker via WorkerService.
-  // If `copy_sizes` is empty, it defaults to copying 1 block for each
-  // source/destination offset pair.
-  absl::StatusOr<proto::TransferBuffersResponse> TransferBuffers(
+  tsl::Future<> TransferBuffers(
       absl::string_view worker_id, rpc::MemoryType src_mem_type,
       rpc::MemoryType dst_mem_type, absl::Span<const int64_t> src_offsets,
       absl::Span<const int64_t> dst_offsets,
       absl::Span<const int64_t> copy_sizes = {}, absl::string_view peer = "");
 
   // Broadcasts TransferBuffers to all registered workers.
-  absl::StatusOr<proto::TransferBuffersResponse> TransferBuffers(
+  tsl::Future<> TransferBuffers(
       rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
       absl::Span<const int64_t> src_offsets,
       absl::Span<const int64_t> dst_offsets,

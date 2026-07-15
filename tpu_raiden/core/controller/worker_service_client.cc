@@ -15,12 +15,14 @@
 #include "tpu_raiden/core/controller/worker_service_client.h"
 
 #include <memory>
+#include <utility>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "grpcpp/client_context.h"
 #include "grpcpp/support/status.h"
+#include "xla/tsl/concurrency/future.h"
 #include "tpu_raiden/proto/worker_service.grpc.pb.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
 
@@ -30,44 +32,66 @@ namespace controller {
 WorkerServiceClient::WorkerServiceClient(std::shared_ptr<grpc::Channel> channel)
     : stub_(proto::WorkerService::NewStub(channel)) {}
 
-absl::StatusOr<proto::CreateBuffersResponse> WorkerServiceClient::CreateBuffers(
+tsl::Future<proto::CreateBuffersResponse> WorkerServiceClient::CreateBuffers(
     const proto::CreateBuffersRequest& request) {
-  proto::CreateBuffersResponse response;
-  grpc::ClientContext context;
+  auto [promise, future] = tsl::MakePromise<proto::CreateBuffersResponse>();
+  auto context = std::make_shared<grpc::ClientContext>();
+  auto response = std::make_shared<proto::CreateBuffersResponse>();
 
-  grpc::Status status = stub_->CreateBuffers(&context, request, &response);
-  if (!status.ok()) {
-    return absl::InternalError(
-        absl::StrCat("CreateBuffers RPC failed: ", status.error_message()));
-  }
-  return response;
+  stub_->async()->CreateBuffers(
+      context.get(), &request, response.get(),
+      [context, response,
+       promise = std::move(promise).ToShared()](grpc::Status status) {
+        if (!status.ok()) {
+          promise->Set(absl::InternalError(absl::StrCat(
+              "CreateBuffers RPC failed: ", status.error_message())));
+        } else {
+          promise->Set(std::move(*response));
+        }
+      });
+  return future;
 }
 
-absl::StatusOr<proto::DeleteBuffersResponse> WorkerServiceClient::DeleteBuffers(
+tsl::Future<proto::DeleteBuffersResponse> WorkerServiceClient::DeleteBuffers(
     const proto::DeleteBuffersRequest& request) {
-  proto::DeleteBuffersResponse response;
-  grpc::ClientContext context;
+  auto [promise, future] = tsl::MakePromise<proto::DeleteBuffersResponse>();
+  auto context = std::make_shared<grpc::ClientContext>();
+  auto response = std::make_shared<proto::DeleteBuffersResponse>();
 
-  grpc::Status status = stub_->DeleteBuffers(&context, request, &response);
-  if (!status.ok()) {
-    return absl::InternalError(
-        absl::StrCat("DeleteBuffers RPC failed: ", status.error_message()));
-  }
-  return response;
+  stub_->async()->DeleteBuffers(
+      context.get(), &request, response.get(),
+      [context, response,
+       promise = std::move(promise).ToShared()](grpc::Status status) {
+        if (!status.ok()) {
+          promise->Set(absl::InternalError(absl::StrCat(
+              "DeleteBuffers RPC failed: ", status.error_message())));
+        } else {
+          promise->Set(std::move(*response));
+        }
+      });
+  return future;
 }
 
-absl::StatusOr<proto::TransferBuffersResponse>
-WorkerServiceClient::TransferBuffers(
+tsl::Future<> WorkerServiceClient::TransferBuffers(
     const proto::TransferBuffersRequest& request) {
-  proto::TransferBuffersResponse response;
-  grpc::ClientContext context;
+  auto [promise, future] = tsl::MakePromise<>();
+  auto context = std::make_shared<grpc::ClientContext>();
+  auto response = std::make_shared<proto::TransferBuffersResponse>();
 
-  grpc::Status status = stub_->TransferBuffers(&context, request, &response);
-  if (!status.ok()) {
-    return absl::InternalError(
-        absl::StrCat("TransferBuffers RPC failed: ", status.error_message()));
-  }
-  return response;
+  stub_->async()->TransferBuffers(
+      context.get(), &request, response.get(),
+      [context, response,
+       promise = std::move(promise).ToShared()](grpc::Status status) {
+        if (!status.ok()) {
+          promise->Set(absl::InternalError(absl::StrCat(
+              "TransferBuffers RPC failed: ", status.error_message())));
+        } else if (!response->success()) {
+          promise->Set(absl::InternalError(response->message()));
+        } else {
+          promise->Set(absl::OkStatus());
+        }
+      });
+  return future;
 }
 
 }  // namespace controller

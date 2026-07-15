@@ -357,22 +357,24 @@ TEST(KVCacheManagerWrapperTest, RaidenControllerTransferBuffersIntegration) {
   std::vector<int64_t> dst_offsets = {20, 40};
   std::vector<int64_t> copy_sizes = {1, 2};
 
-  auto resp_d2h_or = controller.TransferBuffers(
-      "worker_0", rpc::MEMORY_TYPE_HBM, rpc::MEMORY_TYPE_DRAM, src_offsets,
-      dst_offsets, copy_sizes);
-  ASSERT_TRUE(resp_d2h_or.ok());
-  EXPECT_TRUE(resp_d2h_or->success());
+  auto status_d2h = controller.TransferBuffers(
+                                "worker_0", rpc::MEMORY_TYPE_HBM,
+                                rpc::MEMORY_TYPE_DRAM, src_offsets,
+                                dst_offsets, copy_sizes)
+                            .Await();
+  ASSERT_TRUE(status_d2h.ok());
   EXPECT_EQ(ptr0->d2h_calls, 1);
   EXPECT_EQ(ptr0->h2d_calls, 0);
   EXPECT_EQ(ptr0->last_d2h_src_offsets, src_offsets);
   EXPECT_EQ(ptr0->last_d2h_dst_offsets, dst_offsets);
   EXPECT_EQ(ptr0->last_d2h_copy_sizes, copy_sizes);
 
-  auto resp_h2d_or = controller.TransferBuffers(
-      "worker_0", rpc::MEMORY_TYPE_DRAM, rpc::MEMORY_TYPE_HBM, src_offsets,
-      dst_offsets, copy_sizes);
-  ASSERT_TRUE(resp_h2d_or.ok());
-  EXPECT_TRUE(resp_h2d_or->success());
+  auto status_h2d = controller.TransferBuffers(
+                                "worker_0", rpc::MEMORY_TYPE_DRAM,
+                                rpc::MEMORY_TYPE_HBM, src_offsets,
+                                dst_offsets, copy_sizes)
+                            .Await();
+  ASSERT_TRUE(status_h2d.ok());
   EXPECT_EQ(ptr0->d2h_calls, 1);
   EXPECT_EQ(ptr0->h2d_calls, 1);
   EXPECT_EQ(ptr0->last_h2d_src_offsets, src_offsets);

@@ -19,6 +19,7 @@
 
 #include "absl/status/statusor.h"
 #include "grpcpp/channel.h"
+#include "xla/tsl/concurrency/future.h"
 #include "tpu_raiden/proto/worker_service.grpc.pb.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
 
@@ -26,24 +27,24 @@ namespace tpu_raiden {
 namespace controller {
 
 // Client for interacting with the WorkerService gRPC endpoint on a transfer
-// worker.
+// worker asynchronously.
 class WorkerServiceClient {
  public:
   explicit WorkerServiceClient(std::shared_ptr<grpc::Channel> channel);
 
-  // Allocates sharded buffers on the remote transfer worker.
-  absl::StatusOr<proto::CreateBuffersResponse> CreateBuffers(
+  // Allocates sharded buffers on the remote transfer worker asynchronously.
+  tsl::Future<proto::CreateBuffersResponse> CreateBuffers(
       const proto::CreateBuffersRequest& request);
 
-  // Deallocates sharded buffers on the remote transfer worker.
-  absl::StatusOr<proto::DeleteBuffersResponse> DeleteBuffers(
+  // Deallocates sharded buffers on the remote transfer worker asynchronously.
+  tsl::Future<proto::DeleteBuffersResponse> DeleteBuffers(
       const proto::DeleteBuffersRequest& request);
 
   // Transfers (copies) disjoint memory regions across memory spaces on the
-  // remote transfer worker. The transfer specification applies uniformly across
-  // all buffers, i.e., all shards and major dimensions (layers or blocks).
-  absl::StatusOr<proto::TransferBuffersResponse> TransferBuffers(
-      const proto::TransferBuffersRequest& request);
+  // remote transfer worker asynchronously. The transfer specification applies
+  // uniformly across all buffers, i.e., all shards and major dimensions
+  // (layers or blocks).
+  tsl::Future<> TransferBuffers(const proto::TransferBuffersRequest& request);
 
  private:
   std::unique_ptr<proto::WorkerService::Stub> stub_;

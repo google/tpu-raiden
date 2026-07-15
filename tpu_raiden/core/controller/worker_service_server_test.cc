@@ -52,7 +52,7 @@ TEST(WorkerServiceServerTest, StartServerAndGetPortWorks) {
   spec->set_num_shards(1);
   spec->set_size_bytes(512);
 
-  auto resp_or = client.CreateBuffers(create_req);
+  auto resp_or = client.CreateBuffers(create_req).Await();
   ABSL_ASSERT_OK(resp_or);
   EXPECT_TRUE(resp_or->success());
   ASSERT_EQ(resp_or->buffers_size(), 1);
