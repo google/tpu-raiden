@@ -40,6 +40,13 @@ header_only_cc_info(
     ],
 )
 
+header_only_cc_info(
+    name = "torch_tpu_materialize_headers",
+    deps = [
+        "@torch_tpu//torch_tpu/eager:materialize",
+    ],
+)
+
 cc_library(
     name = "weight_synchronizer_torch",
     srcs = ["weight_synchronizer.cc"],
@@ -82,6 +89,7 @@ cc_library(
     ],
     deps = [
         ":torch_tpu_device_buffer_headers",
+        ":torch_tpu_materialize_headers",
         ":torch_tpu_structured_log_buffer_headers",
         ":torch_tpu_tensor_to_buffer_headers",
         "//tpu_raiden/core:xla_raw_transfer_headers",
@@ -466,6 +474,8 @@ py_test(
         "@pypi//numpy",
         "@torch_tpu//shims/torch:pytorch",
         "@torch_tpu//torch_tpu",
+        "@torch_tpu//torch_tpu/_internal/execution_mode",
+        "@torch_tpu//torch_tpu/_internal/sync",
     ],
 )
 

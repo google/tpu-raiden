@@ -14,12 +14,25 @@
 
 """E2E physical unit tests for PyTorch KVCacheManager on XLA TPUs."""
 
+import faulthandler
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
 import torch
+from torch_tpu._internal import execution_mode
+from torch_tpu._internal import sync
 
 from tpu_raiden.frameworks.torch import _tpu_raiden_torch as _kv_cache_manager
+
+EagerMode = execution_mode.EagerMode
+
+# Upper bound on how long constructing a manager over lazy KV caches may take.
+# The constructor holds the GIL, so a regressed deadlock freezes the whole
+# process and no Python-thread watchdog can fire; faulthandler dumps every
+# thread stack and hard-exits the process past this bound so a regression fails
+# loudly instead of hanging the test runner.
+_CONSTRUCTION_DEADLOCK_TIMEOUT_S = 60.0
 
 
 class KVCacheManagerTorchTest(parameterized.TestCase):
@@ -145,6 +158,50 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
         # Verify both blocks have the expected values
         np.testing.assert_allclose(actual_data[0:2], expected_val, atol=1e-5)
         np.testing.assert_allclose(actual_data[2:4], expected_val, atol=1e-5)
+
+  def test_construction_over_lazy_kv_caches_does_not_deadlock(self):
+    """Constructing a manager over still-deferred KV caches must not hang.
+
+    Under DEFER_AND_FUSE (vLLM's execution mode) a KV cache registered right
+    after allocation still carries a pending deferred op. UnpackTorchTensor
+    resolves each tensor's base buffer by awaiting it, and the await only
+    completes once the deferred graph has been executed. The unpack forces that
+    execution before awaiting; without it the constructor waits on a graph that
+    only this (now-blocked) thread could flush.
+    """
+    num_blocks = 2
+    shape = (num_blocks * self.block_size, 128, 8)
+
+    with execution_mode.set_eager_mode(EagerMode.DEFER_AND_FUSE):
+      lazy_tensors = [
+          [torch.ones(shape, dtype=torch.float32, device=self.device)]
+          for _ in range(self.num_layers)
+      ]
+      # The regression only exists for unmaterialized tensors; assert the
+      # tensors are actually deferred so a future eager-materialization change
+      # can't silently turn this into a no-op test.
+      for layer in lazy_tensors:
+        for shard in layer:
+          self.assertFalse(sync.is_materialized(shard))
+
+      faulthandler.dump_traceback_later(
+          _CONSTRUCTION_DEADLOCK_TIMEOUT_S, exit=True
+      )
+      try:
+        manager = _kv_cache_manager.KVCacheManager(
+            lazy_tensors,
+            local_port=0,
+            host_blocks_to_allocate=num_blocks * self.block_size,
+            parallelism=1,
+        )
+      finally:
+        faulthandler.cancel_dump_traceback_later()
+
+    # Unpack awaited each base buffer, so the tensors are materialized now.
+    for layer in lazy_tensors:
+      for shard in layer:
+        self.assertTrue(sync.is_materialized(shard))
+    self.assertIsNotNone(manager.local_port)
 
 
 if __name__ == "__main__":

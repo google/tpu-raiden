@@ -22,8 +22,10 @@
 #include "ATen/core/TensorBody.h"
 #include "torch/headeronly/core/DeviceType.h"
 
+#include "torch_tpu/eager/materialize.h"
 #include "torch_tpu/eager/structured_log_buffer.h"
 #include "torch_tpu/eager/tensor_to_buffer.h"
+#include "absl/strings/str_cat.h"
 
 namespace tpu_raiden {
 namespace torch {
@@ -67,8 +69,8 @@ UnpackedTensor UnpackTorchTensor(const at::Tensor& tensor) {
   // tensor's storage, so the DMA lands in the live cache regardless of view.
   auto status_or_ref = torch_tpu::GetBaseBuffer(tensor);
   if (!status_or_ref.ok()) {
-    throw std::runtime_error("Failed to resolve base device buffer: " +
-                             std::string(status_or_ref.status().message()));
+    throw std::runtime_error(absl::StrCat(
+        "Failed to resolve base device buffer: ", status_or_ref.status().message()));
   }
   torch_tpu::DeviceBufferRef base_ref = std::move(status_or_ref.value());
 
@@ -104,10 +106,20 @@ UnpackedTensor UnpackTorchTensor(const at::Tensor& tensor) {
   const size_t logical_slice_byte_size =
       logical_physical_size / static_cast<size_t>(tensor.size(0));
 
+  // Materialize deferred tensor so AwaitBuffer() won't hang. No-op if already
+  // materialized. This should never return a separate buffer otherwise
+  // all DMA operations will go to the wrong buffer.
+  if (auto status = torch_tpu::Materialize(
+          base_ref, torch_tpu::MaterializationReason::kExplicitSync);
+      !status.ok()) {
+    throw std::runtime_error(absl::StrCat(
+        "Failed to materialize base device buffer: ", status.message()));
+  }
+
   auto status_or_buf = base_ref.AwaitBuffer();
   if (!status_or_buf.ok()) {
-    throw std::runtime_error("Failed to fetch PjRtBuffer from TPU reference: " +
-                             std::string(status_or_buf.status().message()));
+    throw std::runtime_error(absl::StrCat(
+        "Failed to fetch PjRtBuffer from TPU reference: ", status_or_buf.status().message()));
   }
   // Return the buffer AND the owning base ref. The ref pins the storage buffer
   // backing the tensor for as long as the caller keeps it (manager lifetime /
