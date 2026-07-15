@@ -713,7 +713,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2hReadExplicit(
   }
   ASSIGN_OR_RETURN(
       std::vector<int> allocated_ids,
-      server_->Pull(peer, src_block_ids, local_block_ids, explicit_dst_ptrs,
+      server_->Pull({peer}, src_block_ids, local_block_ids, explicit_dst_ptrs,
                     parallelism, major_order, on_block_received));
   return raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{});
 }

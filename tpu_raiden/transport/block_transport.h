@@ -189,20 +189,20 @@ class BlockTransport : public RawBufferTransport {
                  int parallelism = 1);
   ~BlockTransport() override;
 
-  // Standard Scatter-Gather Push (op = 1 / op = 6)
-  absl::StatusOr<std::vector<int>> Push(
-      const std::vector<std::string>& peers,
-      const std::vector<int>& src_block_ids,
-      const std::vector<int>& dst_block_ids = {}, int parallelism = 1,
-      MajorOrder major_order = MajorOrder::kLayerMajor, uint64_t uuid = 0,
-      int layer_idx = -1);
-
   // Asynchronous Scatter-Gather Push
   void Push(const std::vector<std::string>& peers,
             const std::vector<int>& src_block_ids,
             const std::vector<int>& dst_block_ids, int parallelism,
             MajorOrder major_order, uint64_t uuid, int layer_idx,
             std::function<void(absl::StatusOr<std::vector<int>>)> on_complete);
+
+  // Synchronous Scatter-Gather Push (op = 1 / op = 6)
+  absl::StatusOr<std::vector<int>> Push(
+      const std::vector<std::string>& peers,
+      const std::vector<int>& src_block_ids,
+      const std::vector<int>& dst_block_ids = {}, int parallelism = 1,
+      MajorOrder major_order = MajorOrder::kLayerMajor, uint64_t uuid = 0,
+      int layer_idx = -1);
 
   // Synchronous Scatter-Gather Pull (op = 2)
   // When explicit_dst_ptrs is supplied it contains one base pointer per
@@ -233,22 +233,6 @@ class BlockTransport : public RawBufferTransport {
          dst_block_ids, parallelism, major_order, uuid, layer_idx,
          std::move(on_complete));
   }
-
-  absl::StatusOr<std::vector<int>> Pull(
-      absl::string_view peer, const std::vector<int>& src_block_ids,
-      const std::vector<int>& local_block_ids = {},
-      const std::vector<uint8_t*>& explicit_dst_ptrs = {}, int parallelism = 1,
-      MajorOrder major_order = MajorOrder::kLayerMajor,
-      BlockReceivedCallback on_block_received = {}, uint64_t uuid = 0) {
-    return Pull(std::vector<std::string>{std::string(peer)}, src_block_ids,
-                local_block_ids, explicit_dst_ptrs, parallelism, major_order,
-                on_block_received, uuid);
-  }
-
-  // Write a single block of data directly from a host pointer to a remote block
-  // ID.
-  absl::Status WriteBlockDirect(absl::string_view peer, int remote_block_id,
-                                const uint8_t* data_ptr, size_t size_bytes);
 
  protected:
   absl::Status HandleCustomRequest(int client_fd,
