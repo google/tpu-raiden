@@ -43,6 +43,8 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
+#include "tpu_raiden/core/raw_transfer_core.h"
+#include "tpu_raiden/frameworks/torch/pool_layout_nanobind.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
 #include "tpu_raiden/transport/block_transport.h"
 
@@ -161,6 +163,20 @@ class HostKVCacheManager : public KVCacheManagerWithTransfer {
   }
 };
 
+// Distinct C++ wrapper so the host and torch extension modules can each
+// register a Python RaidenFuture without colliding in nanobind's global type
+// registry when both modules are imported in one process.
+struct HostRaidenFuture {
+  explicit HostRaidenFuture(raiden::PjRtCopyFuture value)
+      : future(std::move(value)) {}
+
+  absl::Status Await() { return future.Await(); }
+  bool IsReady() const { return future.IsReady(); }
+  absl::Status PollError() { return future.PollError(); }
+
+  raiden::PjRtCopyFuture future;
+};
+
 void ThrowIfError(const absl::Status& status, absl::string_view context) {
   if (!status.ok()) {
     throw std::runtime_error(absl::StrCat(context, ": ", status.message()));
@@ -170,7 +186,27 @@ void ThrowIfError(const absl::Status& status, absl::string_view context) {
 }  // namespace
 
 NB_MODULE(_tpu_raiden_host, m) {
-  nb::class_<HostKVCacheManager>(m, "KVCacheManager")
+  nb::class_<HostRaidenFuture>(m, "RaidenFuture")
+      .def("Await",
+           [](HostRaidenFuture& self) {
+             nb::gil_scoped_release release;
+             ThrowIfError(self.Await(), "Async copy failed");
+           })
+      .def("wait",
+           [](HostRaidenFuture& self) {
+             nb::gil_scoped_release release;
+             ThrowIfError(self.Await(), "Async copy failed");
+           })
+      .def("IsReady", &HostRaidenFuture::IsReady)
+      .def("is_ready", &HostRaidenFuture::IsReady)
+      .def("ok", [](HostRaidenFuture& self) { return self.PollError().ok(); })
+      .def("error_message", [](HostRaidenFuture& self) {
+        absl::Status status = self.PollError();
+        return status.ok() ? std::string() : std::string(status.message());
+      });
+
+  auto manager_cls = nb::class_<HostKVCacheManager>(m, "KVCacheManager");
+  manager_cls
       .def(nb::init<size_t, size_t, size_t, int64_t, std::optional<int>,
                     std::optional<int>, int>(),
            nb::arg("num_layers"), nb::arg("num_shards"),
@@ -254,6 +290,7 @@ NB_MODULE(_tpu_raiden_host, m) {
                          "KVCacheManager write_block_bytes failed");
           },
           nb::arg("layer_idx"), nb::arg("block_id"), nb::arg("payload"));
+  tpu_raiden::torch_bindings::BindPoolApi<HostRaidenFuture>(manager_cls);
 }
 
 }  // namespace tpu_raiden

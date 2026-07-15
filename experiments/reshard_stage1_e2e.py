@@ -46,7 +46,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from tpu_raiden.api.torch import kv_cache_manager_host
+from tpu_raiden.experimental import kv_cache_manager_host
 from tpu_raiden.rpc import raiden_service_pb2
 
 NUM_FA_LAYERS = 15

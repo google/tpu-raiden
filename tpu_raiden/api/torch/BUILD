@@ -27,10 +27,17 @@ py_library(
 )
 
 py_library(
+    name = "pool_layout",
+    srcs = ["pool_layout.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "kv_cache_manager_torch_py",
     srcs = ["kv_cache_manager.py"],
     visibility = ["//visibility:public"],
     deps = [
+        ":pool_layout",
         ":torch_tpu_common_loader",
         "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",
         "//tpu_raiden/rpc:raiden_service_py_pb2",
@@ -39,10 +46,21 @@ py_library(
 
 py_library(
     name = "kv_cache_manager_host_py",
-    srcs = ["kv_cache_manager_host.py"],
+    srcs = ["kv_cache_manager.py"],
     visibility = ["//visibility:public"],
     deps = [
+        ":pool_layout",
         "//tpu_raiden/frameworks/torch:_tpu_raiden_host",
+        "//tpu_raiden/rpc:raiden_service_py_pb2",
+    ],
+)
+
+py_test(
+    name = "kv_cache_manager_host_test",
+    srcs = ["kv_cache_manager_host_test.py"],
+    deps = [
+        ":kv_cache_manager_host_py",
+        ":pool_layout",
     ],
 )
 

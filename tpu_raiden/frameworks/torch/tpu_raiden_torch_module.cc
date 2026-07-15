@@ -34,6 +34,7 @@
 #include "tpu_raiden/core/raiden_future.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/frameworks/torch/kv_cache_manager.h"
+#include "tpu_raiden/frameworks/torch/pool_layout_nanobind.h"
 #include "tpu_raiden/frameworks/torch/torch_nanobind_utils.h"
 #include "tpu_raiden/frameworks/torch/weight_synchronizer.h"
 #include "tpu_raiden/kv_cache/kv_cache_store.h"
@@ -119,7 +120,8 @@ NB_MODULE(_tpu_raiden_torch, m) {
   // =========================================================================
   // 2. Bind KVCacheManager
   // =========================================================================
-  nb::class_<KVCacheManager>(m, "KVCacheManager")
+  auto manager_cls = nb::class_<KVCacheManager>(m, "KVCacheManager");
+  manager_cls
       .def(nb::init<const std::vector<std::vector<at::Tensor>>&,
                     std::optional<int>, std::optional<int>, bool, int>(),
            nb::arg("device_tensors"), nb::arg("local_port") = nb::none(),
@@ -381,6 +383,8 @@ NB_MODULE(_tpu_raiden_torch, m) {
             self.CompleteReadRaw();
         return nb::make_tuple(done_sending, done_recving, failed_recving);
       });
+  tpu_raiden::torch_bindings::BindPoolApi<tpu_raiden::RaidenFuture>(
+      manager_cls);
 
   // =========================================================================
   // 3. Bind WeightSynchronizer

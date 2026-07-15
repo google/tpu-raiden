@@ -139,6 +139,24 @@ cc_library(
 )
 
 cc_library(
+    name = "pool_layout_nanobind",
+    hdrs = ["pool_layout_nanobind.h"],
+    copts = [
+        "-fexceptions",
+    ],
+    features = [
+        "-use_header_modules",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tpu_raiden/kv_cache:pool_layout",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@nanobind",
+    ],
+)
+
+cc_library(
     name = "kv_cache_manager_torch",
     srcs = ["kv_cache_manager.cc"],
     hdrs = ["kv_cache_manager.h"],
@@ -183,6 +201,7 @@ nanobind_extension(
     visibility = ["//visibility:public"],
     deps = [
         ":kv_cache_manager_torch",
+        ":pool_layout_nanobind",
         ":torch_nanobind_utils",
         ":weight_synchronizer_torch",
         "//tpu_raiden/core:raw_transfer_core",
@@ -212,7 +231,9 @@ nanobind_extension(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":pool_layout_nanobind",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
+        "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/kv_cache:kv_cache_manager_base",
         "//tpu_raiden/rpc:raiden_service_cc_proto",
         "//tpu_raiden/transport:block_transport",

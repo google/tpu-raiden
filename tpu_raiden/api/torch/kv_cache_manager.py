@@ -30,7 +30,19 @@
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+_HOST_IMPL = None
 _TORCH_IMPL = None
+
+
+def _host_impl():
+  """Returns the host-only extension without importing torch_tpu."""
+  global _HOST_IMPL
+  if _HOST_IMPL is None:
+    # pylint: disable=g-import-not-at-top
+    from tpu_raiden.frameworks.torch import _tpu_raiden_host as impl
+    # pylint: enable=g-import-not-at-top
+    _HOST_IMPL = impl
+  return _HOST_IMPL
 
 
 def _torch_impl():
@@ -84,6 +96,7 @@ class KVCacheManager:
       listener_port: Sockets server port for incoming C++ KVCacheListener
         commands.
     """
+    self._admission_summary = None
     impl = _torch_impl()
     if host_blocks_to_allocate is not None:
       self._impl = impl.KVCacheManager(
@@ -110,6 +123,32 @@ class KVCacheManager:
           listener_port=listener_port,
           parallelism=parallelism,
       )
+
+  @classmethod
+  def create_host_only_for_testing(
+      cls,
+      *,
+      num_layers: int,
+      num_shards: int = 1,
+      slice_byte_size: int,
+      node_id: int,
+      local_port: Optional[int] = None,
+      host_blocks: int,
+      parallelism: int = 4,
+  ) -> "KVCacheManager":
+    """Creates a CPU-only manager backed by Raiden-owned host memory."""
+    obj = cls.__new__(cls)
+    obj._admission_summary = None
+    obj._impl = _host_impl().KVCacheManager(
+        num_layers=num_layers,
+        num_shards=num_shards,
+        slice_byte_size=slice_byte_size,
+        node_id=node_id,
+        local_port=local_port,
+        host_blocks_to_allocate=host_blocks,
+        parallelism=parallelism,
+    )
+    return obj
 
   @property
   def node_id(self) -> int:
@@ -182,6 +221,101 @@ class KVCacheManager:
   ) -> None:
     """Overwrites one host block with bytes."""
     self._impl.write_block_bytes(layer_idx, block_id, payload)
+
+  def register_pools(self, pools: Sequence[Any]) -> Dict[str, Any]:
+    """Registers explicit block pools over the wrapped storages.
+
+    Args:
+      pools: Sequence of ``pool_layout.PoolSpec`` (or equivalent mappings) in
+        the caller's canonical order. Pool indices travel on the wire, so both
+        transfer peers must agree on this order.
+
+    Returns:
+      A generic admission summary (also served by ``admission_summary``).
+    """
+    # pylint: disable=g-import-not-at-top
+    from tpu_raiden.api.torch import pool_layout
+    # pylint: enable=g-import-not-at-top
+
+    coerced = tuple(pool_layout.coerce_pool_spec(pool) for pool in pools)
+    if not coerced:
+      raise ValueError("pool table must be non-empty")
+    num_storages = int(self._impl.num_layers)
+    for pool_idx, pool in enumerate(coerced):
+      try:
+        pool.validate()
+      except Exception as exc:
+        raise ValueError(f"invalid pool {pool_idx}: {exc}") from exc
+      if pool.storage_index >= num_storages:
+        raise ValueError(
+            f"pool {pool_idx} ({pool.tag}) storage_index "
+            f"{pool.storage_index} out of range: manager wraps "
+            f"{num_storages} storages"
+        )
+    self._impl.register_pools_native(
+        [pool.to_native_tuple() for pool in coerced]
+    )
+    tags: Dict[str, int] = {}
+    for pool in coerced:
+      tags[pool.tag] = tags.get(pool.tag, 0) + 1
+    storages = len({pool.storage_index for pool in coerced})
+    summary = {
+        "admitted": True,
+        "pools": len(coerced),
+        "storages": storages,
+        "tags": tags,
+    }
+    self._admission_summary = dict(summary)
+    return dict(summary)
+
+  def get_block_ref(
+      self, pool_idx: int, block_id: int, shard_idx: int = 0
+  ) -> Dict[str, Any]:
+    """Returns a reference descriptor for one host-side pool block."""
+    return dict(
+        self._impl.get_pool_block_ref_native(
+            pool_idx=pool_idx, shard_idx=shard_idx, block_id=block_id
+        )
+    )
+
+  def pool_ids_with_tag(self, tag: str) -> List[int]:
+    """Returns the pool indices registered with the given opaque tag."""
+    return [
+        int(pool_idx)
+        for pool_idx in self._impl.pool_indices_with_tag_native(tag)
+    ]
+
+  def num_pools(self) -> int:
+    """Returns the number of pools (implicit or explicit)."""
+    return int(self._impl.num_pools())
+
+  def pool_spec(self, pool_idx: int) -> Dict[str, Any]:
+    """Returns one pool's descriptor as a dict."""
+    return dict(self._impl.pool_spec_native(pool_idx))
+
+  def d2h_pool_blocks(
+      self,
+      pool_idx: int,
+      block_ids: Sequence[int],
+      shard_idx: Optional[int] = None,
+  ) -> Any:
+    """Partial D2H of whole pool blocks into the host mirror."""
+    return self._impl.d2h_pool_blocks(pool_idx, list(block_ids), shard_idx)
+
+  def h2d_pool_blocks(
+      self,
+      pool_idx: int,
+      block_ids: Sequence[int],
+      shard_idx: Optional[int] = None,
+  ) -> Any:
+    """Partial H2D of whole pool blocks from the host mirror."""
+    return self._impl.h2d_pool_blocks(pool_idx, list(block_ids), shard_idx)
+
+  def admission_summary(self) -> Dict[str, Any]:
+    """Returns the last successful pool admission summary."""
+    if self._admission_summary is None:
+      return {"admitted": False}
+    return dict(self._admission_summary)
 
   def register_recv(
       self, uuid: int, req_id: str, expected_block_count: int
