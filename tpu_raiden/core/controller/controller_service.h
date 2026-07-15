@@ -53,7 +53,6 @@ class RaidenControllerServiceImpl final
       ::tpu_raiden::tpu_raiden::proto::RegisterWorkerResponse* response)
       override;
 
-
   // Updates the underlying WorkerRegistry.
   void SetWorkerRegistry(std::shared_ptr<WorkerRegistry> worker_registry);
 

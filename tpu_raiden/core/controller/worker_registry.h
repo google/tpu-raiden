@@ -25,7 +25,9 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/functional/any_invocable.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
+#include "tpu_raiden/proto/worker_service.pb.h"
 
 namespace tpu_raiden {
 namespace core {
@@ -37,6 +39,7 @@ struct WorkerRegistration {
   std::string raiden_transfer_endpoint;
   std::shared_ptr<::tpu_raiden::controller::WorkerServiceClient>
       worker_service_client;
+  std::vector<::tpu_raiden::proto::BufferProto> buffers;
 };
 
 // Thread-safe registry for worker node registrations in the controller plane.
@@ -47,6 +50,14 @@ class WorkerRegistry {
 
   WorkerRegistry(const WorkerRegistry&) = delete;
   WorkerRegistry& operator=(const WorkerRegistry&) = delete;
+
+  using OnRegisterCallback =
+      absl::AnyInvocable<absl::Status(WorkerRegistration&)>;
+
+  void SetOnRegisterCallback(OnRegisterCallback cb) {
+    absl::MutexLock lock(&mutex_);
+    on_register_cb_ = std::move(cb);
+  }
 
   // Registers or updates a worker registration.
   absl::Status RegisterWorker(const WorkerRegistration& reg);
@@ -63,6 +74,7 @@ class WorkerRegistry {
 
  private:
   mutable absl::Mutex mutex_;
+  OnRegisterCallback on_register_cb_ ABSL_GUARDED_BY(mutex_);
   absl::flat_hash_map<std::string, WorkerRegistration> workers_
       ABSL_GUARDED_BY(mutex_);
 };

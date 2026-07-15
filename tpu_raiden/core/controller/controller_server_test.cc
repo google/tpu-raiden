@@ -36,8 +36,6 @@ TEST(ControllerServerTest, StartServerAndGetPortWorks) {
   int port = server.GetGrpcPort();
   EXPECT_GT(port, 0);
 
-  EXPECT_NE(server.GetControllerService(), nullptr);
-
   // Connect via client and verify gRPC communication works.
   std::string server_address = "localhost:" + std::to_string(port);
   RaidenControllerClient client(server_address);

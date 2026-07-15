@@ -72,3 +72,22 @@ cc_grpc_library(
     visibility = ["//visibility:public"],
     deps = [":controller_service_cc_proto"],
 )
+
+proto_library(
+    name = "orchestrator_service_proto",
+    srcs = ["orchestrator_service.proto"],
+    deps = ["//tpu_raiden/rpc:raiden_service_proto"],
+)
+
+cc_proto_library(
+    name = "orchestrator_service_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":orchestrator_service_proto"],
+)
+
+cc_grpc_library(
+    name = "orchestrator_service_cc_grpc",
+    srcs = [":orchestrator_service_proto"],
+    visibility = ["//visibility:public"],
+    deps = [":orchestrator_service_cc_proto"],
+)

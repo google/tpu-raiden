@@ -50,8 +50,8 @@ class KVCacheManager:
       host_blocks_to_allocate: Optional[int] = None,
       parallelism: int = 4,
       node_id: int = 0,
-      grpc_port: int = 0,
-      controller_address: Optional[str] = None,
+      raiden_worker_port: int = 0,
+      raiden_controller_address: Optional[str] = None,
       worker_id: Optional[str] = None,
   ):
     """Instantiates the TransferEngine-based KVCacheManager.
@@ -68,9 +68,9 @@ class KVCacheManager:
         pool.
       parallelism: Number of parallel network copies per layer.
       node_id: Unique identifier for this host/node in the distributed mesh.
-      grpc_port: Optional port for WorkerService gRPC server.
-      controller_address: Optional address of central RaidenController. If
-        provided, the WorkerService gRPC server is enabled.
+      raiden_worker_port: Optional port for WorkerService gRPC server.
+      raiden_controller_address: Optional address of central RaidenController.
+        If provided, the WorkerService gRPC server is enabled.
       worker_id: Optional identifier for this worker.
     """
     if host_blocks_to_allocate is not None:
@@ -80,8 +80,8 @@ class KVCacheManager:
           host_blocks_to_allocate,
           unsafe_skip_buffer_lock,
           parallelism,
-          grpc_port,
-          controller_address,
+          raiden_worker_port,
+          raiden_controller_address,
           worker_id,
       )
     else:
@@ -99,14 +99,14 @@ class KVCacheManager:
           timeout_s=timeout_s,
           unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
           parallelism=parallelism,
-          grpc_port=grpc_port,
-          controller_address=controller_address,
+          raiden_worker_port=raiden_worker_port,
+          raiden_controller_address=raiden_controller_address,
           worker_id=worker_id,
       )
 
-  def get_grpc_port(self) -> int:
+  def get_raiden_worker_port(self) -> int:
     """Returns the gRPC server port if running, or 0."""
-    return self._impl.get_grpc_port()
+    return self._impl.get_raiden_worker_port()
 
   def get_local_endpoints(self) -> List[Dict[str, Any]]:
     """Returns the active Raiden endpoint descriptors."""

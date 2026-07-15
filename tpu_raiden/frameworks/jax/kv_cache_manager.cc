@@ -803,74 +803,75 @@ std::string NumaAwareKVCacheManager::DumpMetricsToString() const {
 }
 
 #ifndef WITHOUT_PYTHON
-KVCacheManager::KVCacheManager(nb::list device_arrays,
-                               std::optional<int> local_port,
-                               std::optional<int> host_blocks_to_allocate,
-                               bool unsafe_skip_buffer_lock, int parallelism,
-                               int grpc_port,
-                               std::optional<std::string> controller_address,
-                               std::optional<std::string> worker_id)
+KVCacheManager::KVCacheManager(
+    nb::list device_arrays, std::optional<int> local_port,
+    std::optional<int> host_blocks_to_allocate, bool unsafe_skip_buffer_lock,
+    int parallelism, int raiden_worker_port,
+    std::optional<std::string> raiden_controller_address,
+    std::optional<std::string> worker_id)
     : numa_manager_(std::make_unique<NumaAwareKVCacheManager>(
           std::move(device_arrays), local_port, host_blocks_to_allocate,
           unsafe_skip_buffer_lock, parallelism)) {
-  StartGrpcServer(grpc_port, controller_address, worker_id);
+  StartGrpcServer(raiden_worker_port, raiden_controller_address, worker_id);
 }
 
-KVCacheManager::KVCacheManager(nanobind::list kv_caches, int64_t node_id,
-                               int64_t local_control_port, int64_t max_blocks,
-                               int64_t num_slots, double timeout_s,
-                               bool unsafe_skip_buffer_lock, int parallelism,
-                               int grpc_port,
-                               std::optional<std::string> controller_address,
-                               std::optional<std::string> worker_id)
+KVCacheManager::KVCacheManager(
+    nanobind::list kv_caches, int64_t node_id, int64_t local_control_port,
+    int64_t max_blocks, int64_t num_slots, double timeout_s,
+    bool unsafe_skip_buffer_lock, int parallelism, int raiden_worker_port,
+    std::optional<std::string> raiden_controller_address,
+    std::optional<std::string> worker_id)
     : numa_manager_(std::make_unique<NumaAwareKVCacheManager>(
           std::move(kv_caches), node_id, local_control_port, max_blocks,
           num_slots, timeout_s, unsafe_skip_buffer_lock, parallelism)) {
-  StartGrpcServer(grpc_port, controller_address, worker_id);
+  StartGrpcServer(raiden_worker_port, raiden_controller_address, worker_id);
 }
 #endif
 
-KVCacheManager::KVCacheManager(size_t num_layers, size_t num_shards,
-                               size_t slice_byte_size,
-                               std::optional<int> local_port,
-                               std::optional<int> host_blocks_to_allocate,
-                               int parallelism, int grpc_port,
-                               std::optional<std::string> controller_address,
-                               std::optional<std::string> worker_id)
+KVCacheManager::KVCacheManager(
+    size_t num_layers, size_t num_shards, size_t slice_byte_size,
+    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
+    int parallelism, int raiden_worker_port,
+    std::optional<std::string> raiden_controller_address,
+    std::optional<std::string> worker_id)
     : numa_manager_(std::make_unique<NumaAwareKVCacheManager>(
           num_layers, num_shards, slice_byte_size, local_port,
           host_blocks_to_allocate, parallelism)) {
-  StartGrpcServer(grpc_port, controller_address, worker_id);
+  StartGrpcServer(raiden_worker_port, raiden_controller_address, worker_id);
 }
 
 KVCacheManager::KVCacheManager(
     std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> sub_managers,
-    int grpc_port, std::optional<std::string> controller_address,
+    int raiden_worker_port,
+    std::optional<std::string> raiden_controller_address,
     std::optional<std::string> worker_id)
     : numa_manager_(
           std::make_unique<NumaAwareKVCacheManager>(std::move(sub_managers))) {
-  StartGrpcServer(grpc_port, controller_address, worker_id);
+  StartGrpcServer(raiden_worker_port, raiden_controller_address, worker_id);
 }
 
 KVCacheManager::~KVCacheManager() = default;
 
 void KVCacheManager::StartGrpcServer(
-    int grpc_port, std::optional<std::string> controller_address,
+    int raiden_worker_port,
+    std::optional<std::string> raiden_controller_address,
     std::optional<std::string> worker_id) {
-  if (!controller_address.has_value() || controller_address->empty()) {
+  if (!raiden_controller_address.has_value() ||
+      raiden_controller_address->empty()) {
     return;
   }
   absl::Status status =
       controller::WorkerServiceServer::GetInstance().StartServer(
           /*host_allocator=*/nullptr, KVManagerHolder(numa_manager_.get()),
-          grpc_port);
+          raiden_worker_port);
   if (!status.ok()) {
     throw std::runtime_error(absl::StrCat(
         "Failed to start gRPC server in KVCacheManager: ", status.message()));
   }
 
-  if (controller_address.has_value() && !controller_address->empty()) {
-    int bound_port = GetGrpcPort();
+  if (raiden_controller_address.has_value() &&
+      !raiden_controller_address->empty()) {
+    int bound_port = GetRaidenWorkerPort();
     std::string w_id = worker_id.value_or("worker_0");
 
     std::string worker_ip = "127.0.0.1";
@@ -886,7 +887,7 @@ void KVCacheManager::StartGrpcServer(
       transfer_endpoint = local_eps[0].endpoint;
     }
 
-    core::controller::RaidenControllerClient client(*controller_address);
+    core::controller::RaidenControllerClient client(*raiden_controller_address);
     status = client.RegisterWorker(w_id, worker_endpoint, transfer_endpoint);
     if (!status.ok()) {
       LOG(ERROR) << "Failed to register worker with controller: "
@@ -895,13 +896,13 @@ void KVCacheManager::StartGrpcServer(
       LOG(INFO) << "Successfully registered worker " << w_id
                 << " (worker_endpoint=" << worker_endpoint
                 << ", transfer_endpoint=" << transfer_endpoint
-                << ") with controller at " << *controller_address;
+                << ") with controller at " << *raiden_controller_address;
     }
   }
 }
 
-int KVCacheManager::GetGrpcPort() const {
-  return controller::WorkerServiceServer::GetInstance().GetGrpcPort();
+int KVCacheManager::GetRaidenWorkerPort() const {
+  return controller::WorkerServiceServer::GetInstance().GetRaidenWorkerPort();
 }
 
 }  // namespace jax

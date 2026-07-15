@@ -53,11 +53,13 @@ class ControllerServer {
   // is not running or failed to start.
   int GetGrpcPort() const;
 
+
+
+ private:
   // Returns a pointer to the hosted RaidenControllerServiceImpl instance, or
   // nullptr if the server has not been started.
   RaidenControllerServiceImpl* GetControllerService() const;
 
- private:
   ControllerServer() = default;
   ~ControllerServer() = default;
   ControllerServer(const ControllerServer&) = delete;

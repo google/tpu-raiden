@@ -223,44 +223,44 @@ class KVCacheManager {
 
 #ifndef WITHOUT_PYTHON
   // JAX sharded constructor E2E (cache-only by default)
-  KVCacheManager(nanobind::list device_arrays,
-                 std::optional<int> local_port = std::nullopt,
-                 std::optional<int> host_blocks_to_allocate = std::nullopt,
-                 bool unsafe_skip_buffer_lock = false, int parallelism = 1,
-                 int grpc_port = 0,
-                 std::optional<std::string> controller_address = std::nullopt,
-                 std::optional<std::string> worker_id = std::nullopt);
+  KVCacheManager(
+      nanobind::list device_arrays,
+      std::optional<int> local_port = std::nullopt,
+      std::optional<int> host_blocks_to_allocate = std::nullopt,
+      bool unsafe_skip_buffer_lock = false, int parallelism = 1,
+      int raiden_worker_port = 0,
+      std::optional<std::string> raiden_controller_address = std::nullopt,
+      std::optional<std::string> worker_id = std::nullopt);
 
   // New transfer-enabled constructor (flat list of arrays, single shard per
   // layer)
-  KVCacheManager(nanobind::list kv_caches, int64_t node_id,
-                 int64_t local_control_port, int64_t max_blocks,
-                 int64_t num_slots, double timeout_s,
-                 bool unsafe_skip_buffer_lock, int parallelism,
-                 int grpc_port = 0,
-                 std::optional<std::string> controller_address = std::nullopt,
-                 std::optional<std::string> worker_id = std::nullopt);
+  KVCacheManager(
+      nanobind::list kv_caches, int64_t node_id, int64_t local_control_port,
+      int64_t max_blocks, int64_t num_slots, double timeout_s,
+      bool unsafe_skip_buffer_lock, int parallelism, int raiden_worker_port = 0,
+      std::optional<std::string> raiden_controller_address = std::nullopt,
+      std::optional<std::string> worker_id = std::nullopt);
 #endif
 
   // FFI metadata constructor (cache-only by default)
-  KVCacheManager(size_t num_layers, size_t num_shards, size_t slice_byte_size,
-                 std::optional<int> local_port,
-                 std::optional<int> host_blocks_to_allocate,
-                 int parallelism = 1, int grpc_port = 0,
-                 std::optional<std::string> controller_address = std::nullopt,
-                 std::optional<std::string> worker_id = std::nullopt);
+  KVCacheManager(
+      size_t num_layers, size_t num_shards, size_t slice_byte_size,
+      std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
+      int parallelism = 1, int raiden_worker_port = 0,
+      std::optional<std::string> raiden_controller_address = std::nullopt,
+      std::optional<std::string> worker_id = std::nullopt);
 
   // Test-only constructor for sub-manager mock injection
   explicit KVCacheManager(
       std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> sub_managers,
-      int grpc_port = 0,
-      std::optional<std::string> controller_address = std::nullopt,
+      int raiden_worker_port = 0,
+      std::optional<std::string> raiden_controller_address = std::nullopt,
       std::optional<std::string> worker_id = std::nullopt);
 
   ~KVCacheManager();
 
   NumaAwareKVCacheManager* numa_manager() const { return numa_manager_.get(); }
-  int GetGrpcPort() const;
+  int GetRaidenWorkerPort() const;
 
 #ifndef WITHOUT_PYTHON
   nanobind::list kv_caches() const { return numa_manager_->kv_caches(); }
@@ -400,8 +400,8 @@ class KVCacheManager {
 
  private:
   void StartGrpcServer(
-      int grpc_port,
-      std::optional<std::string> controller_address = std::nullopt,
+      int raiden_worker_port,
+      std::optional<std::string> raiden_controller_address = std::nullopt,
       std::optional<std::string> worker_id = std::nullopt);
 
   std::unique_ptr<NumaAwareKVCacheManager> numa_manager_;

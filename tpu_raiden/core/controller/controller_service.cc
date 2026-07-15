@@ -14,19 +14,16 @@
 
 #include "tpu_raiden/core/controller/controller_service.h"
 
-#include <grpcpp/grpcpp.h>
-
+#include <memory>
 #include <string>
 #include <utility>
-#include <vector>
 
 #include "absl/status/status.h"
-#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
-#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "grpcpp/server_context.h"
 #include "grpcpp/support/status.h"
+#include "tpu_raiden/core/controller/worker_registry.h"
 #include "tpu_raiden/proto/controller_service.pb.h"
 
 namespace tpu_raiden {
@@ -64,7 +61,6 @@ grpc::Status RaidenControllerServiceImpl::RegisterWorker(
   response->set_success(true);
   return grpc::Status::OK;
 }
-
 
 void RaidenControllerServiceImpl::SetWorkerRegistry(
     std::shared_ptr<WorkerRegistry> worker_registry) {

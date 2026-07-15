@@ -113,8 +113,8 @@ NB_MODULE(_tpu_raiden_jax, m) {
            nb::arg("device_arrays"), nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
-           nb::arg("parallelism") = 1, nb::arg("grpc_port") = 0,
-           nb::arg("controller_address") = nb::none(),
+           nb::arg("parallelism") = 1, nb::arg("raiden_worker_port") = 0,
+           nb::arg("raiden_controller_address") = nb::none(),
            nb::arg("worker_id") = nb::none())
       .def(nb::init<nanobind::list, int64_t, int64_t, int64_t, int64_t, double,
                     bool, int, int, std::optional<std::string>,
@@ -123,8 +123,8 @@ NB_MODULE(_tpu_raiden_jax, m) {
            nb::arg("local_control_port"), nb::arg("max_blocks"),
            nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
            nb::arg("unsafe_skip_buffer_lock") = true,
-           nb::arg("parallelism") = 4, nb::arg("grpc_port") = 0,
-           nb::arg("controller_address") = nb::none(),
+           nb::arg("parallelism") = 4, nb::arg("raiden_worker_port") = 0,
+           nb::arg("raiden_controller_address") = nb::none(),
            nb::arg("worker_id") = nb::none())
 
       // Use lambdas to wrap the returned raiden::PjRtCopyFuture into
@@ -205,8 +205,8 @@ NB_MODULE(_tpu_raiden_jax, m) {
           nb::arg("peer"), nb::arg("src_block_ids"))
 
       .def("local_port", &tpu_raiden::kv_cache::jax::KVCacheManager::local_port)
-      .def("get_grpc_port",
-           &tpu_raiden::kv_cache::jax::KVCacheManager::GetGrpcPort)
+      .def("get_raiden_worker_port",
+           &tpu_raiden::kv_cache::jax::KVCacheManager::GetRaidenWorkerPort)
       .def("get_host_pointer",
            static_cast<const uint8_t* (
                tpu_raiden::kv_cache::jax::KVCacheManager::*)(size_t, size_t)

@@ -50,7 +50,7 @@ class WorkerServiceServer {
 
   // Returns the port the gRPC server is listening on. Returns 0 if the server
   // is not running or failed to start.
-  int GetGrpcPort() const;
+  int GetRaidenWorkerPort() const;
 
  private:
   WorkerServiceServer() = default;
@@ -61,7 +61,7 @@ class WorkerServiceServer {
   mutable absl::Mutex mutex_;
   std::unique_ptr<WorkerServiceImpl> worker_service_ ABSL_GUARDED_BY(mutex_);
   std::unique_ptr<grpc::Server> grpc_server_ ABSL_GUARDED_BY(mutex_);
-  int grpc_port_ ABSL_GUARDED_BY(mutex_) = 0;
+  int raiden_worker_port_ ABSL_GUARDED_BY(mutex_) = 0;
   bool started_ ABSL_GUARDED_BY(mutex_) = false;
 };
 

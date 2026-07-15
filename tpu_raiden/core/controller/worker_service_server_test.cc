@@ -35,7 +35,7 @@ using ::absl_testing::StatusIs;
 TEST(WorkerServiceServerTest, StartServerAndGetPortWorks) {
   WorkerServiceServer& server = WorkerServiceServer::GetInstance();
   ABSL_ASSERT_OK(server.StartServer(/*host_allocator=*/nullptr, /*port=*/0));
-  int port = server.GetGrpcPort();
+  int port = server.GetRaidenWorkerPort();
   EXPECT_GT(port, 0);
 
   // Connect via client and verify gRPC communication works.
@@ -61,12 +61,12 @@ TEST(WorkerServiceServerTest, StartServerAndGetPortWorks) {
 TEST(WorkerServiceServerTest, SingletonIsReused) {
   WorkerServiceServer& server1 = WorkerServiceServer::GetInstance();
   ABSL_ASSERT_OK(server1.StartServer(/*host_allocator=*/nullptr, /*port=*/0));
-  int port1 = server1.GetGrpcPort();
+  int port1 = server1.GetRaidenWorkerPort();
   EXPECT_GT(port1, 0);
 
   WorkerServiceServer& server2 = WorkerServiceServer::GetInstance();
   ABSL_ASSERT_OK(server2.StartServer(/*host_allocator=*/nullptr, /*port=*/0));
-  int port2 = server2.GetGrpcPort();
+  int port2 = server2.GetRaidenWorkerPort();
   EXPECT_EQ(port1, port2);
 }
 

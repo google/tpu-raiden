@@ -38,48 +38,7 @@ namespace {
 using ::testing::ElementsAre;
 using ::testing::HasSubstr;
 
-struct MockTransferManager {
-  int d2h_calls = 0;
-  int h2d_calls = 0;
-  int h2h_calls = 0;
-  std::string last_peer;
-  std::vector<int64_t> last_src_offsets;
-  std::vector<int64_t> last_dst_offsets;
-  std::vector<int64_t> last_copy_sizes;
 
-  absl::StatusOr<raiden::PjRtCopyFuture> D2h(
-      const std::vector<int64_t>& src_offsets,
-      const std::vector<int64_t>& dst_offsets,
-      const std::vector<int64_t>& copy_sizes) {
-    d2h_calls++;
-    last_src_offsets = src_offsets;
-    last_dst_offsets = dst_offsets;
-    last_copy_sizes = copy_sizes;
-    return raiden::PjRtCopyFuture();
-  }
-
-  absl::StatusOr<raiden::PjRtCopyFuture> H2d(
-      const std::vector<int64_t>& src_offsets,
-      const std::vector<int64_t>& dst_offsets,
-      const std::vector<int64_t>& copy_sizes) {
-    h2d_calls++;
-    last_src_offsets = src_offsets;
-    last_dst_offsets = dst_offsets;
-    last_copy_sizes = copy_sizes;
-    return raiden::PjRtCopyFuture();
-  }
-
-  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hWrite(
-      std::string peer, const std::vector<int>& src_block_ids,
-      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
-      int layer_idx = -1) {
-    h2h_calls++;
-    last_peer = peer;
-    last_src_offsets.assign(src_block_ids.begin(), src_block_ids.end());
-    last_dst_offsets.assign(dst_block_ids.begin(), dst_block_ids.end());
-    return std::make_pair(std::vector<int>{}, raiden::PjRtCopyFuture());
-  }
-};
 
 class WorkerServiceTest : public ::testing::Test {
  protected:

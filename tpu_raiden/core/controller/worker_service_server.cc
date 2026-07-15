@@ -70,7 +70,7 @@ absl::Status WorkerServiceServer::StartServer(
                      server_address, ")"));
   }
 
-  grpc_port_ = selected_port;
+  raiden_worker_port_ = selected_port;
   started_ = true;
   return absl::OkStatus();
 }
@@ -82,9 +82,9 @@ void WorkerServiceServer::SetTransferManager(KVManagerHolder transfer_manager) {
   }
 }
 
-int WorkerServiceServer::GetGrpcPort() const {
+int WorkerServiceServer::GetRaidenWorkerPort() const {
   absl::MutexLock lock(mutex_);
-  return grpc_port_;
+  return raiden_worker_port_;
 }
 
 }  // namespace controller

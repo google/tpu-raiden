@@ -23,11 +23,6 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
-#include "grpcpp/create_channel.h"
-#include "grpcpp/security/credentials.h"
-#include "grpcpp/security/server_credentials.h"
-#include "grpcpp/server.h"
-#include "grpcpp/server_builder.h"
 #include "tpu_raiden/core/controller/controller_client.h"
 #include "tpu_raiden/core/controller/test_util.h"
 
@@ -38,7 +33,9 @@ namespace {
 
 class RaidenControllerTest : public ::testing::Test {
  protected:
-  void SetUp() override { test_server_ = CreateTestControllerServer(); }
+  void SetUp() override {
+    test_server_ = CreateTestControllerServer();
+  }
 
   std::unique_ptr<TestControllerServer> test_server_;
 };
@@ -85,14 +82,14 @@ TEST_F(RaidenControllerTest, ConstructWithEndpointString) {
 
 TEST_F(RaidenControllerTest, RegisterWorkerEmptyIdFails) {
   absl::Status status =
-      test_server_->client->RegisterWorker("", "10.0.0.1:9000", {});
+      test_server_->client->RegisterWorker("", "10.0.0.1:9000", "10.0.0.1:8000");
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.code(), absl::StatusCode::kFailedPrecondition);
 }
 
 TEST_F(RaidenControllerTest, RegisterWorkerNoAddressesFails) {
-  absl::Status status =
-      test_server_->client->RegisterWorker("worker_no_addr", "", {});
+  absl::Status status = test_server_->client->RegisterWorker("worker_no_addrs",
+                                                              "", "");
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.code(), absl::StatusCode::kFailedPrecondition);
 }

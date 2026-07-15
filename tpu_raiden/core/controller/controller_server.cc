@@ -96,8 +96,10 @@ int ControllerServer::GetGrpcPort() const {
   return grpc_port_;
 }
 
+
+
 RaidenControllerServiceImpl* ControllerServer::GetControllerService() const {
-  absl::MutexLock lock(mutex_);
+  absl::MutexLock lock(&mutex_);
   return controller_service_.get();
 }
 
