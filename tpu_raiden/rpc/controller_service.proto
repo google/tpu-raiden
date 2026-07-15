@@ -36,17 +36,36 @@ message CoordinateTransferRequest {
   string dst_controller_address = 10;
 }
 
+message GetTransferStatusRequest {
+  string req_id = 1;
+  int64 uuid = 2;
+}
+
+message GetTransferStatusResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_NOT_STARTED = 1;
+    STATUS_IN_PROGRESS = 2;
+    STATUS_COMPLETED = 3;
+    STATUS_FAILED = 4;
+  }
+  Status status = 1;
+}
+
 message ControllerRequest {
   enum Command {
     COMMAND_UNSPECIFIED = 0;
     COMMAND_COORDINATE_TRANSFER = 1;
+    COMMAND_GET_TRANSFER_STATUS = 2;
   }
   Command command = 1;
 
   CoordinateTransferRequest coordinate_transfer_request = 2;
+  GetTransferStatusRequest get_transfer_status_request = 3;
 }
 
 message ControllerResponse {
   bool success = 1;
   string message = 2;
+  GetTransferStatusResponse get_transfer_status_response = 3;
 }

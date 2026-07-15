@@ -512,16 +512,28 @@ class RaidenFuture:
     self.session_id = session_id
     self._transfer_task = transfer_task
     self._completed = False
+    self._exception = None
 
   async def wait(self) -> None:
     """Waits asynchronously for the transfer operation to complete."""
     if self._transfer_task:
-      await self._transfer_task
-    self._completed = True
+      try:
+        await self._transfer_task
+      except Exception as e:
+        self._exception = e
+        raise e
+      finally:
+        self._completed = True
+    else:
+      self._completed = True
 
   def done(self) -> bool:
     """Returns True if the transfer operation has completed."""
     return self._completed
+
+  def exception(self) -> Optional[Exception]:
+    """Returns the exception raised by the transfer operation, if any."""
+    return self._exception
 
 
 def _proto_to_nd_slice(proto_slice: Any) -> list[tuple[int, int]]:
@@ -685,6 +697,7 @@ class RaidenController:
     self.port = port
     self.broadcast_k = int(os.environ.get("RAIDEN_BROADCAST_K", "2"))
     self._active_transfers: dict[str, TransferPlan] = {}
+    self._active_tasks: dict[str, RaidenFuture] = {}
     self._registered_shards: dict[RaidenId, list[str]] = {}
     self._registered_mesh_shapes: dict[RaidenId, list[int]] = {}
     self._registered_layouts: dict[RaidenId, list[int]] = {}
@@ -1621,7 +1634,23 @@ class RaidenController:
         ])
 
     transfer_task = _execute_transfer()
-    return RaidenFuture(session_id=session_id, transfer_task=transfer_task)
+    future = RaidenFuture(session_id=session_id, transfer_task=transfer_task)
+    with self._lock:
+      self._active_tasks[req_id] = future
+    return future
+
+  def get_transfer_status(self, req_id: str) -> int:
+    """Returns the status of the transfer for req_id."""
+    with self._lock:
+      future = self._active_tasks.get(req_id)
+    if not future:
+      return controller_service_pb2.GetTransferStatusResponse.STATUS_NOT_STARTED
+
+    if future.done():
+      if future.exception():
+        return controller_service_pb2.GetTransferStatusResponse.STATUS_FAILED
+      return controller_service_pb2.GetTransferStatusResponse.STATUS_COMPLETED
+    return controller_service_pb2.GetTransferStatusResponse.STATUS_IN_PROGRESS
 
 
 class RaidenControllerServer:
@@ -1775,6 +1804,22 @@ class RaidenControllerServer:
             loop.run_until_complete(future.wait())
             resp.success = True
         except Exception as e:
+          resp.message = str(e)
+        resp_bytes = resp.SerializeToString()
+        conn.sendall(len(resp_bytes).to_bytes(4, "big") + resp_bytes)
+      elif (
+          req.command
+          == self._proto_module.ControllerRequest.COMMAND_GET_TRANSFER_STATUS
+          and req.HasField("get_transfer_status_request")
+      ):
+        resp = self._proto_module.ControllerResponse()
+        resp.success = False
+        try:
+          status_req = req.get_transfer_status_request
+          status = self._controller.get_transfer_status(status_req.req_id)
+          resp.get_transfer_status_response.status = status
+          resp.success = True
+        except Exception as e:  # pylint: disable=broad-except
           resp.message = str(e)
         resp_bytes = resp.SerializeToString()
         conn.sendall(len(resp_bytes).to_bytes(4, "big") + resp_bytes)
@@ -1951,7 +1996,7 @@ class RaidenControllerClientFacade:
         data_name=unit.data_name,
     )
 
-  def _send_protobuf_rpc(self, req: Any) -> bool:
+  def _send_protobuf_rpc(self, req: Any) -> Any:
     """Helper method to serialize and send an RPC Protobuf over robust persistent TCP sockets."""
     sock = connect_socket(
         self._address, timeout=300.0, resolver=self._name_resolver
@@ -1982,7 +2027,7 @@ class RaidenControllerClientFacade:
         raise RuntimeError(
             f"Remote Controller Server execution failed: {resp.message}"
         )
-      return True
+      return resp
     finally:
       sock.close()
 
@@ -2100,7 +2145,21 @@ class RaidenControllerClientFacade:
         command=self._proto_module.ControllerRequest.COMMAND_COORDINATE_TRANSFER,
         coordinate_transfer_request=coord_req,
     )
-    return self._send_protobuf_rpc(req)
+    self._send_protobuf_rpc(req)
+    return True
+
+  def get_transfer_status(self, req_id: str, uuid: int = 0) -> int:
+    """Queries the controller for transfer status."""
+    status_req = self._proto_module.GetTransferStatusRequest(
+        req_id=req_id,
+        uuid=uuid,
+    )
+    req = self._proto_module.ControllerRequest(
+        command=self._proto_module.ControllerRequest.COMMAND_GET_TRANSFER_STATUS,
+        get_transfer_status_request=status_req,
+    )
+    resp = self._send_protobuf_rpc(req)
+    return resp.get_transfer_status_response.status
 
   def register_transfer_schedule(
       self,
