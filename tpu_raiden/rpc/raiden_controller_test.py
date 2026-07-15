@@ -275,7 +275,9 @@ class RaidenControllerTest(absltest.TestCase):
       server._thread.join(timeout=2)
 
   def test_stage3_golden_pcp8_to_dp8_plan_and_encoder(self):
-    controller, client, src_units, dst_unit, dst_ids = self._stage3_fixture()
+    controller, client, src_units, dst_unit, dst_ids = self._stage3_fixture(
+        src_page_slice_tokens=256
+    )
     future = controller.start_transfer(
         src_units=src_units,
         dst_units=[dst_unit],
@@ -301,21 +303,30 @@ class RaidenControllerTest(absltest.TestCase):
     entries = []
     for rank, unit in enumerate(src_units):
       unit_entries = plan.shard_push_schedules[unit][0]
-      self.assertLen(unit_entries, 8)
+      self.assertLen(unit_entries, 32)
       self.assertEqual(
           [entry[3] for entry in unit_entries],
-          [0, 1024**2, 2 * 1024**2, 3 * 1024**2] * 2,
+          [offset * 256 * 1024 for offset in range(16)] * 2,
       )
       self.assertEqual(
           [entry[5] for entry in unit_entries],
-          [1000 + rank * 100] * 4 + [1001 + rank * 100] * 4,
+          [1000 + rank * 100] * 16 + [1001 + rank * 100] * 16,
       )
       entries.extend(unit_entries)
-    self.assertLen(entries, 64)
+    self.assertLen(entries, 256)
     for entry in entries:
-      self.assertEqual(entry[2], 0)
-      self.assertEqual(entry[4], 1024**2)
+      self.assertEqual(entry[4], 256 * 1024)
       self.assertEqual(entry[7:], (0, 0, 1))
+    entries_by_dst_block = {
+        block_id: [entry for entry in entries if entry[6] == block_id]
+        for block_id in dst_ids
+    }
+    for page_entries in entries_by_dst_block.values():
+      self.assertLen(page_entries, 4)
+      self.assertEqual(
+          sorted(entry[2] for entry in page_entries),
+          [offset * 256 * 1024 for offset in range(4)],
+      )
 
     sender_req = raiden_service_pb2.ControlRequest()
     sender_req.ParseFromString(
@@ -555,6 +566,33 @@ class RaidenControllerTest(absltest.TestCase):
             )
         )
 
+  def test_stage3_receiver_rejects_tampered_push_count_before_arm(self):
+    controller, client, _, _, _, plan = self._build_stage3_plan(
+        num_tokens=65_023, src_page_slice_tokens=256
+    )
+
+    with self.assertRaisesRegex(
+        ValueError,
+        "expected_pushes_per_pool does not match the received schedules",
+    ):
+      controller.register_fa_receiver_plan(
+          src_units=plan.src_units,
+          dst_units=plan.dst_units,
+          req_id=plan.req_id,
+          uuid=plan.uuid,
+          shard_push_schedules=plan.shard_push_schedules,
+          expected_pushes_per_pool=plan.expected_pushes_per_pool + 1,
+          transfer_pool_indices=plan.transfer_pool_indices,
+          pool_dtype_tags=plan.pool_dtype_tags,
+          dst_device_block_ids=plan.dst_device_block_ids,
+          src_schedule_keys=plan.src_schedule_keys,
+          parallelism=plan.parallelism,
+          num_tokens=plan.num_tokens,
+      )
+
+    self.assertEmpty(client.calls)
+    self.assertIsNone(controller.get_plan(plan.req_id))
+
   def test_stage3_geometry_edges(self):
     _, _, _, _, dst_ids, tail_plan = self._build_stage3_plan(num_tokens=65024)
     self.assertLen(dst_ids, 64)
@@ -570,15 +608,27 @@ class RaidenControllerTest(absltest.TestCase):
     self.assertEqual(tail_entry[4], 512 * 1024)
     self.assertEqual(tail_entry[7:], (0, 0, 1))
 
-    _, _, _, _, n2_ids, n2_plan = self._build_stage3_plan(dst_page_tokens=2048)
+    _, _, n2_src_units, _, n2_ids, n2_plan = self._build_stage3_plan(
+        dst_page_tokens=2048, src_page_slice_tokens=256
+    )
     self.assertLen(n2_ids, 32)
     n2_entries = [
         entry
         for schedules in n2_plan.shard_push_schedules.values()
         for entry in schedules[0]
     ]
-    self.assertTrue(all(entry[4] == 2 * 1024**2 for entry in n2_entries))
-    self.assertTrue(all(entry[3] in (0, 2 * 1024**2) for entry in n2_entries))
+    self.assertLen(n2_entries, 256)
+    self.assertTrue(all(entry[4] == 256 * 1024 for entry in n2_entries))
+    for unit in n2_src_units:
+      self.assertLen(n2_plan.shard_push_schedules[unit][0], 32)
+    for dst_id in n2_ids:
+      page_entries = [entry for entry in n2_entries if entry[6] == dst_id]
+      self.assertLen(page_entries, 8)
+      self.assertEqual(
+          sorted(entry[2] for entry in page_entries),
+          [offset * 256 * 1024 for offset in range(8)],
+      )
+    self.assertEqual(n2_plan.expected_pushes_per_pool, 64)
 
     for num_tokens, expected_size in ((1024, 1024**2), (511, 511 * 1024)):
       _, _, _, _, small_ids, small_plan = self._build_stage3_plan(
