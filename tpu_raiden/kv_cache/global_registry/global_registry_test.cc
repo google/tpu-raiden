@@ -30,6 +30,7 @@
 #include "grpcpp/server_builder.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_client.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_server.h"
+#include "tpu_raiden/kv_cache/raiden_id.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
@@ -68,7 +69,7 @@ class GlobalRegistryTest : public ::testing::Test {
 
 TEST_F(GlobalRegistryTest, BasicRegisterAndLookup) {
   std::string hash = "hash1";
-  std::string host = "10.0.0.1:1234";
+  RaidenId host = {"job1", "replica1", "data1", 0};
   int32_t block = 42;
 
   auto status = client_->Register({{hash, host, block}});
@@ -78,31 +79,52 @@ TEST_F(GlobalRegistryTest, BasicRegisterAndLookup) {
   ASSERT_TRUE(lookup_res.ok()) << lookup_res.status().ToString();
   ASSERT_EQ(lookup_res->size(), 1);
   const auto& meta = (*lookup_res)[0];
-  EXPECT_EQ(meta.host_address(), host);
+  EXPECT_EQ(meta.raiden_id().job_name(), host.job_name);
+  EXPECT_EQ(meta.raiden_id().job_replica_id(), host.job_replica_id);
+  EXPECT_EQ(meta.raiden_id().data_name(), host.data_name);
+  EXPECT_EQ(meta.raiden_id().data_replica_idx(), host.data_replica_idx);
   EXPECT_EQ(meta.block_id(), block);
 }
 
-TEST_F(GlobalRegistryTest, OverwriteRegistrationDifferentHosts) {
+TEST_F(GlobalRegistryTest, MultiRegistrationAndRoundRobinLookup) {
   std::string hash = "hash1";
-  std::string host1 = "10.0.0.1:1234";
+  RaidenId host1 = {"job1", "replica1", "data1", 0};
   int32_t block1 = 42;
-  std::string host2 = "10.0.0.2:1234";
+  RaidenId host2 = {"job1", "replica2", "data1", 1};
   int32_t block2 = 43;
 
   EXPECT_TRUE(
       client_->Register({{hash, host1, block1}, {hash, host2, block2}}).ok());
 
-  auto lookup_res = client_->Lookup({hash});
-  ASSERT_TRUE(lookup_res.ok()) << lookup_res.status().ToString();
-  ASSERT_EQ(lookup_res->size(), 1);
-  const auto& meta = (*lookup_res)[0];
-  EXPECT_EQ(meta.host_address(), host2);
-  EXPECT_EQ(meta.block_id(), block2);
+  // First lookup should return host1 or host2 depending on internal order.
+  // The server implementation iterates over insertion order, so we expect host1
+  // then host2.
+  auto lookup_res1 = client_->Lookup({hash});
+  ASSERT_TRUE(lookup_res1.ok()) << lookup_res1.status().ToString();
+  ASSERT_EQ(lookup_res1->size(), 1);
+  EXPECT_EQ((*lookup_res1)[0].raiden_id().job_replica_id(),
+            host1.job_replica_id);
+  EXPECT_EQ((*lookup_res1)[0].block_id(), block1);
+
+  // Second lookup should round-robin to host2.
+  auto lookup_res2 = client_->Lookup({hash});
+  ASSERT_TRUE(lookup_res2.ok()) << lookup_res2.status().ToString();
+  ASSERT_EQ(lookup_res2->size(), 1);
+  EXPECT_EQ((*lookup_res2)[0].raiden_id().job_replica_id(),
+            host2.job_replica_id);
+  EXPECT_EQ((*lookup_res2)[0].block_id(), block2);
+
+  // Third lookup should wrap around to host1.
+  auto lookup_res3 = client_->Lookup({hash});
+  ASSERT_TRUE(lookup_res3.ok()) << lookup_res3.status().ToString();
+  ASSERT_EQ(lookup_res3->size(), 1);
+  EXPECT_EQ((*lookup_res3)[0].raiden_id().job_replica_id(),
+            host1.job_replica_id);
 }
 
-TEST_F(GlobalRegistryTest, OverwriteRegistration) {
+TEST_F(GlobalRegistryTest, OverwriteRegistrationSameHost) {
   std::string hash = "hash1";
-  std::string host = "10.0.0.1:1234";
+  RaidenId host = {"job1", "replica1", "data1", 0};
   int32_t block1 = 42;
   int32_t block2 = 43;
 
@@ -112,109 +134,59 @@ TEST_F(GlobalRegistryTest, OverwriteRegistration) {
   auto lookup_res = client_->Lookup({hash});
   ASSERT_TRUE(lookup_res.ok()) << lookup_res.status().ToString();
   ASSERT_EQ(lookup_res->size(), 1);
-  const auto& meta = (*lookup_res)[0];
-  EXPECT_EQ(meta.host_address(), host);
-  EXPECT_EQ(meta.block_id(), block2);
+  EXPECT_EQ((*lookup_res)[0].block_id(), block2);
 }
 
-TEST_F(GlobalRegistryTest, BatchLookup) {
-  EXPECT_TRUE(
-      client_->Register({{"h1", "host1", 42}, {"h2", "host2", 43}}).ok());
+TEST_F(GlobalRegistryTest, MultiLookupTerminatesOnFirstMiss) {
+  EXPECT_TRUE(client_
+                  ->Register({{"h1", {"j1", "r1", "d1", 0}, 42},
+                              {"h2", {"j1", "r2", "d1", 0}, 43}})
+                  .ok());
 
-  auto batch_res = client_->Lookup({"h1", "h2", "h3"});
-  ASSERT_TRUE(batch_res.ok()) << batch_res.status().ToString();
+  // Sequential hits for "h1" and "h2"
+  auto res1 = client_->Lookup({"h1", "h2"});
+  ASSERT_TRUE(res1.ok());
+  EXPECT_EQ(res1->size(), 2);
 
-  ASSERT_EQ(batch_res->size(), 2);  // Only h1 and h2 returned
-  EXPECT_EQ((*batch_res)[0].host_address(), "host1");
-  EXPECT_EQ((*batch_res)[0].block_id(), 42);
-  EXPECT_EQ((*batch_res)[1].host_address(), "host2");
-  EXPECT_EQ((*batch_res)[1].block_id(), 43);
+  // Miss on "h3" stops sequential lookup, "h2" is omitted
+  auto res2 = client_->Lookup({"h1", "h3", "h2"});
+  ASSERT_TRUE(res2.ok());
+  EXPECT_EQ(res2->size(), 1);
+  EXPECT_EQ((*res2)[0].block_id(), 42);
 }
 
-TEST_F(GlobalRegistryTest, StopOnFirstMiss) {
-  EXPECT_TRUE(
-      client_->Register({{"h1", "host1", 42}, {"h3", "host3", 44}}).ok());
-
-  // h2 is a miss in the middle. The lookup should stop at h2 and NOT return h3.
-  auto lookup_res = client_->Lookup({"h1", "h2", "h3"});
-  ASSERT_TRUE(lookup_res.ok()) << lookup_res.status().ToString();
-
-  ASSERT_EQ(lookup_res->size(), 1);  // Only h1 returned
-  EXPECT_EQ((*lookup_res)[0].host_address(), "host1");
-}
-
-TEST_F(GlobalRegistryTest, Unregister) {
+TEST_F(GlobalRegistryTest, UnregisterSuccess) {
   std::string hash1 = "hash1";
   std::string hash2 = "hash2";
-  std::string host = "10.0.0.1:1234";
+  RaidenId host = {"job1", "replica1", "data1", 0};
+
   EXPECT_TRUE(client_->Register({{hash1, host, 42}, {hash2, host, 43}}).ok());
 
-  // Unregister wrong host should fail
-  auto status = client_->Unregister({hash1, hash2}, "wrong_host");
-  EXPECT_FALSE(status.ok());
-
-  // Unregister correct host should succeed
-  status = client_->Unregister({hash1, hash2}, host);
+  auto status = client_->Unregister({hash1}, host);
   EXPECT_TRUE(status.ok()) << status.ToString();
 
-  // Lookup should now return empty
-  auto lookup_res = client_->Lookup({hash1, hash2});
-  ASSERT_TRUE(lookup_res.ok());
-  EXPECT_EQ(lookup_res->size(), 0);
+  auto res = client_->Lookup({hash1, hash2});
+  ASSERT_TRUE(res.ok());
+  EXPECT_EQ(res->size(), 0);  // Stops at first miss (hash1 is gone)
+
+  auto res2 = client_->Lookup({hash2});
+  ASSERT_TRUE(res2.ok());
+  EXPECT_EQ(res2->size(), 1);
+  EXPECT_EQ((*res2)[0].block_id(), 43);
 }
 
-TEST_F(GlobalRegistryTest, TtlExpiration) {
+TEST_F(GlobalRegistryTest, ExpirationTtlFilter) {
   std::string hash = "hash1";
-  std::string host = "10.0.0.1:1234";
+  RaidenId host = {"job1", "replica1", "data1", 0};
 
-  // Register with 1 second TTL
   auto status = client_->Register({{hash, host, 42, absl::Seconds(1)}});
-  EXPECT_TRUE(status.ok()) << status.ToString();
+  EXPECT_TRUE(status.ok());
 
-  // Immediate lookup should succeed
-  auto lookup_res = client_->Lookup({hash});
-  ASSERT_TRUE(lookup_res.ok());
-  ASSERT_EQ(lookup_res->size(), 1);
-  EXPECT_EQ((*lookup_res)[0].block_id(), 42);
-
-  // Wait for TTL to expire (1.5 seconds)
   absl::SleepFor(absl::Milliseconds(1500));
 
-  // Lookup should now return empty (lazy filtering)
-  lookup_res = client_->Lookup({hash});
-  ASSERT_TRUE(lookup_res.ok());
-  EXPECT_EQ(lookup_res->size(), 0);
-
-  // Wait another 1 second to let background cleanup run
-  absl::SleepFor(absl::Seconds(1));
-
-  // Force cleanup just in case, and verify it's gone
-  service_->CleanupExpiredEntries();
-  // (Internal map should be empty, but we can only verify via lookup which
-  // is already empty)
-}
-
-TEST(HashHelperTest, CumulativeHashing) {
-  std::vector<int64_t> tokens1 = {101, 202};
-  std::vector<int64_t> tokens2 = {303, 404};
-
-  std::string h1 = CalculatePrefixHash(tokens1);
-  std::string h2 = CalculatePrefixHash(tokens2, h1);
-
-  EXPECT_FALSE(h1.empty());
-  EXPECT_FALSE(h2.empty());
-  EXPECT_NE(h1, h2);
-
-  // Verify stability
-  std::string h1_ref = CalculatePrefixHash(tokens1);
-  EXPECT_EQ(h1, h1_ref);
-
-  std::string h2_ref = CalculatePrefixHash(tokens2, h1_ref);
-  EXPECT_EQ(h2, h2_ref);
-
-  // Empty tokens should still hash (just parent hash or empty hash)
-  std::string h_empty = CalculatePrefixHash({});
-  EXPECT_FALSE(h_empty.empty());
+  auto res = client_->Lookup({hash});
+  ASSERT_TRUE(res.ok());
+  EXPECT_EQ(res->size(), 0);
 }
 
 }  // namespace

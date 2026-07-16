@@ -61,6 +61,16 @@ class RaidenId:
         f" data='{self.data_name}', data_idx={self.data_replica_idx})"
     )
 
+  def __eq__(self, other: Any) -> bool:
+    if not isinstance(other, RaidenId):
+      return False
+    return (
+        self.job_name == other.job_name
+        and self.job_replica_id == other.job_replica_id
+        and self.data_name == other.data_name
+        and self.data_replica_idx == other.data_replica_idx
+    )
+
 
 class RaidenBlockID:
   """Wrapper around compiled C++ RaidenBlockID."""
@@ -135,6 +145,10 @@ class KVCacheStore:
       capacity: int,
       global_registry_address: str = "",
       raiden_id: RaidenId | None = None,
+      num_shards: int = 0,
+      shard_size_bytes: int = 0,
+      raiden_controller_port: int = 0,
+      raiden_orchestrator_address: str = "",
   ):
     raw_raiden_id = _impl.RaidenId()
     if raiden_id is not None:
@@ -143,12 +157,21 @@ class KVCacheStore:
         capacity=capacity,
         global_registry_address=global_registry_address,
         raiden_id=raw_raiden_id,
+        num_shards=num_shards,
+        shard_size_bytes=shard_size_bytes,
+        raiden_controller_port=raiden_controller_port,
+        raiden_orchestrator_address=raiden_orchestrator_address,
     )
 
   @property
   def raiden_id(self) -> RaidenId:
     """Returns the RaidenId associated with this store."""
     return RaidenId(impl=self._impl.raiden_id)
+
+  @property
+  def raiden_controller_port(self) -> int:
+    """Returns the port that the RaidenController is listening on."""
+    return self._impl.raiden_controller_port
 
   def lookup(
       self,
@@ -296,3 +319,57 @@ class KVCacheStore:
   def release(self, block_hashes: list[bytes]) -> None:
     """Releases previously pinned block hashes, making them eligible for LRU eviction when capacity is exceeded."""
     self._impl.release(block_hashes)
+
+  def save(self, block_hashes: list[bytes]) -> bool:
+    """Saves blocks from device (HBM) to host (DRAM) asynchronously.
+
+    Args:
+      block_hashes: List of block hashes to save.
+
+    Returns:
+      True if successfully launched, False if validation failed.
+    """
+    return self._impl.save(block_hashes)
+
+  def load(
+      self, block_hashes: list[bytes], device_block_ids: list[int]
+  ) -> bool:
+    """Loads blocks from host (DRAM) to device (HBM) asynchronously.
+
+    Args:
+      block_hashes: List of block hashes to load.
+      device_block_ids: Destination device block IDs.
+
+    Returns:
+      True if successfully launched, False if validation failed.
+    """
+    return self._impl.load(block_hashes, device_block_ids)
+
+  def poll_save_status(self) -> tuple[list[bytes], list[bytes], list[bytes]]:
+    """Polls the status of all active asynchronous Save operations.
+
+    For completed transfers, it advances the LRU block states to HOST_AND_HBM
+    and updates their host block locations. For failed transfers, it releases
+    the allocated host blocks.
+
+    Returns:
+      A tuple of (done, failed, pending), where:
+        done: List of block hashes whose Save transfer successfully completed.
+        failed: List of block hashes whose Save transfer failed.
+        pending: List of block hashes whose Save transfer is still in progress.
+    """
+    return self._impl.poll_save_status()
+
+  def poll_load_status(self) -> tuple[list[bytes], list[bytes], list[bytes]]:
+    """Polls the status of all active asynchronous Load operations.
+
+    For completed transfers, it advances the LRU block states to HOST_AND_HBM
+    and updates their device block locations.
+
+    Returns:
+      A tuple of (done, failed, pending), where:
+        done: List of block hashes whose Load transfer successfully completed.
+        failed: List of block hashes whose Load transfer failed.
+        pending: List of block hashes whose Load transfer is still in progress.
+    """
+    return self._impl.poll_load_status()

@@ -14,6 +14,7 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include <csignal>
 #include <cstdint>
 #include <iostream>
 #include <memory>
@@ -64,6 +65,9 @@ void RunServer() {
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
   absl::InitializeLog();
+#ifndef _WIN32
+  std::signal(SIGPIPE, SIG_IGN);
+#endif
   RunServer();
   return 0;
 }

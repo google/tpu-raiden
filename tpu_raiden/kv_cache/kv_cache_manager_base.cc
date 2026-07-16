@@ -1482,6 +1482,7 @@ KVCacheManagerBase::DispatchH2dWork(
           return absl::InvalidArgumentError(
               "Copy range exceeds destination device buffer size");
         }
+
         VLOG(1)
             << "DispatchH2dWork: calling CopyRawHostToDevice (Partial). Layer: "
             << work.layer_idx << ", Shard: " << work.shard_idx
@@ -1572,6 +1573,7 @@ KVCacheManagerBase::DispatchD2hWork(const std::vector<CopyWork>& works,
           return absl::InvalidArgumentError(
               "Copy range exceeds destination host buffer size");
         }
+
         VLOG(1)
             << "DispatchD2hWork: calling CopyRawDeviceToHost (Partial). Layer: "
             << work.layer_idx << ", Shard: " << work.shard_idx

@@ -16,6 +16,8 @@ syntax = "proto3";
 
 package tpu_raiden.kv_cache.global_registry;
 
+import "tpu_raiden/rpc/raiden_service.proto";
+
 option java_multiple_files = true;
 option java_outer_classname = "GlobalRegistry";
 
@@ -37,9 +39,8 @@ service GlobalRegistryService {
 }
 
 message KVBlockMetadata {
-  // String representing the host address. Typically in the format "IP:port" or
-  // "hostname:port". Must uniquely identify the host instance.
-  string host_address = 1;
+  // Logical owner identity.
+  tpu_raiden.rpc.RaidenIdProto raiden_id = 1;
   // Identifier for the cache block on the host. Must be non-negative (>= 0),
   // representing the logical index in the host's physical block allocation
   // pool.
@@ -57,12 +58,12 @@ message RegisterEntry {
   // hour in the server implementation).
   //
   // Rules of thumb for setting TTL:
-  // - For stable environments with low host churn, a longer TTL (e.g., 30+
+  // - For stable environments with low worker churn, a longer TTL (e.g., 30+
   // minutes)
   //   is recommended to maximize cache hit rates.
-  // - For dynamic environments or unstable hosts, a shorter TTL (e.g., 5-10
+  // - For dynamic environments or unstable workers, a shorter TTL (e.g., 5-10
   // minutes)
-  //   helps minimize stale lookups if a host crashes before unregistering.
+  //   helps minimize stale lookups if a worker crashes before unregistering.
   // - The TTL should generally be larger than the expected time between cache
   // reuses.
   int64 ttl_seconds = 3;
@@ -94,7 +95,7 @@ message LookupResponse {
   // sequential hits before the first miss).
   //
   // TODO: Optimize response size when multiple blocks are on the same
-  // host (e.g., by deduplicating host addresses into a host list and using
+  // worker (e.g., by deduplicating RaidenIds into a list and using
   // indices in results).
   // TODO: Consider supporting replicated cache blocks (which currently
   // overwrite each other in the registry).
@@ -103,7 +104,7 @@ message LookupResponse {
 
 message UnregisterRequest {
   repeated string prefix_hashes = 1;
-  string host_address = 2;
+  tpu_raiden.rpc.RaidenIdProto raiden_id = 2;
 }
 
 message UnregisterResponse {

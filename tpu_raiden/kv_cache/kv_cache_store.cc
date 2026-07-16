@@ -16,36 +16,111 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include "grpcpp/create_channel.h"
 #include "grpcpp/grpcpp.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
+#include "absl/types/span.h"
 #include "grpcpp/security/credentials.h"
+#include "xla/tsl/concurrency/future.h"
+#include "tpu_raiden/core/controller/raiden_controller.h"
+#include "tpu_raiden/core/numa_thread_pool.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_client.h"
 #include "tpu_raiden/kv_cache/lru_cache.h"
+#include "tpu_raiden/kv_cache/raiden_id.h"
+#include "tpu_raiden/rpc/raiden_service.pb.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
 
-KVCacheStore::KVCacheStore(size_t capacity, std::string global_registry_address,
-                           RaidenId raiden_id)
-    : lru_cache_(capacity), raiden_id_(std::move(raiden_id)) {
+KVCacheStore::KVCacheStore(size_t capacity,
+                           absl::string_view global_registry_address,
+                           RaidenId raiden_id, int num_shards,
+                           int64_t shard_size_bytes, int raiden_controller_port,
+                           absl::string_view raiden_orchestrator_address)
+    : lru_cache_(capacity),
+      raiden_id_(std::move(raiden_id)),
+      write_through_pool_(std::make_unique<::tpu_raiden::NumaThreadPool>(4)) {
   if (!global_registry_address.empty()) {
-    auto channel = grpc::CreateChannel(global_registry_address,
+    auto channel = grpc::CreateChannel(std::string(global_registry_address),
                                        grpc::InsecureChannelCredentials());
     registry_client_ =
-        std::make_unique<global_registry::GlobalRegistryClient>(channel);
+        std::make_shared<global_registry::GlobalRegistryClient>(channel);
+  }
+  if (num_shards > 0) {
+    ::tpu_raiden::rpc::RaidenIdProto unit_proto;
+    unit_proto.set_job_name(raiden_id_.job_name);
+    unit_proto.set_job_replica_id(raiden_id_.job_replica_id);
+    unit_proto.set_data_name(raiden_id_.data_name);
+    unit_proto.set_data_replica_idx(raiden_id_.data_replica_idx);
+
+    raiden_controller_ =
+        std::make_unique<::tpu_raiden::controller::RaidenController>(
+            unit_proto, capacity, num_shards, shard_size_bytes,
+            raiden_controller_port, raiden_orchestrator_address);
+  }
+  if (raiden_controller_) {
+    poller_thread_ =
+        std::make_unique<std::thread>(&KVCacheStore::PollerLoop, this);
   }
 }
 
-KVCacheStore::~KVCacheStore() = default;
+KVCacheStore::KVCacheStore(
+    size_t capacity,
+    std::unique_ptr<::tpu_raiden::controller::RaidenController>
+        raiden_controller,
+    absl::string_view global_registry_address, RaidenId raiden_id)
+    : lru_cache_(capacity),
+      raiden_id_(std::move(raiden_id)),
+      raiden_controller_(std::move(raiden_controller)),
+      write_through_pool_(std::make_unique<::tpu_raiden::NumaThreadPool>(4)) {
+  if (!global_registry_address.empty()) {
+    auto channel = grpc::CreateChannel(std::string(global_registry_address),
+                                       grpc::InsecureChannelCredentials());
+    registry_client_ =
+        std::make_shared<global_registry::GlobalRegistryClient>(channel);
+  }
+  if (raiden_controller_) {
+    poller_thread_ =
+        std::make_unique<std::thread>(&KVCacheStore::PollerLoop, this);
+  }
+}
+
+KVCacheStore::~KVCacheStore() {
+  if (poller_thread_) {
+    stop_poller_.store(true);
+    if (poller_thread_->joinable()) {
+      poller_thread_->join();
+    }
+  }
+  std::vector<tsl::Future<>> futures_to_await;
+  {
+    absl::MutexLock lock(mutex_);
+    for (auto& state : active_saves_) {
+      futures_to_await.push_back(state.future);
+    }
+    for (auto& state : active_loads_) {
+      futures_to_await.push_back(state.future);
+    }
+  }
+  for (auto& fut : futures_to_await) {
+    (void)fut.Await();
+  }
+}
 
 absl::StatusOr<BlockSliceList> KVCacheStore::Lookup(
     const std::vector<std::string>& block_hashes, bool enable_global) {
@@ -76,14 +151,16 @@ absl::StatusOr<BlockSliceList> KVCacheStore::Lookup(
       const auto& global_results = global_results_or.value();
       for (size_t i = 0; i < global_results.size(); ++i) {
         const auto& metadata = global_results[i];
-        RaidenId remote_id;
-        remote_id.job_name = metadata.host_address();
-        remote_id.job_replica_id = "0";
-        remote_id.data_name = "kv_cache";
-        remote_id.data_replica_idx = metadata.block_id();
-        results.push_back(
-            std::make_pair(remaining_hashes[i],
-                           RaidenBlockID(remote_id, -1, BlockStatus::REMOTE)));
+        const auto& proto_id = metadata.raiden_id();
+        RaidenId remote_id{
+            .job_name = proto_id.job_name(),
+            .job_replica_id = proto_id.job_replica_id(),
+            .data_name = proto_id.data_name(),
+            .data_replica_idx = proto_id.data_replica_idx(),
+        };
+        results.push_back(std::make_pair(
+            remaining_hashes[i], RaidenBlockID(remote_id, metadata.block_id(),
+                                               BlockStatus::REMOTE)));
       }
     } else {
       LOG(WARNING) << "Global registry lookup failed: "
@@ -268,6 +345,141 @@ void KVCacheStore::Release(const std::vector<std::string>& block_hashes) {
   }
 }
 
+absl::Status KVCacheStore::Save(const std::vector<std::string>& block_hashes) {
+  if (!raiden_controller_) {
+    return absl::FailedPreconditionError("RaidenController is not initialized");
+  }
+
+  std::vector<int64_t> src_device_block_ids;
+  src_device_block_ids.reserve(block_hashes.size());
+
+  {
+    absl::MutexLock lock(mutex_);
+    for (const auto& hash : block_hashes) {
+      RaidenBlockID* existing = lru_cache_.Get(hash);
+      if (!existing) {
+        return absl::NotFoundError(
+            absl::StrCat("Block hash not found: ", hash));
+      }
+      if (existing->status != BlockStatus::HBM) {
+        return absl::FailedPreconditionError(
+            absl::StrCat("Block is not in HBM status: ", hash));
+      }
+      if (existing->device_block_id == -1) {
+        return absl::FailedPreconditionError(
+            absl::StrCat("Block device_block_id is -1: ", hash));
+      }
+      if (lru_cache_.GetPinCount(hash) <= 0) {
+        return absl::FailedPreconditionError(
+            absl::StrCat("Block is not pinned: ", hash));
+      }
+      if (saving_hashes_.contains(hash)) {
+        return absl::FailedPreconditionError(
+            absl::StrCat("Block is already saving: ", hash));
+      }
+      src_device_block_ids.push_back(existing->device_block_id);
+    }
+    for (const auto& hash : block_hashes) {
+      saving_hashes_.insert(hash);
+    }
+  }
+
+  // Allocate host blocks on controller
+  auto host_blocks_or =
+      raiden_controller_->AllocateBlockIds(block_hashes.size());
+  if (!host_blocks_or.ok()) {
+    absl::MutexLock lock(mutex_);
+    for (const auto& hash : block_hashes) {
+      saving_hashes_.erase(hash);
+    }
+    return host_blocks_or.status();
+  }
+  const auto& host_block_ids = host_blocks_or.value();
+  std::vector<int64_t> host_block_ids_64(host_block_ids.begin(),
+                                         host_block_ids.end());
+
+  // Trigger transfer
+  tsl::Future<> future = raiden_controller_->TransferBuffers(
+      rpc::MEMORY_TYPE_HBM, rpc::MEMORY_TYPE_DRAM, src_device_block_ids,
+      host_block_ids_64);
+
+  {
+    absl::MutexLock lock(mutex_);
+    active_saves_.push_back(SaveState{
+        .future = std::move(future),
+        .block_hashes = block_hashes,
+        .host_block_ids = host_block_ids,
+    });
+  }
+
+  return absl::OkStatus();
+}
+
+absl::Status KVCacheStore::Load(const std::vector<std::string>& block_hashes,
+                                const std::vector<int>& device_block_ids) {
+  if (block_hashes.size() != device_block_ids.size()) {
+    return absl::InvalidArgumentError(
+        "block_hashes and device_block_ids size mismatch");
+  }
+  if (!raiden_controller_) {
+    return absl::FailedPreconditionError("RaidenController is not initialized");
+  }
+
+  std::vector<int64_t> src_host_block_ids;
+  src_host_block_ids.reserve(block_hashes.size());
+
+  {
+    absl::MutexLock lock(mutex_);
+    for (const auto& hash : block_hashes) {
+      RaidenBlockID* existing = lru_cache_.Get(hash);
+      if (!existing) {
+        return absl::NotFoundError(
+            absl::StrCat("Block hash not found: ", hash));
+      }
+      if (existing->status != BlockStatus::HOST &&
+          existing->status != BlockStatus::HOST_AND_HBM) {
+        return absl::FailedPreconditionError(
+            absl::StrCat("Block is not on host: ", hash));
+      }
+      if (existing->host_block_id == -1) {
+        return absl::FailedPreconditionError(
+            absl::StrCat("Block host_block_id is -1: ", hash));
+      }
+      if (lru_cache_.GetPinCount(hash) <= 0) {
+        return absl::FailedPreconditionError(
+            absl::StrCat("Block is not pinned: ", hash));
+      }
+      if (loading_hashes_.contains(hash)) {
+        return absl::FailedPreconditionError(
+            absl::StrCat("Block is already loading: ", hash));
+      }
+      src_host_block_ids.push_back(existing->host_block_id);
+    }
+    for (const auto& hash : block_hashes) {
+      loading_hashes_.insert(hash);
+    }
+  }
+
+  std::vector<int64_t> dst_device_block_ids(device_block_ids.begin(),
+                                            device_block_ids.end());
+
+  // Trigger transfer
+  tsl::Future<> future = raiden_controller_->TransferBuffers(
+      rpc::MEMORY_TYPE_DRAM, rpc::MEMORY_TYPE_HBM, src_host_block_ids,
+      dst_device_block_ids);
+
+  {
+    absl::MutexLock lock(mutex_);
+    active_loads_.push_back(LoadState{
+        .future = std::move(future),
+        .block_hashes = block_hashes,
+        .device_block_ids = device_block_ids,
+    });
+  }
+
+  return absl::OkStatus();
+}
+
 int KVCacheStore::GetPinCount(const std::string& hash) const {
   absl::MutexLock lock(mutex_);
   return lru_cache_.GetPinCount(hash);
@@ -276,6 +488,175 @@ int KVCacheStore::GetPinCount(const std::string& hash) const {
 size_t KVCacheStore::capacity() const {
   absl::MutexLock lock(mutex_);
   return lru_cache_.capacity();
+}
+
+std::tuple<std::vector<std::string>, std::vector<std::string>,
+           std::vector<std::string>>
+KVCacheStore::PollSaveStatus() {
+  absl::MutexLock lock(mutex_);
+  std::vector<std::string> done = std::move(done_saves_);
+  done_saves_.clear();
+  std::vector<std::string> failed = std::move(failed_saves_);
+  failed_saves_.clear();
+
+  std::vector<std::string> pending;
+  size_t total_pending_blocks = 0;
+  for (const auto& state : active_saves_) {
+    total_pending_blocks += state.block_hashes.size();
+  }
+  pending.reserve(total_pending_blocks);
+  for (const auto& state : active_saves_) {
+    for (const auto& hash : state.block_hashes) {
+      pending.push_back(hash);
+    }
+  }
+
+  return {std::move(done), std::move(failed), std::move(pending)};
+}
+
+std::tuple<std::vector<std::string>, std::vector<std::string>,
+           std::vector<std::string>>
+KVCacheStore::PollLoadStatus() {
+  absl::MutexLock lock(mutex_);
+  std::vector<std::string> done = std::move(done_loads_);
+  done_loads_.clear();
+  std::vector<std::string> failed = std::move(failed_loads_);
+  failed_loads_.clear();
+
+  std::vector<std::string> pending;
+  size_t total_pending_blocks = 0;
+  for (const auto& state : active_loads_) {
+    total_pending_blocks += state.block_hashes.size();
+  }
+  pending.reserve(total_pending_blocks);
+  for (const auto& state : active_loads_) {
+    for (const auto& hash : state.block_hashes) {
+      pending.push_back(hash);
+    }
+  }
+
+  return {std::move(done), std::move(failed), std::move(pending)};
+}
+
+void KVCacheStore::PollerLoop() {
+  while (!stop_poller_.load()) {
+    PollFuturesInternal();
+    absl::SleepFor(absl::Milliseconds(10));
+  }
+}
+
+void KVCacheStore::PollFuturesInternal() {
+  std::vector<SaveState> ready_saves;
+  std::vector<LoadState> ready_loads;
+
+  {
+    absl::MutexLock lock(mutex_);
+    auto it = active_saves_.begin();
+    while (it != active_saves_.end()) {
+      if (it->future.IsReady()) {
+        ready_saves.push_back(std::move(*it));
+        it = active_saves_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+
+    auto jt = active_loads_.begin();
+    while (jt != active_loads_.end()) {
+      if (jt->future.IsReady()) {
+        ready_loads.push_back(std::move(*jt));
+        jt = active_loads_.erase(jt);
+      } else {
+        ++jt;
+      }
+    }
+  }
+
+  for (auto& state : ready_saves) {
+    absl::Status status = state.future.Await();
+    absl::MutexLock lock(mutex_);
+    if (status.ok()) {
+      std::vector<global_registry::Registration> write_through_regs;
+      write_through_regs.reserve(state.block_hashes.size());
+      for (size_t i = 0; i < state.block_hashes.size(); ++i) {
+        const auto& hash = state.block_hashes[i];
+        RaidenBlockID* existing = lru_cache_.Get(hash);
+        if (existing) {
+          existing->host_block_id = state.host_block_ids[i];
+          existing->status = BlockStatus::HOST_AND_HBM;
+          if (registry_client_) {
+            write_through_regs.push_back({
+                .prefix_hash = hash,
+                .raiden_id = raiden_id_,
+                .block_id = state.host_block_ids[i],
+            });
+          }
+        } else {
+          if (raiden_controller_) {
+            (void)raiden_controller_->DeallocateBlockIds(
+                {state.host_block_ids[i]});
+          }
+        }
+        done_saves_.push_back(hash);
+      }
+      if (!write_through_regs.empty() && registry_client_ &&
+          write_through_pool_) {
+        write_through_pool_->Schedule([client = registry_client_,
+                                       regs = std::move(write_through_regs)]() {
+          auto status = client->Register(regs);
+          if (!status.ok()) {
+            LOG(WARNING) << "Async write-through failed after Save: "
+                         << status.message();
+          } else {
+            LOG(INFO) << "Async write-through succeeded after Save for "
+                      << regs.size() << " blocks";
+          }
+        });
+      }
+    } else {
+      LOG(ERROR) << "Async Save failed: " << status.ToString();
+      if (raiden_controller_) {
+        (void)raiden_controller_->DeallocateBlockIds(state.host_block_ids);
+      }
+      for (const auto& hash : state.block_hashes) {
+        failed_saves_.push_back(hash);
+      }
+    }
+    for (const auto& hash : state.block_hashes) {
+      saving_hashes_.erase(hash);
+    }
+  }
+
+  for (auto& state : ready_loads) {
+    absl::Status status = state.future.Await();
+    absl::MutexLock lock(mutex_);
+    if (status.ok()) {
+      for (size_t i = 0; i < state.block_hashes.size(); ++i) {
+        const auto& hash = state.block_hashes[i];
+        RaidenBlockID* existing = lru_cache_.Get(hash);
+        if (existing) {
+          existing->device_block_id = state.device_block_ids[i];
+          existing->status = BlockStatus::HOST_AND_HBM;
+        }
+        done_loads_.push_back(hash);
+      }
+    } else {
+      LOG(ERROR) << "Async Load failed: " << status.ToString();
+      for (const auto& hash : state.block_hashes) {
+        failed_loads_.push_back(hash);
+      }
+    }
+    for (const auto& hash : state.block_hashes) {
+      loading_hashes_.erase(hash);
+    }
+  }
+}
+
+int KVCacheStore::raiden_controller_port() const {
+  if (raiden_controller_) {
+    return raiden_controller_->raiden_controller_port();
+  }
+  return 0;
 }
 
 }  // namespace kv_cache

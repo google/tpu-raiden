@@ -29,6 +29,7 @@
 #include <nanobind/stl/shared_ptr.h>  // IWYU pragma: keep
 #include <nanobind/stl/string.h>  // IWYU pragma: keep
 #include <nanobind/stl/string_view.h>  // IWYU pragma: keep
+#include <nanobind/stl/tuple.h>  // IWYU pragma: keep
 #include <nanobind/stl/vector.h>  // IWYU pragma: keep
 #include "xla/pjrt/status_casters.h"
 #include "tpu_raiden/core/raiden_future.h"
@@ -61,9 +62,13 @@ class KVCacheStoreWrapper {
  public:
   explicit KVCacheStoreWrapper(size_t lru_capacity,
                                std::string global_registry_address = "",
-                               RaidenId raiden_id = {}) {
+                               RaidenId raiden_id = {}, int num_shards = 0,
+                               int64_t shard_size_bytes = 0,
+                               int raiden_controller_port = 0,
+                               std::string raiden_orchestrator_address = "") {
     controller_ = std::make_unique<KVCacheStore>(
-        lru_capacity, global_registry_address, std::move(raiden_id));
+        lru_capacity, global_registry_address, std::move(raiden_id), num_shards,
+        shard_size_bytes, raiden_controller_port, raiden_orchestrator_address);
   }
   KVCacheStore* operator->() { return controller_.get(); }
   KVCacheStore& operator*() { return *controller_; }
@@ -391,15 +396,23 @@ NB_MODULE(_tpu_raiden_jax, m) {
       .def_rw("status", &tpu_raiden::kv_cache::RaidenBlockID::status);
 
   nb::class_<tpu_raiden::kv_cache::KVCacheStoreWrapper>(m, "KVCacheStore")
-      .def(nb::init<size_t, std::string, tpu_raiden::kv_cache::RaidenId>(),
+      .def(nb::init<size_t, std::string, tpu_raiden::kv_cache::RaidenId, int,
+                    int64_t, int, std::string>(),
            nb::arg("capacity"), nb::arg("global_registry_address") = "",
-           nb::arg("raiden_id") = tpu_raiden::kv_cache::RaidenId())
+           nb::arg("raiden_id") = tpu_raiden::kv_cache::RaidenId(),
+           nb::arg("num_shards") = 0, nb::arg("shard_size_bytes") = 0,
+           nb::arg("raiden_controller_port") = 0,
+           nb::arg("raiden_orchestrator_address") = "")
       .def_prop_ro(
           "raiden_id",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
             return (*self).raiden_id();
           },
           "Returns the RaidenId associated with this store.")
+      .def_prop_ro("raiden_controller_port",
+                   [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
+                     return self->raiden_controller_port();
+                   })
       .def(
           "lookup",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
@@ -524,5 +537,58 @@ NB_MODULE(_tpu_raiden_jax, m) {
             auto hashes = ToStdStringVector(block_hashes);
             self->Release(hashes);
           },
-          nb::arg("block_hashes"));
+          nb::arg("block_hashes"))
+      .def(
+          "save",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
+             const std::vector<nb::bytes>& block_hashes) -> bool {
+            auto hashes = ToStdStringVector(block_hashes);
+            return self->Save(hashes).ok();
+          },
+          nb::arg("block_hashes"))
+      .def(
+          "load",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
+             const std::vector<nb::bytes>& block_hashes,
+             const std::vector<int>& device_block_ids) -> bool {
+            auto hashes = ToStdStringVector(block_hashes);
+            return self->Load(hashes, device_block_ids).ok();
+          },
+          nb::arg("block_hashes"), nb::arg("device_block_ids"))
+      .def("poll_save_status",
+           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
+             auto [done, failed, pending] = self->PollSaveStatus();
+             std::vector<nb::bytes> py_done, py_failed, py_pending;
+             py_done.reserve(done.size());
+             for (const auto& h : done) {
+               py_done.push_back(nb::bytes(h.data(), h.size()));
+             }
+             py_failed.reserve(failed.size());
+             for (const auto& h : failed) {
+               py_failed.push_back(nb::bytes(h.data(), h.size()));
+             }
+             py_pending.reserve(pending.size());
+             for (const auto& h : pending) {
+               py_pending.push_back(nb::bytes(h.data(), h.size()));
+             }
+             return std::make_tuple(py_done, py_failed, py_pending);
+           })
+      .def("poll_load_status",
+           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
+             auto [done, failed, pending] = self->PollLoadStatus();
+             std::vector<nb::bytes> py_done, py_failed, py_pending;
+             py_done.reserve(done.size());
+             for (const auto& h : done) {
+               py_done.push_back(nb::bytes(h.data(), h.size()));
+             }
+             py_failed.reserve(failed.size());
+             for (const auto& h : failed) {
+               py_failed.push_back(nb::bytes(h.data(), h.size()));
+             }
+             py_pending.reserve(pending.size());
+             for (const auto& h : pending) {
+               py_pending.push_back(nb::bytes(h.data(), h.size()));
+             }
+             return std::make_tuple(py_done, py_failed, py_pending);
+           });
 }

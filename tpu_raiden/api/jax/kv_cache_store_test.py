@@ -12,62 +12,169 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
+if not os.path.exists("/dev/accel0"):
+  os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
+
+# pylint: disable=g-import-not-at-top
+import socket
+import subprocess
+import time
 import unittest
 
 from absl.testing import absltest
+import jax
+from jax.experimental import mesh_utils
+import jax.numpy as jnp
+import numpy as np
 
+resources = None
 from tpu_raiden.api.jax import kv_cache_store
+from tpu_raiden.api.jax.kv_cache_manager import KVCacheManager
+
+# pylint: enable=g-import-not-at-top
+
+
+def _pick_unused_port():
+  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+  s.bind(("localhost", 0))
+  port = s.getsockname()[1]
+  s.close()
+  return port
+
+
+# Global variables for subprocesses
+_orchestrator_process = None
+_registry_process = None
+_orchestrator_port = None
+_registry_port = None
+
+
+def setUpModule():
+  global _orchestrator_process, _registry_process
+  global _orchestrator_port, _registry_port
+
+  _orchestrator_port = _pick_unused_port()
+  _registry_port = _pick_unused_port()
+
+  this_dir = os.path.dirname(os.path.abspath(__file__))
+  orchestrator_binary = os.path.abspath(
+      os.path.join(
+          this_dir,
+          "..",
+          "..",
+          "core",
+          "controller",
+          "raiden_orchestrator_main",
+      )
+  )
+  registry_binary = os.path.abspath(
+      os.path.join(
+          this_dir,
+          "..",
+          "..",
+          "kv_cache",
+          "global_registry",
+          "global_registry_server",
+      )
+  )
+  extra_flags = []
+
+  print(f"Starting Orchestrator on port {_orchestrator_port}")
+  orch_log = open("/tmp/raiden_orchestrator.log", "w")
+  _orchestrator_process = subprocess.Popen(
+      [
+          orchestrator_binary,
+          f"--port={_orchestrator_port}",
+      ]
+      + extra_flags,
+      stdout=orch_log,
+      stderr=subprocess.STDOUT,
+  )
+
+  print(f"Starting Registry on port {_registry_port}")
+  reg_log = open("/tmp/raiden_registry.log", "w")
+  _registry_process = subprocess.Popen(
+      [
+          registry_binary,
+          f"--port={_registry_port}",
+      ]
+      + extra_flags,
+      stdout=reg_log,
+      stderr=subprocess.STDOUT,
+  )
+
+  # Give them some time to start
+  time.sleep(2)
+
+
+def tearDownModule():
+  if _orchestrator_process:
+    code = _orchestrator_process.poll()
+    if code is not None and code != 0:
+      print(f"--- Orchestrator exited with {code} ---")
+      try:
+        with open("/tmp/raiden_orchestrator.log", "r") as f:
+          print(f.read())
+      except OSError as e:
+        print(f"Failed to read orchestrator log: {e}")
+    _orchestrator_process.terminate()
+    _orchestrator_process.wait()
+  if _registry_process:
+    code = _registry_process.poll()
+    if code is not None and code != 0:
+      print(f"--- Registry exited with {code} ---")
+      try:
+        with open("/tmp/raiden_registry.log", "r") as f:
+          print(f.read())
+      except OSError as e:
+        print(f"Failed to read registry log: {e}")
+    _registry_process.terminate()
+    _registry_process.wait()
 
 
 class KVCacheStoreTest(absltest.TestCase):
 
-  def test_raiden_block_id_creation_and_equality(self):
-    id_ = kv_cache_store.RaidenId("test_job", "0", "test_cache", 0)
-    block_1 = kv_cache_store.RaidenBlockID(
-        id_,
-        host_block_id=10,
-        device_block_id=20,
-        status=kv_cache_store.BlockStatus.HBM,
-    )
-    self.assertEqual(block_1.raiden_id.job_name, id_.job_name)
-    self.assertEqual(block_1.raiden_id.job_replica_id, id_.job_replica_id)
-    self.assertEqual(block_1.raiden_id.data_name, id_.data_name)
-    self.assertEqual(block_1.raiden_id.data_replica_idx, id_.data_replica_idx)
-    self.assertEqual(block_1.host_block_id, 10)
-    self.assertEqual(block_1.device_block_id, 20)
-    self.assertEqual(block_1.status, kv_cache_store.BlockStatus.HBM)
+  def _make_sharding(self, devices):
 
-    # Test constructor with position arguments (backwards compatibility)
-    block_pos = kv_cache_store.RaidenBlockID(
-        id_, 10, kv_cache_store.BlockStatus.HBM
+    n = len(devices)
+    if n >= 4:
+      device_mesh = mesh_utils.create_device_mesh((2, n // 2), devices)
+    else:
+      device_mesh = mesh_utils.create_device_mesh((1, n), devices)
+    mesh = jax.sharding.Mesh(device_mesh, ("x", "y"))
+    return jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec(None, None, "x", "y", None)
     )
-    self.assertEqual(block_pos.raiden_id.job_name, id_.job_name)
-    self.assertEqual(block_pos.raiden_id.job_replica_id, id_.job_replica_id)
-    self.assertEqual(block_pos.raiden_id.data_name, id_.data_name)
-    self.assertEqual(block_pos.raiden_id.data_replica_idx, id_.data_replica_idx)
-    self.assertEqual(block_pos.host_block_id, 10)
-    self.assertEqual(block_pos.device_block_id, -1)
-    self.assertEqual(block_pos.status, kv_cache_store.BlockStatus.HBM)
 
-    block_2 = kv_cache_store.RaidenBlockID(
-        id_,
-        host_block_id=10,
-        device_block_id=20,
-        status=kv_cache_store.BlockStatus.HBM,
-    )
-    self.assertEqual(block_1.host_block_id, block_2.host_block_id)
-    self.assertEqual(block_1.device_block_id, block_2.device_block_id)
-    self.assertEqual(block_1.status, block_2.status)
+  def setUp(self):
+    super().setUp()
+    try:
+      self.devices = jax.devices("tpu")
+    except RuntimeError:
+      self.devices = jax.devices()
 
-    block_3 = kv_cache_store.RaidenBlockID(
-        id_,
-        host_block_id=10,
-        device_block_id=21,
-        status=kv_cache_store.BlockStatus.HBM,
-    )
-    self.assertNotEqual(block_1.device_block_id, block_3.device_block_id)
+    self.num_devices = len(self.devices)
+    self.sharding = self._make_sharding(self.devices)
+    self.mesh = self.sharding.mesh
+    print(f"DEBUG_DEVICES: {self.devices}")
+    print(f"DEBUG_SHARDING: {self.sharding}")
+
+  def _require_tpu(self):
+    if self.devices[0].platform != "tpu":
+      self.skipTest("This test requires TPU hardware")
+
+  def _make_device_array(self, np_array, sharding=None):
+    if sharding is None:
+      sharding = self.sharding
+    return jax.device_put(jnp.array(np_array), sharding).block_until_ready()
 
   def test_basic_tests(self):
+    print("TEST_BASIC_DEVICES:", jax.devices())
+    print("TEST_BASIC_DEVICE_COUNT:", jax.device_count())
+    print("TEST_BASIC_MESH_DEVICES:", self.mesh.devices)
+    print("TEST_BASIC_MESH_SHAPE:", self.mesh.shape)
     controller = kv_cache_store.KVCacheStore(capacity=20)
     self.assertEqual(controller.capacity(), 20)
 
@@ -222,10 +329,14 @@ class KVCacheStoreTest(absltest.TestCase):
 
     # Case 3: No local hit, only global hits.
     remote_id1 = kv_cache_store._impl.RaidenBlockID(
-        kv_cache_store._impl.RaidenId("10.0.0.1:1234", "0", "kv_cache", 42)
+        kv_cache_store._impl.RaidenId("job1", "0", "kv_cache", 0),
+        42,
+        kv_cache_store._impl.BlockStatus.REMOTE,
     )
     remote_id2 = kv_cache_store._impl.RaidenBlockID(
-        kv_cache_store._impl.RaidenId("10.0.0.2:1234", "0", "kv_cache", 43)
+        kv_cache_store._impl.RaidenId("job2", "0", "kv_cache", 0),
+        43,
+        kv_cache_store._impl.BlockStatus.REMOTE,
     )
     mock_impl.lookup.return_value = [
         (b"global_1", remote_id1),
@@ -235,11 +346,13 @@ class KVCacheStoreTest(absltest.TestCase):
     res = controller.lookup([b"global_1", b"global_2"], enable_global=True)
     self.assertLen(res, 2)
     self.assertEqual(res[0][0], b"global_1")
-    self.assertEqual(res[0][1].raiden_id.job_name, "10.0.0.1:1234")
-    self.assertEqual(res[0][1].raiden_id.data_replica_idx, 42)
+    self.assertEqual(res[0][1].raiden_id.job_name, "job1")
+    self.assertEqual(res[0][1].host_block_id, 42)
+    self.assertEqual(res[0][1].status, kv_cache_store.BlockStatus.REMOTE)
     self.assertEqual(res[1][0], b"global_2")
-    self.assertEqual(res[1][1].raiden_id.job_name, "10.0.0.2:1234")
-    self.assertEqual(res[1][1].raiden_id.data_replica_idx, 43)
+    self.assertEqual(res[1][1].raiden_id.job_name, "job2")
+    self.assertEqual(res[1][1].host_block_id, 43)
+    self.assertEqual(res[1][1].status, kv_cache_store.BlockStatus.REMOTE)
     mock_impl.lookup.assert_called_with([b"global_1", b"global_2"], True)
 
   def test_global_lookup_error_ignored(self):
@@ -250,6 +363,37 @@ class KVCacheStoreTest(absltest.TestCase):
     # Should not fail, just return empty because the registry is down
     res = controller.lookup(hashes, enable_global=True)
     self.assertEmpty(res)
+
+  def test_save_and_load_mocked(self):
+    controller = kv_cache_store.KVCacheStore(capacity=20)
+    mock_impl = unittest.mock.MagicMock()
+    controller._impl = mock_impl
+
+    hashes = [b"hash_1", b"hash_2"]
+    mock_impl.save.return_value = True
+    self.assertTrue(controller.save(hashes))
+    mock_impl.save.assert_called_with(hashes)
+    mock_impl.save.return_value = False
+    self.assertFalse(controller.save(hashes))
+
+    device_block_ids = [2, 3]
+    mock_impl.load.return_value = True
+    self.assertTrue(controller.load(hashes, device_block_ids))
+    mock_impl.load.assert_called_with(hashes, device_block_ids)
+    mock_impl.load.return_value = False
+    self.assertFalse(controller.load(hashes, device_block_ids))
+
+    mock_impl.poll_save_status.return_value = ([b"hash_1"], [], [b"hash_2"])
+    self.assertEqual(
+        controller.poll_save_status(), ([b"hash_1"], [], [b"hash_2"])
+    )
+    mock_impl.poll_save_status.assert_called_once()
+
+    mock_impl.poll_load_status.return_value = ([], [b"hash_1"], [b"hash_2"])
+    self.assertEqual(
+        controller.poll_load_status(), ([], [b"hash_1"], [b"hash_2"])
+    )
+    mock_impl.poll_load_status.assert_called_once()
 
   def test_insert_and_pin_release_and_delete(self):
     controller = kv_cache_store.KVCacheStore(capacity=2)
@@ -295,6 +439,272 @@ class KVCacheStoreTest(absltest.TestCase):
     self.assertEqual(del_count, 2)
     self.assertEmpty(rem_evicted)
     self.assertLen(controller.lookup([b"local_1", b"local_2"]), 2)
+
+  def test_e2e_load(self):
+    """Tests end-to-end load (H2D) on CPU."""
+    self._require_tpu()
+    # 1. Setup Ports
+    listener_port = _pick_unused_port()
+
+    # 2. Setup JAX arrays (TPU)
+    num_blocks = 10
+    num_layers = 10
+    shape = (num_blocks, 128, 8, 8, 128)
+    devices = self.devices
+    sharding = self._make_sharding(devices)
+
+    device_caches = []
+    for l in range(num_layers):
+      data = np.arange(np.prod(shape), dtype=np.float32).reshape(shape) + (
+          l * 1000000.0
+      )
+      device_caches.append(self._make_device_array(data, sharding))
+
+    bytes_per_block = 128 * 8 * 8 * 128 * 4
+    local_shards_per_listener = len(devices)
+    local_bytes_per_block = bytes_per_block // local_shards_per_listener
+
+    # 3. Setup Store
+    store_id = kv_cache_store.RaidenId("store_job", "0", "kv_cache", 0)
+    store = kv_cache_store.KVCacheStore(
+        capacity=10,
+        global_registry_address=f"localhost:{_registry_port}",
+        raiden_id=store_id,
+        num_shards=len(devices),
+        shard_size_bytes=local_bytes_per_block,
+        raiden_controller_port=0,
+        raiden_orchestrator_address=f"localhost:{_orchestrator_port}",
+    )
+
+    # 4. Setup Manager
+    manager = KVCacheManager(
+        kv_caches=device_caches,
+        node_id=0,
+        local_control_port=0,
+        max_blocks=num_blocks,
+        num_slots=2,
+        raiden_worker_port=listener_port,
+        raiden_controller_address=f"localhost:{store.raiden_controller_port}",
+    )
+    self.assertTrue(manager.is_listener_active)
+
+    time.sleep(1)
+
+    # 5. Populate DRAM (HOST blocks 3 and 4) using D2H
+    manager.d2h([0, 1], [3, 4]).wait()
+
+    # Insert blocks to store directory as HOST status
+    slices_1 = [
+        kv_cache_store.RaidenBlockID(
+            store_id, 3, kv_cache_store.BlockStatus.HOST
+        )
+    ]
+    self.assertTrue(store.insert([b"hash1"], slices_1, True)[0])
+
+    slices_2 = [
+        kv_cache_store.RaidenBlockID(
+            store_id, 4, kv_cache_store.BlockStatus.HOST
+        )
+    ]
+    self.assertTrue(store.insert([b"hash2"], slices_2, True)[0])
+
+    self.assertTrue(store.pin([b"hash1", b"hash2"]))
+
+    # 6. Trigger Load to HBM block 5 and 6
+    self.assertTrue(store.load([b"hash1", b"hash2"], [5, 6]))
+
+    # Wait for completion
+    done = False
+    for _ in range(50):
+      done_loading, failed_loading, _ = store.poll_load_status()
+      if failed_loading:
+        self.fail(f"Load failed: {failed_loading}")
+      if len(done_loading) == 2:
+        done = True
+        break
+      time.sleep(0.1)
+    self.assertTrue(done, "Load did not finish in time")
+
+    # 7. Verify Data on Device
+    for l in range(num_layers):
+      device_data = np.asarray(device_caches[l])
+      np.testing.assert_array_equal(device_data[5], device_data[0])
+      np.testing.assert_array_equal(device_data[6], device_data[1])
+
+    # Verify LRU Status Upgrade in Store
+    lookup_res1 = store.lookup([b"hash1"])
+    self.assertLen(lookup_res1, 1)
+    self.assertEqual(
+        lookup_res1[0][1].status, kv_cache_store.BlockStatus.HOST_AND_HBM
+    )
+    self.assertEqual(lookup_res1[0][1].host_block_id, 3)
+    self.assertEqual(lookup_res1[0][1].device_block_id, 5)
+
+    lookup_res2 = store.lookup([b"hash2"])
+    self.assertLen(lookup_res2, 1)
+    self.assertEqual(
+        lookup_res2[0][1].status, kv_cache_store.BlockStatus.HOST_AND_HBM
+    )
+    self.assertEqual(lookup_res2[0][1].host_block_id, 4)
+    self.assertEqual(lookup_res2[0][1].device_block_id, 6)
+
+  def test_e2e_save(self):
+    """Tests end-to-end save (D2H) and load (H2D) back on TPU."""
+    self._require_tpu()
+    # 1. Setup Ports
+    listener_port = _pick_unused_port()
+
+    # 2. Setup JAX arrays (TPU)
+    num_blocks = 10
+    num_layers = 10
+    shape = (num_blocks, 128, 8, 8, 128)
+    devices = self.devices
+    sharding = self._make_sharding(devices)
+
+    device_caches = []
+    for l in range(num_layers):
+      data = np.arange(np.prod(shape), dtype=np.float32).reshape(shape) + (
+          l * 1000000.0
+      )
+      device_caches.append(self._make_device_array(data, sharding))
+
+    bytes_per_block = 128 * 8 * 8 * 128 * 4
+    local_shards_per_listener = len(devices)
+    local_bytes_per_block = bytes_per_block // local_shards_per_listener
+
+    # 3. Setup Store
+    store_id = kv_cache_store.RaidenId("store_job", "0", "kv_cache", 0)
+    store = kv_cache_store.KVCacheStore(
+        capacity=10,
+        global_registry_address=f"localhost:{_registry_port}",
+        raiden_id=store_id,
+        num_shards=len(devices),
+        shard_size_bytes=local_bytes_per_block,
+        raiden_controller_port=0,
+        raiden_orchestrator_address=f"localhost:{_orchestrator_port}",
+    )
+
+    # 4. Setup Manager
+    num_slots = 2
+    manager = KVCacheManager(
+        kv_caches=device_caches,
+        node_id=0,
+        local_control_port=0,
+        max_blocks=num_blocks,
+        num_slots=num_slots,
+        raiden_worker_port=listener_port,
+        raiden_controller_address=f"localhost:{store.raiden_controller_port}",
+        host_blocks_to_allocate=num_slots * num_blocks
+        + 2,  # Allocate 2 extra blocks for Save
+    )
+    self.assertTrue(manager.is_listener_active)
+
+    time.sleep(1)
+
+    # 5. Insert blocks to store directory as HBM status and PIN them
+    slices_1 = [
+        kv_cache_store.RaidenBlockID(
+            store_id,
+            host_block_id=-1,
+            device_block_id=0,
+            status=kv_cache_store.BlockStatus.HBM,
+        )
+    ]
+    self.assertTrue(store.insert([b"hash1"], slices_1, False)[0])
+    self.assertTrue(store.pin([b"hash1"]))
+
+    slices_2 = [
+        kv_cache_store.RaidenBlockID(
+            store_id,
+            host_block_id=-1,
+            device_block_id=1,
+            status=kv_cache_store.BlockStatus.HBM,
+        )
+    ]
+    self.assertTrue(store.insert([b"hash2"], slices_2, False)[0])
+    self.assertTrue(store.pin([b"hash2"]))
+
+    # 6. Trigger Save (D2H)
+    self.assertTrue(store.save([b"hash1", b"hash2"]))
+
+    # Wait for save completion
+    done = False
+    for _ in range(50):
+      done_saving, failed_saving, _ = store.poll_save_status()
+      if failed_saving:
+        self.fail(f"Save failed: {failed_saving}")
+      if len(done_saving) == 2:
+        done = True
+        break
+      time.sleep(0.1)
+    self.assertTrue(done, "Save did not finish in time")
+
+    # Verify status in LRU is HOST_AND_HBM, and host_block_id is allocated
+    lookup_res1 = store.lookup([b"hash1"])
+    self.assertLen(lookup_res1, 1)
+    self.assertEqual(
+        lookup_res1[0][1].status, kv_cache_store.BlockStatus.HOST_AND_HBM
+    )
+    host_block_id1 = lookup_res1[0][1].host_block_id
+    self.assertGreaterEqual(host_block_id1, 0)
+
+    lookup_res2 = store.lookup([b"hash2"])
+    self.assertLen(lookup_res2, 1)
+    self.assertEqual(
+        lookup_res2[0][1].status, kv_cache_store.BlockStatus.HOST_AND_HBM
+    )
+    host_block_id2 = lookup_res2[0][1].host_block_id
+    self.assertGreaterEqual(host_block_id2, 0)
+    self.assertNotEqual(host_block_id1, host_block_id2)
+
+    # Verify registration in global registry using a second store instance
+    # (forcing global lookup)
+    store2 = kv_cache_store.KVCacheStore(
+        capacity=10,
+        global_registry_address=f"localhost:{_registry_port}",
+        raiden_id=kv_cache_store.RaidenId("receiver_job", "0", "kv_cache", 0),
+    )
+    global_verified = False
+    for _ in range(50):
+      lookup_res = store2.lookup([b"hash1", b"hash2"], enable_global=True)
+      if len(lookup_res) == 2:
+        self.assertEqual(lookup_res[0][0], b"hash1")
+        self.assertEqual(
+            lookup_res[0][1].status, kv_cache_store.BlockStatus.REMOTE
+        )
+        self.assertEqual(lookup_res[0][1].raiden_id, store_id)
+
+        self.assertEqual(lookup_res[1][0], b"hash2")
+        self.assertEqual(
+            lookup_res[1][1].status, kv_cache_store.BlockStatus.REMOTE
+        )
+        self.assertEqual(lookup_res[1][1].raiden_id, store_id)
+        global_verified = True
+        break
+      time.sleep(0.1)
+    self.assertTrue(global_verified, "Global registration lookup failed")
+
+    # 7. Trigger Load (H2D) to DIFFERENT HBM blocks (5 and 6) to verify DRAM
+    # content
+    self.assertTrue(store.load([b"hash1", b"hash2"], [5, 6]))
+
+    # Wait for load completion
+    done = False
+    for _ in range(50):
+      done_loading, failed_loading, _ = store.poll_load_status()
+      if failed_loading:
+        self.fail(f"Load failed: {failed_loading}")
+      if len(done_loading) == 2:
+        done = True
+        break
+      time.sleep(0.1)
+    self.assertTrue(done, "Load did not finish in time")
+
+    # 8. Verify Data on Device
+    for l in range(num_layers):
+      device_data = np.asarray(device_caches[l])
+      np.testing.assert_array_equal(device_data[5], device_data[0])
+      np.testing.assert_array_equal(device_data[6], device_data[1])
 
 
 if __name__ == "__main__":

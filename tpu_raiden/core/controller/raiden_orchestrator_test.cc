@@ -14,6 +14,7 @@
 
 #include "tpu_raiden/core/controller/raiden_orchestrator.h"
 
+#include <csignal>
 #include <memory>
 #include <string>
 
@@ -23,6 +24,13 @@
 #include "tpu_raiden/proto/orchestrator_service.grpc.pb.h"
 #include "tpu_raiden/proto/orchestrator_service.pb.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
+
+#ifndef _WIN32
+int ignore_sigpipe = []() {
+  std::signal(SIGPIPE, SIG_IGN);
+  return 0;
+}();
+#endif
 
 namespace tpu_raiden {
 namespace {

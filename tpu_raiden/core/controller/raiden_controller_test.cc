@@ -97,17 +97,17 @@ TEST_F(RaidenControllerTest, AllocateAndDeallocateSuccess) {
 
     auto alloc_or = controller.Allocate(/*num_blocks=*/3);
     ASSERT_TRUE(alloc_or.ok());
-    const auto& sharded_buffers = *alloc_or;
-    ASSERT_EQ(sharded_buffers.size(), 3);
+    const auto& allocated_buffers = *alloc_or;
+    ASSERT_EQ(allocated_buffers.size(), 3);
 
     EXPECT_EQ(test_server_->service->GetBufferCount(), 20);
     EXPECT_EQ(controller.block_manager()->num_locked_blocks(), 3);
 
-    EXPECT_EQ(sharded_buffers[0].buffer_handles_size(), 2);
-    EXPECT_NE(sharded_buffers[0].buffer_handles(0).handle(),
-              sharded_buffers[0].buffer_handles(1).handle());
+    EXPECT_EQ(allocated_buffers[0].buffer_handles_size(), 2);
+    EXPECT_NE(allocated_buffers[0].buffer_handles(0).handle(),
+              allocated_buffers[0].buffer_handles(1).handle());
 
-    ASSERT_TRUE(controller.Deallocate(sharded_buffers).ok());
+    ASSERT_TRUE(controller.Deallocate(allocated_buffers).ok());
     EXPECT_EQ(test_server_->service->GetBufferCount(), 20);
     EXPECT_EQ(controller.block_manager()->num_locked_blocks(), 0);
   }
@@ -159,11 +159,50 @@ TEST_F(RaidenControllerTest, DeallocateNonExistentBufferFails) {
       unit_, std::vector<std::string>{test_server_->server_address},
       /*num_blocks=*/5, /*num_shards=*/1, /*shard_size_bytes=*/512);
 
-  proto::BufferProto fake_buffer;
-  fake_buffer.add_buffer_handles()->set_handle(9999);
-
-  std::vector<proto::BufferProto> to_delete = {fake_buffer};
+  proto::BufferProto dummy_buf;
+  dummy_buf.add_buffer_handles()->set_handle(9999);
+  std::vector<proto::BufferProto> to_delete = {dummy_buf};
   EXPECT_FALSE(controller.Deallocate(to_delete).ok());
+}
+
+TEST_F(RaidenControllerTest, AllocateAndDeallocateBlockIdsSuccess) {
+  EXPECT_EQ(test_server_->service->GetBufferCount(), 0);
+  {
+    RaidenController controller(
+        unit_, std::vector<std::string>{test_server_->server_address},
+        /*num_blocks=*/10, /*num_shards=*/2,
+        /*shard_size_bytes=*/1024);
+
+    EXPECT_EQ(test_server_->service->GetBufferCount(), 20);
+    EXPECT_EQ(controller.block_manager()->num_locked_blocks(), 0);
+
+    auto alloc_or = controller.AllocateBlockIds(/*num_blocks=*/3);
+    ASSERT_TRUE(alloc_or.ok());
+    const auto& block_ids = *alloc_or;
+    ASSERT_EQ(block_ids.size(), 3);
+
+    EXPECT_EQ(test_server_->service->GetBufferCount(), 20);
+    EXPECT_EQ(controller.block_manager()->num_locked_blocks(), 3);
+
+    for (int block_id : block_ids) {
+      EXPECT_GE(block_id, 0);
+      EXPECT_LT(block_id, 10);
+    }
+
+    ASSERT_TRUE(controller.DeallocateBlockIds(block_ids).ok());
+    EXPECT_EQ(test_server_->service->GetBufferCount(), 20);
+    EXPECT_EQ(controller.block_manager()->num_locked_blocks(), 0);
+  }
+  EXPECT_EQ(test_server_->service->GetBufferCount(), 0);
+}
+
+TEST_F(RaidenControllerTest, DeallocateNonExistentBlockIdFails) {
+  RaidenController controller(
+      unit_, std::vector<std::string>{test_server_->server_address},
+      /*num_blocks=*/5, /*num_shards=*/1, /*shard_size_bytes=*/512);
+
+  std::vector<int> to_delete = {9999};
+  EXPECT_FALSE(controller.DeallocateBlockIds(to_delete).ok());
 }
 
 TEST_F(RaidenControllerTest, ConstructorThrowsOnBufferCreationFailure) {

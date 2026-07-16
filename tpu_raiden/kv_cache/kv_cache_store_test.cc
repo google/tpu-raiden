@@ -14,22 +14,40 @@
 
 #include "tpu_raiden/kv_cache/kv_cache_store.h"
 
+#include <csignal>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "grpcpp/create_channel.h"
 #include "grpcpp/grpcpp.h"
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "grpcpp/security/credentials.h"
 #include "grpcpp/security/server_credentials.h"
 #include "grpcpp/server.h"
 #include "grpcpp/server_builder.h"
+#include "tpu_raiden/core/controller/controller_client.h"
+#include "tpu_raiden/core/controller/raiden_controller.h"
+#include "tpu_raiden/core/controller/raiden_orchestrator.h"
+#include "tpu_raiden/core/controller/test_util.h"
+#include "tpu_raiden/core/kv_manager_holder.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_client.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_server.h"
 #include "tpu_raiden/kv_cache/lru_cache.h"
+
+#ifndef _WIN32
+int ignore_sigpipe = []() {
+  std::signal(SIGPIPE, SIG_IGN);
+  return 0;
+}();
+#endif
 
 namespace tpu_raiden {
 namespace kv_cache {
@@ -191,17 +209,15 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
   global_registry::GlobalRegistryClient registry_client(channel);
 
   std::string hash1 = "global_hash_1";
-  std::string host1 = "10.0.0.1:1234";
+  RaidenId host1{"job1", "0", "kv_cache", 0};
   int32_t block1 = 42;
 
   std::string hash2 = "global_hash_2";
-  std::string host2 = "10.0.0.2:1234";
+  RaidenId host2{"job2", "0", "kv_cache", 0};
   int32_t block2 = 43;
 
-  // For Case 2: Register a hash that will also be present locally, but with
-  // a different remote address in the registry.
   std::string hash_shared = "shared_hash";
-  std::string host_shared_remote = "10.0.0.9:1234";
+  RaidenId host_shared_remote{"job_shared", "0", "kv_cache", 0};
   int32_t block_shared_remote = 99;
 
   ASSERT_TRUE(
@@ -251,12 +267,14 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
     ASSERT_EQ(lookup_res->size(), 2);
 
     EXPECT_EQ((*lookup_res)[0].first, "global_hash_1");
-    EXPECT_EQ((*lookup_res)[0].second.raiden_id.job_name, host1);
-    EXPECT_EQ((*lookup_res)[0].second.raiden_id.data_replica_idx, block1);
+    EXPECT_EQ((*lookup_res)[0].second.raiden_id.job_name, "job1");
+    EXPECT_EQ((*lookup_res)[0].second.host_block_id, 42);
+    EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::REMOTE);
 
     EXPECT_EQ((*lookup_res)[1].first, "global_hash_2");
-    EXPECT_EQ((*lookup_res)[1].second.raiden_id.job_name, host2);
-    EXPECT_EQ((*lookup_res)[1].second.raiden_id.data_replica_idx, block2);
+    EXPECT_EQ((*lookup_res)[1].second.raiden_id.job_name, "job2");
+    EXPECT_EQ((*lookup_res)[1].second.host_block_id, 43);
+    EXPECT_EQ((*lookup_res)[1].second.status, BlockStatus::REMOTE);
   }
 
   // 4. Lookup with enable_global = false
@@ -284,12 +302,14 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
     EXPECT_EQ((*lookup_res)[0].second.raiden_id.job_name, "local_job");
 
     EXPECT_EQ((*lookup_res)[1].first, "global_hash_1");
-    EXPECT_EQ((*lookup_res)[1].second.raiden_id.job_name, host1);
-    EXPECT_EQ((*lookup_res)[1].second.raiden_id.data_replica_idx, block1);
+    EXPECT_EQ((*lookup_res)[1].second.raiden_id.job_name, "job1");
+    EXPECT_EQ((*lookup_res)[1].second.host_block_id, 42);
+    EXPECT_EQ((*lookup_res)[1].second.status, BlockStatus::REMOTE);
 
     EXPECT_EQ((*lookup_res)[2].first, "global_hash_2");
-    EXPECT_EQ((*lookup_res)[2].second.raiden_id.job_name, host2);
-    EXPECT_EQ((*lookup_res)[2].second.raiden_id.data_replica_idx, block2);
+    EXPECT_EQ((*lookup_res)[2].second.raiden_id.job_name, "job2");
+    EXPECT_EQ((*lookup_res)[2].second.host_block_id, 43);
+    EXPECT_EQ((*lookup_res)[2].second.status, BlockStatus::REMOTE);
   }
 
   // 6. Lookup with enable_global = true, but registry has a miss
@@ -364,15 +384,15 @@ TEST(KVCacheStoreTest, LookupCapLimitWithGlobal) {
   global_registry::GlobalRegistryClient registry_client(channel);
 
   std::string hash1 = "global_hash_1";
-  std::string host1 = "10.0.0.1:1234";
+  RaidenId host1{"job1", "0", "kv_cache", 0};
   int32_t block1 = 42;
 
   std::string hash2 = "global_hash_2";
-  std::string host2 = "10.0.0.2:1234";
+  RaidenId host2{"job2", "0", "kv_cache", 0};
   int32_t block2 = 43;
 
   std::string hash3 = "global_hash_3";
-  std::string host3 = "10.0.0.3:1234";
+  RaidenId host3{"job3", "0", "kv_cache", 0};
   int32_t block3 = 44;
 
   ASSERT_TRUE(registry_client
@@ -413,11 +433,11 @@ TEST(KVCacheStoreTest, LookupCapLimitMixed) {
   global_registry::GlobalRegistryClient registry_client(channel);
 
   std::string hash2 = "global_hash_2";
-  std::string host2 = "10.0.0.2:1234";
+  RaidenId host2{"job2", "0", "kv_cache", 0};
   int32_t block2 = 43;
 
   std::string hash3 = "global_hash_3";
-  std::string host3 = "10.0.0.3:1234";
+  RaidenId host3{"job3", "0", "kv_cache", 0};
   int32_t block3 = 44;
 
   ASSERT_TRUE(
@@ -591,6 +611,418 @@ TEST(KVCacheStoreTest, ReleaseAndDelete) {
   EXPECT_EQ(res_partial.first, 1);
   ASSERT_EQ(res_partial.second.size(), 1);
   EXPECT_EQ(res_partial.second[0].first, "evict_1");  // evict_2 was restored!
+}
+
+using ::testing::ElementsAre;
+
+class KVCacheStoreEmbeddedControllerTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    test_server_ = ::tpu_raiden::controller::CreateTestWorkerServer();
+    unit_.set_job_name("test_job");
+    unit_.set_job_replica_id("0");
+    unit_.set_data_name("test_data");
+
+    orchestrator_service_ =
+        std::make_unique<::tpu_raiden::RaidenOrchestrator>();
+    grpc::ServerBuilder builder;
+    int bound_port = 0;
+    builder.AddListeningPort("0.0.0.0:0", grpc::InsecureServerCredentials(),
+                             &bound_port);
+    builder.RegisterService(orchestrator_service_.get());
+    orchestrator_server_ = builder.BuildAndStart();
+    orchestrator_address_ = absl::StrCat("localhost:", bound_port);
+  }
+
+  void TearDown() override {
+    if (orchestrator_server_) {
+      orchestrator_server_->Shutdown();
+      orchestrator_server_->Wait();
+    }
+  }
+
+  void RegisterAndInitWorker(
+      ::tpu_raiden::controller::RaidenController& controller,
+      const std::string& worker_id, const std::string& worker_address) {
+    std::string server_address =
+        absl::StrCat("localhost:", controller.raiden_controller_port());
+    ::tpu_raiden::core::controller::RaidenControllerClient client(
+        server_address);
+    auto status =
+        client.RegisterWorker(worker_id, worker_address, worker_address);
+    ASSERT_TRUE(status.ok()) << status.message();
+  }
+
+  rpc::RaidenIdProto unit_;
+  std::unique_ptr<::tpu_raiden::controller::TestWorkerServer> test_server_;
+  std::unique_ptr<::tpu_raiden::RaidenOrchestrator> orchestrator_service_;
+  std::unique_ptr<grpc::Server> orchestrator_server_;
+  std::string orchestrator_address_;
+};
+
+TEST_F(KVCacheStoreEmbeddedControllerTest, SaveSuccess) {
+  ::tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(
+      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+
+  auto controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(
+          unit_, 10, 1, 512, 0, orchestrator_address_);
+  RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
+
+  RaidenId rid{"test_job", "0", "test_cache", 0};
+  KVCacheStore store(10, std::move(controller), "", rid);
+
+  std::vector<std::string> hashes = {"hash_1", "hash_2"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, -1, 0, BlockStatus::HBM),
+      RaidenBlockID(rid, -1, 1, BlockStatus::HBM)};
+
+  // Insert them as HBM blocks
+  ASSERT_TRUE(store.Insert(hashes, slices, false).first);
+
+  // Pin them
+  ASSERT_TRUE(store.Pin(hashes));
+
+  // Save them
+  absl::Status status = store.Save(hashes);
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  // Poll for completion
+  bool done = false;
+  while (!done) {
+    auto [save_done, save_failed, save_pending] = store.PollSaveStatus();
+    if (!save_failed.empty()) {
+      FAIL() << "Async Save failed during polling";
+    }
+    if (!save_done.empty()) {
+      EXPECT_THAT(save_done,
+                  ::testing::UnorderedElementsAre("hash_1", "hash_2"));
+      done = true;
+    }
+    if (!done) {
+      absl::SleepFor(absl::Milliseconds(10));
+    }
+  }
+
+  // Verify transfer manager was called
+  EXPECT_EQ(mock_mgr.d2h_calls, 1);
+  EXPECT_EQ(mock_mgr.h2d_calls, 0);
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(0, 1));
+  // host_block_ids are allocated starting from 0
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(0, 1));
+
+  // Verify status in store is updated to HOST_AND_HBM
+  auto lookup_res = store.Lookup(hashes);
+  ASSERT_TRUE(lookup_res.ok());
+  ASSERT_EQ(lookup_res->size(), 2);
+  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::HOST_AND_HBM);
+  EXPECT_EQ((*lookup_res)[0].second.host_block_id, 0);
+  EXPECT_EQ((*lookup_res)[0].second.device_block_id, 0);
+  EXPECT_EQ((*lookup_res)[1].second.status, BlockStatus::HOST_AND_HBM);
+  EXPECT_EQ((*lookup_res)[1].second.host_block_id, 1);
+  EXPECT_EQ((*lookup_res)[1].second.device_block_id, 1);
+}
+
+TEST_F(KVCacheStoreEmbeddedControllerTest, LoadSuccess) {
+  ::tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(
+      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+
+  auto controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(
+          unit_, 10, 1, 512, 0, orchestrator_address_);
+  RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
+
+  RaidenId rid{"test_job", "0", "test_cache", 0};
+  KVCacheStore store(10, std::move(controller), "", rid);
+
+  std::vector<std::string> hashes = {"hash_1", "hash_2"};
+  // Insert as HOST only blocks
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, 0, -1, BlockStatus::HOST),
+      RaidenBlockID(rid, 1, -1, BlockStatus::HOST)};
+
+  ASSERT_TRUE(store.Insert(hashes, slices, true).first);
+
+  // Pin them
+  ASSERT_TRUE(store.Pin(hashes));
+
+  // Load them to device block 2 and 3
+  absl::Status status = store.Load(hashes, {2, 3});
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  // Poll for completion
+  bool done = false;
+  while (!done) {
+    auto [load_done, load_failed, load_pending] = store.PollLoadStatus();
+    if (!load_failed.empty()) {
+      FAIL() << "Async Load failed during polling";
+    }
+    if (!load_done.empty()) {
+      EXPECT_THAT(load_done,
+                  ::testing::UnorderedElementsAre("hash_1", "hash_2"));
+      done = true;
+    }
+    if (!done) {
+      absl::SleepFor(absl::Milliseconds(10));
+    }
+  }
+
+  // Verify transfer manager was called
+  EXPECT_EQ(mock_mgr.d2h_calls, 0);
+  EXPECT_EQ(mock_mgr.h2d_calls, 1);
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(0, 1));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(2, 3));
+
+  // Verify status in store is updated to HOST_AND_HBM
+  auto lookup_res = store.Lookup(hashes);
+  ASSERT_TRUE(lookup_res.ok());
+  ASSERT_EQ(lookup_res->size(), 2);
+  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::HOST_AND_HBM);
+  EXPECT_EQ((*lookup_res)[0].second.host_block_id, 0);
+  EXPECT_EQ((*lookup_res)[0].second.device_block_id, 2);
+  EXPECT_EQ((*lookup_res)[1].second.status, BlockStatus::HOST_AND_HBM);
+  EXPECT_EQ((*lookup_res)[1].second.host_block_id, 1);
+  EXPECT_EQ((*lookup_res)[1].second.device_block_id, 3);
+}
+
+TEST_F(KVCacheStoreEmbeddedControllerTest, SaveMultiWorkerSuccess) {
+  auto test_server_0 = ::tpu_raiden::controller::CreateTestWorkerServer();
+  auto test_server_1 = ::tpu_raiden::controller::CreateTestWorkerServer();
+
+  ::tpu_raiden::controller::MockTransferManager mock_mgr_0;
+  ::tpu_raiden::controller::MockTransferManager mock_mgr_1;
+
+  test_server_0->service->SetTransferManager(
+      ::tpu_raiden::KVManagerHolder(&mock_mgr_0));
+  test_server_1->service->SetTransferManager(
+      ::tpu_raiden::KVManagerHolder(&mock_mgr_1));
+
+  auto controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(
+          unit_, 10, 1, 512, 0, orchestrator_address_);
+
+  RegisterAndInitWorker(*controller, "worker_0", test_server_0->server_address);
+  RegisterAndInitWorker(*controller, "worker_1", test_server_1->server_address);
+
+  RaidenId rid{"test_job", "0", "test_cache", 0};
+  KVCacheStore store(10, std::move(controller), "", rid);
+
+  std::vector<std::string> hashes = {"hash_1", "hash_2"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, -1, 0, BlockStatus::HBM),
+      RaidenBlockID(rid, -1, 1, BlockStatus::HBM)};
+
+  ASSERT_TRUE(store.Insert(hashes, slices, false).first);
+
+  // Pin them
+  ASSERT_TRUE(store.Pin(hashes));
+
+  absl::Status status = store.Save(hashes);
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  // Poll for completion
+  bool done = false;
+  while (!done) {
+    auto [save_done, save_failed, save_pending] = store.PollSaveStatus();
+    if (!save_failed.empty()) {
+      FAIL() << "Async Save failed during polling";
+    }
+    if (!save_done.empty()) {
+      EXPECT_THAT(save_done,
+                  ::testing::UnorderedElementsAre("hash_1", "hash_2"));
+      done = true;
+    }
+    if (!done) {
+      absl::SleepFor(absl::Milliseconds(10));
+    }
+  }
+
+  EXPECT_EQ(mock_mgr_0.d2h_calls, 1);
+  EXPECT_EQ(mock_mgr_0.h2d_calls, 0);
+  EXPECT_THAT(mock_mgr_0.last_src_offsets, ElementsAre(0, 1));
+  EXPECT_THAT(mock_mgr_0.last_dst_offsets, ElementsAre(0, 1));
+
+  EXPECT_EQ(mock_mgr_1.d2h_calls, 1);
+  EXPECT_EQ(mock_mgr_1.h2d_calls, 0);
+  EXPECT_THAT(mock_mgr_1.last_src_offsets, ElementsAre(0, 1));
+  EXPECT_THAT(mock_mgr_1.last_dst_offsets, ElementsAre(0, 1));
+
+  auto lookup_res = store.Lookup(hashes);
+  ASSERT_TRUE(lookup_res.ok());
+  ASSERT_EQ(lookup_res->size(), 2);
+  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::HOST_AND_HBM);
+  EXPECT_EQ((*lookup_res)[0].second.host_block_id, 0);
+  EXPECT_EQ((*lookup_res)[0].second.device_block_id, 0);
+}
+
+TEST_F(KVCacheStoreEmbeddedControllerTest, LoadMultiWorkerSuccess) {
+  auto test_server_0 = ::tpu_raiden::controller::CreateTestWorkerServer();
+  auto test_server_1 = ::tpu_raiden::controller::CreateTestWorkerServer();
+
+  ::tpu_raiden::controller::MockTransferManager mock_mgr_0;
+  ::tpu_raiden::controller::MockTransferManager mock_mgr_1;
+
+  test_server_0->service->SetTransferManager(
+      ::tpu_raiden::KVManagerHolder(&mock_mgr_0));
+  test_server_1->service->SetTransferManager(
+      ::tpu_raiden::KVManagerHolder(&mock_mgr_1));
+
+  auto controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(
+          unit_, 10, 1, 512, 0, orchestrator_address_);
+
+  RegisterAndInitWorker(*controller, "worker_0", test_server_0->server_address);
+  RegisterAndInitWorker(*controller, "worker_1", test_server_1->server_address);
+
+  RaidenId rid{"test_job", "0", "test_cache", 0};
+  KVCacheStore store(10, std::move(controller), "", rid);
+
+  std::vector<std::string> hashes = {"hash_1", "hash_2"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, 0, -1, BlockStatus::HOST),
+      RaidenBlockID(rid, 1, -1, BlockStatus::HOST)};
+
+  ASSERT_TRUE(store.Insert(hashes, slices, true).first);
+
+  // Pin them
+  ASSERT_TRUE(store.Pin(hashes));
+
+  absl::Status status = store.Load(hashes, {2, 3});
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  // Poll for completion
+  bool done = false;
+  while (!done) {
+    auto [load_done, load_failed, load_pending] = store.PollLoadStatus();
+    if (!load_failed.empty()) {
+      FAIL() << "Async Load failed during polling";
+    }
+    if (!load_done.empty()) {
+      EXPECT_THAT(load_done,
+                  ::testing::UnorderedElementsAre("hash_1", "hash_2"));
+      done = true;
+    }
+    if (!done) {
+      absl::SleepFor(absl::Milliseconds(10));
+    }
+  }
+
+  EXPECT_EQ(mock_mgr_0.d2h_calls, 0);
+  EXPECT_EQ(mock_mgr_0.h2d_calls, 1);
+  EXPECT_THAT(mock_mgr_0.last_src_offsets, ElementsAre(0, 1));
+  EXPECT_THAT(mock_mgr_0.last_dst_offsets, ElementsAre(2, 3));
+
+  EXPECT_EQ(mock_mgr_1.d2h_calls, 0);
+  EXPECT_EQ(mock_mgr_1.h2d_calls, 1);
+  EXPECT_THAT(mock_mgr_1.last_src_offsets, ElementsAre(0, 1));
+  EXPECT_THAT(mock_mgr_1.last_dst_offsets, ElementsAre(2, 3));
+
+  auto lookup_res = store.Lookup(hashes);
+  ASSERT_TRUE(lookup_res.ok());
+  ASSERT_EQ(lookup_res->size(), 2);
+  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::HOST_AND_HBM);
+  EXPECT_EQ((*lookup_res)[0].second.host_block_id, 0);
+  EXPECT_EQ((*lookup_res)[0].second.device_block_id, 2);
+}
+
+TEST_F(KVCacheStoreEmbeddedControllerTest, SaveWriteThrough) {
+  // 1. Start a local mock registry server
+  auto service = std::make_unique<global_registry::GlobalRegistryServiceImpl>();
+  grpc::ServerBuilder builder;
+  int port = 0;
+  builder.AddListeningPort("localhost:0", grpc::InsecureServerCredentials(),
+                           &port);
+  builder.RegisterService(service.get());
+  auto server = builder.BuildAndStart();
+  std::string server_address = "localhost:" + std::to_string(port);
+
+  // 2. Setup mock transfer manager & controller
+  ::tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(
+      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+
+  auto controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(
+          unit_, 10, 1, 512, 0, orchestrator_address_);
+  RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
+
+  // 3. Initialize KVCacheStore with the registry server address & controller
+  RaidenId rid{"test_job", "0", "test_cache", 0};
+  KVCacheStore store(10, std::move(controller), server_address, rid);
+
+  std::vector<std::string> hashes = {"hash_1", "hash_2"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, -1, 0, BlockStatus::HBM),
+      RaidenBlockID(rid, -1, 1, BlockStatus::HBM)};
+
+  // 4. Insert them as HBM blocks locally and pin them
+  ASSERT_TRUE(store.Insert(hashes, slices, false).first);
+  ASSERT_TRUE(store.Pin(hashes));
+
+  // 5. Call Save on the store
+  absl::Status status = store.Save(hashes);
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  // 6. Poll for completion
+  bool done = false;
+  while (!done) {
+    auto [save_done, save_failed, save_pending] = store.PollSaveStatus();
+    if (!save_failed.empty()) {
+      FAIL() << "Async Save failed during polling";
+    }
+    if (!save_done.empty()) {
+      EXPECT_THAT(save_done,
+                  ::testing::UnorderedElementsAre("hash_1", "hash_2"));
+      done = true;
+    }
+    if (!done) {
+      absl::SleepFor(absl::Milliseconds(10));
+    }
+  }
+
+  // 7. Verify registry has been updated (need to poll registry since
+  // registration is async)
+  auto channel =
+      grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials());
+  global_registry::GlobalRegistryClient registry_client(channel);
+
+  bool registered = false;
+  std::vector<global_registry::KVBlockMetadata> metadata_results;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    auto lookup_res = registry_client.Lookup(hashes);
+    if (lookup_res.ok() && lookup_res->size() == 2) {
+      metadata_results = *std::move(lookup_res);
+      registered = true;
+      break;
+    }
+    absl::SleepFor(absl::Milliseconds(10));
+  }
+
+  ASSERT_TRUE(registered)
+      << "Block hashes were not registered in global registry";
+
+  // Verify the metadata results
+  EXPECT_EQ(metadata_results[0].raiden_id().job_name(), rid.job_name);
+  EXPECT_EQ(metadata_results[0].raiden_id().job_replica_id(),
+            rid.job_replica_id);
+  EXPECT_EQ(metadata_results[0].raiden_id().data_name(), rid.data_name);
+  EXPECT_EQ(metadata_results[0].raiden_id().data_replica_idx(),
+            rid.data_replica_idx);
+  EXPECT_EQ(metadata_results[0].block_id(),
+            0);  // first host block allocated is 0
+
+  EXPECT_EQ(metadata_results[1].raiden_id().job_name(), rid.job_name);
+  EXPECT_EQ(metadata_results[1].raiden_id().job_replica_id(),
+            rid.job_replica_id);
+  EXPECT_EQ(metadata_results[1].raiden_id().data_name(), rid.data_name);
+  EXPECT_EQ(metadata_results[1].raiden_id().data_replica_idx(),
+            rid.data_replica_idx);
+  EXPECT_EQ(metadata_results[1].block_id(),
+            1);  // second host block allocated is 1
+
+  server->Shutdown();
 }
 
 }  // namespace

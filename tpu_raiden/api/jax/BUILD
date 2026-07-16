@@ -36,10 +36,18 @@ py_library(
 py_test(
     name = "kv_cache_store_test",
     srcs = ["kv_cache_store_test.py"],
-    data = ["//tpu_raiden/kv_cache/global_registry:global_registry_server"],
+    data = [
+        "//tpu_raiden/core/controller:raiden_orchestrator_main",
+        "//tpu_raiden/kv_cache/global_registry:global_registry_server",
+    ],
     deps = [
         ":kv_cache_store",
+        ":kv_cache_manager_jax_py",
+        "//pyglib:resources",
         "@com_google_absl_py//absl/testing:absltest",
+        "@jax//jax",
+        "@jax//jax/experimental:mesh_utils",
+        "@pypi//numpy",
         # buildcleaner: keep
         "//tpu_raiden/frameworks/jax:_raw_transfer",
     ],
@@ -62,6 +70,19 @@ py_test(
         ":weight_synchronizer_jax_py",
         "//tpu_raiden/rpc:raiden_service_py_pb2",
         "@com_google_absl_py//absl/testing:absltest",
+        "@jax//jax",
+        "@pypi//numpy",
+    ],
+)
+
+py_test(
+    name = "kv_cache_store_e2e_test",
+    srcs = ["kv_cache_store_e2e_test.py"],
+    deps = [
+        ":kv_cache_manager_jax_py",
+        ":kv_cache_store",
+        "@com_google_absl_py//absl/testing:absltest",
+        "@com_google_absl_py//absl/testing:parameterized",
         "@jax//jax",
         "@pypi//numpy",
     ],

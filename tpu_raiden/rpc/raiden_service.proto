@@ -23,6 +23,7 @@ message RaidenIdProto {
   string job_name = 1;
   string job_replica_id = 2;
   string data_name = 3;
+  int32 data_replica_idx = 4;
 }
 
 // Coordinate intervals representing a contiguous slice along a single tensor

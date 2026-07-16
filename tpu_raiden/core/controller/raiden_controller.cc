@@ -21,7 +21,6 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "absl/status/status_macros.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
@@ -33,6 +32,7 @@
 #include "tpu_raiden/core/controller/controller_server.h"
 #include "tpu_raiden/core/controller/orchestrator_service_client.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
+#include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
@@ -245,6 +245,18 @@ absl::Status RaidenController::Deallocate(
   return block_manager_->Unlock(block_ids);
 }
 
+absl::StatusOr<std::vector<int>> RaidenController::AllocateBlockIds(
+    int num_blocks) {
+  absl::MutexLock lock(mutex_);
+  return block_manager_->Allocate(num_blocks, /*lock=*/true);
+}
+
+absl::Status RaidenController::DeallocateBlockIds(
+    absl::Span<const int> block_ids) {
+  absl::MutexLock lock(mutex_);
+  return block_manager_->Unlock(block_ids);
+}
+
 tsl::Future<> RaidenController::TransferBuffers(
     absl::string_view worker_id, rpc::MemoryType src_mem_type,
     rpc::MemoryType dst_mem_type, absl::Span<const int64_t> src_offsets,
@@ -284,6 +296,8 @@ tsl::Future<> RaidenController::TransferBuffers(
   for (int64_t size : copy_sizes) {
     transfer->add_copy_sizes(size);
   }
+  // TODO: For remote transfers (e.g. H2H), the peer argument needs to be
+  // revised as we do not need the peer address for local D2H and H2D transfers.
   if (!peer.empty()) {
     transfer->set_peer(std::string(peer));
   }
@@ -317,6 +331,8 @@ tsl::Future<> RaidenController::TransferBuffers(
   for (int64_t size : copy_sizes) {
     transfer->add_copy_sizes(size);
   }
+  // TODO: For remote transfers (e.g. H2H), the peer argument needs to be
+  // revised as we do not need the peer address for local D2H and H2D transfers.
   if (!peer.empty()) {
     transfer->set_peer(std::string(peer));
   }

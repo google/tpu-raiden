@@ -881,7 +881,12 @@ void KVCacheManager::StartGrpcServer(
     if (!ips.empty()) {
       worker_ip = ips[0];
     }
-    std::string worker_endpoint = absl::StrCat(worker_ip, ":", bound_port);
+    std::string worker_endpoint;
+    if (absl::StrContains(worker_ip, ":")) {
+      worker_endpoint = absl::StrCat("[", worker_ip, "]:", bound_port);
+    } else {
+      worker_endpoint = absl::StrCat(worker_ip, ":", bound_port);
+    }
 
     std::string transfer_endpoint = "";
     auto local_eps = numa_manager_->get_local_endpoints();

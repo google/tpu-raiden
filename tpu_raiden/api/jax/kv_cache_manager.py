@@ -108,6 +108,11 @@ class KVCacheManager:
     """Returns the gRPC server port if running, or 0."""
     return self._impl.get_raiden_worker_port()
 
+  @property
+  def is_listener_active(self) -> bool:
+    """Returns True if the worker gRPC service listener is active."""
+    return self.get_raiden_worker_port() > 0
+
   def get_local_endpoints(self) -> List[Dict[str, Any]]:
     """Returns the active Raiden endpoint descriptors."""
     return self._impl.get_local_endpoints()

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <csignal>
 #include <memory>
 #include <string>
 
@@ -43,6 +44,9 @@ void RunServer(int port) {
 
 int main(int argc, char** argv) {
   absl::ParseCommandLine(argc, argv);
+#ifndef _WIN32
+  std::signal(SIGPIPE, SIG_IGN);
+#endif
   RunServer(absl::GetFlag(FLAGS_port));
   return 0;
 }

@@ -77,13 +77,26 @@ class RaidenController {
   // buffers on the registered workers.
   ~RaidenController();
 
-  // Allocates num_blocks logical blocks from the pre-created buffer pool and
-  // returns the corresponding BufferProtos. No gRPC call is made.
+  // Legacy API (Physical/BufferProto Mode):
+  // Allocates `num_blocks` logical blocks and returns their associated
+  // `BufferProto`s containing sharded physical buffer handles. Use these if you
+  // need worker-level raw buffer handles. No RPC is performed.
   absl::StatusOr<std::vector<proto::BufferProto>> Allocate(int num_blocks);
 
-  // Unlocks the specified BufferProtos in the local logical block manager so
-  // they can be reused. No gRPC call is made.
+  // Legacy API (Physical/BufferProto Mode):
+  // Deallocates logical blocks associated with the provided `BufferProto`s.
+  // No RPC is performed.
   absl::Status Deallocate(absl::Span<const proto::BufferProto> sharded_buffers);
+
+  // New API (Logical/Block ID Mode):
+  // Allocates `num_blocks` logical blocks from the block manager and returns
+  // their raw logical block IDs (0..N-1). No RPC is performed.
+  absl::StatusOr<std::vector<int>> AllocateBlockIds(int num_blocks);
+
+  // New API (Logical/Block ID Mode):
+  // Unlocks/deallocates the given logical block IDs in the block manager.
+  // No RPC is performed.
+  absl::Status DeallocateBlockIds(absl::Span<const int> block_ids);
 
   tsl::Future<> TransferBuffers(
       absl::string_view worker_id, rpc::MemoryType src_mem_type,

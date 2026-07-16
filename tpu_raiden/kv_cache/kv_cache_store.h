@@ -15,42 +15,38 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_KV_CACHE_KV_CACHE_STORE_H_
 #define THIRD_PARTY_TPU_RAIDEN_KV_CACHE_KV_CACHE_STORE_H_
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <thread>  // NOLINT(build/c++11)
 #include <utility>
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
+#include "xla/tsl/concurrency/future.h"
+#include "tpu_raiden/core/numa_thread_pool.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/kv_cache/lru_cache.h"
+#include "tpu_raiden/kv_cache/raiden_id.h"
 
 namespace tpu_raiden {
+
+namespace controller {
+class RaidenController;
+}  // namespace controller
+
 namespace kv_cache {
 
 namespace global_registry {
 class GlobalRegistryClient;
 }
-
-// Represents a microservice slice identifier / entity address hosting a replica
-// of a Key-Value cache block.
-struct RaidenId {
-  std::string job_name;
-  std::string job_replica_id;
-  std::string data_name;
-  int data_replica_idx = 0;
-
-  bool operator==(const RaidenId& other) const {
-    return job_name == other.job_name &&
-           job_replica_id == other.job_replica_id &&
-           data_name == other.data_name &&
-           data_replica_idx == other.data_replica_idx;
-  }
-};
 
 enum class BlockStatus {
   INIT,
@@ -92,8 +88,18 @@ using BlockSliceList = std::vector<std::pair<std::string, RaidenBlockID>>;
 class KVCacheStore {
  public:
   explicit KVCacheStore(size_t capacity,
-                        std::string global_registry_address = "",
-                        RaidenId raiden_id = {});
+                        absl::string_view global_registry_address = "",
+                        RaidenId raiden_id = {}, int num_shards = 0,
+                        int64_t shard_size_bytes = 0,
+                        int raiden_controller_port = 0,
+                        absl::string_view raiden_orchestrator_address = "");
+
+  // Test-only constructor for injecting mock controller
+  explicit KVCacheStore(
+      size_t capacity,
+      std::unique_ptr<tpu_raiden::controller::RaidenController>
+          raiden_controller,
+      absl::string_view global_registry_address = "", RaidenId raiden_id = {});
 
   ~KVCacheStore();
 
@@ -154,18 +160,79 @@ class KVCacheStore {
   // eviction when capacity is exceeded.
   void Release(const std::vector<std::string>& block_hashes);
 
+  // Saves blocks from device (HBM) to host (DRAM).
+  absl::Status Save(const std::vector<std::string>& block_hashes);
+
+  // Loads blocks from host (DRAM) to device (HBM).
+  absl::Status Load(const std::vector<std::string>& block_hashes,
+                    const std::vector<int>& device_block_ids);
+
   int GetPinCount(const std::string& hash) const;
 
   size_t capacity() const;
+  int raiden_controller_port() const;
 
   const RaidenId& raiden_id() const { return raiden_id_; }
 
+  // Polls the status of all active/inflight Save operations.
+  // Iterates over pending futures, updates cache metadata to HOST_AND_HBM
+  // upon successful transfers, and deallocates host blocks on failure.
+  //
+  // Returns:
+  //   A tuple of {done_block_hashes, failed_block_hashes, pending_block_hashes}
+  //   representing the status of all block hashes tracked by active saves.
+  std::tuple<std::vector<std::string>, std::vector<std::string>,
+             std::vector<std::string>>
+  PollSaveStatus();
+
+  // Polls the status of all active/inflight Load operations.
+  // Iterates over pending futures, and updates cache metadata to HOST_AND_HBM
+  // upon successful H2D transfers.
+  //
+  // Returns:
+  //   A tuple of {done_block_hashes, failed_block_hashes, pending_block_hashes}
+  //   representing the status of all block hashes tracked by active loads.
+  std::tuple<std::vector<std::string>, std::vector<std::string>,
+             std::vector<std::string>>
+  PollLoadStatus();
+
  private:
+  struct SaveState {
+    tsl::Future<> future;
+    std::vector<std::string> block_hashes;
+    std::vector<int> host_block_ids;
+  };
+
+  struct LoadState {
+    tsl::Future<> future;
+    std::vector<std::string> block_hashes;
+    std::vector<int> device_block_ids;
+  };
+
   mutable absl::Mutex mutex_;
   mutable LRUCache<std::string, RaidenBlockID> lru_cache_
       ABSL_GUARDED_BY(mutex_);
-  std::unique_ptr<global_registry::GlobalRegistryClient> registry_client_;
+  std::shared_ptr<global_registry::GlobalRegistryClient> registry_client_;
   RaidenId raiden_id_;
+  std::unique_ptr<tpu_raiden::controller::RaidenController> raiden_controller_;
+
+  std::vector<SaveState> active_saves_ ABSL_GUARDED_BY(mutex_);
+  std::vector<LoadState> active_loads_ ABSL_GUARDED_BY(mutex_);
+
+  std::vector<std::string> done_saves_ ABSL_GUARDED_BY(mutex_);
+  std::vector<std::string> failed_saves_ ABSL_GUARDED_BY(mutex_);
+  std::vector<std::string> done_loads_ ABSL_GUARDED_BY(mutex_);
+  std::vector<std::string> failed_loads_ ABSL_GUARDED_BY(mutex_);
+
+  absl::flat_hash_set<std::string> saving_hashes_ ABSL_GUARDED_BY(mutex_);
+  absl::flat_hash_set<std::string> loading_hashes_ ABSL_GUARDED_BY(mutex_);
+
+  std::unique_ptr<std::thread> poller_thread_;
+  std::unique_ptr<tpu_raiden::NumaThreadPool> write_through_pool_;
+  std::atomic<bool> stop_poller_{false};
+
+  void PollerLoop();
+  void PollFuturesInternal();
 };
 
 }  // namespace kv_cache
