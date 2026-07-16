@@ -26,10 +26,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_python//python:defs.bzl", "py_test")
-load("//third_party/bazel_rules/rules_python/python:py_binary.bzl", "py_binary")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 
 package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "sources",
+    srcs = glob(["**"]),
+    visibility = ["//:internal"],
+)
 
 py_binary(
     name = "reshard_stage1_e2e",

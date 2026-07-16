@@ -12,16 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_python//python:defs.bzl", "py_library")
-load("//third_party/bazel_rules/rules_python/python:py_binary.bzl", "py_binary")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library")
 
 package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "sources",
+    srcs = glob(["**"]),
+    visibility = ["//:internal"],
+)
 
 py_library(
     name = "bap_metrics",
     testonly = True,
     srcs = ["bap_metrics.py"],
-    deps = ["//third_party/py/tensorflow"],
+    deps = ["@pypi//tensorflow"],
 )
 
 py_library(
@@ -29,9 +34,9 @@ py_library(
     testonly = True,
     srcs = ["perf_core.py"],
     deps = [
-        "//third_party/py/libtpu",
         "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
         "@jax//jax",
+        "@pypi//libtpu",
         "@pypi//numpy",
     ],
 )
@@ -43,7 +48,7 @@ py_binary(
     deps = [
         ":bap_metrics",
         ":perf_core",
-        "//third_party/py/absl:app",
+        "@com_google_absl_py//absl:app",
         "@com_google_absl_py//absl/flags",
     ],
 )
@@ -56,7 +61,7 @@ py_binary(
     deps = [
         ":bap_metrics",
         ":perf_core",
-        "//third_party/py/absl:app",
+        "@com_google_absl_py//absl:app",
         "@com_google_absl_py//absl/flags",
     ],
 )
@@ -70,7 +75,7 @@ py_binary(
     ],
     deps = [
         ":bap_metrics",
-        "//third_party/py/absl:app",
+        "@com_google_absl_py//absl:app",
         "@com_google_absl_py//absl/flags",
     ],
 )
