@@ -2,11 +2,11 @@ name: Record H2D/D2H Baselines
 on:
   workflow_dispatch:
 
-permissions: { contents: read, pull-requests: write }
-
   push:
     branches:
       - presubmit
+
+permissions: { contents: read, pull-requests: write }
 
 jobs:
   record:
