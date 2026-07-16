@@ -2,10 +2,6 @@ name: Record H2D/D2H Baselines
 on:
   workflow_dispatch:
 
-  push:
-    branches:
-      - presubmit
-
 permissions: { contents: read, pull-requests: write }
 
 jobs:
