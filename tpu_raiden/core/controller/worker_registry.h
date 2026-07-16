@@ -55,7 +55,7 @@ class WorkerRegistry {
       absl::AnyInvocable<absl::Status(WorkerRegistration&)>;
 
   void SetOnRegisterCallback(OnRegisterCallback cb) {
-    absl::MutexLock lock(&mutex_);
+    absl::MutexLock lock(mutex_);
     on_register_cb_ = std::move(cb);
   }
 

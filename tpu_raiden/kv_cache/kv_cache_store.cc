@@ -491,6 +491,124 @@ absl::Status KVCacheStore::Load(const std::vector<std::string>& block_hashes,
   return absl::OkStatus();
 }
 
+absl::Status KVCacheStore::ReadRemote(
+    const std::vector<std::string>& block_hashes) {
+  if (!raiden_controller_) {
+    return absl::FailedPreconditionError("RaidenController is not initialized");
+  }
+
+  std::vector<std::pair<RaidenId, int32_t>> src_info;
+  src_info.reserve(block_hashes.size());
+
+  {
+    absl::MutexLock lock(mutex_);
+    for (const auto& hash : block_hashes) {
+      RaidenBlockID* existing = lru_cache_.PeekMutable(hash);
+      if (!existing) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("Block hash not found: ", hash));
+      }
+      if (existing->status != BlockStatus::REMOTE) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("Block status is not REMOTE: ", hash));
+      }
+      if (lru_cache_.GetPinCount(hash) <= 0) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("Block is not pinned: ", hash));
+      }
+      if (reading_hashes_.contains(hash)) {
+        return absl::FailedPreconditionError(
+            absl::StrCat("Block is already reading: ", hash));
+      }
+      src_info.push_back({existing->raiden_id, existing->host_block_id});
+    }
+    for (const auto& hash : block_hashes) {
+      reading_hashes_.insert(hash);
+    }
+  }
+
+  // Allocate host blocks on controller
+  auto host_blocks_or = AllocateBlockIds(block_hashes.size());
+  if (!host_blocks_or.ok()) {
+    LOG(WARNING) << "Failed to allocate local block IDs for ReadRemote: "
+                 << host_blocks_or.status().message();
+    absl::MutexLock lock(mutex_);
+    for (const auto& hash : block_hashes) {
+      reading_hashes_.erase(hash);
+    }
+    return host_blocks_or.status();
+  }
+  const auto& dest_host_block_ids = host_blocks_or.value();
+
+  {
+    absl::MutexLock lock(mutex_);
+    for (size_t i = 0; i < block_hashes.size(); ++i) {
+      RaidenBlockID* existing = lru_cache_.PeekMutable(block_hashes[i]);
+      if (existing) {
+        existing->host_block_id = dest_host_block_ids[i];
+      }
+    }
+  }
+
+  // Group by source RaidenId
+  absl::flat_hash_map<RaidenId, std::vector<size_t>, RaidenIdHash> groups;
+  for (size_t i = 0; i < src_info.size(); ++i) {
+    groups[src_info[i].first].push_back(i);
+  }
+
+  std::vector<tsl::Future<>> futures;
+  futures.reserve(groups.size());
+  for (const auto& [src_raiden_id, indices] : groups) {
+    std::vector<int32_t> group_src_ids;
+    std::vector<int32_t> group_dst_ids;
+    group_src_ids.reserve(indices.size());
+    group_dst_ids.reserve(indices.size());
+    for (size_t idx : indices) {
+      group_src_ids.push_back(src_info[idx].second);
+      group_dst_ids.push_back(dest_host_block_ids[idx]);
+    }
+    futures.push_back(raiden_controller_->ReadRemote(
+        src_raiden_id, group_src_ids, group_dst_ids));
+  }
+
+  tsl::Future<> combined_future = tsl::JoinFutures(futures);
+
+  {
+    absl::MutexLock lock(mutex_);
+    active_remote_reads_.emplace(std::move(combined_future),
+                                 RemoteReadState{
+                                     .block_hashes = block_hashes,
+                                     .host_block_ids = dest_host_block_ids,
+                                 });
+  }
+
+  return absl::OkStatus();
+}
+
+std::tuple<std::vector<std::string>, std::vector<std::string>,
+           std::vector<std::string>>
+KVCacheStore::PollRemoteReadStatus() {
+  absl::MutexLock lock(mutex_);
+  std::vector<std::string> done = std::move(done_remote_reads_);
+  done_remote_reads_.clear();
+  std::vector<std::string> failed = std::move(failed_remote_reads_);
+  failed_remote_reads_.clear();
+
+  std::vector<std::string> pending;
+  size_t total_pending_blocks = 0;
+  for (const auto& [future, state] : active_remote_reads_) {
+    total_pending_blocks += state.block_hashes.size();
+  }
+  pending.reserve(total_pending_blocks);
+  for (const auto& [future, state] : active_remote_reads_) {
+    for (const auto& hash : state.block_hashes) {
+      pending.push_back(hash);
+    }
+  }
+
+  return {std::move(done), std::move(failed), std::move(pending)};
+}
+
 int KVCacheStore::GetPinCount(const std::string& hash) const {
   absl::MutexLock lock(mutex_);
   return lru_cache_.GetPinCount(hash);
@@ -595,33 +713,60 @@ void KVCacheStore::PollerLoop() {
   }
 }
 
-void KVCacheStore::PollFuturesInternal() {
-  std::vector<SaveState> ready_saves;
-  std::vector<LoadState> ready_loads;
-
-  {
+void KVCacheStore::PollRemoteReadsInternal(
+    std::vector<std::pair<tsl::Future<>, RemoteReadState>> ready_remote_reads) {
+  for (auto& [future, state] : ready_remote_reads) {
+    absl::Status status = future.Await();
     absl::MutexLock lock(mutex_);
-    auto it = active_saves_.begin();
-    while (it != active_saves_.end()) {
-      if (it->future.IsReady()) {
-        ready_saves.push_back(std::move(*it));
-        it = active_saves_.erase(it);
-      } else {
-        ++it;
+    if (status.ok()) {
+      std::vector<global_registry::Registration> write_through_regs;
+      write_through_regs.reserve(state.block_hashes.size());
+      for (size_t i = 0; i < state.block_hashes.size(); ++i) {
+        const auto& hash = state.block_hashes[i];
+        RaidenBlockID* existing = lru_cache_.Get(hash);
+        if (existing) {
+          existing->host_block_id = state.host_block_ids[i];
+          existing->status = BlockStatus::HOST;
+          if (registry_client_) {
+            write_through_regs.push_back({
+                .prefix_hash = hash,
+                .raiden_id = raiden_id_,
+                .block_id = state.host_block_ids[i],
+            });
+          }
+        } else {
+          DeallocateBlockIds({state.host_block_ids[i]});
+        }
+        done_remote_reads_.push_back(hash);
+      }
+      if (!write_through_regs.empty() && registry_client_ &&
+          write_through_pool_) {
+        write_through_pool_->Schedule([client = registry_client_,
+                                       regs = std::move(write_through_regs)]() {
+          auto status = client->Register(regs);
+          if (!status.ok()) {
+            LOG(WARNING) << "Async write-through failed after ReadRemote: "
+                         << status.message();
+          } else {
+            LOG(INFO) << "Async write-through succeeded after ReadRemote for "
+                      << regs.size() << " blocks";
+          }
+        });
+      }
+    } else {
+      LOG(WARNING) << "Async ReadRemote failed: " << status.ToString();
+      DeallocateBlockIds(state.host_block_ids);
+      for (const auto& hash : state.block_hashes) {
+        failed_remote_reads_.push_back(hash);
       }
     }
-
-    auto jt = active_loads_.begin();
-    while (jt != active_loads_.end()) {
-      if (jt->future.IsReady()) {
-        ready_loads.push_back(std::move(*jt));
-        jt = active_loads_.erase(jt);
-      } else {
-        ++jt;
-      }
+    for (const auto& hash : state.block_hashes) {
+      reading_hashes_.erase(hash);
     }
   }
+}
 
+void KVCacheStore::PollSavesInternal(std::vector<SaveState> ready_saves) {
   for (auto& state : ready_saves) {
     absl::Status status = state.future.Await();
     absl::MutexLock lock(mutex_);
@@ -671,7 +816,9 @@ void KVCacheStore::PollFuturesInternal() {
       saving_hashes_.erase(hash);
     }
   }
+}
 
+void KVCacheStore::PollLoadsInternal(std::vector<LoadState> ready_loads) {
   for (auto& state : ready_loads) {
     absl::Status status = state.future.Await();
     absl::MutexLock lock(mutex_);
@@ -695,6 +842,49 @@ void KVCacheStore::PollFuturesInternal() {
       loading_hashes_.erase(hash);
     }
   }
+}
+
+void KVCacheStore::PollFuturesInternal() {
+  std::vector<SaveState> ready_saves;
+  std::vector<LoadState> ready_loads;
+  std::vector<std::pair<tsl::Future<>, RemoteReadState>> ready_remote_reads;
+
+  {
+    absl::MutexLock lock(mutex_);
+    auto it = active_saves_.begin();
+    while (it != active_saves_.end()) {
+      if (it->future.IsReady()) {
+        ready_saves.push_back(std::move(*it));
+        it = active_saves_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+
+    auto jt = active_loads_.begin();
+    while (jt != active_loads_.end()) {
+      if (jt->future.IsReady()) {
+        ready_loads.push_back(std::move(*jt));
+        jt = active_loads_.erase(jt);
+      } else {
+        ++jt;
+      }
+    }
+
+    auto kt = active_remote_reads_.begin();
+    while (kt != active_remote_reads_.end()) {
+      if (kt->first.IsReady()) {
+        ready_remote_reads.push_back({kt->first, std::move(kt->second)});
+        active_remote_reads_.erase(kt++);
+      } else {
+        ++kt;
+      }
+    }
+  }
+
+  PollSavesInternal(std::move(ready_saves));
+  PollLoadsInternal(std::move(ready_loads));
+  PollRemoteReadsInternal(std::move(ready_remote_reads));
 }
 
 size_t KVCacheStore::Evict(const std::vector<std::string>& block_hashes) {

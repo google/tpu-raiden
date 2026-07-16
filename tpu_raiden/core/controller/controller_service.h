@@ -70,7 +70,7 @@ class RaidenControllerServiceImpl final
                                                          const>;
 
   void SetTransferBuffersCallback(TransferBuffersCallback cb) {
-    absl::MutexLock lock(&mutex_);
+    absl::MutexLock lock(mutex_);
     transfer_buffers_cb_ =
         std::make_shared<TransferBuffersCallback>(std::move(cb));
   }

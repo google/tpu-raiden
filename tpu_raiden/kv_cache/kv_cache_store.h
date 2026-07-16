@@ -222,6 +222,15 @@ class KVCacheStore {
              std::vector<std::string>>
   PollLoadStatus();
 
+  // Launches async H2H read from remote worker.
+  absl::Status ReadRemote(const std::vector<std::string>& block_hashes);
+
+  // Polls status of active remote reads.
+  // Returns {done_hashes, failed_hashes, pending_hashes}
+  std::tuple<std::vector<std::string>, std::vector<std::string>,
+             std::vector<std::string>>
+  PollRemoteReadStatus();
+
  private:
   // Evicts host blocks by their logical block hashes.
   //
@@ -246,6 +255,23 @@ class KVCacheStore {
     std::vector<int> device_block_ids;
   };
 
+  struct RemoteReadState {
+    std::vector<std::string> block_hashes;
+    std::vector<int> host_block_ids;
+  };
+
+  struct FutureHash {
+    size_t operator()(const tsl::Future<>& f) const {
+      return reinterpret_cast<size_t>(f.async_value());
+    }
+  };
+
+  struct FutureEqual {
+    bool operator()(const tsl::Future<>& lhs, const tsl::Future<>& rhs) const {
+      return lhs.async_value() == rhs.async_value();
+    }
+  };
+
   mutable absl::Mutex mutex_;
   mutable LRUCache<std::string, RaidenBlockID> lru_cache_
       ABSL_GUARDED_BY(mutex_);
@@ -255,14 +281,19 @@ class KVCacheStore {
 
   std::vector<SaveState> active_saves_ ABSL_GUARDED_BY(mutex_);
   std::vector<LoadState> active_loads_ ABSL_GUARDED_BY(mutex_);
+  absl::flat_hash_map<tsl::Future<>, RemoteReadState, FutureHash, FutureEqual>
+      active_remote_reads_ ABSL_GUARDED_BY(mutex_);
 
   std::vector<std::string> done_saves_ ABSL_GUARDED_BY(mutex_);
   std::vector<std::string> failed_saves_ ABSL_GUARDED_BY(mutex_);
   std::vector<std::string> done_loads_ ABSL_GUARDED_BY(mutex_);
   std::vector<std::string> failed_loads_ ABSL_GUARDED_BY(mutex_);
+  std::vector<std::string> done_remote_reads_ ABSL_GUARDED_BY(mutex_);
+  std::vector<std::string> failed_remote_reads_ ABSL_GUARDED_BY(mutex_);
 
   absl::flat_hash_set<std::string> saving_hashes_ ABSL_GUARDED_BY(mutex_);
   absl::flat_hash_set<std::string> loading_hashes_ ABSL_GUARDED_BY(mutex_);
+  absl::flat_hash_set<std::string> reading_hashes_ ABSL_GUARDED_BY(mutex_);
 
   std::unique_ptr<std::thread> poller_thread_;
   std::unique_ptr<tpu_raiden::NumaThreadPool> write_through_pool_;
@@ -272,6 +303,11 @@ class KVCacheStore {
   void DeallocateBlockIds(absl::Span<const int> block_ids);
 
   void PollerLoop();
+  void PollSavesInternal(std::vector<SaveState> ready_saves);
+  void PollLoadsInternal(std::vector<LoadState> ready_loads);
+  void PollRemoteReadsInternal(
+      std::vector<std::pair<tsl::Future<>, RemoteReadState>>
+          ready_remote_reads);
   void PollFuturesInternal();
 
   std::vector<std::string> GetSortedHashes(

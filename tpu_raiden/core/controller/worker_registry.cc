@@ -54,7 +54,7 @@ absl::Status WorkerRegistry::RegisterWorker(const WorkerRegistration& reg) {
             std::move(channel));
   }
 
-  absl::MutexLock lock(&mutex_);
+  absl::MutexLock lock(mutex_);
   if (on_register_cb_) {
     absl::Status status = on_register_cb_(entry);
     if (!status.ok()) return status;

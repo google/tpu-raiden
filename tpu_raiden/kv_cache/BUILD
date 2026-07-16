@@ -249,6 +249,7 @@ cc_test(
         ":lru_cache",
         "//tpu_raiden/core:kv_manager_holder",
         "//tpu_raiden/core/controller:controller_client",
+        "//tpu_raiden/core/controller:orchestrator_service_client",
         "//tpu_raiden/core/controller:raiden_controller",
         "//tpu_raiden/core/controller:raiden_orchestrator",
         "//tpu_raiden/core/controller:test_util",
@@ -256,12 +257,15 @@ cc_test(
         "//tpu_raiden/kv_cache/global_registry:global_registry_client_cc",
         "//tpu_raiden/kv_cache/global_registry:global_registry_server_lib",
         "@com_github_grpc_grpc//:grpc++",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
+        "@com_google_absl//absl/types:span",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
+        "@xla//xla/tsl/concurrency:future",
     ],
 )
 
