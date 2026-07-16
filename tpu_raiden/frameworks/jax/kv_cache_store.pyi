@@ -57,38 +57,33 @@ class KVCacheStore:
   ) -> tuple[bool, list[tuple[bytes, list[RaidenBlockID]]]]:
     """Caches sharded buffers into host-RAM/HBM backing store."""
     ...
-  def insert_and_pin(
+  def insert_and_lock(
       self,
       block_hashes: list[bytes],
-      slices: list[list[RaidenBlockID]],
+      slices: list[RaidenBlockID],
       on_host: bool,
-  ) -> tuple[bool, list[tuple[bytes, list[RaidenBlockID]]]]:
-    """Pins existing block hashes, and inserts/pins new block hashes.
+  ) -> bool:
+    """Locks existing block hashes, and inserts/locks new block hashes.
 
-    Pins all existing block hashes, and inserts and pins new block hashes if
+    Locks all existing block hashes, and inserts and locks new block hashes if
     there is sufficient available space in the LRU cache.
 
     Returns:
-      - bool: whether the entire insert_and_pin operation succeeded (i.e. all
-        existing keys were pinned, all new keys inserted and pinned).
-      - list: list of entries evicted during insertion.
+      - bool: whether the entire insert_and_lock operation succeeded (i.e. all
+        existing keys were locked, all new keys inserted and locked).
     """
     ...
   def release_and_delete(
       self,
       block_hashes: list[bytes],
-      pending_evict_entries: list[tuple[bytes, list[RaidenBlockID]]]
-      | None = ...,
-  ) -> tuple[int, list[tuple[bytes, list[RaidenBlockID]]]]:
-    """Reverts an insert_and_pin operation.
+  ) -> int:
+    """Reverts an insert_and_lock operation.
 
     Unpins all block_hashes in the LRU cache, deletes any block_hash in REMOTE
-    status whose pin count is 0, and puts back evicted entries in reverse order
-    for each deleted remote block.
+    status whose pin count is 0.
 
     Returns:
       - int: number of remote blocks deleted.
-      - list: remaining evicted entries that were not restored.
     """
     ...
   def delete(
@@ -108,10 +103,35 @@ class KVCacheStore:
     """Releases previously pinned block hashes, making them eligible for LRU eviction when capacity is exceeded."""
     ...
   def save(self, block_hashes: list[bytes]) -> bool:
-    """Saves blocks from device (HBM) to host (DRAM) asynchronously."""
+    """Saves blocks from device (HBM) to host (DRAM) asynchronously.
+
+    NOTE: The block_hashes must be pinned in the LRU cache (e.g. via
+    insert_and_lock) before calling save. Once the operation is complete (as
+    reported by poll_save_status), the caller must manually release/unpin them
+    via release so they can be evicted if needed.
+
+    Recommended usage flow:
+      0. [optional for save] lookup block hashes
+      1. insert_and_lock(block_hashes)
+      2. save(block_hashes)
+      3. poll_save_status() -> wait for completion
+      4. release(completed_block_hashes)
+    """
     ...
   def load(self, block_hashes: list[bytes], device_block_ids: list[int]) -> bool:
-    """Loads blocks from host (DRAM) to device (HBM) asynchronously."""
+    """Loads blocks from host (DRAM) to device (HBM) asynchronously.
+
+    NOTE: The block_hashes must be pinned in the LRU cache (e.g. via pin or
+    insert_and_lock) before calling load. Once the operation is complete (as
+    reported by poll_load_status), the caller must manually release/unpin them
+    via release so they can be evicted if needed.
+
+    Recommended usage flow:
+      1. insert_and_lock(block_hashes) (or pin if they already exist in store)
+      2. load(block_hashes, device_block_ids)
+      3. poll_load_status() -> wait for completion
+      4. release(completed_block_hashes)
+    """
     ...
   def poll_save_status(self) -> tuple[list[bytes], list[bytes], list[bytes]]:
     """Polls status of asynchronous Save operations."""

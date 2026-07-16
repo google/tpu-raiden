@@ -251,7 +251,7 @@ class KVCacheStoreTest(absltest.TestCase):
     res = controller.lookup(hashes, enable_global=True)
     self.assertEmpty(res)
 
-  def test_insert_and_pin_release_and_delete(self):
+  def test_insert_and_lock_release_and_delete(self):
     controller = kv_cache_store.KVCacheStore(capacity=2)
 
     local_hashes = [b"local_1", b"local_2"]
@@ -282,18 +282,12 @@ class KVCacheStoreTest(absltest.TestCase):
             kv_cache_store.BlockStatus.REMOTE,
         ),
     ]
-    success, evicted = controller.insert_and_pin(
-        remote_hashes, remote_slices, True
-    )
+    success = controller.insert_and_lock(remote_hashes, remote_slices, True)
     self.assertTrue(success)
-    self.assertLen(evicted, 2)
     self.assertEmpty(controller.lookup([b"local_1"]))
 
-    del_count, rem_evicted = controller.release_and_delete(
-        remote_hashes, evicted
-    )
+    del_count = controller.release_and_delete(remote_hashes)
     self.assertEqual(del_count, 2)
-    self.assertEmpty(rem_evicted)
     self.assertLen(controller.lookup([b"local_1", b"local_2"]), 2)
 
 

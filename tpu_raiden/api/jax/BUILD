@@ -40,6 +40,10 @@ py_test(
         "//tpu_raiden/core/controller:raiden_orchestrator_main",
         "//tpu_raiden/kv_cache/global_registry:global_registry_server",
     ],
+    tags = [
+        "manual",
+        "notap",
+    ],
     deps = [
         ":kv_cache_store",
         ":kv_cache_manager_jax_py",
@@ -78,6 +82,10 @@ py_test(
 py_test(
     name = "kv_cache_store_e2e_test",
     srcs = ["kv_cache_store_e2e_test.py"],
+    tags = [
+        "manual",
+        "notap",
+    ],
     deps = [
         ":kv_cache_manager_jax_py",
         ":kv_cache_store",

@@ -60,10 +60,14 @@ TEST(LRUCacheTest, EvictionOnOverfull) {
   EXPECT_EQ(evicted->first, 2);
   EXPECT_EQ(evicted->second, "two");
 
-  EXPECT_EQ(cache.size(), 2);
+  EXPECT_EQ(cache.size(), 3);
+  EXPECT_EQ(cache.active_size(), 2);
   EXPECT_TRUE(cache.Contains(1));
-  EXPECT_FALSE(cache.Contains(2));
+  EXPECT_FALSE(cache.Contains(2));  // 2 is candidate
   EXPECT_TRUE(cache.Contains(3));
+  auto candidates = cache.GetEvictCandidateKeys();
+  ASSERT_EQ(candidates.size(), 1);
+  EXPECT_EQ(candidates[0], 2);
 }
 
 TEST(LRUCacheTest, PinningProtectsAgainstEviction) {
@@ -83,8 +87,9 @@ TEST(LRUCacheTest, PinningProtectsAgainstEviction) {
   EXPECT_EQ(evicted->first, 1);
   EXPECT_EQ(evicted->second, "one");
 
-  EXPECT_EQ(cache.size(), 2);
-  EXPECT_FALSE(cache.Contains(1));
+  EXPECT_EQ(cache.size(), 3);
+  EXPECT_EQ(cache.active_size(), 2);
+  EXPECT_FALSE(cache.Contains(1));  // 1 is candidate
   EXPECT_TRUE(cache.Contains(2));
   EXPECT_TRUE(cache.Contains(3));
 
@@ -165,6 +170,187 @@ TEST(LRUCacheTest, PutBack) {
   auto evicted3 = cache.Evict();
   ASSERT_TRUE(evicted3.has_value());
   EXPECT_EQ(evicted3->first, 2);
+}
+
+TEST(LRUCacheTest, RescueFromCandidateList) {
+  LRUCache<int, std::string> cache(2);
+  cache.Put(1, "one");
+  cache.Put(2, "two");
+
+  // Evict will move 1 to candidate list (since 1 is LRU)
+  auto evicted = cache.Evict();
+  ASSERT_TRUE(evicted.has_value());
+  EXPECT_EQ(evicted->first, 1);
+
+  // 1 is in candidate list, size (total including candidates) is still 2
+  EXPECT_EQ(cache.size(), 2);
+  EXPECT_EQ(cache.active_size(), 1);
+
+  auto candidates = cache.GetEvictCandidateKeys();
+  ASSERT_EQ(candidates.size(), 1);
+  EXPECT_EQ(candidates[0], 1);
+
+  // Get(1) should rescue 1
+  auto* val = cache.Get(1);
+  ASSERT_NE(val, nullptr);
+  EXPECT_EQ(*val, "one");
+
+  EXPECT_EQ(cache.active_size(), 2);
+  EXPECT_TRUE(cache.GetEvictCandidateKeys().empty());
+
+  // Since 1 was rescued, it becomes MRU. 2 is now LRU.
+  // Putting 3 should evict 2.
+  auto evicted2 = cache.Put(3, "three");
+  ASSERT_TRUE(evicted2.has_value());
+  EXPECT_EQ(evicted2->first, 2);
+
+  auto candidates2 = cache.GetEvictCandidateKeys();
+  ASSERT_EQ(candidates2.size(), 1);
+  EXPECT_EQ(candidates2[0], 2);
+}
+
+TEST(LRUCacheTest, PinCandidateAndRescue) {
+  LRUCache<int, std::string> cache(2);
+  cache.Put(1, "one");
+  cache.Put(2, "two");
+
+  cache.Evict();  // 1 becomes candidate
+
+  auto candidates = cache.GetEvictCandidateKeys();
+  ASSERT_EQ(candidates.size(), 1);
+  EXPECT_EQ(candidates[0], 1);
+  EXPECT_EQ(cache.active_size(), 1);
+
+  // Pinning 1 should rescue and pin it
+  EXPECT_TRUE(cache.Pin(1));
+  EXPECT_EQ(cache.GetPinCount(1), 1);
+  EXPECT_EQ(cache.active_size(), 2);
+  EXPECT_TRUE(cache.GetEvictCandidateKeys().empty());
+
+  // 1 is pinned, 2 is unpinned. Putting 3 should evict 2.
+  auto evicted = cache.Put(3, "three");
+  ASSERT_TRUE(evicted.has_value());
+  EXPECT_EQ(evicted->first, 2);
+}
+
+TEST(LRUCacheTest, EraseCandidate) {
+  LRUCache<int, std::string> cache(2);
+  cache.Put(1, "one");
+  cache.Put(2, "two");
+
+  cache.Evict();  // 1 becomes candidate
+  auto candidates = cache.GetEvictCandidateKeys();
+  ASSERT_EQ(candidates.size(), 1);
+  EXPECT_EQ(candidates[0], 1);
+  EXPECT_EQ(cache.size(), 2);
+
+  // Erasing candidate 1
+  EXPECT_TRUE(cache.Erase(1));
+  EXPECT_EQ(cache.size(), 1);
+  EXPECT_TRUE(cache.GetEvictCandidateKeys().empty());
+  EXPECT_FALSE(cache.Contains(1));
+}
+
+TEST(LRUCacheTest, GetEvictableKeysScanningOrder) {
+  LRUCache<int, std::string> cache(3);
+  cache.Put(1, "one");
+  cache.Put(2, "two");
+  cache.Put(3, "three");
+  // Active LRU: 3, 2, 1 (MRU to LRU)
+
+  cache.Evict();  // 1 becomes candidate
+  // Candidates: 1
+  // Active: 3, 2
+
+  cache.Put(4, "four");
+  // Candidates: 1
+  // Active: 4, 3, 2 (MRU to LRU)
+
+  cache.Evict();  // 2 becomes candidate
+  // Candidates: 1, 2 (1 is older)
+  // Active: 4, 3 (3 is older active)
+
+  auto keys = cache.GetEvictableKeys(4);
+  ASSERT_EQ(keys.size(), 4);
+  EXPECT_EQ(keys[0], 1);  // Oldest candidate
+  EXPECT_EQ(keys[1], 2);  // Newer candidate
+  EXPECT_EQ(keys[2], 3);  // Oldest active
+  EXPECT_EQ(keys[3], 4);  // Newer active
+}
+
+TEST(LRUCacheTest, RestoreLastCandidate) {
+  LRUCache<int, std::string> cache(3);
+  cache.Put(1, "one");
+  cache.Put(2, "two");
+  cache.Put(3, "three");
+  // MRU to LRU is: 3, 2, 1.
+
+  // Evict twice.
+  auto evicted1 = cache.Evict();
+  ASSERT_TRUE(evicted1.has_value());
+  EXPECT_EQ(evicted1->first, 1);
+
+  auto evicted2 = cache.Evict();
+  ASSERT_TRUE(evicted2.has_value());
+  EXPECT_EQ(evicted2->first, 2);
+
+  // Candidates: 1, 2.
+
+  // Restore once. It should restore 2 (last candidate).
+  EXPECT_TRUE(cache.RestoreLastCandidate());
+  EXPECT_TRUE(cache.Contains(2));
+  EXPECT_FALSE(cache.GetEvictCandidateKeys().empty());
+  EXPECT_EQ(cache.GetEvictCandidateKeys().size(), 1);
+  EXPECT_EQ(cache.GetEvictCandidateKeys()[0], 1);
+
+  // Restore again. It should restore 1.
+  EXPECT_TRUE(cache.RestoreLastCandidate());
+  EXPECT_TRUE(cache.Contains(1));
+  EXPECT_TRUE(cache.GetEvictCandidateKeys().empty());
+
+  // Restore when candidate list is empty should return false.
+  EXPECT_FALSE(cache.RestoreLastCandidate());
+
+  // Verify that restored items are at the back of the LRU list (LRU position).
+  // Now MRU to LRU should be: 3, 2, 1.
+  auto evict_again1 = cache.Evict();
+  ASSERT_TRUE(evict_again1.has_value());
+  EXPECT_EQ(evict_again1->first, 1);
+
+  auto evict_again2 = cache.Evict();
+  ASSERT_TRUE(evict_again2.has_value());
+  EXPECT_EQ(evict_again2->first, 2);
+
+  auto evict_again3 = cache.Evict();
+  ASSERT_TRUE(evict_again3.has_value());
+  EXPECT_EQ(evict_again3->first, 3);
+}
+
+TEST(LRUCacheTest, CandidateVisibility) {
+  LRUCache<int, std::string> cache(2);
+  cache.Put(1, "one");
+  cache.Put(2, "two");
+
+  cache.Evict();  // 1 becomes candidate
+
+  // 1 should not be visible to Contains, Peek, PeekMutable
+  EXPECT_FALSE(cache.Contains(1));
+  EXPECT_EQ(cache.Peek(1), nullptr);
+  EXPECT_EQ(cache.PeekMutable(1), nullptr);
+
+  // 1 should still be visible to PeekIncludingCandidates and
+  // PeekMutableIncludingCandidates
+  EXPECT_NE(cache.PeekIncludingCandidates(1), nullptr);
+  EXPECT_EQ(*cache.PeekIncludingCandidates(1), "one");
+  EXPECT_NE(cache.PeekMutableIncludingCandidates(1), nullptr);
+  EXPECT_EQ(*cache.PeekMutableIncludingCandidates(1), "one");
+
+  // 2 (active) should be visible to all
+  EXPECT_TRUE(cache.Contains(2));
+  EXPECT_NE(cache.Peek(2), nullptr);
+  EXPECT_EQ(*cache.Peek(2), "two");
+  EXPECT_NE(cache.PeekMutable(2), nullptr);
+  EXPECT_EQ(*cache.PeekMutable(2), "two");
 }
 
 }  // namespace

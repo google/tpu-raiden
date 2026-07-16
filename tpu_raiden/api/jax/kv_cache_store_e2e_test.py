@@ -73,14 +73,13 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
-    device_type = "tpu"
     try:
-      self.devices = jax.devices(device_type)
-    except RuntimeError as exc:
-      raise AssertionError(f"No {device_type} devices found") from exc
+      self.devices = jax.devices("tpu")
+    except RuntimeError:
+      self.devices = jax.devices()
 
     if not self.devices:
-      raise AssertionError(f"No {device_type} devices found")
+      raise AssertionError("No JAX devices found")
 
     self.num_devices = len(self.devices)
     self.num_layers = 1

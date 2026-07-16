@@ -25,16 +25,18 @@
 #include <utility>
 #include <vector>
 
-#include "grpcpp/create_channel.h"
-#include "grpcpp/grpcpp.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
+#include "grpcpp/create_channel.h"
 #include "grpcpp/security/credentials.h"
 #include "xla/tsl/concurrency/future.h"
 #include "tpu_raiden/core/controller/raiden_controller.h"
@@ -134,7 +136,7 @@ absl::StatusOr<BlockSliceList> KVCacheStore::Lookup(
     results.reserve(limit);
     for (size_t i = 0; i < limit; ++i) {
       const std::string& hash = block_hashes[i];
-      RaidenBlockID* existing = lru_cache_.Get(hash);
+      RaidenBlockID* existing = lru_cache_.Peek(hash);
       if (!existing) {
         break;
       }
@@ -149,7 +151,9 @@ absl::StatusOr<BlockSliceList> KVCacheStore::Lookup(
     auto global_results_or = registry_client_->Lookup(remaining_hashes);
     if (global_results_or.ok()) {
       const auto& global_results = global_results_or.value();
-      for (size_t i = 0; i < global_results.size(); ++i) {
+      size_t num_results =
+          std::min(global_results.size(), remaining_hashes.size());
+      for (size_t i = 0; i < num_results; ++i) {
         const auto& metadata = global_results[i];
         const auto& proto_id = metadata.raiden_id();
         RaidenId remote_id{
@@ -205,11 +209,10 @@ std::pair<bool, BlockSliceList> KVCacheStore::Insert(
 // 1. Pins all existing block hashes.
 // 2. Inserts new block hashes into the LRU cache if space permits.
 // 3. Pins the newly inserted block hashes, with full rollback on failure.
-std::pair<bool, BlockSliceList> KVCacheStore::InsertAndPin(
-    const std::vector<std::string>& block_hashes,
-    const std::vector<RaidenBlockID>& slices, bool /*on_host*/) {
+bool KVCacheStore::InsertAndLock(const std::vector<std::string>& block_hashes,
+                                 const std::vector<RaidenBlockID>& slices,
+                                 bool /*on_host*/) {
   absl::MutexLock lock(mutex_);
-  BlockSliceList evicted_entries;
 
   std::vector<size_t> existing_indices;
   std::vector<size_t> new_indices;
@@ -228,7 +231,7 @@ std::pair<bool, BlockSliceList> KVCacheStore::InsertAndPin(
       for (size_t j = 0; j < idx; ++j) {
         lru_cache_.Unpin(block_hashes[existing_indices[j]]);
       }
-      return std::make_pair(false, std::move(evicted_entries));
+      return false;
     }
   }
 
@@ -237,11 +240,13 @@ std::pair<bool, BlockSliceList> KVCacheStore::InsertAndPin(
     for (size_t i : existing_indices) {
       lru_cache_.Unpin(block_hashes[i]);
     }
-    return std::make_pair(false, std::move(evicted_entries));
+    return false;
   }
 
-  // Insert all new block hashes into the lru cache list
-  for (size_t i : new_indices) {
+  size_t eviction_count = 0;
+  // Insert all new block hashes into the lru cache list in reverse order
+  for (auto it = new_indices.rbegin(); it != new_indices.rend(); ++it) {
+    size_t i = *it;
     const std::string& hash = block_hashes[i];
     std::optional<std::pair<std::string, RaidenBlockID>> evicted;
     if (i < slices.size()) {
@@ -250,7 +255,7 @@ std::pair<bool, BlockSliceList> KVCacheStore::InsertAndPin(
       evicted = lru_cache_.Put(hash, RaidenBlockID());
     }
     if (evicted.has_value()) {
-      evicted_entries.push_back(std::move(*evicted));
+      eviction_count++;
     }
   }
 
@@ -267,54 +272,60 @@ std::pair<bool, BlockSliceList> KVCacheStore::InsertAndPin(
       for (size_t j : new_indices) {
         lru_cache_.Erase(block_hashes[j]);
       }
-      for (auto it = evicted_entries.rbegin(); it != evicted_entries.rend();
-           ++it) {
-        lru_cache_.PutBack(it->first, std::move(it->second));
+      for (size_t j = 0; j < eviction_count; ++j) {
+        lru_cache_.RestoreLastCandidate();
       }
-      return std::make_pair(false, BlockSliceList{});
+      return false;
     }
   }
 
-  return std::make_pair(true, std::move(evicted_entries));
+  if (eviction_count > 0) {
+    pending_eviction_counts_[GetSortedHashes(block_hashes)] = eviction_count;
+  }
+  return true;
 }
 
-// Reverts an InsertAndPin operation.
-// 1. Unpins all block hashes in the LRU cache.
-// 2. Erases remote block hashes whose pin count reaches 0.
-// 3. Restores evicted entries to the back of the LRU cache in reverse order for
-//    each deleted remote block. Returns the number of deleted remote blocks and
-//    the remaining unrestored evicted entries.
-std::pair<size_t, BlockSliceList> KVCacheStore::ReleaseAndDelete(
-    const std::vector<std::string>& block_hashes,
-    BlockSliceList pending_evict_entries) {
+// Reverts an InsertAndLock operation.
+// 1. Unpins all block hashes in the LRU cache in reverse order.
+// 2. Erases block hashes (not HOST and not HOST_AND_HBM) whose pin count
+// reaches 0.
+// 3. Restores evicted entries to the back of the LRU cache.
+// Returns the number of deleted blocks.
+size_t KVCacheStore::ReleaseAndDelete(
+    const std::vector<std::string>& block_hashes) {
   absl::MutexLock lock(mutex_);
-  size_t deleted_remote_blocks = 0;
+  size_t deleted_blocks = 0;
+
+  // 1. Unpin in reverse order
+  for (auto it = block_hashes.rbegin(); it != block_hashes.rend(); ++it) {
+    lru_cache_.Unpin(*it);
+  }
+
+  // 2. Erase blocks that are not HOST and not HOST_AND_HBM when pin count is 0
   for (const std::string& hash : block_hashes) {
-    lru_cache_.Unpin(hash);
     auto* val = lru_cache_.Peek(hash);
-    if (val != nullptr && val->status == BlockStatus::REMOTE &&
-        lru_cache_.GetPinCount(hash) == 0) {
+    if (val != nullptr && lru_cache_.GetPinCount(hash) == 0 &&
+        val->status != BlockStatus::HOST &&
+        val->status != BlockStatus::HOST_AND_HBM) {
       lru_cache_.Erase(hash);
-      deleted_remote_blocks++;
+      deleted_blocks++;
     }
   }
 
-  if (deleted_remote_blocks > pending_evict_entries.size()) {
-    LOG(WARNING) << "Number of deleted remote blocks (" << deleted_remote_blocks
-                 << ") exceeds number of pending evict entries ("
-                 << pending_evict_entries.size() << ").";
+  size_t restoration_count = 0;
+  auto it = pending_eviction_counts_.find(GetSortedHashes(block_hashes));
+  if (it != pending_eviction_counts_.end()) {
+    restoration_count = it->second;
+    pending_eviction_counts_.erase(it);
   }
 
-  size_t to_restore =
-      std::min(deleted_remote_blocks, pending_evict_entries.size());
+  // 3. Restore candidates
+  size_t to_restore = std::min(deleted_blocks, restoration_count);
   for (size_t i = 0; i < to_restore; ++i) {
-    auto& entry = pending_evict_entries.back();
-    lru_cache_.PutBack(entry.first, std::move(entry.second));
-    pending_evict_entries.pop_back();
+    lru_cache_.RestoreLastCandidate();
   }
 
-  return std::make_pair(deleted_remote_blocks,
-                        std::move(pending_evict_entries));
+  return deleted_blocks;
 }
 
 void KVCacheStore::Delete(const std::vector<std::string>& block_hashes,
@@ -340,9 +351,10 @@ bool KVCacheStore::Pin(const std::vector<std::string>& block_hashes) {
 
 void KVCacheStore::Release(const std::vector<std::string>& block_hashes) {
   absl::MutexLock lock(mutex_);
-  for (const std::string& hash : block_hashes) {
-    lru_cache_.Unpin(hash);
+  for (auto it = block_hashes.rbegin(); it != block_hashes.rend(); ++it) {
+    lru_cache_.Unpin(*it);
   }
+  pending_eviction_counts_.erase(GetSortedHashes(block_hashes));
 }
 
 absl::Status KVCacheStore::Save(const std::vector<std::string>& block_hashes) {
@@ -385,8 +397,7 @@ absl::Status KVCacheStore::Save(const std::vector<std::string>& block_hashes) {
   }
 
   // Allocate host blocks on controller
-  auto host_blocks_or =
-      raiden_controller_->AllocateBlockIds(block_hashes.size());
+  auto host_blocks_or = AllocateBlockIds(block_hashes.size());
   if (!host_blocks_or.ok()) {
     absl::MutexLock lock(mutex_);
     for (const auto& hash : block_hashes) {
@@ -538,6 +549,45 @@ KVCacheStore::PollLoadStatus() {
   return {std::move(done), std::move(failed), std::move(pending)};
 }
 
+absl::StatusOr<std::vector<int>> KVCacheStore::AllocateBlockIds(int needed) {
+  std::vector<std::string> hashes_to_deallocate;
+  {
+    absl::MutexLock l(mutex_);
+    int free_count = raiden_controller_->block_manager()->num_free_blocks();
+    int to_free = needed - free_count;
+    if (to_free > 0) {
+      // Get evictable keys. This automatically scans candidates first, then
+      // active LRU.
+      hashes_to_deallocate = lru_cache_.GetEvictableKeys(to_free);
+      if (hashes_to_deallocate.size() < to_free) {
+        return absl::ResourceExhaustedError(
+            absl::StrCat("Insufficient free blocks and not enough evictable "
+                         "blocks. Needed: ",
+                         needed, ", Free: ", free_count,
+                         ", Evictable: ", hashes_to_deallocate.size()));
+      }
+    }
+  }
+
+  // Perform eviction outside lock
+  if (!hashes_to_deallocate.empty()) {
+    Evict(hashes_to_deallocate);
+  }
+
+  // Now allocate from the controller
+  return raiden_controller_->AllocateBlockIds(needed);
+}
+
+void KVCacheStore::DeallocateBlockIds(absl::Span<const int> block_ids) {
+  if (raiden_controller_) {
+    auto status = raiden_controller_->DeallocateBlockIds(block_ids);
+    if (!status.ok()) {
+      LOG(WARNING) << "Failed to deallocate host block IDs: "
+                   << status.message();
+    }
+  }
+}
+
 void KVCacheStore::PollerLoop() {
   while (!stop_poller_.load()) {
     PollFuturesInternal();
@@ -592,10 +642,7 @@ void KVCacheStore::PollFuturesInternal() {
             });
           }
         } else {
-          if (raiden_controller_) {
-            (void)raiden_controller_->DeallocateBlockIds(
-                {state.host_block_ids[i]});
-          }
+          DeallocateBlockIds({state.host_block_ids[i]});
         }
         done_saves_.push_back(hash);
       }
@@ -615,9 +662,7 @@ void KVCacheStore::PollFuturesInternal() {
       }
     } else {
       LOG(ERROR) << "Async Save failed: " << status.ToString();
-      if (raiden_controller_) {
-        (void)raiden_controller_->DeallocateBlockIds(state.host_block_ids);
-      }
+      DeallocateBlockIds(state.host_block_ids);
       for (const auto& hash : state.block_hashes) {
         failed_saves_.push_back(hash);
       }
@@ -652,11 +697,61 @@ void KVCacheStore::PollFuturesInternal() {
   }
 }
 
+size_t KVCacheStore::Evict(const std::vector<std::string>& block_hashes) {
+  if (block_hashes.empty()) {
+    return 0;
+  }
+  std::vector<std::string> erased_hashes;
+  std::vector<int> host_ids_to_deallocate;
+  erased_hashes.reserve(block_hashes.size());
+  host_ids_to_deallocate.reserve(block_hashes.size());
+  {
+    absl::MutexLock l(mutex_);
+    for (const auto& hash : block_hashes) {
+      RaidenBlockID* existing = lru_cache_.PeekMutableIncludingCandidates(hash);
+      if (existing != nullptr && lru_cache_.GetPinCount(hash) == 0 &&
+          (existing->status == BlockStatus::HOST ||
+           existing->status == BlockStatus::HOST_AND_HBM)) {
+        host_ids_to_deallocate.push_back(existing->host_block_id);
+        erased_hashes.push_back(hash);
+        lru_cache_.Erase(hash);
+      }
+    }
+  }
+
+  if (host_ids_to_deallocate.empty()) {
+    return 0;
+  }
+
+  // 1. Unregister from global registry (batched)
+  if (registry_client_) {
+    auto status = registry_client_->Unregister(erased_hashes, raiden_id_);
+    if (!status.ok()) {
+      LOG(WARNING)
+          << "Failed to unregister proactively evicted blocks: "
+          << status.message();
+    }
+  }
+
+  // 2. Deallocate host block IDs (batched)
+  DeallocateBlockIds(host_ids_to_deallocate);
+
+  return host_ids_to_deallocate.size();
+}
+
 int KVCacheStore::raiden_controller_port() const {
   if (raiden_controller_) {
     return raiden_controller_->raiden_controller_port();
   }
   return 0;
+}
+
+std::vector<std::string> KVCacheStore::GetSortedHashes(
+    const std::vector<std::string>& hashes) const {
+  // Dummy comment to trigger presubmit retry.
+  std::vector<std::string> sorted = hashes;
+  std::sort(sorted.begin(), sorted.end());
+  return sorted;
 }
 
 }  // namespace kv_cache

@@ -554,57 +554,23 @@ NB_MODULE(_tpu_raiden_torch, m) {
           },
           nb::arg("block_hashes"), nb::arg("slices"), nb::arg("on_host"))
       .def(
-          "insert_and_pin",
+          "insert_and_lock",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
              const std::vector<nb::bytes>& block_hashes,
              const std::vector<tpu_raiden::kv_cache::RaidenBlockID>& slices,
              bool on_host) {
             auto hashes = ToStdStringVector(block_hashes);
-            auto res = self->InsertAndPin(hashes, slices, on_host);
-            std::vector<
-                std::pair<nb::bytes, tpu_raiden::kv_cache::RaidenBlockID>>
-                py_evicted;
-            py_evicted.reserve(res.second.size());
-            for (const auto& pair : res.second) {
-              py_evicted.push_back(std::make_pair(
-                  nb::bytes(pair.first.data(), pair.first.size()),
-                  pair.second));
-            }
-            return std::make_pair(res.first, py_evicted);
+            return self->InsertAndLock(hashes, slices, on_host);
           },
           nb::arg("block_hashes"), nb::arg("slices"), nb::arg("on_host"))
       .def(
           "release_and_delete",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
-             const std::vector<nb::bytes>& block_hashes,
-             const std::vector<
-                 std::pair<nb::bytes, tpu_raiden::kv_cache::RaidenBlockID>>&
-                 pending_evict_entries) {
+             const std::vector<nb::bytes>& block_hashes) {
             auto hashes = ToStdStringVector(block_hashes);
-            std::vector<
-                std::pair<std::string, tpu_raiden::kv_cache::RaidenBlockID>>
-                evicted;
-            evicted.reserve(pending_evict_entries.size());
-            for (const auto& pair : pending_evict_entries) {
-              evicted.push_back(std::make_pair(
-                  std::string(pair.first.c_str(), pair.first.size()),
-                  pair.second));
-            }
-            auto res = self->ReleaseAndDelete(hashes, evicted);
-            std::vector<
-                std::pair<nb::bytes, tpu_raiden::kv_cache::RaidenBlockID>>
-                py_rem_evicted;
-            py_rem_evicted.reserve(res.second.size());
-            for (const auto& pair : res.second) {
-              py_rem_evicted.push_back(std::make_pair(
-                  nb::bytes(pair.first.data(), pair.first.size()),
-                  pair.second));
-            }
-            return std::make_pair(res.first, py_rem_evicted);
+            return self->ReleaseAndDelete(hashes);
           },
-          nb::arg("block_hashes"),
-          nb::arg("pending_evict_entries") = std::vector<
-              std::pair<nb::bytes, tpu_raiden::kv_cache::RaidenBlockID>>())
+          nb::arg("block_hashes"))
       .def(
           "delete",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,

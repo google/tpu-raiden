@@ -226,76 +226,49 @@ class KVCacheStore:
       wrapped_evicted.append((hash_val, RaidenBlockID(impl=raw_slice)))
     return all_inserted, wrapped_evicted
 
-  def insert_and_pin(
+  def insert_and_lock(
       self,
       block_hashes: list[bytes],
       slices: list[RaidenBlockID],
       on_host: bool,
-  ) -> tuple[bool, list[tuple[bytes, RaidenBlockID]]]:
-    """Pins existing block hashes, and inserts/pins new block hashes.
+  ) -> bool:
+    """Locks existing block hashes, and inserts/locks new block hashes.
 
-    Pins all existing block hashes, and inserts and pins new block hashes if
+    Locks all existing block hashes, and inserts and locks new block hashes if
     there is sufficient available space in the LRU cache.
 
     Args:
-      block_hashes: Incoming block hashes to insert and pin.
+      block_hashes: Incoming block hashes to insert and lock.
       slices: List of RaidenBlockID, one for each block hash.
       on_host: Whether the slices are located in host memory.
 
     Returns:
-      A tuple containing:
-      - bool: whether the entire insert_and_pin operation succeeded (i.e. all
-        existing keys were pinned, all new keys inserted and pinned).
-      - list: list of entries evicted during insertion.
+      bool: whether the entire insert_and_lock operation succeeded (i.e. all
+        existing keys were locked, all new keys inserted and locked).
     """
     raw_slices = []
     for s in slices:
       if isinstance(s, RaidenId):
         s = RaidenBlockID(raiden_id=s)
       raw_slices.append(s._impl)  # pylint: disable=protected-access
-    all_inserted, raw_evicted = self._impl.insert_and_pin(
-        block_hashes, raw_slices, on_host
-    )
-    wrapped_evicted = []
-    for hash_val, raw_slice in raw_evicted:
-      wrapped_evicted.append((hash_val, RaidenBlockID(impl=raw_slice)))
-    return all_inserted, wrapped_evicted
+    return self._impl.insert_and_lock(block_hashes, raw_slices, on_host)
 
   def release_and_delete(
       self,
       block_hashes: list[bytes],
-      pending_evict_entries: list[tuple[bytes, RaidenBlockID]] | None = None,
-  ) -> tuple[int, list[tuple[bytes, RaidenBlockID]]]:
-    """Reverts an insert_and_pin operation.
+  ) -> int:
+    """Reverts an insert_and_lock operation.
 
     Unpins all block_hashes in the LRU cache, deletes any block_hash in REMOTE
-    status whose pin count is 0, and puts back evicted entries in reverse order
-    for each deleted remote block.
+    status whose pin count is 0.
 
     Args:
       block_hashes: Incoming block hashes to unpin and check for deletion.
-      pending_evict_entries: List of entries previously evicted during
-        insert_and_pin.
 
     Returns:
-      A tuple containing:
-      - int: number of remote blocks deleted.
-      - list: remaining evicted entries that were not restored.
+      int: number of remote blocks deleted.
     """
-    if pending_evict_entries is None:
-      pending_evict_entries = []
-    raw_evicted_in = []
-    for hash_val, s in pending_evict_entries:
-      if isinstance(s, RaidenId):
-        s = RaidenBlockID(raiden_id=s)
-      raw_evicted_in.append((hash_val, s._impl))  # pylint: disable=protected-access
-    del_count, raw_evicted_out = self._impl.release_and_delete(
-        block_hashes, raw_evicted_in
-    )
-    wrapped_evicted_out = []
-    for hash_val, raw_slice in raw_evicted_out:
-      wrapped_evicted_out.append((hash_val, RaidenBlockID(impl=raw_slice)))
-    return del_count, wrapped_evicted_out
+    return self._impl.release_and_delete(block_hashes)
 
   def delete(
       self,
@@ -323,6 +296,18 @@ class KVCacheStore:
   def save(self, block_hashes: list[bytes]) -> bool:
     """Saves blocks from device (HBM) to host (DRAM) asynchronously.
 
+    NOTE: The block_hashes must be pinned in the LRU cache (e.g. via
+    insert_and_lock) before calling save. Once the operation is complete (as
+    reported by poll_save_status), the caller must manually release/unpin them
+    via release so they can be evicted if needed.
+
+    Recommended usage flow:
+      0. [optional for save] lookup block hashes
+      1. insert_and_lock(block_hashes)
+      2. save(block_hashes)
+      3. poll_save_status() -> wait for completion
+      4. release(completed_block_hashes)
+
     Args:
       block_hashes: List of block hashes to save.
 
@@ -335,6 +320,17 @@ class KVCacheStore:
       self, block_hashes: list[bytes], device_block_ids: list[int]
   ) -> bool:
     """Loads blocks from host (DRAM) to device (HBM) asynchronously.
+
+    NOTE: The block_hashes must be pinned in the LRU cache (e.g. via pin or
+    insert_and_lock) before calling load. Once the operation is complete (as
+    reported by poll_load_status), the caller must manually release/unpin them
+    via release so they can be evicted if needed.
+
+    Recommended usage flow:
+      1. insert_and_lock(block_hashes) (or pin if they already exist in store)
+      2. load(block_hashes, device_block_ids)
+      3. poll_load_status() -> wait for completion
+      4. release(completed_block_hashes)
 
     Args:
       block_hashes: List of block hashes to load.

@@ -19,6 +19,7 @@
 #include <list>
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 
@@ -34,8 +35,13 @@ namespace kv_cache {
 //   evicted.
 // - Features exact MRU promotion on `Get` and fast LRU eviction on `Evict`.
 // - Exposes `Peek` to read values without perturbing LRU order.
+enum class NodeLocation { kLru, kPinned, kCandidate };
+
 template <typename Key, typename Value>
 class LRUCache {
+ private:
+  struct CacheNode;
+
  public:
   explicit LRUCache(size_t capacity) : capacity_(capacity) {}
 
@@ -55,18 +61,23 @@ class LRUCache {
 
   // Returns the available space (free + evictable capacity).
   size_t available_space() const { return capacity_ - pinned_list_.size(); }
+  size_t active_size() const { return lru_list_.size() + pinned_list_.size(); }
 
   // Returns true if the cache is completely empty.
   bool empty() const { return map_.empty(); }
 
-  // Returns true if the key is present in the cache.
-  bool Contains(const Key& key) const { return map_.contains(key); }
+  // Returns true if the key is present in the cache (and not a candidate).
+  bool Contains(const Key& key) const {
+    auto it = map_.find(key);
+    return it != map_.end() && it->second->location != NodeLocation::kCandidate;
+  }
 
   // Clears all elements from the cache.
   void Clear() {
     map_.clear();
     lru_list_.clear();
     pinned_list_.clear();
+    evict_candidate_list_.clear();
   }
 
   // Inserts or updates a key-value pair.
@@ -80,22 +91,19 @@ class LRUCache {
     if (it != map_.end()) {
       // Update existing item and promote to MRU
       it->second->value = std::move(value);
-      if (it->second->pin_count > 0) {
-        pinned_list_.splice(pinned_list_.begin(), pinned_list_, it->second);
-      } else {
-        lru_list_.splice(lru_list_.begin(), lru_list_, it->second);
-      }
+      Promote(it->second);
       return std::nullopt;
     }
 
     std::optional<std::pair<Key, Value>> evicted = std::nullopt;
-    if (map_.size() >= capacity_) {
+    if (active_size() >= capacity_) {
       evicted = Evict();
       if (!evicted.has_value()) return std::nullopt;
     }
 
     // Insert new item at the front of the lru_list_ (MRU)
-    lru_list_.emplace_front(std::move(key), std::move(value), 0);
+    lru_list_.emplace_front(std::move(key), std::move(value), 0,
+                            NodeLocation::kLru);
     map_.emplace_hint(it, lru_list_.front().key, lru_list_.begin());
     return evicted;
   }
@@ -107,19 +115,16 @@ class LRUCache {
     auto it = map_.find(key);
     if (it != map_.end()) {
       it->second->value = std::move(value);
-      if (it->second->pin_count > 0) {
-        pinned_list_.splice(pinned_list_.end(), pinned_list_, it->second);
-      } else {
-        lru_list_.splice(lru_list_.end(), lru_list_, it->second);
-      }
+      PromoteBack(it->second);
       return;
     }
 
-    if (map_.size() >= capacity_) {
+    if (active_size() >= capacity_) {
       Evict();
     }
 
-    lru_list_.emplace_back(std::move(key), std::move(value), 0);
+    lru_list_.emplace_back(std::move(key), std::move(value), 0,
+                           NodeLocation::kLru);
     map_.emplace_hint(it, lru_list_.back().key, std::prev(lru_list_.end()));
   }
 
@@ -130,19 +135,33 @@ class LRUCache {
     if (it == map_.end()) {
       return nullptr;
     }
-    // Promote to MRU
-    if (it->second->pin_count > 0) {
-      pinned_list_.splice(pinned_list_.begin(), pinned_list_, it->second);
-    } else {
-      lru_list_.splice(lru_list_.begin(), lru_list_, it->second);
-    }
+    Promote(it->second);
     return &(it->second->value);
   }
 
   // Retrieves a pointer to the stored value for the given key without
   // promoting it to MRU (preserves exact LRU order). Returns nullptr if
-  // absent.
+  // absent or candidate.
   Value* Peek(const Key& key) const {
+    auto it = map_.find(key);
+    if (it == map_.end() || it->second->location == NodeLocation::kCandidate) {
+      return nullptr;
+    }
+    return &(it->second->value);
+  }
+
+  // Exposes a mutable pointer via Peek without perturbing LRU order.
+  // Returns nullptr if absent or candidate.
+  Value* PeekMutable(const Key& key) {
+    auto it = map_.find(key);
+    if (it == map_.end() || it->second->location == NodeLocation::kCandidate) {
+      return nullptr;
+    }
+    return &(it->second->value);
+  }
+
+  // Retrieves a pointer to the stored value even if it is a candidate.
+  const Value* PeekIncludingCandidates(const Key& key) const {
     auto it = map_.find(key);
     if (it == map_.end()) {
       return nullptr;
@@ -150,8 +169,8 @@ class LRUCache {
     return &(it->second->value);
   }
 
-  // Exposes a mutable pointer via Peek without perturbing LRU order.
-  Value* PeekMutable(const Key& key) {
+  // Exposes a mutable pointer even if it is a candidate.
+  Value* PeekMutableIncludingCandidates(const Key& key) {
     auto it = map_.find(key);
     if (it == map_.end()) {
       return nullptr;
@@ -168,8 +187,13 @@ class LRUCache {
       return false;
     }
     if (it->second->pin_count == 0) {
-      // Move from lru_list_ to pinned_list_
-      pinned_list_.splice(pinned_list_.begin(), lru_list_, it->second);
+      if (it->second->location == NodeLocation::kLru) {
+        pinned_list_.splice(pinned_list_.begin(), lru_list_, it->second);
+      } else if (it->second->location == NodeLocation::kCandidate) {
+        pinned_list_.splice(pinned_list_.begin(), evict_candidate_list_,
+                            it->second);
+      }
+      it->second->location = NodeLocation::kPinned;
     }
     it->second->pin_count++;
     return true;
@@ -188,6 +212,7 @@ class LRUCache {
       if (it->second->pin_count == 0) {
         // Move from pinned_list_ to lru_list_ (promote to MRU)
         lru_list_.splice(lru_list_.begin(), pinned_list_, it->second);
+        it->second->location = NodeLocation::kLru;
       }
     }
     return true;
@@ -202,6 +227,33 @@ class LRUCache {
     return it->second->pin_count;
   }
 
+  // Exposes read-only access to the internal map for iteration.
+  const absl::flat_hash_map<Key, typename std::list<CacheNode>::iterator>& map()
+      const {
+    return map_;
+  }
+
+  // Returns up to `count` oldest evictable (unpinned) keys in LRU order (oldest
+  // first).
+  std::vector<Key> GetEvictableKeys(size_t count) const {
+    std::vector<Key> keys;
+    keys.reserve(
+        std::min(count, evict_candidate_list_.size() + lru_list_.size()));
+    // 1. Scan evict_candidate_list_ first (oldest first, i.e. front to back)
+    for (auto it = evict_candidate_list_.begin();
+         it != evict_candidate_list_.end() && keys.size() < count; ++it) {
+      keys.push_back(it->key);
+    }
+    // 2. Scan lru_list_ (oldest first, i.e. back to front)
+    if (keys.size() < count) {
+      for (auto it = lru_list_.rbegin();
+           it != lru_list_.rend() && keys.size() < count; ++it) {
+        keys.push_back(it->key);
+      }
+    }
+    return keys;
+  }
+
   // Erases the given key from the cache entirely.
   // Returns true if the element was successfully erased.
   bool Erase(const Key& key) {
@@ -209,26 +261,59 @@ class LRUCache {
     if (it == map_.end()) {
       return false;
     }
-    if (it->second->pin_count > 0) {
+    if (it->second->location == NodeLocation::kPinned) {
       pinned_list_.erase(it->second);
-    } else {
+    } else if (it->second->location == NodeLocation::kLru) {
       lru_list_.erase(it->second);
+    } else if (it->second->location == NodeLocation::kCandidate) {
+      evict_candidate_list_.erase(it->second);
     }
     map_.erase(it);
     return true;
   }
 
-  // Evicts and returns the least recently used, unpinned key-value pair.
-  // Returns std::nullopt if all items are pinned or empty.
+  // Evicts the least recently used, unpinned key-value pair to candidate list.
+  // Returns the evicted pair if successful, or std::nullopt.
   std::optional<std::pair<Key, Value>> Evict() {
     if (lru_list_.empty()) {
       return std::nullopt;
     }
     auto it = std::prev(lru_list_.end());
-    std::pair<Key, Value> evicted{std::move(it->key), std::move(it->value)};
-    map_.erase(evicted.first);
-    lru_list_.erase(it);
-    return evicted;
+    it->location = NodeLocation::kCandidate;
+    evict_candidate_list_.splice(evict_candidate_list_.end(), lru_list_, it);
+    return std::make_pair(it->key, it->value);
+  }
+
+  // Restores the last evicted candidate back to the LRU list (at the LRU
+  // position). Returns true if a candidate was successfully restored.
+  bool RestoreLastCandidate() {
+    if (evict_candidate_list_.empty()) {
+      return false;
+    }
+    auto it = std::prev(evict_candidate_list_.end());
+    it->location = NodeLocation::kLru;
+    lru_list_.splice(lru_list_.end(), evict_candidate_list_, it);
+    return true;
+  }
+
+  std::vector<Key> GetEvictCandidateKeys() const {
+    std::vector<Key> keys;
+    keys.reserve(evict_candidate_list_.size());
+    for (const auto& node : evict_candidate_list_) {
+      keys.push_back(node.key);
+    }
+    return keys;
+  }
+
+  // Moves the key from the candidate list back to the active LRU list (as MRU)
+  // if it was in the candidate list.
+  void MarkAsActive(const Key& key) {
+    auto it = map_.find(key);
+    if (it == map_.end()) return;
+    if (it->second->location == NodeLocation::kCandidate) {
+      lru_list_.splice(lru_list_.begin(), evict_candidate_list_, it->second);
+      it->second->location = NodeLocation::kLru;
+    }
   }
 
  private:
@@ -236,14 +321,44 @@ class LRUCache {
     Key key;
     Value value;
     int pin_count = 0;
+    NodeLocation location = NodeLocation::kLru;
 
-    CacheNode(Key k, Value v, int p)
-        : key(std::move(k)), value(std::move(v)), pin_count(p) {}
+    CacheNode(Key k, Value v, int p, NodeLocation loc = NodeLocation::kLru)
+        : key(std::move(k)), value(std::move(v)), pin_count(p), location(loc) {}
   };
+
+  void Promote(typename std::list<CacheNode>::iterator node_it) {
+    if (node_it->pin_count > 0) {
+      pinned_list_.splice(pinned_list_.begin(), pinned_list_, node_it);
+      node_it->location = NodeLocation::kPinned;
+    } else {
+      if (node_it->location == NodeLocation::kLru) {
+        lru_list_.splice(lru_list_.begin(), lru_list_, node_it);
+      } else if (node_it->location == NodeLocation::kCandidate) {
+        lru_list_.splice(lru_list_.begin(), evict_candidate_list_, node_it);
+        node_it->location = NodeLocation::kLru;
+      }
+    }
+  }
+
+  void PromoteBack(typename std::list<CacheNode>::iterator node_it) {
+    if (node_it->pin_count > 0) {
+      pinned_list_.splice(pinned_list_.end(), pinned_list_, node_it);
+      node_it->location = NodeLocation::kPinned;
+    } else {
+      if (node_it->location == NodeLocation::kLru) {
+        lru_list_.splice(lru_list_.end(), lru_list_, node_it);
+      } else if (node_it->location == NodeLocation::kCandidate) {
+        lru_list_.splice(lru_list_.end(), evict_candidate_list_, node_it);
+        node_it->location = NodeLocation::kLru;
+      }
+    }
+  }
 
   size_t capacity_;
   std::list<CacheNode> lru_list_;
   std::list<CacheNode> pinned_list_;
+  std::list<CacheNode> evict_candidate_list_;
   absl::flat_hash_map<Key, typename std::list<CacheNode>::iterator> map_;
 };
 

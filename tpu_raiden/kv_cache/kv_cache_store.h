@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -58,6 +59,8 @@ enum class BlockStatus {
 
 struct RaidenBlockID {
   RaidenId raiden_id;
+  // When status is REMOTE, it represents the remote host block ID.
+  // When status is HOST or HOST_AND_HBM, it represents the local host block ID.
   int host_block_id = -1;
   int device_block_id = -1;
   BlockStatus status = BlockStatus::INIT;
@@ -87,6 +90,8 @@ using BlockSliceList = std::vector<std::pair<std::string, RaidenBlockID>>;
 // nodes and microservice slices.
 class KVCacheStore {
  public:
+  friend class KVCacheStoreTest;
+
   explicit KVCacheStore(size_t capacity,
                         absl::string_view global_registry_address = "",
                         RaidenId raiden_id = {}, int num_shards = 0,
@@ -126,26 +131,22 @@ class KVCacheStore {
       const std::vector<std::string>& block_hashes,
       const std::vector<RaidenBlockID>& slices, bool on_host);
 
-  // Pins all existing block hashes, and inserts and pins new block hashes if
+  // Pins all existing block hashes, and inserts and locks new block hashes if
   // there is sufficient available space in the LRU cache.
-  // Returns:
-  // - bool: whether the entire InsertAndPin operation succeeded (i.e. all
-  //         existing keys were pinned, all new keys inserted and pinned)
-  // - BlockSliceList: list of entries evicted during insertion
-  std::pair<bool, BlockSliceList> InsertAndPin(
-      const std::vector<std::string>& block_hashes,
-      const std::vector<RaidenBlockID>& slices, bool on_host);
+  // New items are inserted in reverse order to ensure tail blocks are evicted
+  // first. Returns:
+  // - bool: whether the entire InsertAndLock operation succeeded (i.e. all
+  //         existing keys were locked, all new keys inserted and locked)
+  bool InsertAndLock(const std::vector<std::string>& block_hashes,
+                     const std::vector<RaidenBlockID>& slices, bool on_host);
 
-  // Reverts an InsertAndPin operation by unpinning all block_hashes in the
-  // LRU cache, deleting any block_hash in REMOTE status whose pin count is 0,
-  // and putting back evicted entries in reverse order for each deleted remote
-  // block.
+  // Reverts an InsertAndLock operation by unlocking all block_hashes in the
+  // LRU cache, deleting any block_hash NOT in HOST or HOST_AND_HBM status
+  // whose pin count is 0, and restoring evicted entries from the LRU cache's
+  // candidate list for each deleted block.
   // Returns:
-  // - size_t: number of remote blocks deleted
-  // - BlockSliceList: remaining evicted entries that were not restored
-  std::pair<size_t, BlockSliceList> ReleaseAndDelete(
-      const std::vector<std::string>& block_hashes,
-      BlockSliceList pending_evict_entries = {});
+  // - size_t: number of blocks deleted
+  size_t ReleaseAndDelete(const std::vector<std::string>& block_hashes);
 
   // Deletes cached sharded buffers from host-RAM/HBM backing store entirely.
   void Delete(const std::vector<std::string>& block_hashes,
@@ -156,14 +157,39 @@ class KVCacheStore {
   // pinned.
   bool Pin(const std::vector<std::string>& block_hashes);
 
-  // Releases previously pinned block hashes, making them eligible for LRU
-  // eviction when capacity is exceeded.
+  // Releases previously pinned block hashes (a.k.a. Unpin), making them
+  // eligible for LRU eviction when capacity is exceeded.
+  // The blocks are released in reversed order internally to ensure that the
+  // last blocks (tails of sequences) are evicted first.
   void Release(const std::vector<std::string>& block_hashes);
 
-  // Saves blocks from device (HBM) to host (DRAM).
+  // Saves blocks from device (HBM) to host (DRAM) asynchronously.
+  //
+  // NOTE: The block_hashes must be pinned in the LRU cache (e.g., via
+  // InsertAndLock) before calling Save. Once the operation is complete (as
+  // reported by PollSaveStatus), the caller must manually release/unpin them
+  // via Release so they become eligible for eviction.
+  //
+  // Recommended usage flow:
+  //   0. [optional for save] lookup block hashes
+  //   1. insert_and_lock(block_hashes)
+  //   2. save(block_hashes)
+  //   3. poll_save_status() -> wait for completion
+  //   4. release(completed_block_hashes)
   absl::Status Save(const std::vector<std::string>& block_hashes);
 
-  // Loads blocks from host (DRAM) to device (HBM).
+  // Loads blocks from host (DRAM) to device (HBM) asynchronously.
+  //
+  // NOTE: The block_hashes must be pinned in the LRU cache (e.g., via Pin or
+  // InsertAndLock) before calling Load. Once the operation is complete (as
+  // reported by PollLoadStatus), the caller must manually release/unpin them
+  // via Release so they become eligible for eviction.
+  //
+  // Recommended usage flow:
+  //   1. insert_and_lock(block_hashes) (or Pin if they already exist in store)
+  //   2. load(block_hashes, device_block_ids)
+  //   3. poll_load_status() -> wait for completion
+  //   4. release(completed_block_hashes)
   absl::Status Load(const std::vector<std::string>& block_hashes,
                     const std::vector<int>& device_block_ids);
 
@@ -197,6 +223,17 @@ class KVCacheStore {
   PollLoadStatus();
 
  private:
+  // Evicts host blocks by their logical block hashes.
+  //
+  // Checks if the blocks exist in the cache and are in HOST or HOST_AND_HBM
+  // status and erases them from the cache.
+  // Releases the host blocks via RaidenController and unregisters them from
+  // GlobalRegistry.
+  //
+  // Input: `block_hashes` - list of block hashes to evict.
+  // Output: Number of successfully evicted host blocks.
+  size_t Evict(const std::vector<std::string>& block_hashes);
+
   struct SaveState {
     tsl::Future<> future;
     std::vector<std::string> block_hashes;
@@ -231,8 +268,17 @@ class KVCacheStore {
   std::unique_ptr<tpu_raiden::NumaThreadPool> write_through_pool_;
   std::atomic<bool> stop_poller_{false};
 
+  absl::StatusOr<std::vector<int>> AllocateBlockIds(int needed);
+  void DeallocateBlockIds(absl::Span<const int> block_ids);
+
   void PollerLoop();
   void PollFuturesInternal();
+
+  std::vector<std::string> GetSortedHashes(
+      const std::vector<std::string>& hashes) const;
+
+  absl::flat_hash_map<std::vector<std::string>, size_t> pending_eviction_counts_
+      ABSL_GUARDED_BY(mutex_);
 };
 
 }  // namespace kv_cache
