@@ -281,3 +281,27 @@ class KVCacheStore:
   def release(self, block_hashes: list[bytes]) -> None:
     """Releases previously pinned block hashes, making them eligible for LRU eviction when capacity is exceeded."""
     self._impl.release(block_hashes)
+
+  def read_remote(self, block_hashes: list[bytes]) -> bool:
+    """Launches async H2H read from remote worker.
+
+    Args:
+      block_hashes: List of block hashes to read from remote.
+
+    Returns:
+      True if successfully launched.
+    """
+    return self._impl.read_remote(block_hashes)
+
+  def poll_remote_read_status(
+      self,
+  ) -> tuple[list[bytes], list[bytes], list[bytes]]:
+    """Polls the status of all active remote reads.
+
+    Returns:
+      A tuple of (done, failed, pending), where:
+        done: List of block hashes whose remote read successfully completed.
+        failed: List of block hashes whose remote read failed.
+        pending: List of block hashes whose remote read is still in progress.
+    """
+    return self._impl.poll_remote_read_status()

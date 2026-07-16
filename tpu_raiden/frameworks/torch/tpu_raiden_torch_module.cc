@@ -599,5 +599,31 @@ NB_MODULE(_tpu_raiden_torch, m) {
             auto hashes = ToStdStringVector(block_hashes);
             self->Release(hashes);
           },
-          nb::arg("block_hashes"));
+          nb::arg("block_hashes"))
+      .def(
+          "read_remote",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
+             const std::vector<nb::bytes>& block_hashes) -> bool {
+            auto hashes = ToStdStringVector(block_hashes);
+            return self->ReadRemote(hashes).ok();
+          },
+          nb::arg("block_hashes"))
+      .def("poll_remote_read_status",
+           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
+             auto [done, failed, pending] = self->PollRemoteReadStatus();
+             std::vector<nb::bytes> py_done, py_failed, py_pending;
+             py_done.reserve(done.size());
+             for (const auto& h : done) {
+               py_done.push_back(nb::bytes(h.data(), h.size()));
+             }
+             py_failed.reserve(failed.size());
+             for (const auto& h : failed) {
+               py_failed.push_back(nb::bytes(h.data(), h.size()));
+             }
+             py_pending.reserve(pending.size());
+             for (const auto& h : pending) {
+               py_pending.push_back(nb::bytes(h.data(), h.size()));
+             }
+             return std::make_tuple(py_done, py_failed, py_pending);
+           });
 }

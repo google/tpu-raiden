@@ -34,6 +34,8 @@ namespace controller {
 class WorkerServiceServer {
  public:
   static WorkerServiceServer& GetInstance();
+  static std::unique_ptr<WorkerServiceServer> Create();
+  ~WorkerServiceServer();
 
   // Starts the gRPC server hosting WorkerServiceImpl on the specified port.
   // If the server is already started, updates the transfer manager (if
@@ -54,7 +56,6 @@ class WorkerServiceServer {
 
  private:
   WorkerServiceServer() = default;
-  ~WorkerServiceServer() = default;
   WorkerServiceServer(const WorkerServiceServer&) = delete;
   WorkerServiceServer& operator=(const WorkerServiceServer&) = delete;
 

@@ -32,7 +32,8 @@ namespace controller {
 // conflicts and rebinding overhead.
 class ControllerServer {
  public:
-  static ControllerServer& GetInstance();
+  ControllerServer() = default;
+  ~ControllerServer();
 
   // Starts the gRPC server hosting RaidenControllerServiceImpl on the specified
   // port (pass 0 for an ephemeral port).
@@ -63,8 +64,6 @@ class ControllerServer {
   // nullptr if the server has not been started.
   RaidenControllerServiceImpl* GetControllerService() const;
 
-  ControllerServer() = default;
-  ~ControllerServer() = default;
   ControllerServer(const ControllerServer&) = delete;
   ControllerServer& operator=(const ControllerServer&) = delete;
 

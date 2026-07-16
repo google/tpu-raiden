@@ -31,7 +31,7 @@ namespace {
 using ::absl_testing::StatusIs;
 
 TEST(ControllerServerTest, StartServerAndGetPortWorks) {
-  ControllerServer& server = ControllerServer::GetInstance();
+  ControllerServer server;
   ABSL_ASSERT_OK(server.StartServer(/*port=*/0));
   int port = server.GetGrpcPort();
   EXPECT_GT(port, 0);
@@ -51,26 +51,28 @@ TEST(ControllerServerTest, StartServerAndGetPortWorks) {
   EXPECT_EQ(worker_or->raiden_transfer_endpoint, "localhost:10002");
 }
 
-TEST(ControllerServerTest, SingletonIsReused) {
-  ControllerServer& server1 = ControllerServer::GetInstance();
+TEST(ControllerServerTest, MultipleServersCanRunConcurrently) {
+  ControllerServer server1;
   ABSL_ASSERT_OK(server1.StartServer(/*port=*/0));
   int port1 = server1.GetGrpcPort();
   EXPECT_GT(port1, 0);
 
-  ControllerServer& server2 = ControllerServer::GetInstance();
+  ControllerServer server2;
   ABSL_ASSERT_OK(server2.StartServer(/*port=*/0));
   int port2 = server2.GetGrpcPort();
-  EXPECT_EQ(port1, port2);
+  EXPECT_GT(port2, 0);
+
+  EXPECT_NE(port1, port2);
 }
 
 TEST(ControllerServerTest, StartServerWithInvalidPortFails) {
-  ControllerServer& server = ControllerServer::GetInstance();
+  ControllerServer server;
   absl::Status status = server.StartServer(/*port=*/-1);
   EXPECT_THAT(status, StatusIs(absl::StatusCode::kInvalidArgument));
 }
 
 TEST(ControllerServerTest, StartServerWithConflictingPortFails) {
-  ControllerServer& server = ControllerServer::GetInstance();
+  ControllerServer server;
   ABSL_ASSERT_OK(server.StartServer(/*port=*/0));
   int active_port = server.GetGrpcPort();
   int different_port = (active_port == 12345) ? 12346 : 12345;

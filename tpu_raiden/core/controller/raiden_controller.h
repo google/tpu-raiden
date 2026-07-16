@@ -44,6 +44,7 @@ class OrchestratorServiceClient;
 namespace core {
 namespace controller {
 class RaidenControllerServiceImpl;
+class ControllerServer;
 }  // namespace controller
 }  // namespace core
 
@@ -158,6 +159,7 @@ class RaidenController {
       ABSL_GUARDED_BY(mutex_);
 
   int raiden_controller_port_;
+  std::unique_ptr<core::controller::ControllerServer> controller_server_;
   std::unique_ptr<OrchestratorServiceClient> orchestrator_client_;
   absl::flat_hash_map<kv_cache::RaidenId, std::string, kv_cache::RaidenIdHash>
       resolved_controllers_ ABSL_GUARDED_BY(mutex_);

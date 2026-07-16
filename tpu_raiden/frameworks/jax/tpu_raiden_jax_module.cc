@@ -218,6 +218,22 @@ NB_MODULE(_tpu_raiden_jax, m) {
                            const>(
                &tpu_raiden::kv_cache::jax::KVCacheManager::GetHostPointer),
            nb::arg("layer_idx"), nb::arg("shard_idx"))
+      .def(
+          "read_host_memory",
+          [](tpu_raiden::kv_cache::jax::KVCacheManager& self, size_t layer_idx,
+             size_t shard_idx, size_t num_floats) -> nb::list {
+            const uint8_t* ptr = self.GetHostPointer(layer_idx, shard_idx);
+            LOG(ERROR) << "read_host_memory DEBUG: ptr=" << (const void*)ptr;
+            nb::list lst;
+            if (ptr) {
+              const float* fptr = reinterpret_cast<const float*>(ptr);
+              for (size_t i = 0; i < num_floats; ++i) {
+                lst.append(fptr[i]);
+              }
+            }
+            return lst;
+          },
+          nb::arg("layer_idx"), nb::arg("shard_idx"), nb::arg("num_floats"))
       .def_prop_ro("num_layers",
                    &tpu_raiden::kv_cache::jax::KVCacheManager::num_layers)
       .def_prop_ro("num_shards",
@@ -542,6 +558,32 @@ NB_MODULE(_tpu_raiden_jax, m) {
       .def("poll_load_status",
            [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
              auto [done, failed, pending] = self->PollLoadStatus();
+             std::vector<nb::bytes> py_done, py_failed, py_pending;
+             py_done.reserve(done.size());
+             for (const auto& h : done) {
+               py_done.push_back(nb::bytes(h.data(), h.size()));
+             }
+             py_failed.reserve(failed.size());
+             for (const auto& h : failed) {
+               py_failed.push_back(nb::bytes(h.data(), h.size()));
+             }
+             py_pending.reserve(pending.size());
+             for (const auto& h : pending) {
+               py_pending.push_back(nb::bytes(h.data(), h.size()));
+             }
+             return std::make_tuple(py_done, py_failed, py_pending);
+           })
+      .def(
+          "read_remote",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
+             const std::vector<nb::bytes>& block_hashes) -> bool {
+            auto hashes = ToStdStringVector(block_hashes);
+            return self->ReadRemote(hashes).ok();
+          },
+          nb::arg("block_hashes"))
+      .def("poll_remote_read_status",
+           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
+             auto [done, failed, pending] = self->PollRemoteReadStatus();
              std::vector<nb::bytes> py_done, py_failed, py_pending;
              py_done.reserve(done.size());
              for (const auto& h : done) {

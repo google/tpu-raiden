@@ -1584,6 +1584,7 @@ KVCacheManagerBase::DispatchD2hWork(const std::vector<CopyWork>& works,
         copies.push_back({dst_host_ptr + dst_offset, src_offset, size_to_copy});
       }
     }
+
     TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture cf,
                         raiden::IssueD2hShard(shard_hold, copies));
     local_futures.push_back(std::move(cf));

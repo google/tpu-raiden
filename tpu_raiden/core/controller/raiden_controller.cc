@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -111,17 +113,17 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
       });
 
   // 2. Start ControllerServer
-  auto& server = core::controller::ControllerServer::GetInstance();
-  absl::Status server_status =
-      server.StartServer(worker_registry_, raiden_controller_port_);
+  controller_server_ = std::make_unique<core::controller::ControllerServer>();
+  absl::Status server_status = controller_server_->StartServer(
+      worker_registry_, raiden_controller_port_);
   if (!server_status.ok()) {
     LOG(WARNING) << "Failed to start ControllerServer in RaidenController: "
                  << server_status.message();
   }
   // Store the actual port the server bound to
-  raiden_controller_port_ = server.GetGrpcPort();
+  raiden_controller_port_ = controller_server_->GetGrpcPort();
 
-  server.SetTransferBuffersCallback(
+  controller_server_->SetTransferBuffersCallback(
       [this](rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
              absl::Span<const int64_t> src_offsets,
              absl::Span<const int64_t> dst_offsets,
@@ -187,6 +189,14 @@ RaidenController::RaidenController(
 }
 
 RaidenController::~RaidenController() {
+  if (worker_registry_) {
+    worker_registry_->SetOnRegisterCallback(nullptr);
+  }
+  if (controller_server_) {
+    controller_server_->SetWorkerRegistry(nullptr);
+    controller_server_.reset();
+  }
+
   if (all_sharded_buffers_.empty() || !worker_registry_) return;
 
   proto::DeleteBuffersRequest request;
@@ -207,9 +217,6 @@ RaidenController::~RaidenController() {
       }
     }
   }
-
-  worker_registry_->SetOnRegisterCallback(nullptr);
-  core::controller::ControllerServer::GetInstance().SetWorkerRegistry(nullptr);
 }
 
 absl::Status RaidenController::InitializeWorkerBuffers(

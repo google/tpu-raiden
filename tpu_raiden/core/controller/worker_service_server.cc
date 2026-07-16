@@ -35,6 +35,17 @@ WorkerServiceServer& WorkerServiceServer::GetInstance() {
   return *instance;
 }
 
+std::unique_ptr<WorkerServiceServer> WorkerServiceServer::Create() {
+  return std::unique_ptr<WorkerServiceServer>(new WorkerServiceServer());
+}
+
+WorkerServiceServer::~WorkerServiceServer() {
+  absl::MutexLock lock(mutex_);
+  if (grpc_server_) {
+    grpc_server_->Shutdown();
+  }
+}
+
 absl::Status WorkerServiceServer::StartServer(
     std::shared_ptr<HostMemoryAllocator> host_allocator,
     KVManagerHolder transfer_manager, int port) {

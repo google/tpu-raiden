@@ -369,3 +369,27 @@ class KVCacheStore:
         pending: List of block hashes whose Load transfer is still in progress.
     """
     return self._impl.poll_load_status()
+
+  def read_remote(self, block_hashes: list[bytes]) -> bool:
+    """Launches async H2H read from remote worker.
+
+    Args:
+      block_hashes: List of block hashes to read from remote.
+
+    Returns:
+      True if successfully launched.
+    """
+    return self._impl.read_remote(block_hashes)
+
+  def poll_remote_read_status(
+      self,
+  ) -> tuple[list[bytes], list[bytes], list[bytes]]:
+    """Polls the status of all active remote reads.
+
+    Returns:
+      A tuple of (done, failed, pending), where:
+        done: List of block hashes whose remote read successfully completed.
+        failed: List of block hashes whose remote read failed.
+        pending: List of block hashes whose remote read is still in progress.
+    """
+    return self._impl.poll_remote_read_status()

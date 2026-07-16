@@ -405,6 +405,8 @@ class KVCacheManager {
       std::optional<std::string> worker_id = std::nullopt);
 
   std::unique_ptr<NumaAwareKVCacheManager> numa_manager_;
+  std::unique_ptr<tpu_raiden::controller::WorkerServiceServer>
+      private_grpc_server_;
 };
 
 }  // namespace jax

@@ -30,9 +30,12 @@ namespace tpu_raiden {
 namespace core {
 namespace controller {
 
-ControllerServer& ControllerServer::GetInstance() {
-  static ControllerServer* instance = new ControllerServer();
-  return *instance;
+
+ControllerServer::~ControllerServer() {
+  absl::MutexLock lock(mutex_);
+  if (grpc_server_) {
+    grpc_server_->Shutdown();
+  }
 }
 
 absl::Status ControllerServer::StartServer(

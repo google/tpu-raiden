@@ -368,6 +368,7 @@ void NumaAwareKVCacheManager::InitSubManagers(
       if (!bound_base_port.has_value() && sub_mgr->local_port().has_value()) {
         bound_base_port = sub_mgr->local_port().value();
       }
+
       sub_managers_.push_back(std::move(sub_mgr));
     }
     if (!bind_conflict) break;
@@ -862,10 +863,28 @@ void KVCacheManager::StartGrpcServer(
       raiden_controller_address->empty()) {
     return;
   }
-  absl::Status status =
-      controller::WorkerServiceServer::GetInstance().StartServer(
-          /*host_allocator=*/nullptr, KVManagerHolder(numa_manager_.get()),
-          raiden_worker_port);
+
+  bool use_private_server = false;
+  const char* disable_singleton =
+      std::getenv("RAIDEN_DISABLE_SINGLETON_WORKER");
+  if (disable_singleton != nullptr &&
+      (std::strcmp(disable_singleton, "true") == 0 ||
+       std::strcmp(disable_singleton, "1") == 0)) {
+    use_private_server = true;
+  }
+
+  absl::Status status;
+  if (use_private_server) {
+    private_grpc_server_ = controller::WorkerServiceServer::Create();
+    status = private_grpc_server_->StartServer(
+        /*host_allocator=*/nullptr, KVManagerHolder(numa_manager_.get()),
+        raiden_worker_port);
+  } else {
+    status = controller::WorkerServiceServer::GetInstance().StartServer(
+        /*host_allocator=*/nullptr, KVManagerHolder(numa_manager_.get()),
+        raiden_worker_port);
+  }
+
   if (!status.ok()) {
     throw std::runtime_error(absl::StrCat(
         "Failed to start gRPC server in KVCacheManager: ", status.message()));
@@ -909,6 +928,9 @@ void KVCacheManager::StartGrpcServer(
 }
 
 int KVCacheManager::GetRaidenWorkerPort() const {
+  if (private_grpc_server_) {
+    return private_grpc_server_->GetRaidenWorkerPort();
+  }
   return controller::WorkerServiceServer::GetInstance().GetRaidenWorkerPort();
 }
 
