@@ -53,6 +53,7 @@ WeightSynchronizerListener::WeightSynchronizerListener(
   address.sin6_addr = in6addr_any;
   address.sin6_port = htons(listener_port_);
 
+  // Bind to the requested port (0 for OS auto-allocation)
   if (bind(server_fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) <
       0) {
     LOG(FATAL) << "C++ Listener bind failed on port " << listener_port_ << ": "

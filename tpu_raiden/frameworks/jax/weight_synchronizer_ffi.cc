@@ -69,11 +69,13 @@ static WeightSynchronizerBase* GetSharedWs(int32_t shard_idx,
                                            int64_t slice_byte_size,
                                            int32_t local_port) {
   absl::MutexLock lock(ws_mu);
-  int32_t key = (listener_port > 0) ? listener_port : -(shard_idx + 1);
+  // Support 0 as a valid port for auto-allocation, while keeping it shared in
+  // the process.
+  int32_t key = (listener_port >= 0) ? listener_port : -(shard_idx + 1);
   auto& ws = (*ws_map)[key];
   if (ws == nullptr) {
     std::optional<int> opt_listener_port =
-        (listener_port > 0) ? std::make_optional(listener_port) : std::nullopt;
+        (listener_port >= 0) ? std::make_optional(listener_port) : std::nullopt;
     ws = new WeightSynchronizerBase(
         static_cast<size_t>(num_layers), static_cast<size_t>(parallelism),
         static_cast<size_t>(slice_byte_size), std::make_optional(local_port),

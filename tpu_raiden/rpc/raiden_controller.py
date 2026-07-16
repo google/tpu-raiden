@@ -1289,7 +1289,14 @@ class RaidenController:
                 except ValueError:
                   src_indices = [(0, 0)]
               else:
-                src_indices = [(i, i) for i in range(len(src_slices))]
+                try:
+                  replica_id = int(src_unit.job_replica_id)
+                  src_indices = [
+                      (i, replica_id * len(src_shards) + i)
+                      for i in range(len(src_shards))
+                  ]
+                except ValueError:
+                  src_indices = [(i, i) for i in range(len(src_slices))]
 
               for local_src_idx, global_src_idx in src_indices:
                 if global_src_idx >= len(src_slices):
@@ -1328,7 +1335,14 @@ class RaidenController:
                     except ValueError:
                       dst_indices = [(0, 0)]
                   else:
-                    dst_indices = [(j, j) for j in range(len(d_slices))]
+                    try:
+                      replica_id = int(dst_unit.job_replica_id)
+                      dst_indices = [
+                          (j, replica_id * len(dst_shards) + j)
+                          for j in range(len(dst_shards))
+                      ]
+                    except ValueError:
+                      dst_indices = [(j, j) for j in range(len(d_slices))]
 
                   for local_dst_idx, global_dst_idx in dst_indices:
                     if global_dst_idx >= len(d_slices):
