@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "tpu_raiden/transport/socket_util.h"
+#include "tpu_raiden/transport/lib/socket_util.h"
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -39,7 +39,7 @@
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 
-namespace tpu_raiden::transport {
+namespace tpu_raiden::transport::lib {
 
 absl::Status WriteExact(int fd, const void* buffer, size_t length) {
   struct iovec iov = {.iov_base = const_cast<void*>(buffer), .iov_len = length};
@@ -263,4 +263,4 @@ absl::StatusOr<int> ConnectToPeer(absl::string_view peer,
   return sock_fd;
 }
 
-}  // namespace tpu_raiden::transport
+}  // namespace tpu_raiden::transport::lib

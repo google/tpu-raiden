@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "tpu_raiden/transport/socket_transport.h"
+#include "tpu_raiden/transport/lib/socket_transport.h"
 
 #include <chrono>  // NOLINT
 #include <cstdint>
@@ -28,8 +28,7 @@
 #include "third_party/peregrine/src/api/transport.h"
 #include "third_party/peregrine/src/api/transport_types.h"
 
-namespace tpu_raiden {
-namespace transport {
+namespace tpu_raiden::transport::lib::testing {
 namespace {
 
 // Helper to poll completion with a bounding timeout.
@@ -172,5 +171,4 @@ TEST(SocketTransportTest, PointToPointIPv6ReadTransfer) {
 }
 
 }  // namespace
-}  // namespace transport
-}  // namespace tpu_raiden
+}  // namespace tpu_raiden::transport::lib::testing

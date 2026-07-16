@@ -512,7 +512,6 @@ TEST(BlockTransportTest, RoundRobinDistribution) {
   }
 }
 
-// Force warnings check
 }  // namespace
 }  // namespace transport
 }  // namespace tpu_raiden

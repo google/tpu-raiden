@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_TPU_RAIDEN_TRANSPORT_RAW_BUFFER_TRANSPORT_H_
-#define THIRD_PARTY_TPU_RAIDEN_TRANSPORT_RAW_BUFFER_TRANSPORT_H_
+#ifndef THIRD_PARTY_TPU_RAIDEN_TRANSPORT_LIB_RAW_BUFFER_TRANSPORT_H_
+#define THIRD_PARTY_TPU_RAIDEN_TRANSPORT_LIB_RAW_BUFFER_TRANSPORT_H_
 
 #include <sys/uio.h>
 
@@ -31,8 +31,7 @@
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 
-namespace tpu_raiden {
-namespace transport {
+namespace tpu_raiden::transport::lib {
 
 // Foundational delegate interface for RawBufferTransport to query base host
 // memory.
@@ -57,8 +56,8 @@ class RawBufferTransport {
  public:
   // Compact 32-byte binary packet header layout.
   struct alignas(8) PacketHeader {
-    uint8_t op;  // 3=BytePull, 5=ByteSlicePush, 1,2,4,6=HigherLevelBlockOps
-    uint8_t flags;           // Holds major_order or protocol flags
+    uint8_t op;     // 3=BytePull, 5=ByteSlicePush, 1,2,4,6=HigherLevelBlockOps
+    uint8_t flags;  // Holds major_order or protocol flags
     uint16_t buffer_id;      // Multidimensional Buffer / Layer ID coordinate
     uint16_t reserved;       // Holds parallelism/expected chunks count
     uint16_t padding;        // Unused padding to align fields
@@ -122,8 +121,6 @@ class RawBufferTransport {
   std::vector<std::thread> worker_threads_;
 };
 
-}  // namespace transport
+}  // namespace tpu_raiden::transport::lib
 
-}  // namespace tpu_raiden
-
-#endif  // THIRD_PARTY_TPU_RAIDEN_TRANSPORT_RAW_BUFFER_TRANSPORT_H_
+#endif  // THIRD_PARTY_TPU_RAIDEN_TRANSPORT_LIB_RAW_BUFFER_TRANSPORT_H_

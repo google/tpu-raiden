@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_TPU_RAIDEN_TRANSPORT_SOCKET_TRANSPORT_H_
-#define THIRD_PARTY_TPU_RAIDEN_TRANSPORT_SOCKET_TRANSPORT_H_
+#ifndef THIRD_PARTY_TPU_RAIDEN_TRANSPORT_LIB_SOCKET_TRANSPORT_H_
+#define THIRD_PARTY_TPU_RAIDEN_TRANSPORT_LIB_SOCKET_TRANSPORT_H_
 
 #include <atomic>
 #include <cstdint>
@@ -32,8 +32,7 @@
 #include "third_party/peregrine/src/api/transport.h"
 #include "third_party/peregrine/src/api/transport_types.h"
 
-namespace tpu_raiden {
-namespace transport {
+namespace tpu_raiden::transport::lib {
 
 // Prototyped POSIX TCP socket implementation of peregrine::Transport interface.
 // Spins up a dedicated background server thread listening on a local port to
@@ -116,7 +115,6 @@ class SocketTransport final : public peregrine::Transport {
   std::vector<std::thread> worker_threads_;
 };
 
-}  // namespace transport
-}  // namespace tpu_raiden
+}  // namespace tpu_raiden::transport::lib
 
-#endif  // THIRD_PARTY_TPU_RAIDEN_TRANSPORT_SOCKET_TRANSPORT_H_
+#endif  // THIRD_PARTY_TPU_RAIDEN_TRANSPORT_LIB_SOCKET_TRANSPORT_H_

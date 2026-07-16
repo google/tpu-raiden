@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "tpu_raiden/transport/raw_buffer_transport.h"
+#include "tpu_raiden/transport/lib/raw_buffer_transport.h"
 
 #include <signal.h>
 
@@ -30,8 +30,7 @@
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 
-namespace tpu_raiden {
-namespace transport {
+namespace tpu_raiden::transport::lib::testing {
 namespace {
 
 class RawMockDelegate : public RawBufferTransportDelegate {
@@ -222,7 +221,5 @@ TEST(RawBufferTransportTest, MultiIpPoolingIsolation) {
   transport2.ReleaseConnection(peer1, fd4, "127.0.0.2");
 }
 
-// Force warnings check
 }  // namespace
-}  // namespace transport
-}  // namespace tpu_raiden
+}  // namespace tpu_raiden::transport::lib::testing

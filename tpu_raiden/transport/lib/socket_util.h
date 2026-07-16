@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_TRANSPORT_SOCKET_UTIL_H_
-#define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_TRANSPORT_SOCKET_UTIL_H_
+#ifndef THIRD_PARTY_TPU_RAIDEN_TRANSPORT_LIB_SOCKET_UTIL_H_
+#define THIRD_PARTY_TPU_RAIDEN_TRANSPORT_LIB_SOCKET_UTIL_H_
 
 #include <sys/uio.h>
 
@@ -24,7 +24,7 @@
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 
-namespace tpu_raiden::transport {
+namespace tpu_raiden::transport::lib {
 
 absl::Status WriteExact(int fd, const void* buffer, size_t length);
 absl::Status WriteVExact(int fd, absl::Span<const struct iovec> iov);
@@ -35,6 +35,6 @@ absl::Status ReadVExact(int fd, absl::Span<const struct iovec> iov);
 absl::StatusOr<int> ConnectToPeer(absl::string_view peer,
                                   absl::string_view local_ip = "");
 
-}  // namespace tpu_raiden::transport
+}  // namespace tpu_raiden::transport::lib
 
-#endif  // THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_TRANSPORT_SOCKET_UTIL_H_
+#endif  // THIRD_PARTY_TPU_RAIDEN_TRANSPORT_LIB_SOCKET_UTIL_H_

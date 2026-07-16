@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "tpu_raiden/transport/raw_buffer_transport.h"
+#include "tpu_raiden/transport/lib/raw_buffer_transport.h"
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -42,10 +42,9 @@
 #include "absl/synchronization/mutex.h"
 #include "xla/tsl/platform/statusor.h"
 #include "tpu_raiden/core/status_macros.h"
-#include "tpu_raiden/transport/socket_util.h"
+#include "tpu_raiden/transport/lib/socket_util.h"
 
-namespace tpu_raiden {
-namespace transport {
+namespace tpu_raiden::transport::lib {
 
 RawBufferTransport::RawBufferTransport(
     RawBufferTransportDelegate* delegate, int local_port, bool enable_conn_pool,
@@ -404,7 +403,4 @@ absl::Status RawBufferTransport::PushBuffer(
   return absl::OkStatus();
 }
 
-// Force warnings check
-}  // namespace transport
-
-}  // namespace tpu_raiden
+}  // namespace tpu_raiden::transport::lib

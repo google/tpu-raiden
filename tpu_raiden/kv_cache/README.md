@@ -98,9 +98,9 @@ Python orchestration scripts via non-blocking tuple lambda futures.
   loops (`ConnectToPeer`), allowing clients to push or pull data transparently
   without starting background listening server threads.
 * **Transparent Symmetric Tensor Exchanges**: Uses custom block pointer packet
-  structures (`BlockPacketHeader`). Receiving worker streams inspect
-  pre-extracted internal attention layers (`layers_`) to compute target byte
-  offset locations locally on the fly, bypassing raw virtual base addresses
+  structures (`RawBufferTransport::PacketHeader`). Receiving worker streams
+  inspect pre-extracted internal attention layers (`layers_`) to compute target
+  byte offset locations locally on the fly, bypassing raw virtual base addresses
   entirely. Implements automated column assignments during push streams and
   local allocations during pulling symmetrically.
 
