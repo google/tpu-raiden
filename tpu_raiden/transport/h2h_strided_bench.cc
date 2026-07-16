@@ -76,7 +76,7 @@
 
 #include "absl/status/status.h"
 #include "absl/types/span.h"
-#include "tpu_raiden/transport/lib/socket_util.h"
+#include "tpu_raiden/transport/lib/socket/util.h"
 
 namespace {
 

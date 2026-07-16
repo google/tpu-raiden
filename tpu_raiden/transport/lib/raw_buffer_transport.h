@@ -25,11 +25,10 @@
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
-#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
-#include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "tpu_raiden/transport/lib/conn/pool.h"
 
 namespace tpu_raiden::transport::lib {
 
@@ -88,12 +87,6 @@ class RawBufferTransport {
   const std::string& bound_ip() const { return bound_ip_; }
 
  protected:
-  virtual absl::StatusOr<int> BorrowConnection(absl::string_view peer,
-                                               absl::string_view local_ip = "");
-  virtual void ReturnConnection(bool ok, int fd, absl::string_view peer,
-                                absl::string_view local_ip = "");
-  void ClosePooledConnections();
-
   virtual absl::Status ProcessSingleRequest(int client_fd);
   virtual absl::Status HandleCustomRequest(int client_fd,
                                            const PacketHeader& header);
@@ -111,9 +104,7 @@ class RawBufferTransport {
   absl::Mutex mu_;
   std::vector<int> active_client_fds_ ABSL_GUARDED_BY(mu_);
 
-  absl::Mutex pool_mu_;
-  absl::flat_hash_map<std::string, std::vector<int>> conn_pool_
-      ABSL_GUARDED_BY(pool_mu_);
+  ConnPool conn_pool_;
 
   std::thread listener_thread_;
   std::vector<std::thread> worker_threads_;
