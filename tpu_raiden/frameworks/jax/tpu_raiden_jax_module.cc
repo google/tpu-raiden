@@ -223,7 +223,6 @@ NB_MODULE(_tpu_raiden_jax, m) {
           [](tpu_raiden::kv_cache::jax::KVCacheManager& self, size_t layer_idx,
              size_t shard_idx, size_t num_floats) -> nb::list {
             const uint8_t* ptr = self.GetHostPointer(layer_idx, shard_idx);
-            LOG(ERROR) << "read_host_memory DEBUG: ptr=" << (const void*)ptr;
             nb::list lst;
             if (ptr) {
               const float* fptr = reinterpret_cast<const float*>(ptr);
