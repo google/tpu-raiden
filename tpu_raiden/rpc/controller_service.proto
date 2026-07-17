@@ -34,6 +34,56 @@ message CoordinateTransferRequest {
   string req_id = 8;
   string src_controller_address = 9;
   string dst_controller_address = 10;
+  // Block-granular reshard inputs. Source block IDs are looked up from the
+  // producer-side registry and deliberately never cross vLLM metadata.
+  repeated int64 dst_device_block_ids = 11;
+  int64 num_tokens = 12;
+  // Pool tags the consumer wants moved (e.g. "fa"). The controller resolves
+  // tags against both peers' registered manifests; the complement becomes the
+  // skip summary. Raiden attaches no meaning to any tag value.
+  repeated string transfer_pool_tags = 13;
+}
+
+// One contiguous run of destination tokens materialized from one source
+// block, declared by the producer rank that owns it. Spans are controller
+// -plane data only: the worker wire never sees them.
+message SourceSpan {
+  // Global token index in request order where this run lands.
+  int64 dst_token_start = 1;
+  int64 token_count = 2;
+  // Index into the owning registration's block_ids list — never a physical
+  // block id.
+  int64 src_block_ordinal = 3;
+  int64 src_block_token_offset = 4;
+}
+
+message RegisterRequestBlocksRequest {
+  string req_id = 1;
+  int64 uuid = 2;
+  RaidenIdProto unit = 3;
+  repeated int64 block_ids = 4;
+  // The registering rank's declared source map. A span never crosses a
+  // source block boundary (offset + count <= page_tokens).
+  repeated SourceSpan spans = 5;
+}
+
+message ReleaseRequestBlocksRequest {
+  string req_id = 1;
+  int64 uuid = 2;
+  // Distinguishes administrative cleanup (drop the whole registration) from
+  // the per-rank release semantics.
+  bool force = 3;
+}
+
+message CompleteRequestBlocksRequest {
+  string req_id = 1;
+  int64 uuid = 2;
+  RaidenIdProto unit = 3;
+}
+
+message CancelRequestBlocksIfUnclaimedRequest {
+  string req_id = 1;
+  int64 uuid = 2;
 }
 
 message GetTransferStatusRequest {
@@ -57,15 +107,30 @@ message ControllerRequest {
     COMMAND_UNSPECIFIED = 0;
     COMMAND_COORDINATE_TRANSFER = 1;
     COMMAND_GET_TRANSFER_STATUS = 2;
+    COMMAND_REGISTER_REQUEST_BLOCKS = 3;
+    COMMAND_RELEASE_REQUEST_BLOCKS = 4;
+    COMMAND_COMPLETE_REQUEST_BLOCKS = 5;
+    COMMAND_CANCEL_REQUEST_BLOCKS_IF_UNCLAIMED = 6;
   }
   Command command = 1;
 
   CoordinateTransferRequest coordinate_transfer_request = 2;
   GetTransferStatusRequest get_transfer_status_request = 3;
+  // Fields 8+ deliberately avoid raiden_service.proto ControlRequest's field
+  // space (1-4): the server body-sniffs one TCP payload against both message
+  // types, and a shared (command, field) pair would misroute legacy worker
+  // commands into the D5 registry handlers.
+  RegisterRequestBlocksRequest register_request_blocks_request = 8;
+  ReleaseRequestBlocksRequest release_request_blocks_request = 9;
+  CompleteRequestBlocksRequest complete_request_blocks_request = 10;
+  CancelRequestBlocksIfUnclaimedRequest
+      cancel_request_blocks_if_unclaimed_request = 11;
 }
 
 message ControllerResponse {
   bool success = 1;
   string message = 2;
   GetTransferStatusResponse get_transfer_status_response = 3;
+  // Command-specific scalar result (e.g. cancellation verdict, retire count).
+  string response_data = 4;
 }
