@@ -2,6 +2,13 @@ name: Test TPU Multi-Host Runner
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - haochengd-google-patch-3
+      
+  pull_request:
+    branches:
+      - haochengd-google-patch-3
 
 jobs:
   run_tpu_tests:
