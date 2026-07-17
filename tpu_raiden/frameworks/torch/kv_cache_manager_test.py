@@ -46,13 +46,48 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
     self.block_size = 2
     self.slice_byte_size = 16384 // 4  # float32 capacity
 
+  def _new_manager(self, tensors, num_blocks):
+    """Constructs a manager, hard-failing if construction hangs.
+
+    Construction unpacks each cache and awaits its device buffer; a cache still
+    carrying a deferred op whose graph is never materialized would block here
+    forever. The constructor holds the GIL, so a hang freezes the process and no
+    Python-thread watchdog could fire -- guard it with faulthandler instead.
+    """
+    faulthandler.dump_traceback_later(
+        _CONSTRUCTION_DEADLOCK_TIMEOUT_S, exit=True
+    )
+    try:
+      return _kv_cache_manager.KVCacheManager(
+          tensors,
+          local_port=0,
+          host_blocks_to_allocate=num_blocks * self.block_size,
+          parallelism=1,
+      )
+    finally:
+      faulthandler.cancel_dump_traceback_later()
+
   @parameterized.named_parameters(
-      ("fp32", torch.float32),
-      ("int32", torch.int32),
+      ("fp32", torch.float32, False),
+      ("int32", torch.int32, False),
+      ("fp32_deferred", torch.float32, True),
+      ("int32_deferred", torch.int32, True),
   )
-  def test_e2e_distributed_staging_offloads_and_socket_transceives(self, dtype):
+  def test_e2e_distributed_staging_offloads_and_socket_transceives(
+      self, dtype, defer
+  ):
     num_blocks = 2
     shape = (num_blocks * self.block_size, 128, 8)  # 2 blocks capacity
+
+    if defer:
+      # Create and register the caches while they still carry a pending deferred
+      # op (vLLM's DEFER_AND_FUSE mode), exercising the in-place materialization
+      # that construction performs. If that materialization forked a separate
+      # buffer instead of filling the live one, the H2d in step 3 would write
+      # into the copy and the parity check in step 4 would fail.
+      cm = execution_mode.set_eager_mode(EagerMode.DEFER_AND_FUSE)
+      cm.__enter__()
+      self.addCleanup(cm.__exit__, None, None, None)
 
     # 1. Allocate sharded eager tensors directly on the physical XLA TPU devices!
     # Layer 0 and Layer 1 for Source (Trainer)
@@ -75,19 +110,15 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
         shards.append(t)
       dst_tensors.append(shards)
 
+    if defer:
+      # Guard: the caches must still be deferred here, or this variant would not
+      # exercise construction-time materialization at all.
+      self.assertFalse(sync.is_materialized(src_tensors[0][0]))
+      self.assertFalse(sync.is_materialized(dst_tensors[0][0]))
+
     # 2. Instantiate two real managers locally on ephemeral loopback ports!
-    ws_source = _kv_cache_manager.KVCacheManager(
-        src_tensors,
-        local_port=0,
-        host_blocks_to_allocate=num_blocks * self.block_size,
-        parallelism=1,
-    )
-    ws_dest = _kv_cache_manager.KVCacheManager(
-        dst_tensors,
-        local_port=0,
-        host_blocks_to_allocate=num_blocks * self.block_size,
-        parallelism=1,
-    )
+    ws_source = self._new_manager(src_tensors, num_blocks)
+    ws_dest = self._new_manager(dst_tensors, num_blocks)
 
     self.assertIsNotNone(ws_source.local_port)
     self.assertIsNotNone(ws_dest.local_port)
@@ -184,21 +215,33 @@ class KVCacheManagerTorchTest(parameterized.TestCase):
         for shard in layer:
           self.assertFalse(sync.is_materialized(shard))
 
-      faulthandler.dump_traceback_later(
-          _CONSTRUCTION_DEADLOCK_TIMEOUT_S, exit=True
-      )
-      try:
-        manager = _kv_cache_manager.KVCacheManager(
-            lazy_tensors,
-            local_port=0,
-            host_blocks_to_allocate=num_blocks * self.block_size,
-            parallelism=1,
-        )
-      finally:
-        faulthandler.cancel_dump_traceback_later()
+      manager = self._new_manager(lazy_tensors, num_blocks)
 
     # Unpack awaited each base buffer, so the tensors are materialized now.
     for layer in lazy_tensors:
+      for shard in layer:
+        self.assertTrue(sync.is_materialized(shard))
+    self.assertIsNotNone(manager.local_port)
+
+  def test_construction_over_host_transferred_kv_caches(self):
+    """KV caches created as `cpu_tensor.to(device)` must unpack.
+
+    vLLM allocates KV caches as `torch.zeros(shape, dtype).to(device)`. Under
+    DEFER_AND_FUSE the resulting tensor's TensorImpl may not expose a device
+    until the transfer materializes, so unpack must not gate on
+    `tensor.device()` before resolving and materializing the base buffer.
+    """
+    num_blocks = 2
+    shape = (num_blocks * self.block_size, 128, 8)
+
+    with execution_mode.set_eager_mode(EagerMode.DEFER_AND_FUSE):
+      transferred = [
+          [torch.zeros(shape, dtype=torch.float32).to(self.device)]
+          for _ in range(self.num_layers)
+      ]
+      manager = self._new_manager(transferred, num_blocks)
+
+    for layer in transferred:
       for shard in layer:
         self.assertTrue(sync.is_materialized(shard))
     self.assertIsNotNone(manager.local_port)
