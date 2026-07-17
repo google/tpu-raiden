@@ -156,6 +156,10 @@ BAZEL_TARGETS=(
   "//tpu_raiden/rpc:raiden_service_py_pb2"
   "//tpu_raiden/rpc:coordination_py_pb2"
   "//tpu_raiden/rpc:coordination_py_pb2_grpc"
+  # C++ control-plane service binaries. These do not depend on JAX or Torch,
+  # so they are always built.
+  "//tpu_raiden/core/controller:raiden_orchestrator_main"
+  "//tpu_raiden/kv_cache/global_registry:global_registry_server"
 )
 DEFINE_FLAGS=""
 BAZEL_MODULE_FLAGS=()
