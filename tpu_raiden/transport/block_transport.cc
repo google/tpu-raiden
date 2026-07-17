@@ -251,6 +251,48 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
 absl::Status BlockTransport::HandleIncomingPush(int client_fd,
                                                 const PacketHeader& header) {
   ASSIGN_OR_RETURN(MajorOrder major_order, ParseMajorOrder(header.flags));
+
+  std::vector<int> target_layers;
+  if (header.local_id == 0xFFFFFFFF) {
+    target_layers.resize(block_delegate_->num_block_arrays());
+    std::iota(target_layers.begin(), target_layers.end(), 0);
+  } else {
+    if (header.local_id >= block_delegate_->num_block_arrays()) {
+      return absl::OutOfRangeError(absl::StrCat(
+          "push block-array index ", header.local_id,
+          " out of range: ", block_delegate_->num_block_arrays()));
+    }
+    target_layers = {static_cast<int>(header.local_id)};
+  }
+
+  // Resolve the expectation source before the explicit-destination handshake
+  // or any payload write. A uuid whose registered receive plan carries pool
+  // fields is plan-declared: it addresses exactly one declared pool and its
+  // completion gate is the plan's global push count. nullopt keeps the
+  // header-declared (legacy) contract.
+  std::optional<PoolPushProgressSpec> pool_progress_spec;
+  for (int target_layer : target_layers) {
+    ASSIGN_OR_RETURN(
+        std::optional<PoolPushProgressSpec> candidate,
+        block_delegate_->GetPoolPushProgressSpec(target_layer, header.uuid));
+    if (!candidate.has_value()) {
+      if (pool_progress_spec.has_value()) {
+        return absl::InvalidArgumentError(
+            "push mixes pool-keyed and legacy block arrays");
+      }
+      continue;
+    }
+    if (target_layers.size() != 1) {
+      return absl::InvalidArgumentError(
+          "pool-keyed push must address exactly one transfer pool");
+    }
+    if (candidate->expected_pushes == 0 || candidate->expected_pools == 0) {
+      return absl::InvalidArgumentError(
+          "pool-keyed push progress counts must be positive");
+    }
+    pool_progress_spec = *candidate;
+  }
+
   std::vector<int> allocated_ids;
 
   std::vector<int> src_block_ids;
@@ -268,14 +310,6 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
                               header.count_or_size * sizeof(int)));
     uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
-  }
-
-  std::vector<int> target_layers;
-  if (header.local_id == 0xFFFFFFFF) {
-    target_layers.resize(block_delegate_->num_block_arrays());
-    std::iota(target_layers.begin(), target_layers.end(), 0);
-  } else {
-    target_layers = {static_cast<int>(header.local_id)};
   }
 
   RETURN_IF_ERROR(ForEachPayload(
@@ -319,37 +353,77 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
         return absl::OkStatus();
       }));
 
-  bool trigger_on_layer_received = false;
+  // Unified receive accounting: one progress map and one increment path for
+  // both contracts; only the expectation source and the completion callback
+  // differ. Plan-declared mode counts every sender's streams against the
+  // plan's global per-pool total and retires the uuid when all declared pools
+  // complete; header-declared (legacy) mode counts this push's parallelism
+  // from header.reserved and retires the uuid when all constructor layers
+  // complete.
   const int l =
       (header.local_id == 0xFFFFFFFF) ? 0 : static_cast<int>(header.local_id);
-  const size_t expected_chunks = header.reserved;  // P
+  const bool plan_declared = pool_progress_spec.has_value();
+  const size_t expected_chunks =
+      plan_declared ? pool_progress_spec->expected_pushes : header.reserved;
+  bool trigger_completion = false;
   {
     absl::MutexLock lock(progress_mu_);
     auto& progress = layer_progress_[{header.uuid, l}];
     progress.completed_chunks++;
+    if (plan_declared && progress.completed_chunks > expected_chunks) {
+      return absl::AlreadyExistsError(absl::StrCat(
+          "pool ", l, " received more than ", expected_chunks,
+          " push streams for UUID ", header.uuid));
+    }
     if (progress.completed_chunks == expected_chunks &&
         !progress.on_layer_received_called) {
       progress.on_layer_received_called = true;
-      trigger_on_layer_received = true;
-      bool all_layers_called = true;
-      for (size_t layer = 0; layer < block_delegate_->num_layers(); ++layer) {
-        auto it = layer_progress_.find({header.uuid, layer});
-        if (it == layer_progress_.end() ||
-            !it->second.on_layer_received_called) {
-          all_layers_called = false;
-          break;
+      trigger_completion = true;
+      if (plan_declared) {
+        size_t completed_pools = 0;
+        for (const auto& [key, pool_progress] : layer_progress_) {
+          if (key.first == header.uuid &&
+              pool_progress.on_layer_received_called) {
+            ++completed_pools;
+          }
         }
-      }
-      if (all_layers_called) {
+        if (completed_pools == pool_progress_spec->expected_pools) {
+          for (auto it = layer_progress_.begin();
+               it != layer_progress_.end();) {
+            if (it->first.first == header.uuid) {
+              auto erase_it = it++;
+              layer_progress_.erase(erase_it);
+            } else {
+              ++it;
+            }
+          }
+        }
+      } else {
+        bool all_layers_called = true;
         for (size_t layer = 0; layer < block_delegate_->num_layers(); ++layer) {
-          layer_progress_.erase({header.uuid, layer});
+          auto it = layer_progress_.find({header.uuid, layer});
+          if (it == layer_progress_.end() ||
+              !it->second.on_layer_received_called) {
+            all_layers_called = false;
+            break;
+          }
+        }
+        if (all_layers_called) {
+          for (size_t layer = 0; layer < block_delegate_->num_layers();
+               ++layer) {
+            layer_progress_.erase({header.uuid, layer});
+          }
         }
       }
     }
   }
 
-  if (trigger_on_layer_received) {
-    RETURN_IF_ERROR(block_delegate_->OnLayerReceived(l, header.uuid));
+  if (trigger_completion) {
+    if (plan_declared) {
+      RETURN_IF_ERROR(block_delegate_->OnPoolReceived(l, header.uuid));
+    } else {
+      RETURN_IF_ERROR(block_delegate_->OnLayerReceived(l, header.uuid));
+    }
   }
 
   LOG(INFO) << "HandleCustomRequest (H2H read complete): client_fd="
@@ -800,9 +874,14 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
         const int src_id = src_block_ids[block_offset + k];
 
         const int64_t block_id_val = src_id;
+        const int64_t dst_id_val =
+            block_offset + k < dst_block_ids.size()
+                ? static_cast<int64_t>(dst_block_ids[block_offset + k])
+                : -1;
         std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
             l, sh, absl::MakeConstSpan(&block_id_val, 1),
-            block_delegate_->block_bytes(l), uuid, -1, peer);
+            block_delegate_->block_bytes(l), uuid, -1, peer,
+            /*src_block_id=*/-1, /*dst_block_id=*/dst_id_val);
         if (chunks.empty()) {
           return absl::NotFoundError(
               absl::StrCat("No transfer chunks found for block ", src_id,
@@ -831,6 +910,19 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
   }
 
   ok_to_pool = true;
+}
+
+void BlockTransport::ForgetPushProgress(uint64_t uuid) {
+  absl::MutexLock lock(progress_mu_);
+  for (auto it = layer_progress_.begin(); it != layer_progress_.end();) {
+    if (it->first.first == uuid) {
+      // absl::flat_hash_map::erase(iterator) returns void.
+      auto erase_it = it++;
+      layer_progress_.erase(erase_it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 void BlockTransport::H2hReadWorker(

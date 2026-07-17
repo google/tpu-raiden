@@ -22,6 +22,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>  // NOLINT
 #include <utility>
@@ -59,6 +60,17 @@ enum class BlockChunkRegionValidationMode {
   kDisabled = 0,
   kWarn = 1,
   kFail = 2,
+};
+
+// Receiver-side expectation contract for one plan-declared (pool-keyed)
+// transfer. The transport keeps a single progress map for every push; a
+// registered plan supplies this spec and switches the expectation source for
+// its uuid from the wire header's per-push parallelism to the plan's global
+// per-pool push count. expected_pools retires all progress records for the
+// uuid once the final declared pool completes.
+struct PoolPushProgressSpec {
+  size_t expected_pushes = 0;
+  size_t expected_pools = 0;
 };
 
 // Delegate interface for BlockTransport inheriting raw memory primitives.
@@ -112,11 +124,14 @@ class BlockTransportDelegate : public lib::RawBufferTransportDelegate {
   // transfers.
   // If `src_block_id` is provided (not -1), it is used to resolve correct chunk
   // offsets when multiple source blocks merge into a single destination block
-  // (heterogeneous block sizes).
+  // (heterogeneous block sizes). If `dst_block_id` is provided (not -1), the
+  // sender resolution is restricted to that destination block. This is needed
+  // when one source block fans out to multiple blocks on the same peer.
   virtual std::vector<BlockChunk> GetBlockChunks(
       size_t layer_idx, size_t shard_idx, absl::Span<const int64_t> block_ids,
       size_t total_bytes, uint64_t uuid, int64_t sender_node_id = -1,
-      absl::string_view peer = "", int64_t src_block_id = -1) {
+      absl::string_view peer = "", int64_t src_block_id = -1,
+      int64_t dst_block_id = -1) {
     // Default implementation: blocks are contiguous and of uniform size.
     std::vector<BlockChunk> result;
     size_t accumulated_bytes = 0;
@@ -135,6 +150,23 @@ class BlockTransportDelegate : public lib::RawBufferTransportDelegate {
       size_t num_blocks, uint64_t uuid = 0) = 0;
 
   virtual absl::Status OnLayerReceived(size_t layer_idx, uint64_t uuid) {
+    return absl::OkStatus();
+  }
+
+  // Resolves the receive-progress expectation source for one wire-addressed
+  // block array. A registered pool plan returns its contract (plan-declared
+  // mode); nullopt selects the legacy header-declared mode; an error rejects
+  // the push before any payload is read (e.g. a pool outside the plan's
+  // transfer set).
+  virtual absl::StatusOr<std::optional<PoolPushProgressSpec>>
+  GetPoolPushProgressSpec(size_t pool_idx, uint64_t uuid) const {
+    return std::nullopt;
+  }
+
+  // Pool-keyed counterpart to OnLayerReceived, fired when a declared pool
+  // reaches its plan-declared push count. An explicit-pool index is not
+  // necessarily a constructor layer/storage index, so the default is a no-op.
+  virtual absl::Status OnPoolReceived(size_t pool_idx, uint64_t uuid) {
     return absl::OkStatus();
   }
 
@@ -212,6 +244,10 @@ class BlockTransport : public lib::RawBufferTransport {
       const std::vector<uint8_t*>& explicit_dst_ptrs = {}, int parallelism = 1,
       MajorOrder major_order = MajorOrder::kLayerMajor,
       BlockReceivedCallback on_block_received = {}, uint64_t uuid = 0);
+
+  // Drops receive-progress counters belonging to a finished, failed, or
+  // timed-out plan so the UUID can be safely reused.
+  void ForgetPushProgress(uint64_t uuid);
 
  private:
   absl::Status HandleCustomRequest(int client_fd,
