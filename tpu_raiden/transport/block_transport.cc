@@ -46,7 +46,7 @@
 #include "absl/types/span.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/transport/lib/raw_buffer_transport.h"
-#include "tpu_raiden/transport/lib/socket_util.h"
+#include "tpu_raiden/transport/lib/socket/util.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -716,7 +716,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
                                     std::vector<absl::Status>& statuses,
                                     MajorOrder major_order, uint64_t uuid,
                                     int layer_idx, int parallelism) {
-  auto status_or_fd = BorrowConnection(peer, local_ip);
+  auto status_or_fd = conn_pool_.Borrow(peer, local_ip);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
     return;
@@ -725,7 +725,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
   const int fd = status_or_fd.value();
   bool ok_to_pool = false;
   auto fd_cleaner = absl::MakeCleanup(
-      [&] { ReturnConnection(ok_to_pool, fd, peer, local_ip); });
+      [&] { conn_pool_.Return(ok_to_pool, fd, peer, local_ip); });
 
   PacketHeader header = {};
   header.op = dst_block_ids.empty() ? 1 : 6;
@@ -842,7 +842,7 @@ void BlockTransport::H2hReadWorker(
     const std::vector<uint8_t*>& explicit_dst_ptrs,
     std::vector<absl::Status>& statuses, MajorOrder major_order,
     BlockReceivedCallback on_block_received, uint64_t uuid) {
-  auto status_or_fd = BorrowConnection(peer, local_ip);
+  auto status_or_fd = conn_pool_.Borrow(peer, local_ip);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
     return;
@@ -851,7 +851,7 @@ void BlockTransport::H2hReadWorker(
   const int fd = status_or_fd.value();
   bool ok_to_pool = false;
   auto fd_cleaner = absl::MakeCleanup(
-      [&] { ReturnConnection(ok_to_pool, fd, peer, local_ip); });
+      [&] { conn_pool_.Return(ok_to_pool, fd, peer, local_ip); });
 
   size_t SF = block_delegate_->shard_factor();
 

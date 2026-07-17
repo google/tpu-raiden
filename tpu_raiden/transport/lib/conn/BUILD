@@ -12,70 +12,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# BUILD file for tpu_raiden BlockTransport package.
-
-load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
-    name = "block_transport",
-    srcs = ["block_transport.cc"],
-    hdrs = ["block_transport.h"],
+    name = "pool",
+    srcs = ["pool.cc"],
+    hdrs = ["pool.h"],
     copts = [
         "-fno-strict-aliasing",
         "-fexceptions",
     ],
     features = ["-use_header_modules"],
-    visibility = ["//visibility:public"],
     deps = [
-        "//tpu_raiden/core:status_macros",
-        "//tpu_raiden/core:tsl_platform_headers",
-        "//tpu_raiden/transport/lib:raw_buffer_transport",
         "//tpu_raiden/transport/lib/socket:util",
         "@com_google_absl//absl/base:core_headers",
-        "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/log:absl_check",
+        "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
         "@com_google_absl//absl/synchronization",
-        "@com_google_absl//absl/types:span",
     ],
 )
 
 cc_test(
-    name = "block_transport_test",
-    srcs = ["block_transport_test.cc"],
+    name = "pool_test",
+    srcs = ["pool_test.cc"],
     copts = [
         "-fno-strict-aliasing",
         "-fexceptions",
     ],
     features = ["-use_header_modules"],
     deps = [
-        ":block_transport",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings:string_view",
-        "@com_google_absl//absl/synchronization",
-        "@com_google_googletest//:gtest",
+        ":pool",
         "@com_google_googletest//:gtest_main",
-    ],
-)
-
-cc_binary(
-    name = "h2h_strided_bench",
-    srcs = ["h2h_strided_bench.cc"],
-    copts = [
-        "-fno-strict-aliasing",
-        "-fexceptions",
-    ],
-    features = ["-use_header_modules"],
-    deps = [
-        "//tpu_raiden/transport/lib/socket:util",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/types:span",
     ],
 )

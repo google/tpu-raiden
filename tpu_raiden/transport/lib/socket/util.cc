@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "tpu_raiden/transport/lib/socket_util.h"
+#include "tpu_raiden/transport/lib/socket/util.h"
 
 #include <arpa/inet.h>
 #include <netdb.h>
