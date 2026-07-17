@@ -79,7 +79,7 @@ class RawBufferTransport {
 
   // Synchronously requests an arbitrary continuous byte slice from a remote
   // peer's staging memory.
-  absl::Status PullBuffer(absl::string_view source, size_t buffer_id,
+  absl::Status PullBuffer(absl::string_view peer, size_t buffer_id,
                           size_t src_shard_idx, size_t src_offset_bytes,
                           size_t dst_shard_idx, size_t dst_offset_bytes,
                           size_t size_bytes);
@@ -90,7 +90,7 @@ class RawBufferTransport {
  protected:
   virtual absl::StatusOr<int> BorrowConnection(absl::string_view peer,
                                                absl::string_view local_ip = "");
-  virtual void ReturnConnection(absl::string_view peer, int fd,
+  virtual void ReturnConnection(bool ok, int fd, absl::string_view peer,
                                 absl::string_view local_ip = "");
   void ClosePooledConnections();
 

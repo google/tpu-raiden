@@ -721,17 +721,11 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
     statuses[stream_idx] = status_or_fd.status();
     return;
   }
-  int fd = status_or_fd.value();
 
+  const int fd = status_or_fd.value();
   bool ok_to_pool = false;
-  auto fd_cleaner = absl::MakeCleanup([&] {
-    if (ok_to_pool) {
-      ReturnConnection(peer, fd, local_ip);
-    } else {
-      shutdown(fd, SHUT_RDWR);
-      close(fd);
-    }
-  });
+  auto fd_cleaner = absl::MakeCleanup(
+      [&] { ReturnConnection(ok_to_pool, fd, peer, local_ip); });
 
   PacketHeader header = {};
   header.op = dst_block_ids.empty() ? 1 : 6;
@@ -853,17 +847,11 @@ void BlockTransport::H2hReadWorker(
     statuses[stream_idx] = status_or_fd.status();
     return;
   }
-  int fd = status_or_fd.value();
 
+  const int fd = status_or_fd.value();
   bool ok_to_pool = false;
-  auto fd_cleaner = absl::MakeCleanup([&] {
-    if (ok_to_pool) {
-      ReturnConnection(peer, fd, local_ip);
-    } else {
-      shutdown(fd, SHUT_RDWR);
-      close(fd);
-    }
-  });
+  auto fd_cleaner = absl::MakeCleanup(
+      [&] { ReturnConnection(ok_to_pool, fd, peer, local_ip); });
 
   size_t SF = block_delegate_->shard_factor();
 
