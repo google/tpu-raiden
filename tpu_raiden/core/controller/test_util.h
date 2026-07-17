@@ -42,6 +42,8 @@ struct MockTransferManager {
   int d2h_calls = 0;
   int h2d_calls = 0;
   int h2h_calls = 0;
+  int h2h_read_calls = 0;
+  int h2h_write_calls = 0;
   std::string last_peer;
   std::vector<int64_t> last_src_offsets;
   std::vector<int64_t> last_dst_offsets;
@@ -69,11 +71,24 @@ struct MockTransferManager {
     return raiden::PjRtCopyFuture();
   }
 
+  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hRead(
+      std::string peer, const std::vector<int>& src_block_ids,
+      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
+      int layer_idx = -1) {
+    h2h_calls++;
+    h2h_read_calls++;
+    last_peer = peer;
+    last_src_offsets.assign(src_block_ids.begin(), src_block_ids.end());
+    last_dst_offsets.assign(dst_block_ids.begin(), dst_block_ids.end());
+    return std::make_pair(std::vector<int>{}, raiden::PjRtCopyFuture());
+  }
+
   absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hWrite(
       std::string peer, const std::vector<int>& src_block_ids,
       const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
       int layer_idx = -1) {
     h2h_calls++;
+    h2h_write_calls++;
     last_peer = peer;
     last_src_offsets.assign(src_block_ids.begin(), src_block_ids.end());
     last_dst_offsets.assign(dst_block_ids.begin(), dst_block_ids.end());

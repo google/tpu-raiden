@@ -14,6 +14,7 @@
 
 #include "tpu_raiden/core/controller/raiden_controller.h"
 
+// Dummy comment to trigger Copybara export and Kokoro presubmit.
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -40,6 +41,7 @@
 #include "grpcpp/security/credentials.h"
 #include "grpcpp/support/status.h"
 #include "xla/tsl/concurrency/future.h"
+#include "tpu_raiden/core/buffer.h"
 #include "tpu_raiden/core/controller/controller_server.h"
 #include "tpu_raiden/core/controller/orchestrator_service_client.h"
 #include "tpu_raiden/core/controller/worker_registry.h"
@@ -271,18 +273,15 @@ absl::Status RaidenController::InitializeWorkerBuffers(
   std::vector<proto::BufferProto> created_buffers;
   created_buffers.reserve(num_total_blocks_);
   for (int block_id = 0; block_id < num_total_blocks_; ++block_id) {
-    created_buffers.push_back(resp.buffers(block_id));
+    proto::BufferProto buf = resp.buffers(block_id);
+    buf.set_index(block_id);
+    created_buffers.push_back(std::move(buf));
   }
 
   reg.buffers = std::move(created_buffers);
 
   if (all_sharded_buffers_.empty()) {
     all_sharded_buffers_ = reg.buffers;
-    for (int block_id = 0; block_id < num_total_blocks_; ++block_id) {
-      for (const auto& handle_proto : all_sharded_buffers_[block_id].buffer_handles()) {
-        handle_to_block_id_[handle_proto.handle()] = block_id;
-      }
-    }
   }
 
   return absl::OkStatus();
@@ -301,23 +300,32 @@ absl::StatusOr<std::vector<proto::BufferProto>> RaidenController::Allocate(
   return result;
 }
 
+absl::StatusOr<std::vector<Buffer>> RaidenController::AllocateBuffers(
+    int num_blocks) {
+  ASSIGN_OR_RETURN(std::vector<proto::BufferProto> protos,
+                   Allocate(num_blocks));
+  std::vector<Buffer> buffers;
+  buffers.reserve(protos.size());
+  for (const auto& proto : protos) {
+    Buffer buf = Buffer::FromProto(proto);
+    buf.set_memory_type(rpc::MEMORY_TYPE_DRAM);
+    buffers.push_back(std::move(buf));
+  }
+  return buffers;
+}
+
 absl::Status RaidenController::Deallocate(
     absl::Span<const proto::BufferProto> sharded_buffers) {
-  absl::MutexLock lock(mutex_);
   std::vector<int> block_ids;
   block_ids.reserve(sharded_buffers.size());
   for (const auto& sharded_buf : sharded_buffers) {
-    if (sharded_buf.buffer_handles().empty()) {
-      return absl::InvalidArgumentError("BufferProto has no buffer_handles");
+    if (!sharded_buf.has_index() || sharded_buf.index() < 0) {
+      return absl::InvalidArgumentError(
+          "BufferProto has invalid or missing index");
     }
-    uint64_t handle = sharded_buf.buffer_handles(0).handle();
-    auto it = handle_to_block_id_.find(handle);
-    if (it == handle_to_block_id_.end()) {
-      return absl::NotFoundError(absl::StrCat(
-          "Buffer not found in logical block manager: handle ", handle));
-    }
-    block_ids.push_back(it->second);
+    block_ids.push_back(sharded_buf.index());
   }
+  absl::MutexLock lock(mutex_);
   return block_manager_->Unlock(block_ids);
 }
 
@@ -333,36 +341,96 @@ absl::Status RaidenController::DeallocateBlockIds(
   return block_manager_->Unlock(block_ids);
 }
 
-tsl::Future<> RaidenController::TransferBuffers(
-    absl::string_view worker_id, rpc::MemoryType src_mem_type,
-    rpc::MemoryType dst_mem_type, absl::Span<const int64_t> src_offsets,
-    absl::Span<const int64_t> dst_offsets, absl::Span<const int64_t> copy_sizes,
-    absl::string_view peer) {
-  if (src_offsets.empty() || src_offsets.size() != dst_offsets.size()) {
-    return tsl::Future<>(absl::InvalidArgumentError(
-        "Source and destination offsets must have the same non-zero length"));
+absl::Status RaidenController::DeallocateBuffers(
+    absl::Span<const Buffer> buffers) {
+  std::vector<proto::BufferProto> protos;
+  protos.reserve(buffers.size());
+  for (const auto& buf : buffers) {
+    protos.push_back(buf.ToProto());
   }
-  if (!copy_sizes.empty() && copy_sizes.size() != src_offsets.size()) {
-    return tsl::Future<>(absl::InvalidArgumentError(
-        "copy_sizes, if provided, must match the length of src_offsets"));
+  return Deallocate(protos);
+}
+
+absl::StatusOr<proto::TransferBuffersRequest>
+RaidenController::BuildTransferBuffersRequest(
+    absl::Span<const Buffer> src_buffers, absl::Span<const Buffer> dst_buffers,
+    absl::Span<const int64_t> copy_sizes) {
+  if (src_buffers.empty() || src_buffers.size() != dst_buffers.size()) {
+    return absl::InvalidArgumentError(
+        "Source and destination buffers must have the same non-zero length");
+  }
+  if (!copy_sizes.empty() && copy_sizes.size() != src_buffers.size()) {
+    return absl::InvalidArgumentError(
+        "copy_sizes, if provided, must match the length of src_buffers");
   }
 
-  auto worker_or = worker_registry_->GetWorker(worker_id);
-  if (!worker_or.ok()) {
-    return tsl::Future<>(absl::FailedPreconditionError(absl::StrCat(
-        "Worker ", worker_id, " is not registered. ",
-        "Did you wait for the worker to register?")));
-  }
-  auto worker_client = worker_or->worker_service_client;
-  if (!worker_client) {
-    return tsl::Future<>(absl::FailedPreconditionError(absl::StrCat(
-        "WorkerServiceClient for ", worker_id, " is not initialized.")));
+  rpc::MemoryType src_mem_type = src_buffers[0].memory_type();
+  rpc::MemoryType dst_mem_type = dst_buffers[0].memory_type();
+  std::string peer;
+  if (dst_buffers[0].remote_address().has_value() &&
+      !dst_buffers[0].remote_address()->empty()) {
+    peer = *dst_buffers[0].remote_address();
+  } else if (src_buffers[0].remote_address().has_value() &&
+             !src_buffers[0].remote_address()->empty()) {
+    peer = *src_buffers[0].remote_address();
   }
 
   proto::TransferBuffersRequest request;
   auto* transfer = request.mutable_transfer();
   transfer->set_src_mem_type(src_mem_type);
   transfer->set_dst_mem_type(dst_mem_type);
+  if (!peer.empty()) {
+    transfer->set_peer(peer);
+  }
+
+  for (const auto& buf : src_buffers) {
+    if (buf.index() < 0) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Source buffer has invalid negative index: ", buf.index()));
+    }
+    auto* added_buf = transfer->add_src_buffers();
+    *added_buf = buf.ToProto();
+    added_buf->set_index(buf.index());
+  }
+  for (const auto& buf : dst_buffers) {
+    if (buf.index() < 0) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Destination buffer has invalid negative index: ", buf.index()));
+    }
+    auto* added_buf = transfer->add_dst_buffers();
+    *added_buf = buf.ToProto();
+    added_buf->set_index(buf.index());
+  }
+  for (int64_t size : copy_sizes) {
+    transfer->add_copy_sizes(size);
+  }
+
+  return request;
+}
+
+absl::StatusOr<proto::TransferBuffersRequest>
+RaidenController::BuildRawTransferBuffersRequest(
+    rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
+    absl::Span<const int64_t> src_offsets,
+    absl::Span<const int64_t> dst_offsets, absl::Span<const int64_t> copy_sizes,
+    absl::string_view peer) {
+  if (src_offsets.empty() || src_offsets.size() != dst_offsets.size()) {
+    return absl::InvalidArgumentError(
+        "Source and destination offsets must have the same non-zero length");
+  }
+  if (!copy_sizes.empty() && copy_sizes.size() != src_offsets.size()) {
+    return absl::InvalidArgumentError(
+        "copy_sizes, if provided, must match the length of src_offsets");
+  }
+
+  proto::TransferBuffersRequest request;
+  auto* transfer = request.mutable_transfer();
+  transfer->set_src_mem_type(src_mem_type);
+  transfer->set_dst_mem_type(dst_mem_type);
+  if (!peer.empty()) {
+    transfer->set_peer(std::string(peer));
+  }
+
   for (int64_t offset : src_offsets) {
     transfer->add_src_offsets(offset);
   }
@@ -372,12 +440,88 @@ tsl::Future<> RaidenController::TransferBuffers(
   for (int64_t size : copy_sizes) {
     transfer->add_copy_sizes(size);
   }
-  // TODO: For remote transfers (e.g. H2H), the peer argument needs to be
-  // revised as we do not need the peer address for local D2H and H2D transfers.
-  if (!peer.empty()) {
-    transfer->set_peer(std::string(peer));
+  return request;
+}
+
+tsl::Future<> RaidenController::TransferBuffers(
+    absl::string_view worker_id, absl::Span<const Buffer> src_buffers,
+    absl::Span<const Buffer> dst_buffers,
+    absl::Span<const int64_t> copy_sizes) {
+  auto request_or =
+      BuildTransferBuffersRequest(src_buffers, dst_buffers, copy_sizes);
+  if (!request_or.ok()) {
+    return tsl::Future<>(request_or.status());
   }
-  return worker_client->TransferBuffers(request);
+
+  auto worker_or = worker_registry_->GetWorker(worker_id);
+  if (!worker_or.ok()) {
+    return tsl::Future<>(absl::FailedPreconditionError(
+        absl::StrCat("Worker ", worker_id, " is not registered. ",
+                     "Did you wait for the worker to register?")));
+  }
+  auto worker_client = worker_or->worker_service_client;
+  if (!worker_client) {
+    return tsl::Future<>(absl::FailedPreconditionError(absl::StrCat(
+        "WorkerServiceClient for ", worker_id, " is not initialized.")));
+  }
+
+  return worker_client->TransferBuffers(*request_or);
+}
+
+tsl::Future<> RaidenController::TransferBuffers(
+    absl::Span<const Buffer> src_buffers, absl::Span<const Buffer> dst_buffers,
+    absl::Span<const int64_t> copy_sizes) {
+  auto request_or =
+      BuildTransferBuffersRequest(src_buffers, dst_buffers, copy_sizes);
+  if (!request_or.ok()) {
+    return tsl::Future<>(request_or.status());
+  }
+  auto workers = worker_registry_->GetRegisteredWorkers();
+  if (workers.empty()) {
+    return tsl::Future<>(absl::FailedPreconditionError(
+        "No registered workers available for TransferBuffers"));
+  }
+
+  std::vector<tsl::Future<>> worker_futures;
+  for (const auto& reg : workers) {
+    if (reg.worker_service_client) {
+      worker_futures.push_back(
+          reg.worker_service_client->TransferBuffers(*request_or));
+    }
+  }
+
+  if (worker_futures.empty()) {
+    return tsl::Future<>(absl::FailedPreconditionError(
+        "No active WorkerServiceClient available for TransferBuffers"));
+  }
+
+  return tsl::JoinFutures(absl::MakeSpan(worker_futures));
+}
+
+tsl::Future<> RaidenController::TransferBuffers(
+    absl::string_view worker_id, rpc::MemoryType src_mem_type,
+    rpc::MemoryType dst_mem_type, absl::Span<const int64_t> src_offsets,
+    absl::Span<const int64_t> dst_offsets, absl::Span<const int64_t> copy_sizes,
+    absl::string_view peer) {
+  auto request_or = BuildRawTransferBuffersRequest(
+      src_mem_type, dst_mem_type, src_offsets, dst_offsets, copy_sizes, peer);
+  if (!request_or.ok()) {
+    return tsl::Future<>(request_or.status());
+  }
+
+  auto worker_or = worker_registry_->GetWorker(worker_id);
+  if (!worker_or.ok()) {
+    return tsl::Future<>(absl::FailedPreconditionError(
+        absl::StrCat("Worker ", worker_id, " is not registered. ",
+                     "Did you wait for the worker to register?")));
+  }
+  auto worker_client = worker_or->worker_service_client;
+  if (!worker_client) {
+    return tsl::Future<>(absl::FailedPreconditionError(absl::StrCat(
+        "WorkerServiceClient for ", worker_id, " is not initialized.")));
+  }
+
+  return worker_client->TransferBuffers(*request_or);
 }
 
 tsl::Future<> RaidenController::TransferBuffers(
@@ -393,7 +537,6 @@ tsl::Future<> RaidenController::TransferBuffers(
     return tsl::Future<>(absl::InvalidArgumentError(
         "copy_sizes, if provided, must match the length of src_offsets"));
   }
-
   auto workers = worker_registry_->GetRegisteredWorkers();
   if (workers.empty()) {
     return tsl::Future<>(absl::FailedPreconditionError(

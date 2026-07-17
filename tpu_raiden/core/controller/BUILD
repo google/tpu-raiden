@@ -98,6 +98,7 @@ cc_library(
         ":orchestrator_service_client",
         ":worker_registry",
         ":worker_service_client",
+        "//tpu_raiden/core:buffer",
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/kv_cache:logical_block_manager",
         "//tpu_raiden/kv_cache:raiden_id",

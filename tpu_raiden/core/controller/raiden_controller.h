@@ -28,6 +28,7 @@
 #include "absl/types/span.h"
 #include "grpcpp/channel.h"
 #include "xla/tsl/concurrency/future.h"
+#include "tpu_raiden/core/buffer.h"
 #include "tpu_raiden/core/controller/worker_registry.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
@@ -86,6 +87,14 @@ class RaidenController {
   // need worker-level raw buffer handles. No RPC is performed.
   absl::StatusOr<std::vector<proto::BufferProto>> Allocate(int num_blocks);
 
+  // Allocates num_blocks logical blocks from the pre-created buffer pool and
+  // returns the corresponding Buffers. No gRPC call is made.
+  absl::StatusOr<std::vector<Buffer>> AllocateBuffers(int num_blocks);
+
+  // Unlocks the specified Buffers in the local logical block manager so
+  // they can be reused. No gRPC call is made.
+  absl::Status DeallocateBuffers(absl::Span<const Buffer> buffers);
+
   // Legacy API (Physical/BufferProto Mode):
   // Deallocates logical blocks associated with the provided `BufferProto`s.
   // No RPC is performed.
@@ -101,13 +110,27 @@ class RaidenController {
   // No RPC is performed.
   absl::Status DeallocateBlockIds(absl::Span<const int> block_ids);
 
-  tsl::Future<> TransferBuffers(
-      absl::string_view worker_id, rpc::MemoryType src_mem_type,
-      rpc::MemoryType dst_mem_type, absl::Span<const int64_t> src_offsets,
-      absl::Span<const int64_t> dst_offsets,
-      absl::Span<const int64_t> copy_sizes = {}, absl::string_view peer = "");
+  // Targeted worker transfer
+  tsl::Future<> TransferBuffers(absl::string_view worker_id,
+                                absl::Span<const Buffer> src_buffers,
+                                absl::Span<const Buffer> dst_buffers,
+                                absl::Span<const int64_t> copy_sizes = {});
 
-  // Broadcasts TransferBuffers to all registered workers.
+  // Broadcast transfer to all registered workers
+  tsl::Future<> TransferBuffers(absl::Span<const Buffer> src_buffers,
+                                absl::Span<const Buffer> dst_buffers,
+                                absl::Span<const int64_t> copy_sizes = {});
+
+  // Legacy targeted worker transfer using raw block offsets
+  tsl::Future<> TransferBuffers(absl::string_view worker_id,
+                                rpc::MemoryType src_mem_type,
+                                rpc::MemoryType dst_mem_type,
+                                absl::Span<const int64_t> src_offsets,
+                                absl::Span<const int64_t> dst_offsets,
+                                absl::Span<const int64_t> copy_sizes = {},
+                                absl::string_view peer = "");
+
+  // Legacy broadcast transfer using raw block offsets
   tsl::Future<> TransferBuffers(rpc::MemoryType src_mem_type,
                                 rpc::MemoryType dst_mem_type,
                                 absl::Span<const int64_t> src_offsets,
@@ -142,6 +165,17 @@ class RaidenController {
   int raiden_controller_port() const { return raiden_controller_port_; }
 
  private:
+  absl::StatusOr<proto::TransferBuffersRequest> BuildTransferBuffersRequest(
+      absl::Span<const Buffer> src_buffers,
+      absl::Span<const Buffer> dst_buffers,
+      absl::Span<const int64_t> copy_sizes);
+
+  absl::StatusOr<proto::TransferBuffersRequest> BuildRawTransferBuffersRequest(
+      rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
+      absl::Span<const int64_t> src_offsets,
+      absl::Span<const int64_t> dst_offsets,
+      absl::Span<const int64_t> copy_sizes, absl::string_view peer);
+
   void Init(absl::Span<const std::string> worker_addresses,
             absl::string_view raiden_orchestrator_address);
 
@@ -152,7 +186,6 @@ class RaidenController {
   int64_t shard_size_bytes_;
   int num_total_blocks_;
   std::vector<proto::BufferProto> all_sharded_buffers_;
-  absl::flat_hash_map<uint64_t, int> handle_to_block_id_;
   std::shared_ptr<core::controller::WorkerRegistry> worker_registry_;
   mutable absl::Mutex mutex_;
   std::unique_ptr<kv_cache::LogicalBlockManager> block_manager_

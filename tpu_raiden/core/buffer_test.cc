@@ -41,7 +41,7 @@ TEST(BufferTest, ConstructAndAccessProperties) {
   EXPECT_EQ(buffer.shards()[1].offset, 1024);
   EXPECT_EQ(buffer.shards()[1].size, 2048);
 
-  EXPECT_FALSE(buffer.RemoteAddress().has_value());
+  EXPECT_FALSE(buffer.remote_address().has_value());
 }
 
 TEST(BufferTest, ConstructWithRemoteAddress) {
@@ -53,8 +53,8 @@ TEST(BufferTest, ConstructWithRemoteAddress) {
   Buffer buffer(7, shards, remote_address);
 
   EXPECT_EQ(buffer.index(), 7);
-  EXPECT_TRUE(buffer.RemoteAddress().has_value());
-  EXPECT_EQ(*buffer.RemoteAddress(), remote_address);
+  EXPECT_TRUE(buffer.remote_address().has_value());
+  EXPECT_EQ(*buffer.remote_address(), remote_address);
 }
 
 }  // namespace

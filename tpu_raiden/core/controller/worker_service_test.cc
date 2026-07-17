@@ -136,6 +136,8 @@ TEST_F(WorkerServiceTest, TransferBuffersH2hSuccess) {
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_calls, 0);
   EXPECT_EQ(mock_mgr.h2h_calls, 1);
+  EXPECT_EQ(mock_mgr.h2h_read_calls, 0);
+  EXPECT_EQ(mock_mgr.h2h_write_calls, 1);
   EXPECT_EQ(mock_mgr.last_peer, "localhost:8080");
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(10));
   EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(20));
@@ -286,6 +288,91 @@ TEST_F(WorkerServiceTest, TransferBuffersH2DSuccess) {
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
   EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
   EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersWithBufferProtosSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_HBM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
+  auto* src_buf = transfer->add_src_buffers();
+  src_buf->set_index(10);
+  auto* dst_buf = transfer->add_dst_buffers();
+  dst_buf->set_index(20);
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.d2h_calls, 1);
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(10));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(20));
+}
+
+TEST_F(WorkerServiceTest,
+       TransferBuffersInfersMemoryTypeAndPeerFromBufferProtos) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  auto* src_buf = transfer->add_src_buffers();
+  src_buf->set_index(10);
+  src_buf->set_memory_type(rpc::MEMORY_TYPE_DRAM);
+  auto* dst_buf = transfer->add_dst_buffers();
+  dst_buf->set_index(20);
+  dst_buf->set_memory_type(rpc::MEMORY_TYPE_DRAM);
+  dst_buf->set_remote_address("localhost:8080");
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.h2h_calls, 1);
+  EXPECT_EQ(mock_mgr.h2h_read_calls, 0);
+  EXPECT_EQ(mock_mgr.h2h_write_calls, 1);
+  EXPECT_EQ(mock_mgr.last_peer, "localhost:8080");
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(10));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(20));
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersH2hReadRemoteSrcSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  auto* src_buf = transfer->add_src_buffers();
+  src_buf->set_index(10);
+  src_buf->set_memory_type(rpc::MEMORY_TYPE_DRAM);
+  src_buf->set_remote_address("localhost:8080");
+  auto* dst_buf = transfer->add_dst_buffers();
+  dst_buf->set_index(20);
+  dst_buf->set_memory_type(rpc::MEMORY_TYPE_DRAM);
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.h2h_calls, 1);
+  EXPECT_EQ(mock_mgr.h2h_read_calls, 1);
+  EXPECT_EQ(mock_mgr.h2h_write_calls, 0);
+  EXPECT_EQ(mock_mgr.last_peer, "localhost:8080");
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(10));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, testing::IsEmpty());
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersWithInvalidBufferProtoFails) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_HBM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->add_src_buffers();  // index not set
+  transfer->add_dst_buffers();  // index not set
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  EXPECT_FALSE(status.ok());
+  EXPECT_THAT(status.message(), HasSubstr("BufferProto missing valid index"));
 }
 
 }  // namespace

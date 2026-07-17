@@ -46,6 +46,9 @@ class KVManagerHolder {
         const std::vector<int64_t>& src_offsets,
         const std::vector<int64_t>& dst_offsets,
         const std::vector<int64_t>& copy_sizes) = 0;
+    virtual absl::StatusOr<raiden::PjRtCopyFuture> H2hRead(
+        absl::string_view peer, const std::vector<int64_t>& src_offsets,
+        const std::vector<int64_t>& dst_offsets) = 0;
     virtual absl::StatusOr<raiden::PjRtCopyFuture> H2hWrite(
         absl::string_view peer, const std::vector<int64_t>& src_offsets,
         const std::vector<int64_t>& dst_offsets) = 0;
@@ -66,6 +69,15 @@ class KVManagerHolder {
         const std::vector<int64_t>& dst_offsets,
         const std::vector<int64_t>& copy_sizes) override {
       return impl_->H2d(src_offsets, dst_offsets, copy_sizes);
+    }
+    absl::StatusOr<raiden::PjRtCopyFuture> H2hRead(
+        absl::string_view peer, const std::vector<int64_t>& src_offsets,
+        const std::vector<int64_t>& dst_offsets) override {
+      (void)dst_offsets;  // H2hRead in KVCacheManagerBase auto-allocates
+                          // destination blocks.
+      ASSIGN_OR_RETURN(std::vector<int> src_ids, SafeCastOffsets(src_offsets));
+      ASSIGN_OR_RETURN(auto res, impl_->H2hRead(std::string(peer), src_ids));
+      return res.second;
     }
     absl::StatusOr<raiden::PjRtCopyFuture> H2hWrite(
         absl::string_view peer, const std::vector<int64_t>& src_offsets,
@@ -121,6 +133,15 @@ class KVManagerHolder {
       return absl::InternalError("KVManagerHolder is null");
     }
     return self_->H2d(src_offsets, dst_offsets, copy_sizes);
+  }
+
+  absl::StatusOr<raiden::PjRtCopyFuture> H2hRead(
+      absl::string_view peer, const std::vector<int64_t>& src_offsets,
+      const std::vector<int64_t>& dst_offsets) const {
+    if (!self_) {
+      return absl::InternalError("KVManagerHolder is null");
+    }
+    return self_->H2hRead(peer, src_offsets, dst_offsets);
   }
 
   absl::StatusOr<raiden::PjRtCopyFuture> H2hWrite(
