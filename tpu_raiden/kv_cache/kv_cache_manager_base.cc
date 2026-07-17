@@ -32,6 +32,8 @@
 #include <vector>
 
 #include "absl/log/log.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
@@ -604,6 +606,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2h(
     const std::vector<int64_t>& copy_sizes_major_dim,
     std::optional<int64_t> slot_idx, std::optional<size_t> layer_idx,
     std::optional<size_t> shard_idx) {
+  absl::SleepFor(absl::Seconds(600));
   ASSIGN_OR_RETURN(
       auto logical_futures,
       DispatchD2hChunks(src_offsets_major_dim, dst_offsets_major_dim,
