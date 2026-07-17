@@ -92,6 +92,41 @@ inline const PJRT_RawBuffer_Extension* GetRawBufferExtension(
       PJRT_Extension_Type::PJRT_Extension_Type_RawBuffer);
 }
 
+// Returns OK when `buffer` decomposes into contiguous per-major-row byte
+// slices (row i addressable at offset i * GetMajorSliceByteSize(buffer)).
+// Layouts that interleave the major dimension — a tiled buffer whose major
+// dim is not the outermost physical dim, or any tiled buffer of rank < 3
+// (both dims are then inside the tile pair) — have no such slice;
+// GetMajorSliceByteSize on them yields a value that is NOT a per-row
+// stride (up to the whole buffer), so callers that index rows with it
+// must reject these layouts first.
+inline absl::Status ValidateMajorSliceAddressable(
+    const xla::PjRtBuffer* buffer) {
+  const xla::Shape& shape = buffer->on_device_shape();
+  if (shape.dimensions_size() == 0) {
+    return absl::InvalidArgumentError(
+        "scalar buffer has no major dimension to slice");
+  }
+  auto pjrt_layout = buffer->layout();
+  const xla::Layout* xla_layout =
+      pjrt_layout ? &pjrt_layout->xla_layout() : nullptr;
+  if (!xla_layout) return absl::OkStatus();
+  if (!xla_layout->minor_to_major().empty() &&
+      xla_layout->minor_to_major().back() != 0) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "buffer ", shape.ToString(), " (layout ", xla_layout->ToString(),
+        ") does not keep its major dimension outermost in device memory; "
+        "major rows interleave and no per-row byte slice exists"));
+  }
+  if (!xla_layout->tiles().empty() && shape.dimensions_size() < 3) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "buffer ", shape.ToString(), " (layout ", xla_layout->ToString(),
+        ") is tiled with rank < 3; rows sit inside the tile pair and no "
+        "per-row byte slice exists"));
+  }
+  return absl::OkStatus();
+}
+
 inline int64_t GetMajorSliceByteSize(const xla::PjRtBuffer* buffer) {
   const xla::Shape& shape = buffer->on_device_shape();
   if (shape.dimensions_size() == 0) return 0;

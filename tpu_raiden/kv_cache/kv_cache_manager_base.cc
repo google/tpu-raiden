@@ -155,6 +155,29 @@ KVCacheManagerBase::KVCacheManagerBase(
     // may differ (e.g. mamba conv_state bf16 vs ssm_state f32).
     device_info.physical_size =
         layer_buffers[layer_idx][0]->GetOnDeviceSizeInBytes().value();
+
+    // Host allocation and host-side block offsets are both derived from
+    // layer 0's slice (bytes_per_block()), and per-block device offsets
+    // require a contiguous per-row slice. A layer whose layout breaks
+    // either assumption corrupts host data or over-allocates by the full
+    // buffer per block, so reject at registration.
+    absl::Status addressable = raiden::ValidateMajorSliceAddressable(
+        layer_buffers[layer_idx][0]);
+    if (!addressable.ok()) {
+      throw std::runtime_error(absl::StrCat(
+          "KVCacheManager: layer ", layer_idx,
+          " is not per-block DMA-addressable: ",
+          addressable.ToString()));
+    }
+    int64_t layer_slice =
+        raiden::GetMajorSliceByteSize(layer_buffers[layer_idx][0]);
+    if (layer_slice != static_cast<int64_t>(bytes_per_block())) {
+      throw std::runtime_error(absl::StrCat(
+          "KVCacheManager: layer ", layer_idx, " slice byte size ",
+          layer_slice, " differs from layer 0's ", bytes_per_block(),
+          "; register layers with distinct slice sizes in separate "
+          "managers"));
+    }
     max_physical_size_ =
         std::max(max_physical_size_, device_info.physical_size);
     VLOG(1) << "KVCacheManagerBase: layer " << layer_idx << " on_device_shape: "
