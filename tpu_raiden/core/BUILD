@@ -577,6 +577,27 @@ cc_test(
 )
 
 cc_test(
+    name = "kv_cache_manager_with_transfer_pool_reshard_test",
+    srcs = ["kv_cache_manager_with_transfer_pool_reshard_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = [
+        "-use_header_modules",
+        "-layering_check",
+    ],
+    deps = [
+        ":kv_cache_manager_with_transfer",
+        "//tpu_raiden/kv_cache:kv_cache_manager_base",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/types:span",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "kv_cache_manager_perf_test",
     timeout = "long",
     srcs = ["kv_cache_manager_perf_test.cc"],

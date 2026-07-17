@@ -28,6 +28,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
 #include "xla/future.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
@@ -154,6 +155,24 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   absl::Status PushKVCacheResharded(
       const tpu_raiden::rpc::StartTransferRequest& request);
 
+  // Pool-plan executor hooks used by KVCacheListener. Designed as the
+  // successor of PushKVCacheResharded/RegisterActivePlan for pool-addressed
+  // plans; managers without transfer support fail closed instead of falling
+  // back to the legacy whole-layer reshard path.
+  virtual absl::Status PoolReshardPush(
+      const tpu_raiden::rpc::StartTransferRequest&, absl::Span<const int64_t>,
+      int = 8) {
+    return absl::UnimplementedError(
+        "pool reshard push is not supported by this manager");
+  }
+
+  virtual absl::Status PoolReshardRegisterRecv(
+      const tpu_raiden::rpc::StartTransferRequest&,
+      absl::Span<const int64_t>) {
+    return absl::UnimplementedError(
+        "pool reshard receive is not supported by this manager");
+  }
+
   // Blocks until all pending asynchronous transfers/copies are complete.
   virtual absl::Status WaitForPendingWork() { return absl::OkStatus(); }
 
@@ -261,6 +280,9 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<size_t> shard_idx = std::nullopt);
 
   bool use_block_chunks(uint64_t uuid) const override;
+
+  absl::StatusOr<std::optional<tpu_raiden::transport::PoolPushProgressSpec>>
+  GetPoolPushProgressSpec(size_t pool_idx, uint64_t uuid) const override;
 
   void SetBlockChunkRegionValidation(
       tpu_raiden::transport::BlockChunkRegionValidationMode mode);

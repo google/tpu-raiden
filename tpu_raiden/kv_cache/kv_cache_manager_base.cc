@@ -1413,6 +1413,38 @@ bool KVCacheManagerBase::use_block_chunks(uint64_t uuid) const {
   return it->second.request.use_block_chunks();
 }
 
+absl::StatusOr<std::optional<tpu_raiden::transport::PoolPushProgressSpec>>
+KVCacheManagerBase::GetPoolPushProgressSpec(size_t pool_idx,
+                                            uint64_t uuid) const {
+  absl::MutexLock l(plans_mu_);
+  auto it = active_plans_.find(uuid);
+  if (it == active_plans_.end() ||
+      it->second.request.expected_pushes_per_pool() == 0) {
+    return std::nullopt;
+  }
+
+  const auto& request = it->second.request;
+  bool pool_is_transferred = false;
+  for (int32_t transferred_pool_idx : request.transfer_pool_indices()) {
+    if (transferred_pool_idx >= 0 &&
+        static_cast<size_t>(transferred_pool_idx) == pool_idx) {
+      pool_is_transferred = true;
+      break;
+    }
+  }
+  if (!pool_is_transferred) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "pool ", pool_idx, " is not in the active plan's transfer set"));
+  }
+
+  return tpu_raiden::transport::PoolPushProgressSpec{
+      .expected_pushes =
+          static_cast<size_t>(request.expected_pushes_per_pool()),
+      .expected_pools =
+          static_cast<size_t>(request.transfer_pool_indices_size()),
+  };
+}
+
 absl::StatusOr<std::vector<raiden::PjRtCopyFuture>>
 KVCacheManagerBase::DispatchH2dWork(
     const std::vector<CopyWork>& works, std::optional<int64_t> slot_idx,
@@ -1700,6 +1732,40 @@ absl::Status KVCacheManagerBase::PushKVCacheResharded(
 absl::Status KVCacheManagerBase::RegisterActivePlan(
     uint64_t uuid, const tpu_raiden::rpc::StartTransferRequest& request,
     bool is_sender) {
+  // Structural contract for pool-addressed plans. Pool selection is request
+  // data resolved by the controller; raiden validates consistency (indices
+  // resolve against this manager's pool table, explicit or implicit) and
+  // never tag policy.
+  if (request.expected_pushes_per_pool() < 0) {
+    return absl::InvalidArgumentError(
+        "expected_pushes_per_pool must be non-negative");
+  }
+  const bool has_pool_progress = request.expected_pushes_per_pool() > 0;
+  const bool has_transfer_pools = request.transfer_pool_indices_size() > 0;
+  if (has_pool_progress != has_transfer_pools) {
+    return absl::InvalidArgumentError(
+        "expected_pushes_per_pool and transfer_pool_indices must either both "
+        "be set or both be absent");
+  }
+  if (has_pool_progress) {
+    if (request.req_id().empty()) {
+      return absl::InvalidArgumentError(
+          "pool-keyed transfer plans require a non-empty req_id");
+    }
+    const size_t pool_count = num_pools();
+    std::set<int32_t> seen_pool_indices;
+    for (int32_t pool_idx : request.transfer_pool_indices()) {
+      if (pool_idx < 0 || static_cast<size_t>(pool_idx) >= pool_count) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("transfer pool index ", pool_idx,
+                         " out of range: ", pool_count, " registered pools"));
+      }
+      if (!seen_pool_indices.insert(pool_idx).second) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("duplicate transfer pool index ", pool_idx));
+      }
+    }
+  }
   // When the sender declares per-pool dtype tags, they must match the local
   // pool table (both peers must agree on canonical pool order and dtypes).
   if (request.pool_dtype_tags_size() > 0 && explicit_pools_) {
@@ -1731,13 +1797,25 @@ absl::Status KVCacheManagerBase::RegisterActivePlan(
 }
 
 absl::Status KVCacheManagerBase::UnregisterActivePlan(uint64_t uuid) {
-  absl::MutexLock l(plans_mu_);
-  auto it = active_plans_.find(uuid);
-  if (it == active_plans_.end()) {
-    return absl::NotFoundError(
-        absl::StrCat("Plan with UUID ", uuid, " is not registered"));
+  {
+    absl::MutexLock l(plans_mu_);
+    auto it = active_plans_.find(uuid);
+    if (it == active_plans_.end()) {
+      return absl::NotFoundError(
+          absl::StrCat("Plan with UUID ", uuid, " is not registered"));
+    }
+    active_plans_.erase(it);
   }
-  active_plans_.erase(it);
+  // Receive-progress counters key on the uuid; drop them with the plan so a
+  // finished, failed, or timed-out uuid can be safely reused.
+  transport::BlockTransport* transport_server = nullptr;
+  {
+    absl::MutexLock lock(server_init_mu_);
+    transport_server = server_.get();
+  }
+  if (transport_server != nullptr) {
+    transport_server->ForgetPushProgress(uuid);
+  }
   VLOG(1) << "UnregisterActivePlan: Removed plan for UUID " << uuid;
   return absl::OkStatus();
 }

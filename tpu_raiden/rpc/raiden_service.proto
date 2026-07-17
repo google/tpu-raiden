@@ -73,6 +73,16 @@ message RegisterWorkUnitRequest {
   repeated int64 mesh_shape = 6;
   repeated int32 layout = 7;
   repeated int64 global_shape = 8;
+  // Canonical explicit-pool manifest and physical layout identity used by the
+  // controller to fail closed before planning a raw-byte pool transfer.
+  repeated PoolSpecProto pools = 9;
+  string layout_fingerprint = 10;
+  int64 page_tokens = 11;
+  int32 transfer_parallelism = 12;
+  // Stable transfer rank inside the producer group. This is distinct from
+  // data_replica_idx (the DP engine identity); declared source spans arrive on
+  // the registration of the rank that owns them.
+  int32 transfer_rank = 13;
 }
 
 // Defines an explicit 1D linear memory push operation from a local source to a
@@ -127,6 +137,21 @@ message StartTransferRequest {
   // the receiving manager has explicitly registered pools, the tags must match
   // the local pools' dtype tags at plan registration.
   repeated string pool_dtype_tags = 10;
+  // Pool-keyed receive accounting. Each listed transfer pool expects this
+  // many independent push streams (summed across senders) before its
+  // completion callback fires. Zero preserves the legacy header-declared
+  // (header.reserved) accounting.
+  int32 expected_pushes_per_pool = 11;
+  // Canonical pool indices moved by this plan, resolved by the controller
+  // from the consumer's requested pool tags. Unselected pools are never
+  // armed; raiden attaches no meaning to any tag name.
+  repeated int32 transfer_pool_indices = 12;
+  // Block-granular arguments consumed by the pool executor. The controller
+  // emits only the IDs relevant to the worker receiving this command.
+  repeated int64 src_block_ids = 13;
+  repeated int64 dst_device_block_ids = 14;
+  int32 parallelism = 15;
+  int64 num_tokens = 16;
 }
 
 message GetMetadataResponse {
