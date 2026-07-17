@@ -257,6 +257,49 @@ TEST(BlockTransportTest, RegionValidationWarnModeAllowsPushChunks) {
   EXPECT_EQ(delegate2.data()[size - 1], 0xCD);
 }
 
+TEST(BlockTransportTest, PushAndPullWithoutConnectionPool) {
+  size_t size = 1024;
+  MockDelegate delegate1(size);
+  MockDelegate delegate2(size);
+
+  // Populate source with custom pattern
+  std::memset(delegate1.data(), 0xAB, size);
+  std::memset(delegate2.data(), 0x00, size);
+
+  // Disable connection pooling
+  BlockTransport transport1(&delegate1, 0, /*enable_conn_pool=*/false);
+  BlockTransport transport2(&delegate2, 0, /*enable_conn_pool=*/false);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  std::string peer2 = "localhost:" + std::to_string(transport2.local_port());
+
+  // Push block 0 from transport1 to transport2
+  auto push_res = transport1.SyncPush(
+      {peer2}, /*src_block_ids=*/{0}, /*dst_block_ids=*/{},
+      /*parallelism=*/1, MajorOrder::kLayerMajor, /*uuid=*/0, /*layer_idx=*/-1);
+  ASSERT_TRUE(push_res.ok()) << push_res.status().message();
+
+  // Verify push parity
+  EXPECT_EQ(delegate2.data()[0], 0xAB);
+  EXPECT_EQ(delegate2.data()[size - 1], 0xAB);
+
+  // Reset dest to 0
+  std::memset(delegate2.data(), 0x00, size);
+
+  // Pull block 0 from transport1 using transport2
+  std::string peer1 = "localhost:" + std::to_string(transport1.local_port());
+  auto pull_res = transport2.SyncPull(
+      {peer1}, /*src_block_ids=*/{0}, /*local_block_ids=*/{},
+      /*explicit_dst_ptrs=*/{}, /*parallelism=*/1, MajorOrder::kLayerMajor,
+      /*on_block_received=*/{}, /*uuid=*/0);
+  ASSERT_TRUE(pull_res.ok()) << pull_res.status().message();
+
+  // Verify pull parity
+  EXPECT_EQ(delegate2.data()[0], 0xAB);
+  EXPECT_EQ(delegate2.data()[size - 1], 0xAB);
+}
+
 TEST(BlockTransportTest, PullNonContiguous) {
   size_t size = 1024;
   // Delegate 1 has 3 blocks capacity
@@ -409,10 +452,10 @@ class MockBlockTransport : public BlockTransport {
 
   MockBlockTransport(BlockTransportDelegate* delegate, int local_port,
                      const std::vector<std::string>& local_ips)
-      : BlockTransport(delegate, local_port, local_ips) {}
+      : BlockTransport(delegate, local_port, true, local_ips) {}
 
-  absl::StatusOr<int> BorrowConnection(absl::string_view peer,
-                                       absl::string_view local_ip) override {
+  absl::StatusOr<int> AcquireConnection(absl::string_view peer,
+                                        absl::string_view local_ip) override {
     absl::MutexLock lock(mock_mu_);
     acquire_calls_.push_back({std::string(peer), std::string(local_ip)});
     return absl::InternalError("mock_connection_halt");

@@ -182,6 +182,7 @@ class BlockTransportDelegate : public lib::RawBufferTransportDelegate {
 class BlockTransport : public lib::RawBufferTransport {
  public:
   BlockTransport(BlockTransportDelegate* delegate, int local_port,
+                 bool enable_conn_pool = true,
                  const std::vector<std::string>& local_ips = {},
                  int parallelism = 1);
   ~BlockTransport() override;

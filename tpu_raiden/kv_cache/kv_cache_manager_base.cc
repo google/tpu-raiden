@@ -134,7 +134,6 @@ KVCacheManagerBase::KVCacheManagerBase(
 
   xla::PjRtBuffer* first_buffer = layer_buffers[0][0];
   const xla::Shape& shape = first_buffer->on_device_shape();
-  LOG(ERROR) << "KVCacheManagerBase: on_device_shape: " << shape.ToString();
 
   is_blocked_layout_ = (shape.dimensions().size() == 5);
 

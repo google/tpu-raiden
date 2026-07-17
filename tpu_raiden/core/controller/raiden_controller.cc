@@ -113,17 +113,37 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
       });
 
   // 2. Start ControllerServer
-  controller_server_ = std::make_unique<core::controller::ControllerServer>();
-  absl::Status server_status = controller_server_->StartServer(
-      worker_registry_, raiden_controller_port_);
+  bool use_private_server = false;
+  const char* disable_singleton =
+      std::getenv("RAIDEN_DISABLE_SINGLETON_WORKER");
+  if (disable_singleton != nullptr &&
+      (std::strcmp(disable_singleton, "true") == 0 ||
+       std::strcmp(disable_singleton, "1") == 0)) {
+    use_private_server = true;
+  }
+
+  absl::Status server_status;
+  core::controller::ControllerServer* server_ptr = nullptr;
+  if (use_private_server) {
+    private_controller_server_ = core::controller::ControllerServer::Create();
+    server_status = private_controller_server_->StartServer(
+        worker_registry_, raiden_controller_port_);
+    server_ptr = private_controller_server_.get();
+  } else {
+    auto& server = core::controller::ControllerServer::GetInstance();
+    server_status =
+        server.StartServer(worker_registry_, raiden_controller_port_);
+    server_ptr = &server;
+  }
+
   if (!server_status.ok()) {
     LOG(WARNING) << "Failed to start ControllerServer in RaidenController: "
                  << server_status.message();
   }
   // Store the actual port the server bound to
-  raiden_controller_port_ = controller_server_->GetGrpcPort();
+  raiden_controller_port_ = server_ptr->GetGrpcPort();
 
-  controller_server_->SetTransferBuffersCallback(
+  server_ptr->SetTransferBuffersCallback(
       [this](rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
              absl::Span<const int64_t> src_offsets,
              absl::Span<const int64_t> dst_offsets,
@@ -192,9 +212,13 @@ RaidenController::~RaidenController() {
   if (worker_registry_) {
     worker_registry_->SetOnRegisterCallback(nullptr);
   }
-  if (controller_server_) {
-    controller_server_->SetWorkerRegistry(nullptr);
-    controller_server_.reset();
+  if (private_controller_server_) {
+    private_controller_server_->SetWorkerRegistry(nullptr);
+    private_controller_server_.reset();
+  } else {
+    auto& server = core::controller::ControllerServer::GetInstance();
+    server.SetWorkerRegistry(nullptr);
+    server.SetTransferBuffersCallback(nullptr);
   }
 
   if (all_sharded_buffers_.empty() || !worker_registry_) return;

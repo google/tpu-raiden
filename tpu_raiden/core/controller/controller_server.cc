@@ -20,6 +20,7 @@
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/memory/memory.h"
 #include "absl/synchronization/mutex.h"
 #include "grpcpp/security/server_credentials.h"
 #include "grpcpp/server_builder.h"
@@ -30,6 +31,14 @@ namespace tpu_raiden {
 namespace core {
 namespace controller {
 
+ControllerServer& ControllerServer::GetInstance() {
+  static absl::NoDestructor<ControllerServer> instance;
+  return *instance;
+}
+
+std::unique_ptr<ControllerServer> ControllerServer::Create() {
+  return absl::WrapUnique(new ControllerServer());
+}
 
 ControllerServer::~ControllerServer() {
   absl::MutexLock lock(mutex_);

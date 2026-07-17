@@ -41,17 +41,18 @@
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "tpu_raiden/core/status_macros.h"
-#include "tpu_raiden/transport/lib/socket/util.h"
+#include "tpu_raiden/transport/lib/socket_util.h"
 
 namespace tpu_raiden::transport::lib {
 
 RawBufferTransport::RawBufferTransport(
-    RawBufferTransportDelegate* delegate, int local_port,
+    RawBufferTransportDelegate* delegate, int local_port, bool enable_conn_pool,
     const std::vector<std::string>& local_ips)
     : raw_delegate_(delegate),
       local_port_(local_port),
       bound_ip_(local_ips.empty() ? "127.0.0.1" : local_ips[0]),
-      local_ips_(local_ips) {
+      local_ips_(local_ips),
+      pooling_enabled_(enable_conn_pool) {
   // 1. Setup server_fd_ (Always use IPv6 wildcard to listen on all interfaces)
   server_fd_ = socket(AF_INET6, SOCK_STREAM, 0);
   if (server_fd_ < 0) {
@@ -151,10 +152,10 @@ static std::string GetPoolKey(absl::string_view peer,
   return absl::StrCat(local_ip, "->", peer);
 }
 
-absl::StatusOr<int> RawBufferTransport::BorrowConnection(
+absl::StatusOr<int> RawBufferTransport::AcquireConnection(
     absl::string_view peer, absl::string_view local_ip) {
-  {
-    absl::MutexLock lock(pool_mu_);
+  if (pooling_enabled_) {
+    absl::MutexLock lock( pool_mu_ );
     std::string key = GetPoolKey(peer, local_ip);
     if (auto it = conn_pool_.find(key); it != conn_pool_.end()) {
       while (!it->second.empty()) {
@@ -176,26 +177,21 @@ absl::StatusOr<int> RawBufferTransport::BorrowConnection(
   return ConnectToPeer(peer, local_ip);
 }
 
-void RawBufferTransport::ReturnConnection(bool ok, int fd,
-                                          absl::string_view peer,
-                                          absl::string_view local_ip) {
+void RawBufferTransport::ReleaseConnection(absl::string_view peer, int fd,
+                                           absl::string_view local_ip) {
   if (fd < 0) return;
-
-  if (!ok) {
-    shutdown(fd, SHUT_RDWR);
-    close(fd);
-    return;
-  }
-
   absl::MutexLock lock( pool_mu_ );
-  if (stopping_) {
+  if (!pooling_enabled_ || stopping_) {
     shutdown(fd, SHUT_RDWR);
     close(fd);
     return;
   }
-
-  const std::string key = GetPoolKey(peer, local_ip);
-  conn_pool_[key].push_back(fd);
+  std::string key = GetPoolKey(peer, local_ip);
+  auto it = conn_pool_.find(key);
+  if (it == conn_pool_.end()) {
+    it = conn_pool_.emplace(key, std::vector<int>{}).first;
+  }
+  it->second.push_back(fd);
 }
 
 void RawBufferTransport::ClosePooledConnections() {
@@ -323,10 +319,10 @@ void RawBufferTransport::ListenerLoop() {
 }
 
 absl::Status RawBufferTransport::PullBuffer(
-    absl::string_view peer, size_t buffer_id, size_t src_shard_idx,
+    absl::string_view source, size_t buffer_id, size_t src_shard_idx,
     size_t src_offset_bytes, size_t dst_shard_idx, size_t dst_offset_bytes,
     size_t size_bytes) {
-  if (peer.empty()) {
+  if (source.empty()) {
     return absl::InvalidArgumentError("Source peer address cannot be empty");
   }
 
@@ -337,10 +333,18 @@ absl::Status RawBufferTransport::PullBuffer(
         ", Size: ", size_bytes, ", Shard Host Size: ", host_size));
   }
 
-  ASSIGN_OR_RETURN(const int fd, BorrowConnection(peer));
+  auto status_or_fd = AcquireConnection(source);
+  if (!status_or_fd.ok()) return status_or_fd.status();
+  int fd = status_or_fd.value();
   bool ok_to_pool = false;
-  auto fd_cleaner =
-      absl::MakeCleanup([&] { ReturnConnection(ok_to_pool, fd, peer); });
+  auto fd_cleaner = absl::MakeCleanup([&] {
+    if (ok_to_pool) {
+      ReleaseConnection(source, fd);
+    } else {
+      shutdown(fd, SHUT_RDWR);
+      close(fd);
+    }
+  });
 
   PacketHeader header = {};
   header.op = 3;
@@ -367,10 +371,16 @@ absl::Status RawBufferTransport::PushBuffer(
         "Destination peer address cannot be empty");
   }
 
-  ASSIGN_OR_RETURN(const int fd, BorrowConnection(peer));
+  ASSIGN_OR_RETURN(const int fd, AcquireConnection(peer));
   bool ok_to_pool = false;
-  auto fd_cleaner =
-      absl::MakeCleanup([&] { ReturnConnection(ok_to_pool, fd, peer); });
+  auto fd_cleaner = absl::MakeCleanup([&] {
+    if (ok_to_pool) {
+      ReleaseConnection(peer, fd);
+    } else {
+      shutdown(fd, SHUT_RDWR);
+      close(fd);
+    }
+  });
 
   PacketHeader header = {};
   header.op = 5;

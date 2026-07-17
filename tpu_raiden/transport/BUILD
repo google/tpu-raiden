@@ -32,7 +32,7 @@ cc_library(
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/core:tsl_platform_headers",
         "//tpu_raiden/transport/lib:raw_buffer_transport",
-        "//tpu_raiden/transport/lib/socket:util",
+        "//tpu_raiden/transport/lib:socket_util",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/container:flat_hash_map",
@@ -75,7 +75,7 @@ cc_binary(
     ],
     features = ["-use_header_modules"],
     deps = [
-        "//tpu_raiden/transport/lib/socket:util",
+        "//tpu_raiden/transport/lib:socket_util",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/types:span",
     ],

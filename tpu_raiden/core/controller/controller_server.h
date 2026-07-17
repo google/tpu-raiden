@@ -17,6 +17,7 @@
 
 #include <memory>
 
+#include "absl/base/no_destructor.h"
 #include "absl/base/thread_annotations.h"
 #include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
@@ -32,7 +33,9 @@ namespace controller {
 // conflicts and rebinding overhead.
 class ControllerServer {
  public:
-  ControllerServer() = default;
+  static ControllerServer& GetInstance();
+  static std::unique_ptr<ControllerServer> Create();
+
   ~ControllerServer();
 
   // Starts the gRPC server hosting RaidenControllerServiceImpl on the specified
@@ -60,6 +63,10 @@ class ControllerServer {
 
 
  private:
+  friend class absl::NoDestructor<ControllerServer>;
+
+  ControllerServer() = default;
+
   // Returns a pointer to the hosted RaidenControllerServiceImpl instance, or
   // nullptr if the server has not been started.
   RaidenControllerServiceImpl* GetControllerService() const;

@@ -31,9 +31,9 @@ namespace {
 using ::absl_testing::StatusIs;
 
 TEST(ControllerServerTest, StartServerAndGetPortWorks) {
-  ControllerServer server;
-  ABSL_ASSERT_OK(server.StartServer(/*port=*/0));
-  int port = server.GetGrpcPort();
+  auto server = ControllerServer::Create();
+  ABSL_ASSERT_OK(server->StartServer(/*port=*/0));
+  int port = server->GetGrpcPort();
   EXPECT_GT(port, 0);
 
   // Connect via client and verify gRPC communication works.
@@ -44,39 +44,52 @@ TEST(ControllerServerTest, StartServerAndGetPortWorks) {
       client.RegisterWorker("worker_0", "localhost:10001", "localhost:10002");
   ABSL_ASSERT_OK(status);
 
-  auto worker_or = server.GetWorkerRegistry()->GetWorker("worker_0");
+  auto worker_or = server->GetWorkerRegistry()->GetWorker("worker_0");
   ABSL_ASSERT_OK(worker_or);
   EXPECT_EQ(worker_or->worker_id, "worker_0");
   EXPECT_EQ(worker_or->raiden_worker_endpoint, "localhost:10001");
   EXPECT_EQ(worker_or->raiden_transfer_endpoint, "localhost:10002");
 }
 
-TEST(ControllerServerTest, MultipleServersCanRunConcurrently) {
-  ControllerServer server1;
+TEST(ControllerServerTest, SingletonIsReused) {
+  auto& server1 = ControllerServer::GetInstance();
   ABSL_ASSERT_OK(server1.StartServer(/*port=*/0));
   int port1 = server1.GetGrpcPort();
-  EXPECT_GT(port1, 0);
 
-  ControllerServer server2;
+  auto& server2 = ControllerServer::GetInstance();
   ABSL_ASSERT_OK(server2.StartServer(/*port=*/0));
   int port2 = server2.GetGrpcPort();
+
+  EXPECT_EQ(port1, port2);
+  EXPECT_EQ(&server1, &server2);
+}
+
+TEST(ControllerServerTest, MultipleServersCanRunConcurrently) {
+  std::unique_ptr<ControllerServer> server1 = ControllerServer::Create();
+  ABSL_ASSERT_OK(server1->StartServer(/*port=*/0));
+  int port1 = server1->GetGrpcPort();
+  EXPECT_GT(port1, 0);
+
+  std::unique_ptr<ControllerServer> server2 = ControllerServer::Create();
+  ABSL_ASSERT_OK(server2->StartServer(/*port=*/0));
+  int port2 = server2->GetGrpcPort();
   EXPECT_GT(port2, 0);
 
   EXPECT_NE(port1, port2);
 }
 
 TEST(ControllerServerTest, StartServerWithInvalidPortFails) {
-  ControllerServer server;
-  absl::Status status = server.StartServer(/*port=*/-1);
+  auto server = ControllerServer::Create();
+  absl::Status status = server->StartServer(/*port=*/-1);
   EXPECT_THAT(status, StatusIs(absl::StatusCode::kInvalidArgument));
 }
 
 TEST(ControllerServerTest, StartServerWithConflictingPortFails) {
-  ControllerServer server;
-  ABSL_ASSERT_OK(server.StartServer(/*port=*/0));
-  int active_port = server.GetGrpcPort();
+  auto server = ControllerServer::Create();
+  ABSL_ASSERT_OK(server->StartServer(/*port=*/0));
+  int active_port = server->GetGrpcPort();
   int different_port = (active_port == 12345) ? 12346 : 12345;
-  absl::Status status = server.StartServer(different_port);
+  absl::Status status = server->StartServer(different_port);
   EXPECT_THAT(status, StatusIs(absl::StatusCode::kFailedPrecondition));
 }
 

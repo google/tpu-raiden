@@ -206,9 +206,9 @@ TEST(RawBufferTransportTest, RejectsOutOfBounds) {
 
 class TestRawBufferTransport : public RawBufferTransport {
  public:
-  using RawBufferTransport::BorrowConnection;
+  using RawBufferTransport::AcquireConnection;
   using RawBufferTransport::RawBufferTransport;
-  using RawBufferTransport::ReturnConnection;
+  using RawBufferTransport::ReleaseConnection;
 };
 
 TEST(RawBufferTransportTest, MultiIpPoolingIsolation) {
@@ -222,40 +222,43 @@ TEST(RawBufferTransportTest, MultiIpPoolingIsolation) {
   TestRawBufferTransport dst_transport(&dst, 0);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-  // 1. Borrow connection with local_ip = "127.0.0.1"
+  // 1. Acquire connection with local_ip = "127.0.0.1"
   const std::string src_addr = GetIpPort(src_transport);
-  const auto fd1_or = dst_transport.BorrowConnection(src_addr, "127.0.0.1");
+  const auto fd1_or = dst_transport.AcquireConnection(src_addr, "127.0.0.1");
   ASSERT_OK(fd1_or) << fd1_or.status().message();
   const int fd1 = fd1_or.value();
 
-  // Return it. It should be pooled under "127.0.0.1->peer1".
-  dst_transport.ReturnConnection(/*ok=*/true, fd1, src_addr, "127.0.0.1");
+  // Release it. It should be pooled under "127.0.0.1->peer1".
+  dst_transport.ReleaseConnection(src_addr, fd1, "127.0.0.1");
 
-  // 2. Borrow connection with local_ip = "127.0.0.2"
+  // 2. Acquire connection with local_ip = "127.0.0.2"
   // This should NOT reuse fd1 because it's a different local IP.
-  const auto fd2_or = dst_transport.BorrowConnection(src_addr, "127.0.0.2");
+  const auto fd2_or = dst_transport.AcquireConnection(src_addr, "127.0.0.2");
   ASSERT_OK(fd2_or) << fd2_or.status().message();
   const int fd2 = fd2_or.value();
+
   EXPECT_NE(fd1, fd2);
 
-  // Return it. It should be pooled under "127.0.0.2->peer1".
-  dst_transport.ReturnConnection(/*ok=*/true, fd2, src_addr, "127.0.0.2");
+  // Release it. It should be pooled under "127.0.0.2->peer1".
+  dst_transport.ReleaseConnection(src_addr, fd2, "127.0.0.2");
 
-  // 3. Borrow connection with local_ip = "127.0.0.1" again.
+  // 3. Acquire connection with local_ip = "127.0.0.1" again.
   // This SHOULD reuse fd1.
-  const auto fd3_or = dst_transport.BorrowConnection(src_addr, "127.0.0.1");
+  const auto fd3_or = dst_transport.AcquireConnection(src_addr, "127.0.0.1");
   ASSERT_OK(fd3_or) << fd3_or.status().message();
   const int fd3 = fd3_or.value();
-  EXPECT_EQ(fd1, fd3);
-  dst_transport.ReturnConnection(/*ok=*/true, fd3, src_addr, "127.0.0.1");
 
-  // 4. Borrow connection with local_ip = "127.0.0.2" again.
+  EXPECT_EQ(fd1, fd3);
+  dst_transport.ReleaseConnection(src_addr, fd3, "127.0.0.1");
+
+  // 4. Acquire connection with local_ip = "127.0.0.2" again.
   // This SHOULD reuse fd2.
-  const auto fd4_or = dst_transport.BorrowConnection(src_addr, "127.0.0.2");
+  const auto fd4_or = dst_transport.AcquireConnection(src_addr, "127.0.0.2");
   ASSERT_OK(fd4_or) << fd4_or.status().message();
   const int fd4 = fd4_or.value();
+
   EXPECT_EQ(fd2, fd4);
-  dst_transport.ReturnConnection(/*ok=*/true, fd4, src_addr, "127.0.0.2");
+  dst_transport.ReleaseConnection(src_addr, fd4, "127.0.0.2");
 }
 
 }  // namespace

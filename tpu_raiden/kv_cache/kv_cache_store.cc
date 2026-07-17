@@ -25,6 +25,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
@@ -493,6 +494,15 @@ absl::Status KVCacheStore::Load(const std::vector<std::string>& block_hashes,
 
 absl::Status KVCacheStore::ReadRemote(
     const std::vector<std::string>& block_hashes) {
+  std::vector<std::string> successfully_marked_as_reading;
+  successfully_marked_as_reading.reserve(block_hashes.size());
+  auto cleanup = absl::MakeCleanup([this, &successfully_marked_as_reading]() {
+    absl::MutexLock lock(mutex_);
+    for (const auto& hash : successfully_marked_as_reading) {
+      reading_hashes_.erase(hash);
+    }
+  });
+
   if (!raiden_controller_) {
     return absl::FailedPreconditionError("RaidenController is not initialized");
   }
@@ -516,14 +526,13 @@ absl::Status KVCacheStore::ReadRemote(
         return absl::InvalidArgumentError(
             absl::StrCat("Block is not pinned: ", hash));
       }
-      if (reading_hashes_.contains(hash)) {
+      auto [it, inserted] = reading_hashes_.insert(hash);
+      if (!inserted) {
         return absl::FailedPreconditionError(
             absl::StrCat("Block is already reading: ", hash));
       }
+      successfully_marked_as_reading.push_back(hash);
       src_info.push_back({existing->raiden_id, existing->host_block_id});
-    }
-    for (const auto& hash : block_hashes) {
-      reading_hashes_.insert(hash);
     }
   }
 
@@ -532,10 +541,6 @@ absl::Status KVCacheStore::ReadRemote(
   if (!host_blocks_or.ok()) {
     LOG(WARNING) << "Failed to allocate local block IDs for ReadRemote: "
                  << host_blocks_or.status().message();
-    absl::MutexLock lock(mutex_);
-    for (const auto& hash : block_hashes) {
-      reading_hashes_.erase(hash);
-    }
     return host_blocks_or.status();
   }
   const auto& dest_host_block_ids = host_blocks_or.value();
@@ -582,6 +587,7 @@ absl::Status KVCacheStore::ReadRemote(
                                  });
   }
 
+  std::move(cleanup).Cancel();
   return absl::OkStatus();
 }
 

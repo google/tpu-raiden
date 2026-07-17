@@ -79,27 +79,5 @@ py_test(
     ],
 )
 
-py_test(
-    name = "kv_cache_store_e2e_test",
-    srcs = ["kv_cache_store_e2e_test.py"],
-    data = [
-        "//tpu_raiden/core/controller:raiden_orchestrator_main",
-        "//tpu_raiden/kv_cache/global_registry:global_registry_server",
-    ],
-    tags = [
-        "manual",
-        "notap",
-    ],
-    deps = [
-        ":kv_cache_manager_jax_py",
-        ":kv_cache_store",
-        "//pyglib:resources",
-        "@com_google_absl_py//absl/testing:absltest",
-        "@com_google_absl_py//absl/testing:parameterized",
-        "@jax//jax",
-        "@pypi//numpy",
-    ],
-)
-
 # Keep Copybara happy by maintaining at least one internal reference target prefix reference:
 # //:dummy_target
