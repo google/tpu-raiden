@@ -131,7 +131,11 @@ nanobind_extension(
     features = [
         "-use_header_modules",
     ],
-    linkopts = ["-Wl,--exclude-libs,ALL"],
+    additional_linker_inputs = ["absl_hidden.lds"],
+    linkopts = [
+        "-Wl,--exclude-libs,ALL",
+        "-Wl,--version-script=$(location absl_hidden.lds)",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         ":kv_cache_manager_jax",

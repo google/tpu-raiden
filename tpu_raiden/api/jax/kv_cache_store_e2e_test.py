@@ -382,14 +382,23 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
   def test_e2e_with_multi_numa(self):
     self._run_e2e_test(enable_multi_numa=True)
 
-  def _run_remote_read_e2e_test(self, enable_multi_numa: bool):
+  def _run_remote_read_e2e_test(
+      self,
+      enable_multi_numa: bool,
+      num_blocks: int = 2,
+      read_rounds: int = 1,
+      consumer_local_save: bool = False,
+  ):
+    # NOTE(jcgu): True Multi-NUMA (ENABLE_MULTI_NUMA=1) with two distinct jobs in
+    # a single process blocks cross-NIC UDP routing, so it is skipped here on
+    # multi-device single hosts. The real two-node coverage (both MULTI_NUMA=0
+    # and =1, incl. multi-round read_remote + consumer-side Save) lives in
+    # current_work/global_prefix_cache_0716/two_node_read_remote/.
     if enable_multi_numa and len(self.devices) > 4:
-      # TODO(jcgu): Create a new multi-host setup
-      # to test True Multi-NUMA ENABLE_MULTI_NUMA=1 correctly, since running
-      # two distinct jobs inside this single-process sandbox blocks cross-NIC UDP routing.
       self.skipTest(
           "Multi-NUMA E2E test is not supported on single-host shared device "
-          f"configurations (devices={len(self.devices)}). Skipping."
+          f"configurations (devices={len(self.devices)}). Skipping. "
+          "See two_node_read_remote/ for real multi-host MULTI_NUMA=1 coverage."
       )
 
     os.environ["ENABLE_MULTI_NUMA"] = "1" if enable_multi_numa else "0"
@@ -405,7 +414,6 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     sharding_a = self.setup_sharding_for_devices(devices_a)
     sharding_b = self.setup_sharding_for_devices(devices_b)
 
-    num_blocks = 2
     shape = (num_blocks, 128, 8, 8, 128)
 
     # 1. Generate sequential distinct cache data for Job A
@@ -429,7 +437,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     # 2. Create Job A's KVCacheStore & KVCacheManager
     rid_a = kv_cache_store.RaidenId("job_a", "0", "cache_a", 0)
     store_a = kv_cache_store.KVCacheStore(
-        capacity=4,
+        capacity=2 * num_blocks + 4,
         global_registry_address=f"localhost:{_registry_port}",
         raiden_id=rid_a,
         num_shards=num_shards,
@@ -446,12 +454,16 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         raiden_worker_port=worker_port_a,
         raiden_controller_address=f"localhost:{store_a.raiden_controller_port}",
         worker_id="worker_a",
+        # host pool must cover the slot pool (num_slots*max_blocks) + the store's
+        # own host-block allocations (Save/read_remote), which the store places
+        # after the slot pool region.
+        host_blocks_to_allocate=4 * num_blocks + 8,
     )
 
     # 3. Create Job B's KVCacheStore & KVCacheManager
     rid_b = kv_cache_store.RaidenId("job_b", "0", "cache_b", 0)
     store_b = kv_cache_store.KVCacheStore(
-        capacity=4,
+        capacity=2 * num_blocks + 4,
         global_registry_address=f"localhost:{_registry_port}",
         raiden_id=rid_b,
         num_shards=num_shards,
@@ -468,28 +480,23 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         raiden_worker_port=worker_port_b,
         raiden_controller_address=f"localhost:{store_b.raiden_controller_port}",
         worker_id="worker_b",
-        host_blocks_to_allocate=4,  # Allocating enough space for receiver host blocks
+        host_blocks_to_allocate=4 * num_blocks + 8,
     )
 
     # Wait for listeners to start
     time.sleep(1)
 
-    hashes = [b"hash_0", b"hash_1"]
+    hashes = [f"hash_{i}".encode() for i in range(num_blocks)]
 
     # 4. Job A inserts HBM status and calls Save
     slices_a = [
         kv_cache_store.RaidenBlockID(
             rid_a,
             host_block_id=-1,
-            device_block_id=0,
+            device_block_id=i,
             status=kv_cache_store.BlockStatus.HBM,
-        ),
-        kv_cache_store.RaidenBlockID(
-            rid_a,
-            host_block_id=-1,
-            device_block_id=1,
-            status=kv_cache_store.BlockStatus.HBM,
-        ),
+        )
+        for i in range(num_blocks)
     ]
     inserted_a, evicted_a = store_a.insert(hashes, slices_a, on_host=False)
     self.assertTrue(inserted_a)
@@ -525,74 +532,63 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     # Give some time for registry propagation
     time.sleep(0.5)
     lookup_res_b = store_b.lookup(hashes, enable_global=True)
-    self.assertLen(lookup_res_b, 2)
+    self.assertLen(lookup_res_b, num_blocks)
 
-    # Verify REMOTE status and owner job_a
-    self.assertEqual(lookup_res_b[0][0], b"hash_0")
-    self.assertEqual(
-        lookup_res_b[0][1].status, kv_cache_store.BlockStatus.REMOTE
-    )
-    self.assertEqual(lookup_res_b[0][1].raiden_id, rid_a)
-
-    self.assertEqual(lookup_res_b[1][0], b"hash_1")
-    self.assertEqual(
-        lookup_res_b[1][1].status, kv_cache_store.BlockStatus.REMOTE
-    )
-    self.assertEqual(lookup_res_b[1][1].raiden_id, rid_a)
-
-    # Verify correct source host block IDs
+    # Verify REMOTE status and owner job_a for every block.
     lookup_res_a = store_a.lookup(hashes)
-    self.assertEqual(
-        lookup_res_b[0][1].host_block_id, lookup_res_a[0][1].host_block_id
-    )
-    self.assertEqual(
-        lookup_res_b[1][1].host_block_id, lookup_res_a[1][1].host_block_id
-    )
+    for i in range(num_blocks):
+      self.assertEqual(lookup_res_b[i][0], hashes[i])
+      self.assertEqual(
+          lookup_res_b[i][1].status, kv_cache_store.BlockStatus.REMOTE
+      )
+      self.assertEqual(lookup_res_b[i][1].raiden_id, rid_a)
+      # Discovered remote host_block_id must match the source's.
+      self.assertEqual(
+          lookup_res_b[i][1].host_block_id, lookup_res_a[i][1].host_block_id
+      )
 
     # 6. Job B controller calls insert_and_lock for the remote slices
-    slices_b = [lookup_res_b[0][1], lookup_res_b[1][1]]
+    slices_b = [blk for _, blk in lookup_res_b]
     self.assertTrue(store_b.insert_and_lock(hashes, slices_b, on_host=True))
 
-    # 7. Job B calls ReadRemote
-    self.assertTrue(store_b.read_remote(hashes))
+    # 7. Job B calls ReadRemote, optionally split across `read_rounds` batches to
+    #    exercise partial / multi-round remote reads.
+    def _poll_remote(store, want, what):
+      done = set()
+      while len(done) < want:
+        dn, failed, _ = store.poll_remote_read_status()
+        if failed:
+          raise RuntimeError(f"{what} failed: {failed}")
+        done.update(dn)
+        if len(done) < want:
+          time.sleep(0.01)
 
-    # Wait for ReadRemote completion
-    done = False
-    while not done:
-      read_done, read_failed, _ = store_b.poll_remote_read_status()
-      if read_failed:
-        raise RuntimeError(f"Job B ReadRemote failed: {read_failed}")
-      if len(read_done) == 2:
-        done = True
-      if not done:
-        time.sleep(0.01)
+    batch = max(1, num_blocks // read_rounds)
+    for r in range(read_rounds):
+      lo = r * batch
+      hi = num_blocks if r == read_rounds - 1 else (r + 1) * batch
+      sub = hashes[lo:hi]
+      if not sub:
+        continue
+      self.assertTrue(store_b.read_remote(sub))
+      _poll_remote(store_b, len(sub), f"Job B ReadRemote round {r}")
 
-    data_b = manager_b._impl.read_host_memory(0, 0, 16)
-    print(
-        "DEBUG: Job B host memory (layer 0, shard 0) after ReadRemote:"
-        f" {data_b}"
-    )
-
-    # 8. Verify Job B's LRU block status becomes HOST
+    # 8. Verify Job B's LRU block status becomes HOST for all blocks.
     lookup_res_b_after = store_b.lookup(hashes)
-    self.assertLen(lookup_res_b_after, 2)
-    self.assertEqual(
-        lookup_res_b_after[0][1].status, kv_cache_store.BlockStatus.HOST
-    )
-    self.assertEqual(
-        lookup_res_b_after[1][1].status, kv_cache_store.BlockStatus.HOST
-    )
+    self.assertLen(lookup_res_b_after, num_blocks)
+    for _, blk in lookup_res_b_after:
+      self.assertEqual(blk.status, kv_cache_store.BlockStatus.HOST)
 
     # 9. Job B controller calls Load to transfer data to TPU blocks
-    self.assertTrue(store_b.load(hashes, [0, 1]))
+    dst = list(range(num_blocks))
+    self.assertTrue(store_b.load(hashes, dst))
 
-    # Wait for Load completion
     done = False
     while not done:
       load_done, load_failed, _ = store_b.poll_load_status()
       if load_failed:
         raise RuntimeError(f"Job B Load failed: {load_failed}")
-      if len(load_done) == 2:
+      if len(load_done) == num_blocks:
         done = True
       if not done:
         time.sleep(0.01)
@@ -602,11 +598,58 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     # 10. Verify byte-exact match on Job B TPU devices
     np.testing.assert_array_equal(np.asarray(tpu_cache_b), host_data_a)
 
+    # 11. (optional) CONSUMER-SIDE Save on the fetched data: register fresh HBM
+    #     hashes over the loaded device blocks and Save (D2H) -> HOST_AND_HBM.
+    if consumer_local_save:
+      local_hashes = [f"b_local_{i}".encode() for i in range(num_blocks)]
+      local_slices = [
+          kv_cache_store.RaidenBlockID(
+              rid_b,
+              host_block_id=-1,
+              device_block_id=i,
+              status=kv_cache_store.BlockStatus.HBM,
+          )
+          for i in range(num_blocks)
+      ]
+      inserted, _ = store_b.insert(local_hashes, local_slices, on_host=False)
+      self.assertTrue(inserted)
+      self.assertTrue(store_b.pin(local_hashes))
+      self.assertTrue(store_b.save(local_hashes))
+      done = False
+      while not done:
+        s_done, s_failed, _ = store_b.poll_save_status()
+        if s_failed:
+          raise RuntimeError(f"Job B local Save failed: {s_failed}")
+        if len(s_done) == num_blocks:
+          done = True
+        if not done:
+          time.sleep(0.01)
+      for _, blk in store_b.lookup(local_hashes):
+        self.assertEqual(blk.status, kv_cache_store.BlockStatus.HOST_AND_HBM)
+        self.assertGreaterEqual(blk.host_block_id, 0)
+      store_b.release(local_hashes)
+
   def test_remote_read_e2e_without_multi_numa(self):
     self._run_remote_read_e2e_test(enable_multi_numa=False)
 
   def test_remote_read_e2e_with_multi_numa(self):
     self._run_remote_read_e2e_test(enable_multi_numa=True)
+
+  def test_remote_read_multiround(self):
+    # 4 blocks fetched in 2 read_remote rounds (partial remote reads).
+    self._run_remote_read_e2e_test(
+        enable_multi_numa=False, num_blocks=4, read_rounds=2
+    )
+
+  def test_remote_read_then_consumer_save(self):
+    # read_remote -> Load -> consumer-side Save of the fetched data (mixes
+    # read_remote + Save + Load on one store).
+    self._run_remote_read_e2e_test(
+        enable_multi_numa=False, num_blocks=2, consumer_local_save=True
+    )
+
+  def test_remote_read_more_blocks(self):
+    self._run_remote_read_e2e_test(enable_multi_numa=False, num_blocks=6)
 
 
 if __name__ == "__main__":

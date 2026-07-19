@@ -170,7 +170,16 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
     orchestrator_client_ = std::make_unique<OrchestratorServiceClient>(
         grpc::CreateChannel(std::string(raiden_orchestrator_address),
                             grpc::InsecureChannelCredentials()));
-    std::string my_endpoint = absl::StrCat("localhost:", raiden_controller_port_);
+    // The endpoint we advertise to the orchestrator must be reachable by peer
+    // controllers. On a single host "localhost" is fine, but for cross-host
+    // (multi-node) deployments the peer resolves this string and dials it, so it
+    // must be this host's real IP. Allow an override via env; default localhost.
+    const char* advertise_host =
+        std::getenv("RAIDEN_CONTROLLER_ADVERTISE_HOST");
+    std::string host = (advertise_host != nullptr && advertise_host[0] != '\0')
+                           ? std::string(advertise_host)
+                           : "localhost";
+    std::string my_endpoint = absl::StrCat(host, ":", raiden_controller_port_);
     absl::Status status = orchestrator_client_->RegisterController(unit_, my_endpoint);
     if (!status.ok()) {
       throw std::runtime_error(absl::StrCat(
