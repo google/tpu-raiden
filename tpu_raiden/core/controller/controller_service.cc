@@ -27,6 +27,7 @@
 #include "grpcpp/server_context.h"
 #include "grpcpp/support/status.h"
 #include "xla/tsl/concurrency/future.h"
+#include "tpu_raiden/core/buffer.h"
 #include "tpu_raiden/core/controller/worker_registry.h"
 #include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/proto/controller_service.pb.h"
@@ -42,12 +43,12 @@ RaidenControllerServiceImpl::RaidenControllerServiceImpl(
 
 grpc::Status RaidenControllerServiceImpl::RegisterWorker(
     grpc::ServerContext* context,
-    const ::tpu_raiden::tpu_raiden::proto::RegisterWorkerRequest* request,
-    ::tpu_raiden::tpu_raiden::proto::RegisterWorkerResponse* response) {
-  std::vector<::tpu_raiden::RaidenTransferEndpoint> eps;
+    const ::tpu_raiden::proto::RegisterWorkerRequest* request,
+    ::tpu_raiden::proto::RegisterWorkerResponse* response) {
+  std::vector<RaidenTransferEndpoint> eps;
   eps.reserve(request->raiden_transfer_endpoints_size());
   for (const auto& desc_proto : request->raiden_transfer_endpoints()) {
-    ::tpu_raiden::RaidenTransferEndpoint ep;
+    RaidenTransferEndpoint ep;
     ep.endpoint = desc_proto.endpoint();
     ep.shards.assign(desc_proto.shards().begin(), desc_proto.shards().end());
     eps.push_back(std::move(ep));
@@ -78,8 +79,8 @@ grpc::Status RaidenControllerServiceImpl::RegisterWorker(
 
 grpc::Status RaidenControllerServiceImpl::ReadRemote(
     grpc::ServerContext* context,
-    const ::tpu_raiden::tpu_raiden::proto::ReadRemoteRequest* request,
-    ::tpu_raiden::tpu_raiden::proto::ReadRemoteResponse* response) {
+    const ::tpu_raiden::proto::ReadRemoteRequest* request,
+    ::tpu_raiden::proto::ReadRemoteResponse* response) {
   if (request->src_host_block_ids_size() !=
       request->dest_host_block_ids_size()) {
     return grpc::Status(
@@ -100,30 +101,36 @@ grpc::Status RaidenControllerServiceImpl::ReadRemote(
   }
 
   auto workers = registry->GetRegisteredWorkers();
-  size_t total_transfers = 0;
-  for (const auto& w : workers) {
-    total_transfers += w.raiden_transfer_endpoints.size();
-  }
-  if (total_transfers != request->dest_raiden_transfer_endpoints_size()) {
+  if (workers.size() != request->dest_worker_endpoints_size()) {
     return grpc::Status(
         grpc::StatusCode::INVALID_ARGUMENT,
-        absl::StrCat("Transfer count mismatch: local has ", total_transfers,
-                     ", request has ",
-                     request->dest_raiden_transfer_endpoints_size()));
+        absl::StrCat("Worker count mismatch: local has ", workers.size(),
+                     ", request has ", request->dest_worker_endpoints_size()));
   }
 
-  std::vector<int64_t> src_offsets(request->src_host_block_ids().begin(),
-                                   request->src_host_block_ids().end());
-  std::vector<int64_t> dst_offsets(request->dest_host_block_ids().begin(),
-                                   request->dest_host_block_ids().end());
+  std::vector<Buffer> src_buffers;
+  src_buffers.reserve(request->src_host_block_ids_size());
+  for (int32_t src_id : request->src_host_block_ids()) {
+    src_buffers.emplace_back(/*index=*/src_id,
+                             /*shards=*/std::vector<BufferShard>{},
+                             /*remote_address=*/std::nullopt,
+                             /*memory_type=*/rpc::MEMORY_TYPE_DRAM);
+  }
 
-  std::vector<::tpu_raiden::RaidenTransferEndpoint> peers;
-  peers.reserve(request->dest_raiden_transfer_endpoints_size());
-  for (const auto& desc_proto : request->dest_raiden_transfer_endpoints()) {
-    ::tpu_raiden::RaidenTransferEndpoint ep;
-    ep.endpoint = desc_proto.endpoint();
-    ep.shards.assign(desc_proto.shards().begin(), desc_proto.shards().end());
-    peers.push_back(std::move(ep));
+  std::vector<Buffer> dst_buffers;
+  dst_buffers.reserve(request->dest_host_block_ids_size());
+  for (size_t i = 0; i < request->dest_host_block_ids_size(); ++i) {
+    int32_t dst_id = request->dest_host_block_ids(i);
+    size_t worker_idx = i % request->dest_worker_endpoints_size();
+    const auto& worker_eps_proto = request->dest_worker_endpoints(worker_idx);
+
+    std::string serialized_remote_address =
+        worker_eps_proto.SerializeAsString();
+
+    dst_buffers.emplace_back(/*index=*/dst_id,
+                             /*shards=*/std::vector<BufferShard>{},
+                             /*remote_address=*/serialized_remote_address,
+                             /*memory_type=*/rpc::MEMORY_TYPE_DRAM);
   }
 
   std::shared_ptr<const TransferBuffersCallback> cb;
@@ -136,9 +143,7 @@ grpc::Status RaidenControllerServiceImpl::ReadRemote(
                         "TransferBuffers callback is not registered");
   }
 
-  tsl::Future<> future = (*cb)(rpc::MemoryType::MEMORY_TYPE_DRAM,
-                               rpc::MemoryType::MEMORY_TYPE_DRAM, src_offsets,
-                               dst_offsets, /*copy_sizes=*/{}, peers);
+  tsl::Future<> future = (*cb)(src_buffers, dst_buffers, /*copy_sizes=*/{});
   absl::Status status = future.Await();
   if (!status.ok()) {
     return grpc::Status(grpc::StatusCode::INTERNAL,

@@ -45,6 +45,7 @@ os.environ.setdefault("GOOGLE_LOG_DIR", _LOG_DIR)
 os.environ.setdefault("TMPDIR", _LOG_DIR)
 
 import torch
+import torch_tpu
 import torch.distributed as dist
 import torch.multiprocessing as mp
 

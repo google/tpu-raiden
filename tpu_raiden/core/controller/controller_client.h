@@ -40,22 +40,18 @@ class RaidenControllerClient {
   // Registers a worker with the controller.
   absl::Status RegisterWorker(
       absl::string_view worker_id, absl::string_view raiden_worker_endpoint,
-      const std::vector<::tpu_raiden::RaidenTransferEndpoint>&
-          raiden_transfer_endpoints);
+      const std::vector<RaidenTransferEndpoint>& raiden_transfer_endpoints);
 
   // Alias for snake_case callers.
   absl::Status register_worker(
       absl::string_view worker_id, absl::string_view raiden_worker_endpoint,
-      const std::vector<::tpu_raiden::RaidenTransferEndpoint>&
-          raiden_transfer_endpoints) {
+      const std::vector<RaidenTransferEndpoint>& raiden_transfer_endpoints) {
     return RegisterWorker(worker_id, raiden_worker_endpoint,
                           raiden_transfer_endpoints);
   }
 
  private:
-  std::unique_ptr<
-      ::tpu_raiden::tpu_raiden::proto::RaidenControllerService::Stub>
-      stub_;
+  std::unique_ptr<proto::RaidenControllerService::Stub> stub_;
 };
 
 }  // namespace controller

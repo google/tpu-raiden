@@ -16,6 +16,7 @@ syntax = "proto3";
 
 package tpu_raiden.proto;
 
+import "tpu_raiden/proto/controller_service.proto";
 import "tpu_raiden/rpc/raiden_service.proto";
 
 // Service providing a gRPC communication channel between Raiden Controller and
@@ -113,6 +114,8 @@ message TransferBufferSpec {
   repeated BufferProto src_buffers = 7;
   // Destination buffers for transfer.
   repeated BufferProto dst_buffers = 8;
+  // Hierarchical nested peer endpoints.
+  repeated RaidenTransferEndpointProto peers = 9;
 }
 
 // Request to transfer data across memory spaces on a transfer worker.

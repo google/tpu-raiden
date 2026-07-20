@@ -42,7 +42,7 @@ namespace kv_cache {
 namespace global_registry {
 namespace {
 
-class GlobalRegistryTest : public ::testing::Test {
+class GlobalRegistryTest : public testing::Test {
  protected:
   void SetUp() override {
     // Start server on ephemeral port

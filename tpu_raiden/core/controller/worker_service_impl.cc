@@ -250,15 +250,62 @@ grpc::Status WorkerServiceImpl::TransferBuffers(
     }
   } else if (transfer.src_buffers_size() > 0 &&
              !transfer.src_buffers(0).remote_address().empty()) {
-    future_or = transfer_manager_.H2hRead(
-        transfer.src_buffers(0).remote_address(), src_offsets, dst_offsets);
+    auto deserialize_peers = [](const std::string& remote_address) {
+      std::vector<RaidenTransferEndpoint> peers;
+      ::tpu_raiden::proto::RaidenWorkerTransferEndpointsProto worker_eps_proto;
+      if (worker_eps_proto.ParseFromString(remote_address) &&
+          worker_eps_proto.endpoints_size() > 0) {
+        peers.reserve(worker_eps_proto.endpoints_size());
+        for (const auto& ep_proto : worker_eps_proto.endpoints()) {
+          RaidenTransferEndpoint ep;
+          ep.endpoint = ep_proto.endpoint();
+          ep.shards.assign(ep_proto.shards().begin(), ep_proto.shards().end());
+          peers.push_back(std::move(ep));
+        }
+      } else {
+        peers.push_back(RaidenTransferEndpoint{.endpoint = remote_address});
+      }
+      return peers;
+    };
+    std::vector<RaidenTransferEndpoint> peers =
+        deserialize_peers(transfer.src_buffers(0).remote_address());
+    future_or = transfer_manager_.H2hRead(peers, src_offsets, dst_offsets);
   } else if (transfer.dst_buffers_size() > 0 &&
              !transfer.dst_buffers(0).remote_address().empty()) {
-    future_or = transfer_manager_.H2hWrite(
-        transfer.dst_buffers(0).remote_address(), src_offsets, dst_offsets);
+    auto deserialize_peers = [](const std::string& remote_address) {
+      std::vector<RaidenTransferEndpoint> peers;
+      ::tpu_raiden::proto::RaidenWorkerTransferEndpointsProto worker_eps_proto;
+      if (worker_eps_proto.ParseFromString(remote_address) &&
+          worker_eps_proto.endpoints_size() > 0) {
+        peers.reserve(worker_eps_proto.endpoints_size());
+        for (const auto& ep_proto : worker_eps_proto.endpoints()) {
+          RaidenTransferEndpoint ep;
+          ep.endpoint = ep_proto.endpoint();
+          ep.shards.assign(ep_proto.shards().begin(), ep_proto.shards().end());
+          peers.push_back(std::move(ep));
+        }
+      } else {
+        peers.push_back(RaidenTransferEndpoint{.endpoint = remote_address});
+      }
+      return peers;
+    };
+    std::vector<RaidenTransferEndpoint> peers =
+        deserialize_peers(transfer.dst_buffers(0).remote_address());
+    future_or = transfer_manager_.H2hWrite(peers, src_offsets, dst_offsets);
+  } else if (transfer.peers_size() > 0) {
+    std::vector<RaidenTransferEndpoint> peers;
+    peers.reserve(transfer.peers_size());
+    for (const auto& peer_proto : transfer.peers()) {
+      RaidenTransferEndpoint ep;
+      ep.endpoint = peer_proto.endpoint();
+      ep.shards.assign(peer_proto.shards().begin(), peer_proto.shards().end());
+      peers.push_back(std::move(ep));
+    }
+    future_or = transfer_manager_.H2hWrite(peers, src_offsets, dst_offsets);
   } else {
     response->set_success(false);
-    response->set_message("Peer address must be provided for H2H transfers");
+    response->set_message(
+        "Peer address or peers list must be provided for H2H transfers");
     return grpc::Status::OK;
   }
   if (!future_or.ok()) {

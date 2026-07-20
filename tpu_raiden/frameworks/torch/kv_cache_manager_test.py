@@ -20,6 +20,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
 import torch
+import torch_tpu
 from torch_tpu._internal import execution_mode
 from torch_tpu._internal import sync
 

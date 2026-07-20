@@ -23,7 +23,10 @@ package(default_visibility = ["//visibility:public"])
 proto_library(
     name = "worker_service_proto",
     srcs = ["worker_service.proto"],
-    deps = ["//tpu_raiden/rpc:raiden_service_proto"],
+    deps = [
+        ":controller_service_proto",
+        "//tpu_raiden/rpc:raiden_service_proto",
+    ],
 )
 
 cc_proto_library(

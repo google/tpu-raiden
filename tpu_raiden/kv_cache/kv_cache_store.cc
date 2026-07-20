@@ -60,7 +60,7 @@ KVCacheStore::KVCacheStore(size_t capacity,
                            absl::string_view raiden_controller_address)
     : lru_cache_(capacity),
       raiden_id_(std::move(raiden_id)),
-      write_through_pool_(std::make_unique<::tpu_raiden::NumaThreadPool>(4)) {
+      write_through_pool_(std::make_unique<NumaThreadPool>(4)) {
   if (!global_registry_address.empty()) {
     auto channel = grpc::CreateChannel(std::string(global_registry_address),
                                        grpc::InsecureChannelCredentials());
@@ -68,15 +68,9 @@ KVCacheStore::KVCacheStore(size_t capacity,
         std::make_shared<global_registry::GlobalRegistryClient>(channel);
   }
   if (num_shards > 0) {
-    ::tpu_raiden::rpc::RaidenIdProto unit_proto;
-    unit_proto.set_job_name(raiden_id_.job_name);
-    unit_proto.set_job_replica_id(raiden_id_.job_replica_id);
-    unit_proto.set_data_name(raiden_id_.data_name);
-    unit_proto.set_data_replica_idx(raiden_id_.data_replica_idx);
-
     raiden_controller_ =
-        std::make_unique<::tpu_raiden::controller::RaidenController>(
-            unit_proto, capacity, num_shards, shard_size_bytes,
+        std::make_unique<tpu_raiden::controller::RaidenController>(
+            raiden_id_.ToProto(), capacity, num_shards, shard_size_bytes,
             raiden_orchestrator_address, raiden_controller_address);
   }
   if (raiden_controller_) {
@@ -87,13 +81,12 @@ KVCacheStore::KVCacheStore(size_t capacity,
 
 KVCacheStore::KVCacheStore(
     size_t capacity,
-    std::unique_ptr<::tpu_raiden::controller::RaidenController>
-        raiden_controller,
+    std::unique_ptr<tpu_raiden::controller::RaidenController> raiden_controller,
     absl::string_view global_registry_address, RaidenId raiden_id)
     : lru_cache_(capacity),
       raiden_id_(std::move(raiden_id)),
       raiden_controller_(std::move(raiden_controller)),
-      write_through_pool_(std::make_unique<::tpu_raiden::NumaThreadPool>(4)) {
+      write_through_pool_(std::make_unique<NumaThreadPool>(4)) {
   if (!global_registry_address.empty()) {
     auto channel = grpc::CreateChannel(std::string(global_registry_address),
                                        grpc::InsecureChannelCredentials());
@@ -160,12 +153,7 @@ absl::StatusOr<BlockSliceList> KVCacheStore::Lookup(
       for (size_t i = 0; i < num_results; ++i) {
         const auto& metadata = global_results[i];
         const auto& proto_id = metadata.raiden_id();
-        RaidenId remote_id{
-            .job_name = proto_id.job_name(),
-            .job_replica_id = proto_id.job_replica_id(),
-            .data_name = proto_id.data_name(),
-            .data_replica_idx = proto_id.data_replica_idx(),
-        };
+        RaidenId remote_id = RaidenId::FromProto(proto_id);
         results.push_back(std::make_pair(
             remaining_hashes[i], RaidenBlockID(remote_id, metadata.block_id(),
                                                BlockStatus::REMOTE)));

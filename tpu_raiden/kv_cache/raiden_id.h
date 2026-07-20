@@ -34,6 +34,7 @@
 #include <string>
 
 #include "absl/hash/hash.h"
+#include "tpu_raiden/rpc/raiden_service.pb.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
@@ -45,6 +46,24 @@ struct RaidenId {
   std::string job_replica_id;
   std::string data_name;
   int data_replica_idx = 0;
+
+  rpc::RaidenIdProto ToProto() const {
+    rpc::RaidenIdProto proto;
+    proto.set_job_name(job_name);
+    proto.set_job_replica_id(job_replica_id);
+    proto.set_data_name(data_name);
+    proto.set_data_replica_idx(data_replica_idx);
+    return proto;
+  }
+
+  static RaidenId FromProto(const rpc::RaidenIdProto& proto) {
+    return RaidenId{
+        .job_name = proto.job_name(),
+        .job_replica_id = proto.job_replica_id(),
+        .data_name = proto.data_name(),
+        .data_replica_idx = proto.data_replica_idx(),
+    };
+  }
 
   bool operator==(const RaidenId& other) const {
     return job_name == other.job_name &&

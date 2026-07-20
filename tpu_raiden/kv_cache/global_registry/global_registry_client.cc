@@ -39,7 +39,7 @@ namespace kv_cache {
 namespace global_registry {
 
 namespace {
-void ToProto(const RaidenId& id, ::tpu_raiden::rpc::RaidenIdProto* proto) {
+void ToProto(const RaidenId& id, tpu_raiden::rpc::RaidenIdProto* proto) {
   proto->set_job_name(id.job_name);
   proto->set_job_replica_id(id.job_replica_id);
   proto->set_data_name(id.data_name);

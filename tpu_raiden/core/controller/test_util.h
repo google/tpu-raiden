@@ -34,6 +34,7 @@
 #include "tpu_raiden/core/controller/controller_service.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
 #include "tpu_raiden/core/controller/worker_service_impl.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 
 namespace tpu_raiden {
@@ -144,6 +145,30 @@ struct MockTransferManager {
     last_peer = peer;
     last_src_offsets.assign(src_block_ids.begin(), src_block_ids.end());
     last_dst_offsets.assign(dst_block_ids.begin(), dst_block_ids.end());
+    return std::make_pair(std::vector<int>{}, raiden::PjRtCopyFuture());
+  }
+
+  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hRead(
+      const std::vector<::tpu_raiden::RaidenTransferEndpoint>& peers,
+      const std::vector<int>& src_block_ids,
+      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
+      int layer_idx = -1) {
+    if (!peers.empty()) {
+      return H2hRead(peers.front().endpoint, src_block_ids, dst_block_ids, uuid,
+                     layer_idx);
+    }
+    return std::make_pair(std::vector<int>{}, raiden::PjRtCopyFuture());
+  }
+
+  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hWrite(
+      const std::vector<::tpu_raiden::RaidenTransferEndpoint>& peers,
+      const std::vector<int>& src_block_ids,
+      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
+      int layer_idx = -1) {
+    if (!peers.empty()) {
+      return H2hWrite(peers.front().endpoint, src_block_ids, dst_block_ids,
+                      uuid, layer_idx);
+    }
     return std::make_pair(std::vector<int>{}, raiden::PjRtCopyFuture());
   }
 };

@@ -27,6 +27,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/status_macros.h"
 
@@ -108,6 +109,16 @@ class KVManagerHolder {
         const std::vector<int64_t>& dst_offsets,
         const std::vector<int64_t>& copy_sizes) = 0;
     virtual absl::StatusOr<raiden::PjRtCopyFuture> H2hRead(
+        const std::vector<RaidenTransferEndpoint>& peers,
+        const std::vector<int64_t>& src_offsets,
+        const std::vector<int64_t>& dst_offsets) = 0;
+    virtual absl::StatusOr<raiden::PjRtCopyFuture> H2hWrite(
+        const std::vector<RaidenTransferEndpoint>& peers,
+        const std::vector<int64_t>& src_offsets,
+        const std::vector<int64_t>& dst_offsets) = 0;
+    // Legacy single peer endpoints (will eventually be deprecated directly down
+    // config stack)
+    virtual absl::StatusOr<raiden::PjRtCopyFuture> H2hRead(
         absl::string_view peer, const std::vector<int64_t>& src_offsets,
         const std::vector<int64_t>& dst_offsets) = 0;
     virtual absl::StatusOr<raiden::PjRtCopyFuture> H2hWrite(
@@ -146,6 +157,24 @@ class KVManagerHolder {
         const std::vector<int64_t>& dst_offsets,
         const std::vector<int64_t>& copy_sizes) override {
       return impl_->H2d(src_offsets, dst_offsets, copy_sizes);
+    }
+    absl::StatusOr<raiden::PjRtCopyFuture> H2hRead(
+        const std::vector<RaidenTransferEndpoint>& peers,
+        const std::vector<int64_t>& src_offsets,
+        const std::vector<int64_t>& dst_offsets) override {
+      (void)dst_offsets;
+      ASSIGN_OR_RETURN(std::vector<int> src_ids, SafeCastOffsets(src_offsets));
+      ASSIGN_OR_RETURN(auto res, impl_->H2hRead(peers, src_ids));
+      return res.second;
+    }
+    absl::StatusOr<raiden::PjRtCopyFuture> H2hWrite(
+        const std::vector<RaidenTransferEndpoint>& peers,
+        const std::vector<int64_t>& src_offsets,
+        const std::vector<int64_t>& dst_offsets) override {
+      ASSIGN_OR_RETURN(std::vector<int> src_ids, SafeCastOffsets(src_offsets));
+      ASSIGN_OR_RETURN(std::vector<int> dst_ids, SafeCastOffsets(dst_offsets));
+      ASSIGN_OR_RETURN(auto res, impl_->H2hWrite(peers, src_ids, dst_ids));
+      return res.second;
     }
     absl::StatusOr<raiden::PjRtCopyFuture> H2hRead(
         absl::string_view peer, const std::vector<int64_t>& src_offsets,
@@ -254,6 +283,26 @@ class KVManagerHolder {
       return absl::InternalError("KVManagerHolder is null");
     }
     return self_->H2d(src_offsets, dst_offsets, copy_sizes);
+  }
+
+  absl::StatusOr<raiden::PjRtCopyFuture> H2hRead(
+      const std::vector<RaidenTransferEndpoint>& peers,
+      const std::vector<int64_t>& src_offsets,
+      const std::vector<int64_t>& dst_offsets) const {
+    if (!self_) {
+      return absl::InternalError("KVManagerHolder is null");
+    }
+    return self_->H2hRead(peers, src_offsets, dst_offsets);
+  }
+
+  absl::StatusOr<raiden::PjRtCopyFuture> H2hWrite(
+      const std::vector<RaidenTransferEndpoint>& peers,
+      const std::vector<int64_t>& src_offsets,
+      const std::vector<int64_t>& dst_offsets) const {
+    if (!self_) {
+      return absl::InternalError("KVManagerHolder is null");
+    }
+    return self_->H2hWrite(peers, src_offsets, dst_offsets);
   }
 
   absl::StatusOr<raiden::PjRtCopyFuture> H2hRead(
