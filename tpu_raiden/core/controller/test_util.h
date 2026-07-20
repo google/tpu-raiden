@@ -44,6 +44,7 @@ struct MockTransferManager {
   int d2h_write_calls = 0;
   int h2d_calls = 0;
   int h2d_write_calls = 0;
+  int h2d_read_calls = 0;
   int h2h_calls = 0;
   int h2h_read_calls = 0;
   int h2h_write_calls = 0;
@@ -91,6 +92,18 @@ struct MockTransferManager {
       const std::vector<int64_t>& dst_offsets,
       const std::vector<int64_t>& copy_sizes) {
     h2d_write_calls++;
+    last_peer = std::string(peer);
+    last_src_offsets = src_offsets;
+    last_dst_offsets = dst_offsets;
+    last_copy_sizes = copy_sizes;
+    return raiden::PjRtCopyFuture();
+  }
+
+  absl::StatusOr<raiden::PjRtCopyFuture> H2dRead(
+      absl::string_view peer, const std::vector<int64_t>& src_offsets,
+      const std::vector<int64_t>& dst_offsets,
+      const std::vector<int64_t>& copy_sizes) {
+    h2d_read_calls++;
     last_peer = std::string(peer);
     last_src_offsets = src_offsets;
     last_dst_offsets = dst_offsets;

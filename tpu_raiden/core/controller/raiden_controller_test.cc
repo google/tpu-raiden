@@ -609,6 +609,35 @@ TEST_F(RaidenControllerTest, TransferBuffersLocalHbmToRemoteDramSuccess) {
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(0));
   EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(1));
 }
+
+TEST_F(RaidenControllerTest, TransferBuffersRemoteDramToLocalHbmSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  RaidenController controller(unit_, /*num_blocks=*/5, /*num_shards=*/1,
+                              /*shard_size_bytes=*/512);
+  RegisterAndInitWorker(controller, "worker_0", test_server_->server_address);
+
+  auto alloc_src = controller.AllocateBuffers(1);
+  ASSERT_TRUE(alloc_src.ok());
+  auto src_buffers = *alloc_src;
+  src_buffers[0].set_memory_type(rpc::MEMORY_TYPE_DRAM);
+  src_buffers[0].set_remote_address("remote_host:9090");
+
+  auto alloc_dst = controller.AllocateBuffers(1);
+  ASSERT_TRUE(alloc_dst.ok());
+  auto dst_buffers = *alloc_dst;
+  dst_buffers[0].set_memory_type(rpc::MEMORY_TYPE_HBM);
+
+  auto status = controller.TransferBuffers(src_buffers, dst_buffers).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.h2d_read_calls, 1);
+  EXPECT_EQ(mock_mgr.h2d_calls, 0);
+  EXPECT_EQ(mock_mgr.h2d_write_calls, 0);
+  EXPECT_EQ(mock_mgr.last_peer, "remote_host:9090");
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(0));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(1));
+}
 }  // namespace
 }  // namespace controller
 }  // namespace tpu_raiden

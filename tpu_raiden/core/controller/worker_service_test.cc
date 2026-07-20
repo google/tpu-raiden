@@ -410,6 +410,34 @@ TEST_F(WorkerServiceTest,
   EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
 }
 
+TEST_F(WorkerServiceTest,
+       TransferBuffersRemoteH2dWithSrcBufferRemoteAddressSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_HBM);
+
+  auto* src_buf = transfer->add_src_buffers();
+  src_buf->set_index(100);
+  src_buf->set_remote_address("remote_host:5678");
+  auto* dst_buf = transfer->add_dst_buffers();
+  dst_buf->set_index(200);
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.d2h_calls, 0);
+  EXPECT_EQ(mock_mgr.h2d_calls, 0);
+  EXPECT_EQ(mock_mgr.h2d_write_calls, 0);
+  EXPECT_EQ(mock_mgr.h2d_read_calls, 1);
+  EXPECT_EQ(mock_mgr.last_peer, "remote_host:5678");
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
+  EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
+}
+
 TEST_F(WorkerServiceTest, TransferBuffersLocalH2dFallbackSuccess) {
   MockTransferManager mock_mgr;
   test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));

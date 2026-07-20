@@ -49,6 +49,20 @@ template <typename T>
 inline constexpr bool has_h2d_write_v = has_h2d_write<T>::value;
 
 template <typename T, typename = void>
+struct has_h2d_read : std::false_type {};
+
+template <typename T>
+struct has_h2d_read<T, std::void_t<decltype(std::declval<T&>().H2dRead(
+                           std::declval<absl::string_view>(),
+                           std::declval<const std::vector<int64_t>&>(),
+                           std::declval<const std::vector<int64_t>&>(),
+                           std::declval<const std::vector<int64_t>&>()))>>
+    : std::true_type {};
+
+template <typename T>
+inline constexpr bool has_h2d_read_v = has_h2d_read<T>::value;
+
+template <typename T, typename = void>
 struct has_d2h_write : std::false_type {};
 
 template <typename T>
@@ -86,6 +100,10 @@ class KVManagerHolder {
         absl::string_view peer, const std::vector<int64_t>& src_offsets,
         const std::vector<int64_t>& dst_offsets) = 0;
     virtual absl::StatusOr<raiden::PjRtCopyFuture> H2dWrite(
+        absl::string_view peer, const std::vector<int64_t>& src_offsets,
+        const std::vector<int64_t>& dst_offsets,
+        const std::vector<int64_t>& copy_sizes) = 0;
+    virtual absl::StatusOr<raiden::PjRtCopyFuture> H2dRead(
         absl::string_view peer, const std::vector<int64_t>& src_offsets,
         const std::vector<int64_t>& dst_offsets,
         const std::vector<int64_t>& copy_sizes) = 0;
@@ -138,6 +156,17 @@ class KVManagerHolder {
       } else {
         return absl::UnimplementedError(
             "H2dWrite is not implemented by the underlying transfer manager.");
+      }
+    }
+    absl::StatusOr<raiden::PjRtCopyFuture> H2dRead(
+        absl::string_view peer, const std::vector<int64_t>& src_offsets,
+        const std::vector<int64_t>& dst_offsets,
+        const std::vector<int64_t>& copy_sizes) override {
+      if constexpr (internal::has_h2d_read_v<T>) {
+        return impl_->H2dRead(peer, src_offsets, dst_offsets, copy_sizes);
+      } else {
+        return absl::UnimplementedError(
+            "H2dRead is not implemented by the underlying transfer manager.");
       }
     }
     absl::StatusOr<raiden::PjRtCopyFuture> D2hWrite(
@@ -224,6 +253,16 @@ class KVManagerHolder {
       return absl::InternalError("KVManagerHolder is null");
     }
     return self_->H2dWrite(peer, src_offsets, dst_offsets, copy_sizes);
+  }
+
+  absl::StatusOr<raiden::PjRtCopyFuture> H2dRead(
+      absl::string_view peer, const std::vector<int64_t>& src_offsets,
+      const std::vector<int64_t>& dst_offsets,
+      const std::vector<int64_t>& copy_sizes) const {
+    if (!self_) {
+      return absl::InternalError("KVManagerHolder is null");
+    }
+    return self_->H2dRead(peer, src_offsets, dst_offsets, copy_sizes);
   }
 
   absl::StatusOr<raiden::PjRtCopyFuture> D2hWrite(

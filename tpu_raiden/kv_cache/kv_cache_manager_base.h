@@ -126,6 +126,14 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
     return absl::UnimplementedError("H2dWrite is not implemented");
   }
 
+  virtual absl::StatusOr<raiden::PjRtCopyFuture> H2dRead(
+      absl::string_view peer,
+      const std::vector<int64_t>& src_offsets_major_dim = {},
+      const std::vector<int64_t>& dst_offsets_major_dim = {},
+      const std::vector<int64_t>& copy_sizes_major_dim = {}) {
+    return absl::UnimplementedError("H2dRead is not implemented");
+  }
+
   // Async on-chip D2H offloads E2E
   virtual absl::StatusOr<raiden::PjRtCopyFuture> D2h(
       const std::vector<int64_t>& src_offsets_major_dim = {},
