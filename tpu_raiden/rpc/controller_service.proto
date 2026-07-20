@@ -42,6 +42,10 @@ message CoordinateTransferRequest {
   // tags against both peers' registered manifests; the complement becomes the
   // skip summary. Raiden attaches no meaning to any tag value.
   repeated string transfer_pool_tags = 13;
+  // "" or "tokens" = the token-axis reshard path; "state" = the per-request
+  // state-class path planned from declared StateSpans. Opaque to raiden
+  // beyond selecting the planner branch.
+  string transfer_kind = 14;
 }
 
 // One contiguous run of destination tokens materialized from one source
@@ -65,6 +69,34 @@ message RegisterRequestBlocksRequest {
   // The registering rank's declared source map. A span never crosses a
   // source block boundary (offset + count <= page_tokens).
   repeated SourceSpan spans = 5;
+  // Per-request state declarations (one per state pool class the rank
+  // contributes to, e.g. GDN conv/ssm slots).
+  repeated StateBlockRegistration state_registrations = 6;
+}
+
+// One contiguous run of destination *units* materialized from one source
+// state block. A "unit" is the tag's physically-contiguous transfer unit
+// (e.g. one head's tile); its byte size is declared by the producer and
+// cross-checked against both manifests. Controller-plane data only.
+message StateSpan {
+  int64 dst_unit_start = 1;
+  int64 unit_count = 2;
+  // Index into the owning StateBlockRegistration's block_ids list.
+  int64 src_block_ordinal = 3;
+  int64 src_unit_offset = 4;
+}
+
+// A rank's declared contribution to one state pool class.
+message StateBlockRegistration {
+  // Opaque pool tag naming the class (e.g. "gdn.conv"). Raiden attaches no
+  // meaning to the value.
+  string tag = 1;
+  repeated int64 block_ids = 2;
+  // Source-side unit geometry: units_per_block * unit_bytes must equal the
+  // registered pool's live bytes per block.
+  int64 unit_bytes = 3;
+  int64 units_per_block = 4;
+  repeated StateSpan spans = 5;
 }
 
 message ReleaseRequestBlocksRequest {

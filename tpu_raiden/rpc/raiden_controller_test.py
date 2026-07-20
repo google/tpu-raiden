@@ -249,6 +249,28 @@ class RaidenControllerTest(absltest.TestCase):
     dst_ids = list(range(2000, 2000 + math.ceil(num_tokens / dst_page_tokens)))
     return controller, client, src_units, dst_unit, dst_ids
 
+  def test_register_work_unit_accepts_duplicate_endpoints_for_shared_port(
+      self,
+  ):
+    # JAX/Pathways: one process serves several local devices behind a single
+    # transfer port, so a unit's shards legitimately register identical
+    # endpoints. The list length is the shard count; the addresses coincide.
+    client = RecordingWorkerRpcClient()
+    controller = raiden_controller.RaidenController(
+        port=10000, worker_rpc_client=client
+    )
+    unit = raiden_controller.RaidenId(
+        job_name="pathways",
+        job_replica_id="host0",
+        data_name="kv_cache",
+        data_replica_idx=0,
+    )
+    shared_endpoint = "10.0.0.1:8000"
+    controller.register_work_unit(unit, [shared_endpoint] * 4)
+    self.assertEqual(
+        controller._resolve_shards(unit), [shared_endpoint] * 4
+    )
+
   def _build_stage3_plan(self, **kwargs):
     transfer_pool_tags = kwargs.pop("transfer_pool_tags", ["fa"])
     controller, client, src_units, dst_unit, dst_ids = self._stage3_fixture(
@@ -1645,3 +1667,286 @@ class RaidenControllerTest(absltest.TestCase):
 
 if __name__ == "__main__":
   absltest.main()
+
+
+def _state_pool_manifest(conv_live, ssm_live, fingerprint_dtype="fp8"):
+  """1 FA pool (skipped by state transfers) + 2 conv + 2 ssm pools."""
+  pools = []
+  tags = [_FA_TAG] + ["gdn.conv"] * 2 + ["gdn.ssm"] * 2
+  for pool_idx, tag in enumerate(tags):
+    if tag == _FA_TAG:
+      live = 4096 * 1024
+    elif tag == "gdn.conv":
+      live = conv_live
+    else:
+      live = ssm_live
+    pool = raiden_service_pb2.PoolSpecProto(
+        tag=tag,
+        storage_index=pool_idx,
+        block_stride_bytes=live,
+        num_blocks=64,
+        dtype_tag=fingerprint_dtype,
+    )
+    pool.regions.add(
+        name=tag,
+        offset_bytes=0,
+        stride_bytes=live,
+        unit_bytes=live,
+        num_units=1,
+        units_per_stride=1,
+    )
+    pools.append(pool)
+  return pools
+
+
+class RaidenControllerStateReshardTest(absltest.TestCase):
+  """State-class (GDN) reshard planning: validate/bind/emit over StateSpans."""
+
+  CONV_UNIT = 1024
+  SSM_UNIT = 65536
+
+  def _fixture(self, *, src_ranks=8, src_conv_units=12, dst_conv_units=96,
+               src_ssm_units=8, dst_ssm_units=64):
+    client = RecordingWorkerRpcClient()
+    controller = raiden_controller.RaidenController(
+        port=10000, worker_rpc_client=client)
+    src_units = []
+    for rank in range(src_ranks):
+      unit = raiden_controller.RaidenId(
+          job_name="prefill",
+          job_replica_id=f"engine-rank{rank}",
+          data_name="kv.state",
+          data_replica_idx=0,
+      )
+      src_units.append(unit)
+      controller.register_work_unit(
+          unit,
+          [f"10.0.0.{rank + 1}:8000"],
+          control_plane_rpc_address=f"10.0.0.{rank + 1}:9000",
+          pool_manifest=_state_pool_manifest(
+              src_conv_units * self.CONV_UNIT,
+              src_ssm_units * self.SSM_UNIT),
+          layout_fingerprint="fingerprint",
+          page_tokens=4096,
+          transfer_parallelism=src_ranks,
+          transfer_rank=rank,
+      )
+    dst_unit = raiden_controller.RaidenId(
+        job_name="decode",
+        job_replica_id="engine",
+        data_name="kv.state",
+        data_replica_idx=0,
+    )
+    controller.register_work_unit(
+        dst_unit,
+        ["10.1.0.1:8000"],
+        control_plane_rpc_address="10.1.0.1:9000",
+        pool_manifest=_state_pool_manifest(
+            dst_conv_units * self.CONV_UNIT, dst_ssm_units * self.SSM_UNIT),
+        layout_fingerprint="fingerprint",
+        page_tokens=1024,
+        transfer_parallelism=src_ranks,
+        transfer_rank=0,
+    )
+    return controller, client, src_units, dst_unit
+
+  def _plan(self, controller, src_units, dst_unit, tag, *, uuid=555,
+            parallelism=None):
+    return controller._build_pool_reshard_plan(
+        src_units=src_units,
+        dst_units=[dst_unit],
+        src_metadata=controller._get_local_metadata(src_units),
+        dst_metadata=controller._get_local_metadata([dst_unit]),
+        req_id="request",
+        uuid=uuid,
+        dst_device_block_ids=[7],
+        num_tokens=0,
+        transfer_pool_tags=[tag],
+        parallelism=parallelism,
+        transfer_kind="state",
+    )
+
+  def _register_empty(self, controller, units, uuid):
+    for unit in units:
+      controller.register_request_blocks("request", uuid, unit, [])
+
+  def test_identity_single_declarer_conv(self):
+    controller, _, src_units, dst_unit = self._fixture(
+        src_conv_units=96, dst_conv_units=96)
+    state = raiden_controller.StateBlockRegistration(
+        tag="gdn.conv",
+        block_ids=(31,),
+        unit_bytes=self.CONV_UNIT,
+        units_per_block=96,
+        spans=(raiden_controller.StateSpan(0, 96, 0, 0),),
+    )
+    controller.register_request_blocks(
+        "request", 555, src_units[0], [], state_registrations=[state])
+    self._register_empty(controller, src_units[1:], 555)
+
+    plan = self._plan(controller, src_units, dst_unit, "gdn.conv")
+    self.assertEqual(plan.transfer_pool_indices, [1, 2])
+    self.assertEqual(plan.expected_pushes_per_pool, 1)
+    self.assertEqual(plan.src_units, [src_units[0]])
+    entries = plan.shard_push_schedules[src_units[0]][0]
+    self.assertEqual(entries, [
+        ("10.1.0.1:8000", 0, 0, 0, 96 * self.CONV_UNIT, 31, 7, 0, 0, 1),
+    ])
+    self.assertEqual(plan.skipped_pool_counts, {_FA_TAG: 1, "gdn.ssm": 2})
+    self.assertEqual(plan.num_tokens, 0)
+
+  def _declare_tp8_conv(self, controller, src_units, uuid=555):
+    # Destination conv unit space: q heads [0,16), k [16,32), v [32,96).
+    # Rank r owns q [2r,2r+2) at local 0, k [16+2r,..) at local 2,
+    # v [32+8r,..+8) at local 4 — 12 local units per rank.
+    for rank, unit in enumerate(src_units):
+      spans = (
+          raiden_controller.StateSpan(2 * rank, 2, 0, 0),
+          raiden_controller.StateSpan(16 + 2 * rank, 2, 0, 2),
+          raiden_controller.StateSpan(32 + 8 * rank, 8, 0, 4),
+      )
+      state = raiden_controller.StateBlockRegistration(
+          tag="gdn.conv",
+          block_ids=(40 + rank,),
+          unit_bytes=self.CONV_UNIT,
+          units_per_block=12,
+          spans=spans,
+      )
+      controller.register_request_blocks(
+          "request", uuid, unit, [], state_registrations=[state])
+
+  def test_tp8_to_tp1_conv_golden(self):
+    controller, _, src_units, dst_unit = self._fixture()
+    self._declare_tp8_conv(controller, src_units)
+    plan = self._plan(controller, src_units, dst_unit, "gdn.conv")
+
+    self.assertEqual(plan.expected_pushes_per_pool, 8)
+    self.assertEqual(len(plan.src_units), 8)
+    total_entries = sum(
+        len(entries)
+        for schedules in plan.shard_push_schedules.values()
+        for entries in schedules.values())
+    self.assertEqual(total_entries, 24)
+    rank0 = plan.shard_push_schedules[src_units[0]][0]
+    self.assertIn(
+        ("10.1.0.1:8000", 0, 0, 0, 2 * self.CONV_UNIT, 40, 7, 0, 0, 1),
+        rank0)
+    self.assertIn(
+        ("10.1.0.1:8000", 0, 16 * self.CONV_UNIT, 2 * self.CONV_UNIT,
+         2 * self.CONV_UNIT, 40, 7, 0, 0, 1), rank0)
+    self.assertIn(
+        ("10.1.0.1:8000", 0, 32 * self.CONV_UNIT, 4 * self.CONV_UNIT,
+         8 * self.CONV_UNIT, 40, 7, 0, 0, 1), rank0)
+    covered = sum(entry[4] for schedules in
+                  plan.shard_push_schedules.values()
+                  for entries in schedules.values() for entry in entries)
+    self.assertEqual(covered, 96 * self.CONV_UNIT)
+
+  def test_tp8_to_tp1_ssm_golden(self):
+    controller, _, src_units, dst_unit = self._fixture()
+    for rank, unit in enumerate(src_units):
+      state = raiden_controller.StateBlockRegistration(
+          tag="gdn.ssm",
+          block_ids=(60 + rank,),
+          unit_bytes=self.SSM_UNIT,
+          units_per_block=8,
+          spans=(raiden_controller.StateSpan(8 * rank, 8, 0, 0),),
+      )
+      controller.register_request_blocks(
+          "request", 555, unit, [], state_registrations=[state])
+    plan = self._plan(controller, src_units, dst_unit, "gdn.ssm")
+    self.assertEqual(plan.expected_pushes_per_pool, 8)
+    self.assertEqual(plan.transfer_pool_indices, [3, 4])
+    entries = plan.shard_push_schedules[src_units[3]][0]
+    self.assertEqual(entries, [
+        ("10.1.0.1:8000", 0, 24 * self.SSM_UNIT, 0, 8 * self.SSM_UNIT, 63, 7,
+         0, 0, 1),
+    ])
+
+  def test_rejects_coverage_gap_and_overlap(self):
+    controller, _, src_units, dst_unit = self._fixture()
+    self._declare_tp8_conv(controller, src_units, uuid=700)
+    # Fresh uuid with rank 5's v-run missing -> gap.
+    for rank, unit in enumerate(src_units):
+      spans = [
+          raiden_controller.StateSpan(2 * rank, 2, 0, 0),
+          raiden_controller.StateSpan(16 + 2 * rank, 2, 0, 2),
+      ]
+      if rank != 5:
+        spans.append(raiden_controller.StateSpan(32 + 8 * rank, 8, 0, 4))
+      controller.register_request_blocks(
+          "request", 701, unit, [],
+          state_registrations=[
+              raiden_controller.StateBlockRegistration(
+                  tag="gdn.conv", block_ids=(40 + rank,),
+                  unit_bytes=self.CONV_UNIT, units_per_block=12,
+                  spans=tuple(spans))
+          ])
+    with self.assertRaisesRegex(ValueError, "gap"):
+      self._plan(controller, src_units, dst_unit, "gdn.conv", uuid=701)
+
+    for rank, unit in enumerate(src_units):
+      spans = [
+          raiden_controller.StateSpan(2 * rank, 2, 0, 0),
+          raiden_controller.StateSpan(16 + 2 * rank, 2, 0, 2),
+          raiden_controller.StateSpan(32 + 8 * (rank % 4), 8, 0, 4),
+      ]
+      controller.register_request_blocks(
+          "request", 702, unit, [],
+          state_registrations=[
+              raiden_controller.StateBlockRegistration(
+                  tag="gdn.conv", block_ids=(40 + rank,),
+                  unit_bytes=self.CONV_UNIT, units_per_block=12,
+                  spans=tuple(spans))
+          ])
+    with self.assertRaisesRegex(ValueError, "overlap"):
+      self._plan(controller, src_units, dst_unit, "gdn.conv", uuid=702)
+
+  def test_rejects_geometry_and_argument_errors(self):
+    controller, _, src_units, dst_unit = self._fixture()
+    # units_per_block x unit_bytes must equal manifest live bytes.
+    controller.register_request_blocks(
+        "request", 800, src_units[0], [],
+        state_registrations=[
+            raiden_controller.StateBlockRegistration(
+                tag="gdn.conv", block_ids=(1,), unit_bytes=self.CONV_UNIT,
+                units_per_block=11,
+                spans=(raiden_controller.StateSpan(0, 11, 0, 0),))
+        ])
+    self._register_empty(controller, src_units[1:], 800)
+    with self.assertRaisesRegex(ValueError, "disagrees with the manifest"):
+      self._plan(controller, src_units, dst_unit, "gdn.conv", uuid=800)
+
+    with self.assertRaisesRegex(ValueError, "exactly one pool class"):
+      controller._build_pool_reshard_plan(
+          src_units=src_units,
+          dst_units=[dst_unit],
+          src_metadata=controller._get_local_metadata(src_units),
+          dst_metadata=controller._get_local_metadata([dst_unit]),
+          req_id="request", uuid=801, dst_device_block_ids=[7],
+          num_tokens=0, transfer_pool_tags=["gdn.conv", "gdn.ssm"],
+          parallelism=None, transfer_kind="state")
+
+  def test_registration_rejects_bad_state_declarations(self):
+    controller, _, src_units, _ = self._fixture()
+    unit = src_units[0]
+    bad = raiden_controller.StateBlockRegistration(
+        tag="gdn.conv", block_ids=(1,), unit_bytes=self.CONV_UNIT,
+        units_per_block=12,
+        spans=(raiden_controller.StateSpan(0, 4, 1, 0),))
+    with self.assertRaisesRegex(ValueError, "outside the"):
+      controller.register_request_blocks(
+          "request", 900, unit, [], state_registrations=[bad])
+    crossing = raiden_controller.StateBlockRegistration(
+        tag="gdn.conv", block_ids=(1,), unit_bytes=self.CONV_UNIT,
+        units_per_block=12,
+        spans=(raiden_controller.StateSpan(0, 8, 0, 6),))
+    with self.assertRaisesRegex(ValueError, "crosses its source block"):
+      controller.register_request_blocks(
+          "request", 901, unit, [], state_registrations=[crossing])
+    dup = raiden_controller.StateBlockRegistration(
+        tag="gdn.conv", block_ids=(1,), unit_bytes=self.CONV_UNIT,
+        units_per_block=12, spans=())
+    with self.assertRaisesRegex(ValueError, "duplicate state registration"):
+      controller.register_request_blocks(
+          "request", 902, unit, [], state_registrations=[dup, dup])

@@ -176,6 +176,34 @@ class SourceSpan:
 
 
 @dataclasses.dataclass(frozen=True)
+class StateSpan:
+  """One contiguous run of destination *units* from one source state block.
+
+  A "unit" is a state pool class's physically-contiguous transfer unit
+  (e.g. one head's tile); its byte size is declared by the producer in the
+  owning StateBlockRegistration and cross-checked against both peers'
+  manifests at plan time. The ordinal indexes the registration's block_ids
+  list — never a physical block id.
+  """
+
+  dst_unit_start: int
+  unit_count: int
+  src_block_ordinal: int
+  src_unit_offset: int
+
+
+@dataclasses.dataclass(frozen=True)
+class StateBlockRegistration:
+  """One rank's declared contribution to one state pool class (by tag)."""
+
+  tag: str
+  block_ids: tuple[int, ...]
+  unit_bytes: int
+  units_per_block: int
+  spans: tuple[StateSpan, ...]
+
+
+@dataclasses.dataclass(frozen=True)
 class RequestBlockRegistration:
   """Producer-owned block IDs and declared spans for one request and unit."""
 
@@ -183,6 +211,7 @@ class RequestBlockRegistration:
   block_ids: tuple[int, ...]
   spans: tuple[SourceSpan, ...]
   expires_at: float
+  state_registrations: tuple[StateBlockRegistration, ...] = ()
 
 
 @dataclasses.dataclass
@@ -787,19 +816,6 @@ def generate_strided_copy_chunks(
     dst_stride = 0
     outer_shape = []
 
-  # Adjacent rows are one physical byte range. Normalizing this common case
-  # gives the FA page planner the required count=1 contiguous descriptor even
-  # when a destination page covers only part of its larger source page.
-  if (
-      count > 1
-      and src_stride == contiguous_bytes
-      and dst_stride == contiguous_bytes
-  ):
-    contiguous_bytes *= count
-    count = 1
-    src_stride = 0
-    dst_stride = 0
-
   num_outer_elements = math.prod(outer_shape) if outer_shape else 1
 
   src_local_int_slice = [
@@ -970,8 +986,12 @@ class RaidenController:
 
     if not shards or any(not shard for shard in shards):
       raise ValueError("shards must contain at least one non-empty endpoint")
-    if len(set(shards)) != len(shards):
-      raise ValueError("shards must not contain duplicate endpoints")
+    # Duplicate endpoints are legal: a single process serving several local
+    # devices (JAX/Pathways) shares one transfer port across its shards, so
+    # the shard list carries the shard COUNT while the addresses coincide.
+    # Delivery is per-unit (one RPC with the shard-indexed plan), so repeats
+    # never double-send. Pool/state reshard planning enforces its stricter
+    # one-endpoint-per-unit contract at plan time.
 
     with self._lock:
       self._registered_shards[unit] = list(shards)
@@ -1112,13 +1132,17 @@ class RaidenController:
       unit: RaidenId,
       block_ids: typing.Sequence[int],
       spans: typing.Sequence[SourceSpan] = (),
+      state_registrations: typing.Sequence[StateBlockRegistration] = (),
   ) -> None:
     """Registers one producer rank's block IDs and declared source spans.
 
     Spans arrive only on the owning rank's registration; the controller never
     derives ownership. Per-span checks (ordinal bounds, block containment,
     dense rank-major packing) fail here; the cross-rank partition check runs
-    at planning time over the claimed union.
+    at planning time over the claimed union. State declarations
+    (per-request state pool classes, e.g. GDN conv/ssm slots) ride the same
+    registration with their own per-declaration checks; their cross-rank
+    unit-partition check also runs at planning time.
     """
     if not req_id:
       raise ValueError("req_id must not be empty")
@@ -1189,12 +1213,68 @@ class RaidenController:
       if not 0 < tokens_per_ordinal[last_ordinal] <= page_tokens:
         raise ValueError("spans over-cover the final registered block")
 
+    normalized_states: list[StateBlockRegistration] = []
+    seen_tags: set[str] = set()
+    for state in state_registrations:
+      tag = str(state.tag)
+      if not tag:
+        raise ValueError("state registration tag must not be empty")
+      if tag in seen_tags:
+        raise ValueError(f"duplicate state registration tag: {tag}")
+      seen_tags.add(tag)
+      state_ids = tuple(int(block_id) for block_id in state.block_ids)
+      if not state_ids:
+        raise ValueError(f"state registration {tag} has no block_ids")
+      if any(block_id < 0 for block_id in state_ids):
+        raise ValueError(f"state registration {tag} block_ids must be "
+                         "non-negative")
+      if len(set(state_ids)) != len(state_ids):
+        raise ValueError(f"state registration {tag} block_ids must not "
+                         "contain duplicates")
+      unit_bytes = int(state.unit_bytes)
+      units_per_block = int(state.units_per_block)
+      if unit_bytes <= 0 or units_per_block <= 0:
+        raise ValueError(
+            f"state registration {tag} needs positive unit_bytes and "
+            f"units_per_block, got {unit_bytes}/{units_per_block}")
+      state_spans = []
+      for span in state.spans:
+        span = StateSpan(
+            dst_unit_start=int(span.dst_unit_start),
+            unit_count=int(span.unit_count),
+            src_block_ordinal=int(span.src_block_ordinal),
+            src_unit_offset=int(span.src_unit_offset),
+        )
+        if span.unit_count <= 0:
+          raise ValueError(f"state span unit_count must be positive ({tag})")
+        if span.dst_unit_start < 0 or span.src_unit_offset < 0:
+          raise ValueError(f"state span fields must be non-negative ({tag})")
+        if not 0 <= span.src_block_ordinal < len(state_ids):
+          raise ValueError(
+              f"state span ordinal {span.src_block_ordinal} is outside the "
+              f"registration's {len(state_ids)} block ids ({tag})")
+        if span.src_unit_offset + span.unit_count > units_per_block:
+          raise ValueError(
+              f"state span crosses its source block boundary ({tag}): "
+              f"offset={span.src_unit_offset}, count={span.unit_count}, "
+              f"units_per_block={units_per_block}")
+        state_spans.append(span)
+      normalized_states.append(
+          StateBlockRegistration(
+              tag=tag,
+              block_ids=state_ids,
+              unit_bytes=unit_bytes,
+              units_per_block=units_per_block,
+              spans=tuple(state_spans),
+          ))
+
     now = time.monotonic()
     registration = RequestBlockRegistration(
         uuid=uuid,
         block_ids=normalized,
         spans=normalized_spans,
         expires_at=now + self._request_registry_ttl_s,
+        state_registrations=tuple(normalized_states),
     )
     key = (req_id, unit)
     lifecycle_key = (req_id, uuid)
@@ -1450,23 +1530,38 @@ class RaidenController:
       num_tokens: int,
       transfer_pool_tags: typing.Sequence[str],
       parallelism: Optional[int],
+      transfer_kind: str = "tokens",
   ) -> TransferPlan:
     """Builds a plan and rolls back any claim if planning fails."""
     claim_owner = object()
     try:
-      plan = self._build_pool_reshard_plan_claimed(
-          src_units=src_units,
-          dst_units=dst_units,
-          src_metadata=src_metadata,
-          dst_metadata=dst_metadata,
-          req_id=req_id,
-          uuid=uuid,
-          dst_device_block_ids=dst_device_block_ids,
-          num_tokens=num_tokens,
-          transfer_pool_tags=transfer_pool_tags,
-          parallelism=parallelism,
-          claim_owner=claim_owner,
-      )
+      if transfer_kind == "state":
+        plan = self._build_state_pool_reshard_plan_claimed(
+            src_units=src_units,
+            dst_units=dst_units,
+            src_metadata=src_metadata,
+            dst_metadata=dst_metadata,
+            req_id=req_id,
+            uuid=uuid,
+            dst_device_block_ids=dst_device_block_ids,
+            transfer_pool_tags=transfer_pool_tags,
+            parallelism=parallelism,
+            claim_owner=claim_owner,
+        )
+      else:
+        plan = self._build_pool_reshard_plan_claimed(
+            src_units=src_units,
+            dst_units=dst_units,
+            src_metadata=src_metadata,
+            dst_metadata=dst_metadata,
+            req_id=req_id,
+            uuid=uuid,
+            dst_device_block_ids=dst_device_block_ids,
+            num_tokens=num_tokens,
+            transfer_pool_tags=transfer_pool_tags,
+            parallelism=parallelism,
+            claim_owner=claim_owner,
+        )
       plan.request_block_claim_owner = claim_owner
       return plan
     except Exception:
@@ -1844,6 +1939,294 @@ class RaidenController:
         skipped_pool_counts=skipped_pool_counts,
     )
 
+  def _build_state_pool_reshard_plan_claimed(
+      self,
+      *,
+      src_units: typing.Sequence[RaidenId],
+      dst_units: typing.Sequence[RaidenId],
+      src_metadata: typing.Sequence[Any],
+      dst_metadata: typing.Sequence[Any],
+      req_id: str,
+      uuid: int,
+      dst_device_block_ids: typing.Sequence[int],
+      transfer_pool_tags: typing.Sequence[str],
+      parallelism: Optional[int],
+      claim_owner: Any,
+  ) -> TransferPlan:
+    """Validates, binds, and emits a declared state-class reshard plan.
+
+    State classes move per-request state slots (e.g. GDN conv/ssm) whose
+    pools share one geometry per tag. The controller derives nothing:
+    producers declare per-rank StateSpans over the destination pool's unit
+    axis (a unit is the class's physically-contiguous transfer piece,
+    unit_bytes declared and cross-checked against both manifests); this
+    method validates the cross-rank unit partition, binds ordinals to the
+    claimed physical slot ids, and emits one contiguous byte entry per
+    span per pool.
+    """
+    if not req_id:
+      raise ValueError("req_id must not be empty for state resharding")
+    if uuid <= 0:
+      raise ValueError("uuid must be positive for state resharding")
+    if len(dst_units) != 1:
+      raise ValueError(
+          "State resharding requires exactly one destination unit")
+    if len(set(src_units)) != len(src_units):
+      raise ValueError("src_units must not contain duplicates")
+
+    requested_tags = [str(tag) for tag in transfer_pool_tags]
+    if len(requested_tags) != 1:
+      raise ValueError(
+          "State resharding moves exactly one pool class per transfer; "
+          f"got tags {requested_tags}")
+    state_tag = requested_tags[0]
+
+    dst_ids = [int(block_id) for block_id in dst_device_block_ids]
+    if len(dst_ids) != 1:
+      raise ValueError(
+          "State resharding requires exactly one destination slot id; "
+          f"got {len(dst_ids)}")
+    if dst_ids[0] < 0:
+      raise ValueError("dst_device_block_ids must be non-negative")
+
+    src_by_unit = self._metadata_by_unit(src_metadata, src_units)
+    dst_by_unit = self._metadata_by_unit(dst_metadata, dst_units)
+    dst_unit = dst_units[0]
+    dst_meta = dst_by_unit[dst_unit]
+
+    all_metadata = [src_by_unit[unit] for unit in src_units] + [dst_meta]
+    for meta in all_metadata:
+      unit = _raiden_id_from_proto(meta.unit)
+      if not meta.layout_fingerprint:
+        raise ValueError(f"Missing layout fingerprint for {unit}")
+      if not meta.pools:
+        raise ValueError(f"Missing explicit pool manifest for {unit}")
+      if not meta.shards:
+        raise ValueError(f"Missing data-plane endpoint for {unit}")
+      if len(meta.shards) != 1:
+        raise ValueError(
+            "State reshard planning requires one data-plane endpoint per "
+            f"work unit; {unit} registered {len(meta.shards)}")
+      if not meta.control_plane_rpc_address:
+        raise ValueError(f"Missing control-plane endpoint for {unit}")
+
+    fingerprints = {meta.layout_fingerprint for meta in all_metadata}
+    if len(fingerprints) != 1:
+      raise ValueError(
+          "Layout fingerprint mismatch between source and destination")
+
+    available_tags = {str(pool.tag) for pool in dst_meta.pools}
+    if state_tag not in available_tags:
+      raise ValueError(
+          f"transfer_pool_tags do not match any registered pool: "
+          f"[{state_tag!r}]")
+    selected_pool_indices = [
+        index for index, pool in enumerate(dst_meta.pools)
+        if str(pool.tag) == state_tag
+    ]
+    skipped_pool_counts: dict[str, int] = {}
+    for index, pool in enumerate(dst_meta.pools):
+      if index not in set(selected_pool_indices):
+        tag = str(pool.tag)
+        skipped_pool_counts[tag] = skipped_pool_counts.get(tag, 0) + 1
+
+    src_live_values = set()
+    dst_live_values = set()
+    for pool_idx in selected_pool_indices:
+      dst_pool = dst_meta.pools[pool_idx]
+      dst_live = _pool_live_bytes(dst_pool)
+      if dst_live != int(dst_pool.block_stride_bytes):
+        raise ValueError(
+            "Raw state transfer rejects padded destination pools; pool "
+            f"{pool_idx} has live={dst_live}, "
+            f"stride={dst_pool.block_stride_bytes}")
+      dst_live_values.add(dst_live)
+      for src_unit in src_units:
+        src_pool = src_by_unit[src_unit].pools[pool_idx]
+        src_live = _pool_live_bytes(src_pool)
+        if src_live != int(src_pool.block_stride_bytes):
+          raise ValueError(
+              "Raw state transfer requires full-live source pools; pool "
+              f"{pool_idx} has live={src_live}, "
+              f"stride={src_pool.block_stride_bytes}")
+        src_live_values.add(src_live)
+    if len(dst_live_values) != 1 or len(src_live_values) != 1:
+      raise ValueError(
+          f"State pools tagged {state_tag} must share one geometry per "
+          f"side; src={sorted(src_live_values)} "
+          f"dst={sorted(dst_live_values)}")
+    src_live = next(iter(src_live_values))
+    dst_live = next(iter(dst_live_values))
+
+    admitted_parallelism = {
+        int(src_by_unit[unit].transfer_parallelism) for unit in src_units
+    }
+    if len(admitted_parallelism) != 1 or 0 in admitted_parallelism:
+      raise ValueError(
+          "All source ranks must declare one consistent positive "
+          "transfer_parallelism")
+    topology_parallelism = next(iter(admitted_parallelism))
+    ranks = {int(src_by_unit[unit].transfer_rank): unit for unit in src_units}
+    if len(ranks) != len(src_units):
+      raise ValueError("Source transfer_rank values must be unique")
+    if sorted(ranks) != list(range(len(src_units))):
+      raise ValueError(
+          "Source transfer_rank values must be contiguous from zero")
+    requested_parallelism = (
+        topology_parallelism if parallelism is None else int(parallelism))
+    if requested_parallelism <= 0:
+      raise ValueError("parallelism must be positive")
+    if requested_parallelism > topology_parallelism:
+      raise ValueError(
+          "parallelism exceeds source admission: "
+          f"requested={requested_parallelism}, "
+          f"admitted={topology_parallelism}")
+
+    registrations = self._lookup_request_blocks(
+        req_id, uuid, src_units, claim_owner=claim_owner)
+
+    # Collect the tag's declarations. Ranks without a declaration for this
+    # tag legitimately contribute nothing (e.g. replicated state with one
+    # canonical sender); the partition check below still requires the
+    # declared union to tile the destination exactly.
+    unit_bytes_values: set[int] = set()
+    declared: list[tuple[RaidenId, StateBlockRegistration]] = []
+    for unit in src_units:
+      registration = registrations[unit]
+      for state in registration.state_registrations:
+        if state.tag != state_tag:
+          continue
+        unit_bytes_values.add(state.unit_bytes)
+        if state.units_per_block * state.unit_bytes != src_live:
+          raise ValueError(
+              f"Declared source unit geometry disagrees with the manifest "
+              f"for {unit}: {state.units_per_block} x {state.unit_bytes} "
+              f"!= live {src_live}")
+        declared.append((unit, state))
+    if not declared:
+      raise ValueError(
+          f"No state declarations are registered for tag {state_tag}, "
+          f"req_id={req_id}, uuid={uuid}")
+    if len(unit_bytes_values) != 1:
+      raise ValueError(
+          f"State declarations disagree on unit_bytes for {state_tag}: "
+          f"{sorted(unit_bytes_values)}")
+    unit_bytes = next(iter(unit_bytes_values))
+    if dst_live % unit_bytes != 0:
+      raise ValueError(
+          f"Destination live bytes {dst_live} are not a multiple of the "
+          f"declared unit_bytes {unit_bytes} for {state_tag}")
+    dst_units_total = dst_live // unit_bytes
+
+    ordered_spans: list[tuple[StateSpan, RaidenId,
+                              StateBlockRegistration]] = []
+    for unit, state in declared:
+      for span in state.spans:
+        ordered_spans.append((span, unit, state))
+    ordered_spans.sort(key=lambda item: item[0].dst_unit_start)
+    covered_until = 0
+    for span, unit, _ in ordered_spans:
+      if span.dst_unit_start != covered_until:
+        relation = ("overlap"
+                    if span.dst_unit_start < covered_until else "gap")
+        raise ValueError(
+            f"Declared state spans have a destination coverage {relation} "
+            f"at unit {min(span.dst_unit_start, covered_until)} "
+            f"(declared by {unit})")
+      covered_until += span.unit_count
+    if covered_until != dst_units_total:
+      raise ValueError(
+          f"Declared state spans cover {covered_until} units for "
+          f"{state_tag}; destination has {dst_units_total}")
+
+    for pool_idx in selected_pool_indices:
+      src_num_blocks = {
+          int(src_by_unit[unit].pools[pool_idx].num_blocks)
+          for unit in src_units
+      }
+      dst_num_blocks = int(dst_meta.pools[pool_idx].num_blocks)
+      for unit, state in declared:
+        limit = int(src_by_unit[unit].pools[pool_idx].num_blocks)
+        if any(block_id >= limit for block_id in state.block_ids):
+          raise ValueError(
+              f"Source slot id is out of range for pool {pool_idx} at "
+              f"{unit}")
+      if dst_ids[0] >= dst_num_blocks:
+        raise ValueError(
+            f"Destination slot id is out of range for pool {pool_idx}")
+      del src_num_blocks
+
+    dst_peer = str(dst_meta.shards[0])
+    schedules: dict[RaidenId, dict[int, list[tuple[Any, ...]]]] = {}
+    transfer_pairs_per_sender: dict[RaidenId, set[tuple[str, int,
+                                                        int]]] = {}
+    for span, src_unit, state in ordered_spans:
+      src_slot = state.block_ids[span.src_block_ordinal]
+      entry = (
+          dst_peer,
+          0,
+          span.dst_unit_start * unit_bytes,
+          span.src_unit_offset * unit_bytes,
+          span.unit_count * unit_bytes,
+          src_slot,
+          dst_ids[0],
+          0,
+          0,
+          1,
+      )
+      schedules.setdefault(src_unit, {}).setdefault(0, []).append(entry)
+      transfer_pairs_per_sender.setdefault(src_unit, set()).add(
+          (dst_peer, src_slot, dst_ids[0]))
+
+    active_src_units = [
+        ranks[rank] for rank in sorted(ranks) if ranks[rank] in schedules
+    ]
+    expected_pushes_per_pool = sum(
+        min(requested_parallelism, len(transfer_pairs_per_sender[unit]))
+        for unit in active_src_units)
+    if expected_pushes_per_pool <= 0:
+      raise ValueError("State reshard plan contains no source pushes")
+
+    worker_rpc_addresses = {}
+    for meta in all_metadata:
+      worker_rpc_addresses[_raiden_id_from_proto(meta.unit)] = str(
+          meta.control_plane_rpc_address)
+    worker_data_addresses = {dst_unit: [dst_peer]}
+    src_schedule_keys = {
+        unit: ordinal for ordinal, unit in enumerate(active_src_units)
+    }
+
+    return TransferPlan(
+        src_units=active_src_units,
+        dst_units=[dst_unit],
+        plan={},
+        shard_push_schedules=schedules,
+        worker_rpc_addresses=worker_rpc_addresses,
+        worker_data_addresses=worker_data_addresses,
+        uuid=uuid,
+        dst_mem_type=RaidenMemoryType.HBM,
+        use_block_chunks=True,
+        is_sender=True,
+        expected_block_count=len(dst_ids),
+        req_id=req_id,
+        expected_pushes_per_pool=expected_pushes_per_pool,
+        transfer_pool_indices=selected_pool_indices,
+        pool_dtype_tags=[str(pool.dtype_tag) for pool in dst_meta.pools],
+        src_block_ids={
+            unit: sorted({
+                int(block_id)
+                for decl_unit, state in declared if decl_unit == unit
+                for block_id in state.block_ids
+            })
+            for unit in active_src_units
+        },
+        dst_device_block_ids=dst_ids,
+        src_schedule_keys=src_schedule_keys,
+        parallelism=requested_parallelism,
+        num_tokens=0,
+        skipped_pool_counts=skipped_pool_counts,
+    )
+
   async def _execute_slice_broadcast(
       self,
       key: tuple,
@@ -2033,8 +2416,12 @@ class RaidenController:
       num_tokens: Optional[int],
       transfer_pool_tags: Optional[typing.Sequence[str]],
       parallelism: Optional[int],
+      transfer_kind: str = "tokens",
   ) -> RaidenFuture:
     """Coordinates the controller-owned block-granular pool reshard path."""
+    if transfer_kind not in ("tokens", "state"):
+      raise ValueError(
+          f"transfer_kind must be 'tokens' or 'state', got {transfer_kind!r}")
     if not src_units:
       raise ValueError("src_units must not be empty")
     if not dst_units:
@@ -2047,7 +2434,12 @@ class RaidenController:
       )
     if dst_device_block_ids is None:
       raise ValueError("dst_device_block_ids are required for pool resharding")
-    if num_tokens is None or num_tokens <= 0:
+    if transfer_kind == "state":
+      if num_tokens not in (None, 0):
+        raise ValueError(
+            "num_tokens does not apply to state-class resharding")
+      num_tokens = 0
+    elif num_tokens is None or num_tokens <= 0:
       raise ValueError("num_tokens must be positive for pool resharding")
     if not transfer_pool_tags:
       raise ValueError(
@@ -2099,6 +2491,7 @@ class RaidenController:
                 dst_device_block_ids=list(dst_device_block_ids),
                 num_tokens=num_tokens,
                 transfer_pool_tags=list(transfer_pool_tags),
+                transfer_kind=transfer_kind,
             ),
         )
         if not success:
@@ -2125,6 +2518,7 @@ class RaidenController:
           num_tokens=num_tokens,
           transfer_pool_tags=list(transfer_pool_tags),
           parallelism=parallelism,
+          transfer_kind=transfer_kind,
       )
       plan_build_end_ns = time.monotonic_ns()
 
@@ -2278,8 +2672,10 @@ class RaidenController:
       raise ValueError("expected_pushes_per_pool must be positive")
     if parallelism <= 0:
       raise ValueError("parallelism must be positive")
-    if num_tokens <= 0:
-      raise ValueError("num_tokens must be positive")
+    if num_tokens < 0:
+      # State-class reshard plans carry num_tokens=0 (states have no token
+      # axis); token plans always arrive positive from the planner.
+      raise ValueError("num_tokens must be non-negative")
     dst_ids = [int(block_id) for block_id in dst_device_block_ids]
     if not dst_ids or any(block_id < 0 for block_id in dst_ids):
       raise ValueError(
@@ -2318,11 +2714,15 @@ class RaidenController:
       raise ValueError(
           "Receiver requires explicit positive destination page geometry"
       )
-    expected_pages = math.ceil(num_tokens / page_tokens)
-    if len(dst_ids) != expected_pages:
-      raise ValueError(
-          "Destination block-id count does not match registered page geometry"
-      )
+    if num_tokens > 0:
+      # Token plans: the destination page set must exactly cover the
+      # transfer extent. State plans (num_tokens=0) address whole slots;
+      # their count is validated by the state planner.
+      expected_pages = math.ceil(num_tokens / page_tokens)
+      if len(dst_ids) != expected_pages:
+        raise ValueError(
+            "Destination block-id count does not match registered page "
+            "geometry")
     destination_page_bytes = set()
     for pool_idx in selected_indices:
       pool = dst_meta.pools[pool_idx]
@@ -2392,16 +2792,21 @@ class RaidenController:
               "Receiver entries must be positive contiguous count=1 "
               "writes with non-negative offsets and block IDs"
           )
-        if (
+        if num_tokens > 0 and (
             dst_offset_bytes % token_bytes
             or src_offset_bytes % token_bytes
             or size_bytes % token_bytes
         ):
           raise ValueError("Receiver entries must be token-byte aligned")
         dst_page_ordinal = dst_page_ordinals[dst_block_id]
-        page_token_start = dst_page_ordinal * page_tokens
-        expected_tokens = min(page_tokens, num_tokens - page_token_start)
-        expected_bytes = expected_tokens * token_bytes
+        if num_tokens > 0:
+          page_token_start = dst_page_ordinal * page_tokens
+          expected_tokens = min(page_tokens, num_tokens - page_token_start)
+          expected_bytes = expected_tokens * token_bytes
+        else:
+          # State plans address whole slots; every entry must stay within
+          # the slot's live bytes.
+          expected_bytes = page_bytes
         dst_end_bytes = dst_offset_bytes + size_bytes
         if dst_end_bytes > expected_bytes:
           raise ValueError(
@@ -2419,10 +2824,13 @@ class RaidenController:
           "expected_pushes_per_pool does not match the received schedules"
       )
     for dst_page_ordinal, dst_block_id in enumerate(dst_ids):
-      expected_tokens = min(
-          page_tokens, num_tokens - dst_page_ordinal * page_tokens
-      )
-      expected_bytes = expected_tokens * token_bytes
+      if num_tokens > 0:
+        expected_tokens = min(
+            page_tokens, num_tokens - dst_page_ordinal * page_tokens
+        )
+        expected_bytes = expected_tokens * token_bytes
+      else:
+        expected_bytes = page_bytes
       covered_until = 0
       for start_bytes, end_bytes in sorted(coverage_by_dst_id[dst_block_id]):
         if start_bytes != covered_until:
@@ -2523,6 +2931,7 @@ class RaidenController:
       num_tokens: Optional[int] = None,
       transfer_pool_tags: Optional[typing.Sequence[str]] = None,
       parallelism: Optional[int] = None,
+      transfer_kind: Optional[str] = None,
   ) -> RaidenFuture:
     """For a requested data transfer, generates a transfer plan for the work units to carry out and start it.
 
@@ -2557,6 +2966,7 @@ class RaidenController:
         num_tokens is not None
         or dst_device_block_ids is not None
         or transfer_pool_tags is not None
+        or transfer_kind is not None
     ):
       if shard_push_schedules:
         raise ValueError(
@@ -2578,6 +2988,7 @@ class RaidenController:
           num_tokens=num_tokens,
           transfer_pool_tags=transfer_pool_tags,
           parallelism=parallelism,
+          transfer_kind=transfer_kind or "tokens",
       )
 
     if not src_units:
@@ -2617,29 +3028,33 @@ class RaidenController:
       if not req_id:
         req_id = f"req_{session_id}"
 
-    # Generate default plan (always needed as fallback or for old workflow)
-    num_src = len(self._resolve_shards(selected_src))
-    default_plan_dict = {}
-    src_plan = [[] for _ in range(num_src)]
-    for dst_unit in dst_units:
-      num_dst = len(self._resolve_shards(dst_unit))
-      for i in range(num_src):
-        src_start = i * num_dst
-        src_end = (i + 1) * num_dst
-        for j in range(num_dst):
-          dst_start = j * num_src
-          dst_end = (j + 1) * num_src
-          intersect_start = max(src_start, dst_start)
-          intersect_end = min(src_end, dst_end)
-          if intersect_start < intersect_end:
-            local_start = intersect_start - src_start
-            local_end = intersect_end - src_start
-            nd_slice = [(local_start, local_end)]
-            src_plan[i].append((dst_unit, j, [nd_slice]))
-    default_plan_dict[selected_src] = src_plan
-
     if not use_block_chunks:
       # === OLD WORKFLOW: Fully build and store plan SYNCHRONOUSLY ===
+      # Generate the default plan. Only this synchronous workflow consumes it
+      # (the block-chunks branch stores plan=None and builds its schedules
+      # asynchronously), and only this workflow may resolve destination
+      # shards eagerly: on a source controller the destination units of a
+      # cross-controller transfer are not locally registered.
+      num_src = len(self._resolve_shards(selected_src))
+      default_plan_dict = {}
+      src_plan = [[] for _ in range(num_src)]
+      for dst_unit in dst_units:
+        num_dst = len(self._resolve_shards(dst_unit))
+        for i in range(num_src):
+          src_start = i * num_dst
+          src_end = (i + 1) * num_dst
+          for j in range(num_dst):
+            dst_start = j * num_src
+            dst_end = (j + 1) * num_src
+            intersect_start = max(src_start, dst_start)
+            intersect_end = min(src_end, dst_end)
+            if intersect_start < intersect_end:
+              local_start = intersect_start - src_start
+              local_end = intersect_end - src_start
+              nd_slice = [(local_start, local_end)]
+              src_plan[i].append((dst_unit, j, [nd_slice]))
+      default_plan_dict[selected_src] = src_plan
+
       rpc_addresses = {}
       if hasattr(self.worker_rpc_client, "get_worker_endpoints"):
         rpc_addresses = self.worker_rpc_client.get_worker_endpoints()
@@ -3359,6 +3774,8 @@ class RaidenControllerServer:
                     or coord_req.dst_device_block_ids
                     else None
                 ),
+                transfer_kind=(coord_req.transfer_kind
+                               if coord_req.transfer_kind else None),
                 transfer_pool_tags=(
                     list(coord_req.transfer_pool_tags)
                     if coord_req.transfer_pool_tags
@@ -3409,6 +3826,24 @@ class RaidenControllerServer:
                       src_block_token_offset=span.src_block_token_offset,
                   )
                   for span in block_req.spans
+              ],
+              state_registrations=[
+                  StateBlockRegistration(
+                      tag=state.tag,
+                      block_ids=tuple(state.block_ids),
+                      unit_bytes=state.unit_bytes,
+                      units_per_block=state.units_per_block,
+                      spans=tuple(
+                          StateSpan(
+                              dst_unit_start=span.dst_unit_start,
+                              unit_count=span.unit_count,
+                              src_block_ordinal=span.src_block_ordinal,
+                              src_unit_offset=span.src_unit_offset,
+                          )
+                          for span in state.spans
+                      ),
+                  )
+                  for state in block_req.state_registrations
               ],
           )
           resp.success = True
@@ -3840,6 +4275,7 @@ class RaidenControllerClientFacade:
       unit: RaidenId,
       block_ids: typing.Sequence[int],
       spans: typing.Sequence[Any] = (),
+      state_registrations: typing.Sequence[Any] = (),
   ) -> None:
     """Registers producer-owned block IDs and declared spans (D5)."""
     block_req = self._proto_module.RegisterRequestBlocksRequest(
@@ -3855,6 +4291,20 @@ class RaidenControllerClientFacade:
           src_block_ordinal=int(span.src_block_ordinal),
           src_block_token_offset=int(span.src_block_token_offset),
       )
+    for state in state_registrations:
+      state_proto = block_req.state_registrations.add(
+          tag=str(state.tag),
+          block_ids=[int(block_id) for block_id in state.block_ids],
+          unit_bytes=int(state.unit_bytes),
+          units_per_block=int(state.units_per_block),
+      )
+      for span in state.spans:
+        state_proto.spans.add(
+            dst_unit_start=int(span.dst_unit_start),
+            unit_count=int(span.unit_count),
+            src_block_ordinal=int(span.src_block_ordinal),
+            src_unit_offset=int(span.src_unit_offset),
+        )
     req = self._proto_module.ControllerRequest(
         command=self._proto_module.ControllerRequest.COMMAND_REGISTER_REQUEST_BLOCKS,
         register_request_blocks_request=block_req,
@@ -3924,6 +4374,7 @@ class RaidenControllerClientFacade:
       dst_device_block_ids: Optional[typing.Sequence[int]] = None,
       num_tokens: Optional[int] = None,
       transfer_pool_tags: Optional[typing.Sequence[str]] = None,
+      transfer_kind: Optional[str] = None,
   ) -> bool:
     """Sends remote RPC to coordinate global least-loaded transfer and blocks until fully complete."""
     coord_req = self._proto_module.CoordinateTransferRequest(
@@ -3948,6 +4399,8 @@ class RaidenControllerClientFacade:
       coord_req.num_tokens = num_tokens
     if transfer_pool_tags is not None:
       coord_req.transfer_pool_tags.extend(transfer_pool_tags)
+    if transfer_kind is not None:
+      coord_req.transfer_kind = transfer_kind
 
     req = self._proto_module.ControllerRequest(
         command=self._proto_module.ControllerRequest.COMMAND_COORDINATE_TRANSFER,
