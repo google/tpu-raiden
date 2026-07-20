@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -32,6 +33,7 @@
 #include "grpcpp/server_builder.h"
 #include "grpcpp/server_context.h"
 #include "xla/tsl/concurrency/future.h"
+#include "tpu_raiden/core/buffer.h"
 #include "tpu_raiden/core/controller/controller_client.h"
 #include "tpu_raiden/core/controller/orchestrator_service_client.h"
 #include "tpu_raiden/core/controller/raiden_orchestrator.h"
@@ -554,6 +556,203 @@ TEST_F(RaidenControllerTest, ReadRemoteSuccess) {
                                           test_server2->server_address));
 }
 
+TEST_F(RaidenControllerTest, AllocateBuffersAndDeallocateBuffersSuccess) {
+  RaidenController controller(
+      unit_, std::vector<std::string>{test_server_->server_address},
+      /*num_blocks=*/10, /*num_shards=*/2,
+      /*shard_size_bytes=*/1024);
+
+  auto alloc_or = controller.AllocateBuffers(/*num_blocks=*/3);
+  ASSERT_TRUE(alloc_or.ok());
+  const auto& buffers = *alloc_or;
+  ASSERT_EQ(buffers.size(), 3);
+  EXPECT_FALSE(buffers[0].empty());
+  EXPECT_EQ(buffers[0].index(), 0);
+  EXPECT_EQ(buffers[1].index(), 1);
+  EXPECT_EQ(buffers[2].index(), 2);
+  EXPECT_EQ(buffers[0].shards().size(), 2);
+
+  EXPECT_EQ(controller.block_manager()->num_locked_blocks(), 3);
+  ASSERT_TRUE(controller.DeallocateBuffers(buffers).ok());
+  EXPECT_EQ(controller.block_manager()->num_locked_blocks(), 0);
+}
+
+TEST_F(RaidenControllerTest, TransferBuffersSingleBufferSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  RaidenController controller(unit_, /*num_blocks=*/5, /*num_shards=*/1,
+                              /*shard_size_bytes=*/512);
+  RegisterAndInitWorker(controller, "worker_0", test_server_->server_address);
+
+  auto alloc_or = controller.AllocateBuffers(2);
+  ASSERT_TRUE(alloc_or.ok());
+  auto buffers = *alloc_or;
+  buffers[0].set_memory_type(rpc::MEMORY_TYPE_HBM);
+
+  auto status =
+      controller.TransferBuffers("worker_0", {buffers[0]}, {buffers[1]})
+          .Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.d2h_calls, 1);
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(0));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(1));
+  EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
+}
+
+TEST_F(RaidenControllerTest, TransferBuffersSpanBufferSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  RaidenController controller(unit_, /*num_blocks=*/5, /*num_shards=*/1,
+                              /*shard_size_bytes=*/512);
+  RegisterAndInitWorker(controller, "worker_0", test_server_->server_address);
+
+  auto alloc_src = controller.AllocateBuffers(2);
+  ASSERT_TRUE(alloc_src.ok());
+  auto src_buffers = *alloc_src;
+  src_buffers[0].set_memory_type(rpc::MEMORY_TYPE_HBM);
+  src_buffers[1].set_memory_type(rpc::MEMORY_TYPE_HBM);
+
+  auto alloc_dst = controller.AllocateBuffers(2);
+  ASSERT_TRUE(alloc_dst.ok());
+  auto dst_buffers = *alloc_dst;
+
+  auto status =
+      controller.TransferBuffers("worker_0", src_buffers, dst_buffers).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.d2h_calls, 1);
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(0, 1));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(2, 3));
+}
+
+TEST_F(RaidenControllerTest, TransferBuffersSimplifiedH2HSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  RaidenController controller(unit_, /*num_blocks=*/5, /*num_shards=*/1,
+                              /*shard_size_bytes=*/512);
+  RegisterAndInitWorker(controller, "worker_0", test_server_->server_address);
+
+  auto alloc_src = controller.AllocateBuffers(1);
+  ASSERT_TRUE(alloc_src.ok());
+  auto src_buffers = *alloc_src;
+
+  auto alloc_dst = controller.AllocateBuffers(1);
+  ASSERT_TRUE(alloc_dst.ok());
+  auto dst_buffers = *alloc_dst;
+  dst_buffers[0].set_remote_address("localhost:8080");
+
+  auto status = controller.TransferBuffers(src_buffers, dst_buffers).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.h2h_calls, 1);
+  EXPECT_EQ(mock_mgr.last_peer, "localhost:8080");
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(0));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(1));
+}
+
+TEST_F(RaidenControllerTest, TransferBuffersBufferProtoSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  RaidenController controller(unit_, /*num_blocks=*/5, /*num_shards=*/1,
+                              /*shard_size_bytes=*/512);
+  RegisterAndInitWorker(controller, "worker_0", test_server_->server_address);
+
+  auto alloc_or = controller.Allocate(2);
+  ASSERT_TRUE(alloc_or.ok());
+  const auto& protos = *alloc_or;
+  std::vector<Buffer> src_buffers;
+  for (const auto& proto : protos) {
+    src_buffers.push_back(Buffer::FromProto(proto, std::nullopt));
+    src_buffers.back().set_memory_type(rpc::MEMORY_TYPE_DRAM);
+  }
+  std::vector<Buffer> dst_buffers;
+  for (const auto& proto : protos) {
+    dst_buffers.push_back(Buffer::FromProto(proto, std::nullopt));
+    dst_buffers.back().set_memory_type(rpc::MEMORY_TYPE_HBM);
+  }
+
+  auto status =
+      controller.TransferBuffers("worker_0", src_buffers, dst_buffers).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.h2d_calls, 1);
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(0, 1));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(0, 1));
+}
+
+TEST_F(RaidenControllerTest, LegacyTransferBuffersTargetedSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  RaidenController controller(unit_, /*num_blocks=*/5, /*num_shards=*/1,
+                              /*shard_size_bytes=*/512);
+  RegisterAndInitWorker(controller, "worker_0", test_server_->server_address);
+
+  std::vector<int64_t> src_offsets = {10, 30};
+  std::vector<int64_t> dst_offsets = {20, 40};
+  std::vector<int64_t> copy_sizes = {1, 2};
+
+  auto status = controller
+                    .TransferBuffers("worker_0", rpc::MEMORY_TYPE_HBM,
+                                     rpc::MEMORY_TYPE_DRAM, src_offsets,
+                                     dst_offsets, copy_sizes, "")
+                    .Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.d2h_calls, 1);
+  EXPECT_EQ(mock_mgr.h2d_calls, 0);
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(10, 30));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(20, 40));
+  EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1, 2));
+}
+
+TEST_F(RaidenControllerTest, LegacyTransferBuffersBroadcastSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  RaidenController controller(unit_, /*num_blocks=*/5, /*num_shards=*/1,
+                              /*shard_size_bytes=*/512);
+  RegisterAndInitWorker(controller, "worker_0", test_server_->server_address);
+
+  std::vector<int64_t> src_offsets = {100};
+  std::vector<int64_t> dst_offsets = {200};
+
+  auto status =
+      controller
+          .TransferBuffers(rpc::MEMORY_TYPE_DRAM, rpc::MEMORY_TYPE_HBM,
+                           src_offsets, dst_offsets, {}, {})
+          .Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.d2h_calls, 0);
+  EXPECT_EQ(mock_mgr.h2d_calls, 1);
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
+}
+
+TEST_F(RaidenControllerTest, LegacyTransferBuffersH2HSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  RaidenController controller(unit_, /*num_blocks=*/5, /*num_shards=*/1,
+                              /*shard_size_bytes=*/512);
+  RegisterAndInitWorker(controller, "worker_0", test_server_->server_address);
+
+  std::vector<int64_t> src_offsets = {5};
+  std::vector<int64_t> dst_offsets = {6};
+
+  auto status =
+      controller
+          .TransferBuffers(rpc::MEMORY_TYPE_DRAM, rpc::MEMORY_TYPE_DRAM,
+                           src_offsets, dst_offsets, {},
+                           std::vector<std::string>{"localhost:8080"})
+          .Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.h2h_write_calls, 1);
+  EXPECT_EQ(mock_mgr.last_peer, "localhost:8080");
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(5));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(6));
+}
+
 TEST_F(RaidenControllerTest, TransferBuffersLocalDramToRemoteHbmSuccess) {
   MockTransferManager mock_mgr;
   test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
@@ -605,6 +804,35 @@ TEST_F(RaidenControllerTest, TransferBuffersLocalHbmToRemoteDramSuccess) {
   ASSERT_TRUE(status.ok());
   EXPECT_EQ(mock_mgr.d2h_write_calls, 1);
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
+  EXPECT_EQ(mock_mgr.last_peer, "remote_host:9090");
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(0));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(1));
+}
+
+TEST_F(RaidenControllerTest, TransferBuffersRemoteHbmToLocalDramSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  RaidenController controller(unit_, /*num_blocks=*/5, /*num_shards=*/1,
+                              /*shard_size_bytes=*/512);
+  RegisterAndInitWorker(controller, "worker_0", test_server_->server_address);
+
+  auto alloc_src = controller.AllocateBuffers(1);
+  ASSERT_TRUE(alloc_src.ok());
+  auto src_buffers = *alloc_src;
+  src_buffers[0].set_memory_type(rpc::MEMORY_TYPE_HBM);
+  src_buffers[0].set_remote_address("remote_host:9090");
+
+  auto alloc_dst = controller.AllocateBuffers(1);
+  ASSERT_TRUE(alloc_dst.ok());
+  auto dst_buffers = *alloc_dst;
+  dst_buffers[0].set_memory_type(rpc::MEMORY_TYPE_DRAM);
+
+  auto status = controller.TransferBuffers(src_buffers, dst_buffers).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.d2h_read_calls, 1);
+  EXPECT_EQ(mock_mgr.d2h_calls, 0);
+  EXPECT_EQ(mock_mgr.d2h_write_calls, 0);
   EXPECT_EQ(mock_mgr.last_peer, "remote_host:9090");
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(0));
   EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(1));

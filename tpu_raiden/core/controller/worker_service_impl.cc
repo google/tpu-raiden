@@ -221,18 +221,18 @@ grpc::Status WorkerServiceImpl::TransferBuffers(
 
   absl::StatusOr<raiden::PjRtCopyFuture> future_or;
   if (is_d2h) {
-    std::string peer;
-    if (!transfer.peer().empty()) {
-      peer = transfer.peer();
-    } else if (transfer.dst_buffers_size() > 0 &&
-               !transfer.dst_buffers(0).remote_address().empty()) {
-      peer = transfer.dst_buffers(0).remote_address();
-    } else if (transfer.src_buffers_size() > 0 &&
-               !transfer.src_buffers(0).remote_address().empty()) {
-      peer = transfer.src_buffers(0).remote_address();
-    }
-    if (!peer.empty()) {
-      future_or = transfer_manager_.D2hWrite(peer, src_offsets, dst_offsets,
+    if (transfer.src_buffers_size() > 0 &&
+        !transfer.src_buffers(0).remote_address().empty()) {
+      std::string src_peer = transfer.src_buffers(0).remote_address();
+      future_or = transfer_manager_.D2hRead(src_peer, src_offsets, dst_offsets,
+                                            copy_sizes);
+    } else if (!transfer.peer().empty() ||
+               (transfer.dst_buffers_size() > 0 &&
+                !transfer.dst_buffers(0).remote_address().empty())) {
+      std::string dst_peer = !transfer.peer().empty()
+                                 ? transfer.peer()
+                                 : transfer.dst_buffers(0).remote_address();
+      future_or = transfer_manager_.D2hWrite(dst_peer, src_offsets, dst_offsets,
                                              copy_sizes);
     } else {
       future_or = transfer_manager_.D2h(src_offsets, dst_offsets, copy_sizes);

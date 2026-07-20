@@ -238,6 +238,7 @@ cc_test(
         ":raiden_controller",
         ":raiden_orchestrator",
         ":test_util",
+        "//tpu_raiden/core:buffer",
         "//tpu_raiden/core:kv_manager_holder",
         "//tpu_raiden/kv_cache:raiden_id",
         "//tpu_raiden/proto:worker_service_cc_proto",
