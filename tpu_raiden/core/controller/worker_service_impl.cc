@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -222,7 +223,22 @@ grpc::Status WorkerServiceImpl::TransferBuffers(
   if (is_d2h) {
     future_or = transfer_manager_.D2h(src_offsets, dst_offsets, copy_sizes);
   } else if (is_h2d) {
-    future_or = transfer_manager_.H2d(src_offsets, dst_offsets, copy_sizes);
+    std::string peer;
+    if (!transfer.peer().empty()) {
+      peer = transfer.peer();
+    } else if (transfer.dst_buffers_size() > 0 &&
+               !transfer.dst_buffers(0).remote_address().empty()) {
+      peer = transfer.dst_buffers(0).remote_address();
+    } else if (transfer.src_buffers_size() > 0 &&
+               !transfer.src_buffers(0).remote_address().empty()) {
+      peer = transfer.src_buffers(0).remote_address();
+    }
+    if (!peer.empty()) {
+      future_or = transfer_manager_.H2dWrite(peer, src_offsets, dst_offsets,
+                                             copy_sizes);
+    } else {
+      future_or = transfer_manager_.H2d(src_offsets, dst_offsets, copy_sizes);
+    }
   } else if (transfer.src_buffers_size() > 0 &&
              !transfer.src_buffers(0).remote_address().empty()) {
     future_or = transfer_manager_.H2hRead(

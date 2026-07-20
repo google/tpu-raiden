@@ -27,6 +27,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "xla/future.h"
@@ -116,6 +117,14 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<int64_t> slot_idx = std::nullopt,
       std::optional<size_t> layer_idx = std::nullopt,
       std::optional<size_t> shard_idx = std::nullopt);
+
+  virtual absl::StatusOr<raiden::PjRtCopyFuture> H2dWrite(
+      absl::string_view peer,
+      const std::vector<int64_t>& src_offsets_major_dim = {},
+      const std::vector<int64_t>& dst_offsets_major_dim = {},
+      const std::vector<int64_t>& copy_sizes_major_dim = {}) {
+    return absl::UnimplementedError("H2dWrite is not implemented");
+  }
 
   // Async on-chip D2H offloads E2E
   virtual absl::StatusOr<raiden::PjRtCopyFuture> D2h(

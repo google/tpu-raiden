@@ -23,7 +23,7 @@
 
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
-#include "tpu_raiden/core/raw_transfer_core.h"
+#include "absl/strings/string_view.h"
 #include "grpcpp/channel.h"
 #include "grpcpp/create_channel.h"
 #include "grpcpp/security/credentials.h"
@@ -34,6 +34,7 @@
 #include "tpu_raiden/core/controller/controller_service.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
 #include "tpu_raiden/core/controller/worker_service_impl.h"
+#include "tpu_raiden/core/raw_transfer_core.h"
 
 namespace tpu_raiden {
 namespace controller {
@@ -41,6 +42,7 @@ namespace controller {
 struct MockTransferManager {
   int d2h_calls = 0;
   int h2d_calls = 0;
+  int h2d_write_calls = 0;
   int h2h_calls = 0;
   int h2h_read_calls = 0;
   int h2h_write_calls = 0;
@@ -71,6 +73,18 @@ struct MockTransferManager {
     return raiden::PjRtCopyFuture();
   }
 
+  absl::StatusOr<raiden::PjRtCopyFuture> H2dWrite(
+      absl::string_view peer, const std::vector<int64_t>& src_offsets,
+      const std::vector<int64_t>& dst_offsets,
+      const std::vector<int64_t>& copy_sizes) {
+    h2d_write_calls++;
+    last_peer = std::string(peer);
+    last_src_offsets = src_offsets;
+    last_dst_offsets = dst_offsets;
+    last_copy_sizes = copy_sizes;
+    return raiden::PjRtCopyFuture();
+  }
+
   absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hRead(
       std::string peer, const std::vector<int>& src_block_ids,
       const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
@@ -82,7 +96,6 @@ struct MockTransferManager {
     last_dst_offsets.assign(dst_block_ids.begin(), dst_block_ids.end());
     return std::make_pair(std::vector<int>{}, raiden::PjRtCopyFuture());
   }
-
   absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hWrite(
       std::string peer, const std::vector<int>& src_block_ids,
       const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
