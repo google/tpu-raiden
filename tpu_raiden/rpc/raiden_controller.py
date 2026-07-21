@@ -257,35 +257,59 @@ class TransferPlan:
   parallelism: int = 1
   num_tokens: int = 0
   skipped_pool_counts: dict[str, int] = dataclasses.field(default_factory=dict)
+  # Byte-span plans: the expected destination coverage end per registered
+  # destination block, in dst_device_block_ids order. Empty on legacy
+  # token plans; non-empty selects the byte-level receiver
+  # validation with no token arithmetic.
+  dst_expected_extent_bytes: list[int] = dataclasses.field(
+      default_factory=list
+  )
   request_block_claim_owner: Any = dataclasses.field(
       default=None, repr=False, compare=False
   )
 
 
 @dataclasses.dataclass(frozen=True)
-class SourceSpan:
-  """One contiguous run of destination tokens materialized from one block.
+class PoolByteSpan:
+  """One contiguous (or uniformly strided) byte copy between one source and
+  one destination block of the same pool.
 
-  Declared by the producer rank that owns it, generated from the kernel's own
-  layout package. The ordinal indexes into the same registration's block_ids
-  list — never a physical block id. A span never crosses a source block
-  boundary (offset + count <= page_tokens).
+  The byte-span registration IR: it mirrors ShardPushEntryProto fields 3-10,
+  so planning reduces to validate/bind/re-key with no token or unit
+  arithmetic. The ordinal indexes the owning registration's block_ids list;
+  the destination index addresses the transfer's destination id list —
+  never physical ids.
   """
 
-  dst_token_start: int
-  token_count: int
   src_block_ordinal: int
-  src_block_token_offset: int
+  src_offset_bytes: int
+  dst_block_index: int
+  dst_offset_bytes: int
+  size_bytes: int
+  src_stride_bytes: int = 0
+  dst_stride_bytes: int = 0
+  count: int = 1
+
+
+@dataclasses.dataclass(frozen=True)
+class PoolSpanRegistration:
+  """One rank's declared byte-span contribution to one pool tag."""
+
+  tag: str
+  block_ids: tuple[int, ...]
+  spans: tuple[PoolByteSpan, ...]
+  declared_bytes: int
 
 
 @dataclasses.dataclass(frozen=True)
 class RequestBlockRegistration:
-  """Producer-owned block IDs and declared spans for one request and unit."""
+  """Producer-owned block IDs and byte-span declarations for one request
+  and unit."""
 
   uuid: int
   block_ids: tuple[int, ...]
-  spans: tuple[SourceSpan, ...]
   expires_at: float
+  pool_spans: tuple[PoolSpanRegistration, ...] = ()
 
 
 @dataclasses.dataclass
@@ -1238,21 +1262,23 @@ class RaidenController:
       uuid: int,
       unit: RaidenId,
       block_ids: typing.Sequence[int],
-      spans: typing.Sequence[SourceSpan] = (),
+      pool_spans: typing.Sequence[PoolSpanRegistration] = (),
   ) -> None:
-    """Registers one producer rank's block IDs and declared source spans.
+    """Registers one producer rank's block IDs and byte-span declarations.
 
-    Spans arrive only on the owning rank's registration; the controller never
-    derives ownership. Per-span checks (ordinal bounds, block containment,
-    dense rank-major packing) fail here; the cross-rank partition check runs
-    at planning time over the claimed union.
+    Declarations arrive only on the owning rank's registration; the
+    controller never derives ownership. Byte-span declarations (pool_spans)
+    are per-tag byte copies lowered by the producer. Per-span source bounds
+    are checked here against the registering unit's own manifest; the
+    cross-rank destination coverage check runs at planning time over the
+    claimed union.
 
     Args:
       req_id: The request ID.
       uuid: The request UUID.
       unit: The RaidenId of the worker registering block IDs.
       block_ids: Sequence of physical block IDs.
-      spans: Sequence of SourceSpan declarations.
+      pool_spans: Sequence of PoolSpanRegistration byte-span declarations.
     """
     if not req_id:
       raise ValueError("req_id must not be empty")
@@ -1264,70 +1290,94 @@ class RaidenController:
     if len(set(normalized)) != len(normalized):
       raise ValueError("block_ids must not contain duplicates")
 
-    normalized_spans = tuple(
-        SourceSpan(
-            dst_token_start=int(span.dst_token_start),
-            token_count=int(span.token_count),
-            src_block_ordinal=int(span.src_block_ordinal),
-            src_block_token_offset=int(span.src_block_token_offset),
-        )
-        for span in spans
-    )
-    # Spans are validated when declared; a registration without spans is a
-    # legal registry entry, but the planner's partition check will never
-    # admit its blocks into a reshard plan beyond the declared coverage.
-    if normalized_spans and not normalized:
-      raise ValueError("spans declared without any registered block_ids")
-    if normalized_spans:
-      page_tokens = self._registered_page_tokens.get(unit)
-      if page_tokens is None or page_tokens <= 0:
-        raise ValueError(
-            f"Work unit {unit} did not register page_tokens; spans cannot be "
-            "validated"
-        )
-      tokens_per_ordinal: dict[int, int] = {}
-      for span in normalized_spans:
-        if span.token_count <= 0:
-          raise ValueError("span token_count must be positive")
-        if span.dst_token_start < 0 or span.src_block_token_offset < 0:
-          raise ValueError("span fields must be non-negative")
-        if not 0 <= span.src_block_ordinal < len(normalized):
+    normalized_pool_spans: list[PoolSpanRegistration] = []
+    if pool_spans:
+      live_bytes_by_tag: dict[str, int] = {}
+      for pool in self._registered_pool_manifests.get(unit, ()):
+        tag = str(pool.tag)
+        live = _pool_live_bytes(pool)
+        if live_bytes_by_tag.setdefault(tag, live) != live:
           raise ValueError(
-              f"span ordinal {span.src_block_ordinal} is outside the "
-              f"registration's {len(normalized)} block ids"
-          )
-        if span.src_block_token_offset + span.token_count > page_tokens:
+              f"pools tagged {tag} disagree on live bytes for {unit}; "
+              "byte-span registration requires one geometry per tag")
+      seen_pool_tags: set[str] = set()
+      for entry in pool_spans:
+        tag = str(entry.tag)
+        if not tag:
+          raise ValueError("pool span registration tag must not be empty")
+        if tag in seen_pool_tags:
+          raise ValueError(f"duplicate pool span registration tag: {tag}")
+        seen_pool_tags.add(tag)
+        if tag not in live_bytes_by_tag:
           raise ValueError(
-              "span crosses its source block boundary: offset="
-              f"{span.src_block_token_offset}, count={span.token_count}, "
-              f"page_tokens={page_tokens}"
-          )
-        tokens_per_ordinal[span.src_block_ordinal] = (
-            tokens_per_ordinal.get(span.src_block_ordinal, 0) + span.token_count
-        )
-      # Dense rank-major packing: every registered block is used; all blocks
-      # except the last are fully covered; the last may be partial.
-      if set(tokens_per_ordinal) != set(range(len(normalized))):
-        raise ValueError(
-            "spans must reference every registered block exactly once "
-            "in dense rank-major packing"
-        )
-      last_ordinal = len(normalized) - 1
-      for ordinal, total in tokens_per_ordinal.items():
-        if ordinal != last_ordinal and total != page_tokens:
+              f"pool span registration {tag} does not match any registered "
+              f"pool for {unit}")
+        live = live_bytes_by_tag[tag]
+        entry_ids = tuple(int(block_id) for block_id in entry.block_ids)
+        if any(block_id < 0 for block_id in entry_ids):
           raise ValueError(
-              f"spans cover {total} tokens of non-final block {ordinal}; "
-              f"dense packing requires exactly {page_tokens}"
+              f"pool span registration {tag} block_ids must be non-negative")
+        if len(set(entry_ids)) != len(entry_ids):
+          raise ValueError(
+              f"pool span registration {tag} block_ids must not contain "
+              "duplicates")
+        entry_spans = []
+        span_bytes = 0
+        for span in entry.spans:
+          span = PoolByteSpan(
+              src_block_ordinal=int(span.src_block_ordinal),
+              src_offset_bytes=int(span.src_offset_bytes),
+              dst_block_index=int(span.dst_block_index),
+              dst_offset_bytes=int(span.dst_offset_bytes),
+              size_bytes=int(span.size_bytes),
+              src_stride_bytes=int(span.src_stride_bytes),
+              dst_stride_bytes=int(span.dst_stride_bytes),
+              count=int(span.count),
           )
-      if not 0 < tokens_per_ordinal[last_ordinal] <= page_tokens:
-        raise ValueError("spans over-cover the final registered block")
+          if span.size_bytes <= 0:
+            raise ValueError(f"byte span size_bytes must be positive ({tag})")
+          if span.count <= 0:
+            raise ValueError(f"byte span count must be positive ({tag})")
+          if span.count > 1 << 20:
+            raise ValueError(
+                f"byte span count {span.count} exceeds the expansion "
+                f"bound ({tag})")
+          if (span.src_offset_bytes < 0 or span.dst_offset_bytes < 0
+              or span.src_stride_bytes < 0 or span.dst_stride_bytes < 0
+              or span.dst_block_index < 0):
+            raise ValueError(f"byte span fields must be non-negative ({tag})")
+          if not 0 <= span.src_block_ordinal < len(entry_ids):
+            raise ValueError(
+                f"byte span ordinal {span.src_block_ordinal} is outside "
+                f"the registration's {len(entry_ids)} block ids ({tag})")
+          src_end = (span.src_offset_bytes +
+                     (span.count - 1) * span.src_stride_bytes +
+                     span.size_bytes)
+          if src_end > live:
+            raise ValueError(
+                f"byte span exceeds its source block live bytes ({tag}): "
+                f"end={src_end}, live={live}")
+          span_bytes += span.size_bytes * span.count
+          entry_spans.append(span)
+        if int(entry.declared_bytes) != span_bytes:
+          raise ValueError(
+              f"pool span registration {tag} declared_bytes "
+              f"{int(entry.declared_bytes)} disagrees with the span sum "
+              f"{span_bytes}")
+        normalized_pool_spans.append(
+            PoolSpanRegistration(
+                tag=tag,
+                block_ids=entry_ids,
+                spans=tuple(entry_spans),
+                declared_bytes=span_bytes,
+            ))
 
     now = time.monotonic()
     registration = RequestBlockRegistration(
         uuid=uuid,
         block_ids=normalized,
-        spans=normalized_spans,
         expires_at=now + self._request_registry_ttl_s,
+        pool_spans=tuple(normalized_pool_spans),
     )
     key = (req_id, unit)
     lifecycle_key = (req_id, uuid)
@@ -1351,7 +1401,7 @@ class RaidenController:
         if (
             existing.uuid != uuid
             or existing.block_ids != normalized
-            or existing.spans != normalized_spans
+            or existing.pool_spans != tuple(normalized_pool_spans)
         ):
           raise ValueError(
               "Conflicting request block registration for "
@@ -1593,7 +1643,7 @@ class RaidenController:
     """Builds a plan and rolls back any claim if planning fails."""
     claim_owner = object()
     try:
-      plan = self._build_pool_reshard_plan_claimed(
+      plan = self._build_byte_span_plan_claimed(
           src_units=src_units,
           dst_units=dst_units,
           src_metadata=src_metadata,
@@ -1612,7 +1662,7 @@ class RaidenController:
       self._abandon_request_blocks_claim(req_id, uuid, claim_owner)
       raise
 
-  def _build_pool_reshard_plan_claimed(
+  def _build_byte_span_plan_claimed(
       self,
       *,
       src_units: typing.Sequence[RaidenId],
@@ -1627,36 +1677,27 @@ class RaidenController:
       parallelism: Optional[int],
       claim_owner: Any,
   ) -> TransferPlan:
-    """Validates, binds, and emits the declared-span pool reshard plan.
+    """Validates, binds, and emits a byte-span reshard plan.
 
-    Planning happens exactly once, here, on the sender-side controller. The
-    controller derives nothing: geometry arrives as per-rank declared source
-    spans; this method validates the cross-rank partition, binds ordinals to
-    the claimed physical block ids, and emits byte entries by intersecting
-    spans with the destination page grid.
+    The single geometry-neutral pipeline: producers declared per-tag byte
+    spans at registration; this method re-validates source bounds, checks
+    exactly-once destination byte coverage over the claimed union (the
+    cross-rank partition check, in bytes), binds ordinals and destination
+    indices to physical ids, and re-keys the spans onto the executor wire.
+    No token or unit arithmetic happens anywhere in this pipeline; the
+    semantic half of the old planners runs producer-side before
+    registration.
 
-    Args:
-      src_units: Sequence of source RaidenIds.
-      dst_units: Sequence of destination RaidenIds.
-      src_metadata: Sequence of source WorkerMetadata.
-      dst_metadata: Sequence of destination WorkerMetadata.
-      req_id: The request ID.
-      uuid: The request UUID.
-      dst_device_block_ids: Sequence of destination physical block IDs.
-      num_tokens: Number of tokens to transfer.
-      transfer_pool_tags: Sequence of transfer pool tags.
-      parallelism: Parallelism factor.
-      claim_owner: Opaque claim owner coordinate.
-
-    Returns:
-      The generated TransferPlan.
+    The destination coverage rule is prefix-shaped: every registered
+    destination block except the last must be covered exactly to its live
+    bytes; the last must be covered as a non-empty prefix (the FA tail).
+    The derived per-block extents ride the plan so the receiver-side
+    controller can re-validate the same rule independently.
     """
     if not req_id:
       raise ValueError("req_id must not be empty for pool resharding")
     if uuid <= 0:
       raise ValueError("uuid must be positive for pool resharding")
-    if num_tokens <= 0:
-      raise ValueError("num_tokens must be positive for pool resharding")
     if len(dst_units) != 1:
       raise ValueError("Pool resharding requires exactly one destination unit")
     if len(set(src_units)) != len(src_units):
@@ -1684,8 +1725,6 @@ class RaidenController:
         raise ValueError(f"Missing layout fingerprint for {unit}")
       if not meta.pools:
         raise ValueError(f"Missing explicit pool manifest for {unit}")
-      if meta.page_tokens <= 0:
-        raise ValueError(f"Missing positive page geometry for {unit}")
       if not meta.shards:
         raise ValueError(f"Missing data-plane endpoint for {unit}")
       if len(meta.shards) != 1:
@@ -1731,29 +1770,24 @@ class RaidenController:
             f"Source pool geometry differs across ranks at {src_unit}"
         )
 
-    # Pool selection is request data: the consumer names opaque tags and the
-    # controller resolves them against the registered manifests. Raiden
-    # attaches no meaning to any tag value; the complement of the selection
-    # becomes the skip summary.
     requested_tags = [str(tag) for tag in transfer_pool_tags]
     if not requested_tags:
       raise ValueError("transfer_pool_tags must name at least one pool tag")
-    if len(set(requested_tags)) != len(requested_tags):
-      raise ValueError("transfer_pool_tags must not contain duplicates")
+    if len(requested_tags) != 1:
+      raise ValueError(
+          "Byte-span resharding moves exactly one pool tag per transfer; "
+          f"got tags {requested_tags}")
+    plan_tag = requested_tags[0]
     available_tags = {str(pool.tag) for pool in dst_meta.pools}
-    unmatched_tags = [
-        tag for tag in requested_tags if tag not in available_tags
-    ]
-    if unmatched_tags:
+    if plan_tag not in available_tags:
       raise ValueError(
           "transfer_pool_tags do not match any registered pool: "
-          f"{unmatched_tags}"
+          f"[{plan_tag!r}]"
       )
-    requested_tag_set = set(requested_tags)
     selected_pool_indices = [
         index
         for index, pool in enumerate(dst_meta.pools)
-        if str(pool.tag) in requested_tag_set
+        if str(pool.tag) == plan_tag
     ]
     skipped_pool_counts: dict[str, int] = {}
     for index, pool in enumerate(dst_meta.pools):
@@ -1761,15 +1795,8 @@ class RaidenController:
         tag = str(pool.tag)
         skipped_pool_counts[tag] = skipped_pool_counts.get(tag, 0) + 1
 
-    src_page_tokens = int(reference_src.page_tokens)
-    dst_page_tokens = int(dst_meta.page_tokens)
-    source_page_tokens = {
-        int(src_by_unit[unit].page_tokens) for unit in src_units
-    }
-    if source_page_tokens != {src_page_tokens}:
-      raise ValueError("Source page_tokens differ across ranks")
-
-    token_bytes_values = set()
+    src_live_values = set()
+    dst_live_values = set()
     for pool_idx in selected_pool_indices:
       src_pool = reference_src.pools[pool_idx]
       dst_pool = dst_meta.pools[pool_idx]
@@ -1787,27 +1814,14 @@ class RaidenController:
             f"pool {pool_idx} has live={dst_live}, "
             f"stride={dst_pool.block_stride_bytes}. See {_TP_GATHER_DESIGN}"
         )
-      if src_live % src_page_tokens != 0:
-        raise ValueError(
-            f"Source pool {pool_idx} live bytes are not token-aligned"
-        )
-      if dst_live % dst_page_tokens != 0:
-        raise ValueError(
-            f"Destination pool {pool_idx} live bytes are not token-aligned"
-        )
-      src_token_bytes = src_live // src_page_tokens
-      dst_token_bytes = dst_live // dst_page_tokens
-      if src_token_bytes != dst_token_bytes:
-        raise ValueError(
-            f"Token byte geometry mismatch for pool {pool_idx}: "
-            f"source={src_token_bytes}, destination={dst_token_bytes}"
-        )
-      token_bytes_values.add(src_token_bytes)
-    if len(token_bytes_values) != 1:
-      raise ValueError("All selected pools must have the same bytes-per-token")
-    token_bytes = next(iter(token_bytes_values))
-    if token_bytes <= 0:
-      raise ValueError("Bytes-per-token must be positive")
+      src_live_values.add(src_live)
+      dst_live_values.add(dst_live)
+    if len(src_live_values) != 1 or len(dst_live_values) != 1:
+      raise ValueError(
+          f"Pools tagged {plan_tag} must share one geometry per side; "
+          f"src={sorted(src_live_values)} dst={sorted(dst_live_values)}")
+    src_live = next(iter(src_live_values))
+    dst_live = next(iter(dst_live_values))
 
     admitted_parallelism = {
         int(src_by_unit[unit].transfer_parallelism) for unit in src_units
@@ -1825,11 +1839,6 @@ class RaidenController:
       raise ValueError(
           "Source transfer_rank values must be contiguous from zero"
       )
-    if topology_parallelism != len(src_units):
-      raise ValueError(
-          "Source transfer_parallelism must equal the complete source rank "
-          f"count: admitted={topology_parallelism}, ranks={len(src_units)}"
-      )
     requested_parallelism = (
         topology_parallelism if parallelism is None else int(parallelism)
     )
@@ -1842,110 +1851,137 @@ class RaidenController:
           f"admitted={topology_parallelism}"
       )
 
-    expected_dst_pages = math.ceil(num_tokens / dst_page_tokens)
-    if len(dst_ids) != expected_dst_pages:
-      raise ValueError(
-          "dst_device_block_ids count does not match destination page count: "
-          f"got={len(dst_ids)}, expected={expected_dst_pages}"
-      )
-
     registrations = self._lookup_request_blocks(
         req_id, uuid, src_units, claim_owner=claim_owner
     )
 
-    # Validate: the union of every rank's declared spans, ordered by
-    # dst_token_start, must tile [0, prompt_tokens) with no gap and no
-    # overlap. Inconsistent per-rank geometry — a missing rank, double-owned
-    # tokens, or ranks disagreeing about the interleave — fails here before
-    # any byte moves.
-    ordered_spans: list[tuple[SourceSpan, RaidenId]] = []
-    prompt_tokens = 0
+    declared: list[tuple[RaidenId, PoolSpanRegistration]] = []
     for unit in src_units:
       registration = registrations[unit]
-      for span in registration.spans:
-        ordered_spans.append((span, unit))
-        prompt_tokens += span.token_count
-    if not ordered_spans:
+      for entry in registration.pool_spans:
+        if entry.tag != plan_tag:
+          continue
+        if entry.spans:
+          declared.append((unit, entry))
+    if not declared:
       raise ValueError(
-          f"No source spans are registered for req_id={req_id}, uuid={uuid}"
-      )
-    ordered_spans.sort(key=lambda item: item[0].dst_token_start)
-    covered_until = 0
-    for span, unit in ordered_spans:
-      if span.dst_token_start != covered_until:
-        relation = "overlap" if span.dst_token_start < covered_until else "gap"
-        raise ValueError(
-            "Declared source spans have a destination coverage "
-            f"{relation} at token {min(span.dst_token_start, covered_until)}"
-            f" (declared by {unit})"
-        )
-      covered_until += span.token_count
-    if covered_until != prompt_tokens:
-      raise AssertionError("span partition accounting failed")
-    if num_tokens > prompt_tokens:
-      raise ValueError(
-          "num_tokens exceeds the declared prompt: "
-          f"requested={num_tokens}, declared={prompt_tokens}"
-      )
+          f"No byte-span declarations are registered for tag {plan_tag}, "
+          f"req_id={req_id}, uuid={uuid}")
 
     for pool_idx in selected_pool_indices:
-      src_num_blocks = int(reference_src.pools[pool_idx].num_blocks)
       dst_num_blocks = int(dst_meta.pools[pool_idx].num_blocks)
-      for src_unit in src_units:
-        if any(
-            block_id >= src_num_blocks
-            for block_id in registrations[src_unit].block_ids
-        ):
+      for unit, entry in declared:
+        limit = int(src_by_unit[unit].pools[pool_idx].num_blocks)
+        if any(block_id >= limit for block_id in entry.block_ids):
           raise ValueError(
               f"Source block id is out of range for pool {pool_idx} at "
-              f"{src_unit}"
+              f"{unit}"
           )
       if any(block_id >= dst_num_blocks for block_id in dst_ids):
         raise ValueError(
             f"Destination block id is out of range for pool {pool_idx}"
         )
 
-    # Bind ordinals to claimed physical ids and emit: clip the span set to
-    # num_tokens (the partial final page falls out for free), intersect with
-    # destination page boundaries, and convert tokens to bytes. Spans are
-    # pool-independent: one geometry applies to every selected pool, since
-    # block ids are shared across pools.
+    # Validate: expand every span's uniform repeats; each repeat must stay
+    # inside its source block and destination block; the union of all
+    # repeats must cover each destination block exactly once as a
+    # prefix-shaped extent (full blocks, then one optional partial tail).
+    coverage: dict[int, list[tuple[int, int]]] = {
+        index: [] for index in range(len(dst_ids))
+    }
+    expanded_repeats = 0
+    declared_total = 0
+    covered_total = 0
+    for unit, entry in declared:
+      declared_total += entry.declared_bytes
+      for span in entry.spans:
+        if span.dst_block_index >= len(dst_ids):
+          raise ValueError(
+              f"Byte span destination index {span.dst_block_index} exceeds "
+              f"the transfer's {len(dst_ids)} destination blocks "
+              f"(declared by {unit})")
+        src_end = (span.src_offset_bytes +
+                   (span.count - 1) * span.src_stride_bytes + span.size_bytes)
+        if src_end > src_live:
+          raise ValueError(
+              "Byte span exceeds its source block live bytes: "
+              f"end={src_end}, live={src_live} (declared by {unit})")
+        dst_end = (span.dst_offset_bytes +
+                   (span.count - 1) * span.dst_stride_bytes + span.size_bytes)
+        if dst_end > dst_live:
+          raise ValueError(
+              "Byte span exceeds its destination block live bytes: "
+              f"end={dst_end}, live={dst_live} (declared by {unit})")
+        expanded_repeats += span.count
+        if expanded_repeats > 1 << 20:
+          raise ValueError(
+              "Byte span plan exceeds the repeat expansion bound")
+        for repeat in range(span.count):
+          start = span.dst_offset_bytes + repeat * span.dst_stride_bytes
+          coverage[span.dst_block_index].append(
+              (start, start + span.size_bytes))
+          covered_total += span.size_bytes
+    extents: list[int] = []
+    for index in range(len(dst_ids)):
+      intervals = sorted(coverage[index])
+      if not intervals:
+        raise ValueError(
+            f"Destination block index {index} has no declared coverage")
+      covered_until = 0
+      for start, end in intervals:
+        if start != covered_until:
+          relation = "overlap" if start < covered_until else "gap"
+          raise ValueError(
+              "Declared byte spans have a destination coverage "
+              f"{relation} at byte {min(start, covered_until)} of "
+              f"destination block index {index}")
+        covered_until = end
+      if index != len(dst_ids) - 1 and covered_until != dst_live:
+        raise ValueError(
+            f"Destination block index {index} is covered to {covered_until} "
+            f"of {dst_live} live bytes; only the final block may be partial")
+      extents.append(covered_until)
+    if declared_total != covered_total:
+      raise ValueError(
+          f"Declared byte totals disagree with coverage: declared="
+          f"{declared_total}, covered={covered_total}")
+    if covered_total != sum(extents):
+      raise AssertionError("byte coverage accounting failed")
+
+    # Bind ordinals and destination indices to physical ids and emit: a
+    # byte span maps 1:1 onto the executor entry; the plan is a re-keying,
+    # not a computation. One schedule applies to every selected pool of the
+    # tag, exactly as the legacy planners' shared-geometry replay did.
     dst_peer = str(dst_meta.shards[0])
+    ordered_spans: list[tuple[PoolByteSpan, RaidenId,
+                              PoolSpanRegistration]] = []
+    for unit, entry in declared:
+      for span in entry.spans:
+        ordered_spans.append((span, unit, entry))
+    ordered_spans.sort(
+        key=lambda item: (item[0].dst_block_index, item[0].dst_offset_bytes))
     schedules: dict[RaidenId, dict[int, list[tuple[Any, ...]]]] = {}
     transfer_pairs_per_sender: dict[RaidenId, set[tuple[str, int, int]]] = {}
-    for span, src_unit in ordered_spans:
-      clipped_end = min(span.dst_token_start + span.token_count, num_tokens)
-      if clipped_end <= span.dst_token_start:
-        continue
-      block_ids = registrations[src_unit].block_ids
-      src_block_id = block_ids[span.src_block_ordinal]
-      cursor = span.dst_token_start
-      while cursor < clipped_end:
-        dst_page_ordinal = cursor // dst_page_tokens
-        page_end = min((dst_page_ordinal + 1) * dst_page_tokens, clipped_end)
-        run_tokens = page_end - cursor
-        dst_block_id = dst_ids[dst_page_ordinal]
-        src_token_offset = span.src_block_token_offset + (
-            cursor - span.dst_token_start
-        )
-        dst_token_offset = cursor - dst_page_ordinal * dst_page_tokens
-        entry = (
-            dst_peer,
-            0,
-            dst_token_offset * token_bytes,
-            src_token_offset * token_bytes,
-            run_tokens * token_bytes,
-            src_block_id,
-            dst_block_id,
-            0,
-            0,
-            1,
-        )
-        schedules.setdefault(src_unit, {}).setdefault(0, []).append(entry)
-        transfer_pairs_per_sender.setdefault(src_unit, set()).add(
-            (dst_peer, src_block_id, dst_block_id)
-        )
-        cursor = page_end
+    for span, src_unit, entry in ordered_spans:
+      src_block_id = entry.block_ids[span.src_block_ordinal]
+      dst_block_id = dst_ids[span.dst_block_index]
+      schedule_entry = (
+          dst_peer,
+          0,
+          span.dst_offset_bytes,
+          span.src_offset_bytes,
+          span.size_bytes,
+          src_block_id,
+          dst_block_id,
+          span.src_stride_bytes,
+          span.dst_stride_bytes,
+          span.count,
+      )
+      schedules.setdefault(src_unit, {}).setdefault(0, []).append(
+          schedule_entry)
+      transfer_pairs_per_sender.setdefault(src_unit, set()).add(
+          (dst_peer, src_block_id, dst_block_id)
+      )
 
     active_src_units = [
         ranks[rank] for rank in sorted(ranks) if ranks[rank] in schedules
@@ -1984,14 +2020,19 @@ class RaidenController:
         transfer_pool_indices=selected_pool_indices,
         pool_dtype_tags=[str(pool.dtype_tag) for pool in dst_meta.pools],
         src_block_ids={
-            unit: list(registrations[unit].block_ids)
+            unit: sorted({
+                int(block_id)
+                for decl_unit, entry in declared if decl_unit == unit
+                for block_id in entry.block_ids
+            })
             for unit in active_src_units
         },
         dst_device_block_ids=dst_ids,
         src_schedule_keys=src_schedule_keys,
         parallelism=requested_parallelism,
-        num_tokens=num_tokens,
+        num_tokens=max(int(num_tokens or 0), 0),
         skipped_pool_counts=skipped_pool_counts,
+        dst_expected_extent_bytes=extents,
     )
 
   async def _execute_slice_broadcast(
@@ -2208,8 +2249,11 @@ class RaidenController:
       )
     if dst_device_block_ids is None:
       raise ValueError("dst_device_block_ids are required for pool resharding")
-    if num_tokens is None or num_tokens <= 0:
-      raise ValueError("num_tokens must be positive for pool resharding")
+    # State-class byte-span transfers legitimately carry num_tokens=0 (their
+    # payloads have no token axis); token plans arrive positive.
+    num_tokens = 0 if num_tokens is None else int(num_tokens)
+    if num_tokens < 0:
+      raise ValueError("num_tokens must be non-negative for pool resharding")
     if not transfer_pool_tags:
       raise ValueError(
           "transfer_pool_tags must name the pools to move for pool resharding"
@@ -2319,6 +2363,9 @@ class RaidenController:
                   src_schedule_keys=final_plan.src_schedule_keys,
                   parallelism=final_plan.parallelism,
                   num_tokens=final_plan.num_tokens,
+                  dst_expected_extent_bytes=(
+                      final_plan.dst_expected_extent_bytes
+                  ),
               ),
           )
         except Exception:
@@ -2415,6 +2462,7 @@ class RaidenController:
       src_schedule_keys: dict[RaidenId, int],
       parallelism: int,
       num_tokens: int,
+      dst_expected_extent_bytes: typing.Sequence[int] = (),
   ) -> RaidenFuture:
     """Independently validates and arms a source-generated receiver plan.
 
@@ -2423,6 +2471,12 @@ class RaidenController:
     an arm acknowledgement permits the source controller to dispatch senders.
     Pool selection is validated for consistency (indices resolve against the
     local manifest), never for policy — no tag value means anything here.
+
+    The plan's declared per-block extents are validated against the local
+    manifest (prefix-shaped: all blocks full except an optional partial
+    tail), then the entries' expanded byte coverage is swept against
+    exactly those extents — no token arithmetic. num_tokens is opaque
+    audit metadata.
 
     Args:
       src_units: Sequence of source RaidenIds.
@@ -2436,7 +2490,9 @@ class RaidenController:
       dst_device_block_ids: Destination physical block IDs.
       src_schedule_keys: Contiguous source ordinals.
       parallelism: Parallelism factor.
-      num_tokens: Number of tokens to transfer.
+      num_tokens: Opaque audit metadata (never consumed for validation).
+      dst_expected_extent_bytes: Expected destination coverage end per
+        destination block, in dst_device_block_ids order.
 
     Returns:
       A RaidenFuture to await execution.
@@ -2453,8 +2509,9 @@ class RaidenController:
       raise ValueError("expected_pushes_per_pool must be positive")
     if parallelism <= 0:
       raise ValueError("parallelism must be positive")
-    if num_tokens <= 0:
-      raise ValueError("num_tokens must be positive")
+    if not dst_expected_extent_bytes:
+      raise ValueError(
+          "Receiver plans require dst_expected_extent_bytes")
     dst_ids = [int(block_id) for block_id in dst_device_block_ids]
     if not dst_ids or any(block_id < 0 for block_id in dst_ids):
       raise ValueError(
@@ -2492,11 +2549,6 @@ class RaidenController:
       raise ValueError(
           "Receiver requires explicit positive destination page geometry"
       )
-    expected_pages = math.ceil(num_tokens / page_tokens)
-    if len(dst_ids) != expected_pages:
-      raise ValueError(
-          "Destination block-id count does not match registered page geometry"
-      )
     destination_page_bytes = set()
     for pool_idx in selected_indices:
       pool = dst_meta.pools[pool_idx]
@@ -2506,9 +2558,9 @@ class RaidenController:
             "Receiver pool is not full-live; TP>1 destinations are "
             f"unsupported. See {_TP_GATHER_DESIGN}"
         )
-      if live_bytes <= 0 or live_bytes % page_tokens:
+      if live_bytes <= 0:
         raise ValueError(
-            f"Receiver pool {pool_idx} has invalid token byte geometry"
+            f"Receiver pool {pool_idx} has invalid byte geometry"
         )
       destination_page_bytes.add(live_bytes)
       if any(block_id >= int(pool.num_blocks) for block_id in dst_ids):
@@ -2520,10 +2572,28 @@ class RaidenController:
           "All selected receiver pools must have one byte geometry"
       )
     page_bytes = next(iter(destination_page_bytes))
-    token_bytes = page_bytes // page_tokens
+
+    # The declared extents are validated against the local manifest
+    # before any entry is examined: prefix-shaped coverage (every block
+    # full except an optional partial tail) is the only accepted form.
+    extents = [int(extent) for extent in dst_expected_extent_bytes]
+    if len(extents) != len(dst_ids):
+      raise ValueError(
+          "Byte-span receiver plan extents do not match the destination "
+          f"block count: got {len(extents)}, expected {len(dst_ids)}")
+    for ordinal, extent in enumerate(extents):
+      if not 0 < extent <= page_bytes:
+        raise ValueError(
+            f"Byte-span extent {extent} for destination block ordinal "
+            f"{ordinal} is outside (0, {page_bytes}]")
+      if ordinal != len(extents) - 1 and extent != page_bytes:
+        raise ValueError(
+            "Byte-span extents must cover every destination block fully "
+            "except the final one")
 
     dst_peers = set(dst_meta.shards)
     entry_count = 0
+    expanded_repeats = 0
     calculated_pushes = 0
     coverage_by_dst_id = {block_id: [] for block_id in dst_ids}
     dst_page_ordinals = {
@@ -2548,6 +2618,9 @@ class RaidenController:
         size_bytes = int(entry[4])
         src_block_id = int(entry[5])
         dst_block_id = int(entry[6])
+        src_stride_bytes = int(entry[7])
+        dst_stride_bytes = int(entry[8])
+        count = int(entry[9])
         if dst_block_id not in coverage_by_dst_id:
           raise ValueError(
               "Receiver entry targets an unregistered destination block"
@@ -2558,32 +2631,29 @@ class RaidenController:
             or src_offset_bytes < 0
             or size_bytes <= 0
             or src_block_id < 0
-            or entry[7] != 0
-            or entry[8] != 0
-            or entry[9] != 1
         ):
           raise ValueError(
-              "Receiver entries must be positive contiguous count=1 "
-              "writes with non-negative offsets and block IDs"
+              "Receiver entries must be positive writes with non-negative "
+              "offsets and block IDs"
           )
-        if (
-            dst_offset_bytes % token_bytes
-            or src_offset_bytes % token_bytes
-            or size_bytes % token_bytes
-        ):
-          raise ValueError("Receiver entries must be token-byte aligned")
+        if count <= 0 or src_stride_bytes < 0 or dst_stride_bytes < 0:
+          raise ValueError(
+              "Byte-span receiver entries must have positive count and "
+              "non-negative strides")
+        expanded_repeats += count
+        if expanded_repeats > 1 << 20:
+          raise ValueError(
+              "Byte-span receiver plan exceeds the repeat expansion bound")
         dst_page_ordinal = dst_page_ordinals[dst_block_id]
-        page_token_start = dst_page_ordinal * page_tokens
-        expected_tokens = min(page_tokens, num_tokens - page_token_start)
-        expected_bytes = expected_tokens * token_bytes
-        dst_end_bytes = dst_offset_bytes + size_bytes
-        if dst_end_bytes > expected_bytes:
-          raise ValueError(
-              "Receiver entry exceeds its destination page or live tail"
-          )
-        coverage_by_dst_id[dst_block_id].append(
-            (dst_offset_bytes, dst_end_bytes)
-        )
+        expected_bytes = extents[dst_page_ordinal]
+        for repeat in range(count):
+          repeat_start = dst_offset_bytes + repeat * dst_stride_bytes
+          repeat_end = repeat_start + size_bytes
+          if repeat_end > expected_bytes:
+            raise ValueError(
+                "Receiver entry exceeds its destination page or live tail"
+            )
+          coverage_by_dst_id[dst_block_id].append((repeat_start, repeat_end))
         transfer_pairs.add((entry[0], src_block_id, dst_block_id))
       calculated_pushes += min(parallelism, len(transfer_pairs))
     if entry_count == 0:
@@ -2593,10 +2663,7 @@ class RaidenController:
           "expected_pushes_per_pool does not match the received schedules"
       )
     for dst_page_ordinal, dst_block_id in enumerate(dst_ids):
-      expected_tokens = min(
-          page_tokens, num_tokens - dst_page_ordinal * page_tokens
-      )
-      expected_bytes = expected_tokens * token_bytes
+      expected_bytes = extents[dst_page_ordinal]
       covered_until = 0
       for start_bytes, end_bytes in sorted(coverage_by_dst_id[dst_block_id]):
         if start_bytes != covered_until:
@@ -2636,6 +2703,7 @@ class RaidenController:
         src_schedule_keys=dict(src_schedule_keys),
         parallelism=parallelism,
         num_tokens=num_tokens,
+        dst_expected_extent_bytes=extents,
     )
     with self._lock:
       session_id = len(self._active_transfers)
@@ -3624,14 +3692,26 @@ class RaidenControllerServer:
               block_req.uuid,
               _raiden_id_from_proto(block_req.unit),
               list(block_req.block_ids),
-              spans=[
-                  SourceSpan(
-                      dst_token_start=span.dst_token_start,
-                      token_count=span.token_count,
-                      src_block_ordinal=span.src_block_ordinal,
-                      src_block_token_offset=span.src_block_token_offset,
+              pool_spans=[
+                  PoolSpanRegistration(
+                      tag=entry.tag,
+                      block_ids=tuple(entry.block_ids),
+                      spans=tuple(
+                          PoolByteSpan(
+                              src_block_ordinal=span.src_block_ordinal,
+                              src_offset_bytes=span.src_offset_bytes,
+                              dst_block_index=span.dst_block_index,
+                              dst_offset_bytes=span.dst_offset_bytes,
+                              size_bytes=span.size_bytes,
+                              src_stride_bytes=span.src_stride_bytes,
+                              dst_stride_bytes=span.dst_stride_bytes,
+                              count=span.count,
+                          )
+                          for span in entry.spans
+                      ),
+                      declared_bytes=entry.declared_bytes,
                   )
-                  for span in block_req.spans
+                  for entry in block_req.pool_spans
               ],
           )
           resp.success = True
@@ -3835,6 +3915,9 @@ class RaidenControllerServer:
                   },
                   parallelism=start_req.parallelism,
                   num_tokens=start_req.num_tokens,
+                  dst_expected_extent_bytes=list(
+                      start_req.dst_expected_extent_bytes
+                  ),
               )
             else:
               shard_push_schedules = {}
@@ -4072,7 +4155,7 @@ class RaidenControllerClientFacade:
       uuid: int,
       unit: RaidenId,
       block_ids: typing.Sequence[int],
-      spans: typing.Sequence[Any] = (),
+      pool_spans: typing.Sequence[Any] = (),
   ) -> None:
     """Registers producer-owned block IDs and declared spans (D5)."""
     block_req = self._proto_module.RegisterRequestBlocksRequest(
@@ -4081,13 +4164,23 @@ class RaidenControllerClientFacade:
         unit=self._raiden_id_to_proto(unit),
         block_ids=list(block_ids),
     )
-    for span in spans:
-      block_req.spans.add(
-          dst_token_start=int(span.dst_token_start),
-          token_count=int(span.token_count),
-          src_block_ordinal=int(span.src_block_ordinal),
-          src_block_token_offset=int(span.src_block_token_offset),
+    for entry in pool_spans:
+      entry_proto = block_req.pool_spans.add(
+          tag=str(entry.tag),
+          block_ids=[int(block_id) for block_id in entry.block_ids],
+          declared_bytes=int(entry.declared_bytes),
       )
+      for span in entry.spans:
+        entry_proto.spans.add(
+            src_block_ordinal=int(span.src_block_ordinal),
+            src_offset_bytes=int(span.src_offset_bytes),
+            dst_block_index=int(span.dst_block_index),
+            dst_offset_bytes=int(span.dst_offset_bytes),
+            size_bytes=int(span.size_bytes),
+            src_stride_bytes=int(span.src_stride_bytes),
+            dst_stride_bytes=int(span.dst_stride_bytes),
+            count=int(span.count),
+        )
     req = self._proto_module.ControllerRequest(
         command=self._proto_module.ControllerRequest.COMMAND_REGISTER_REQUEST_BLOCKS,
         register_request_blocks_request=block_req,
@@ -4222,6 +4315,7 @@ class RaidenControllerClientFacade:
       src_schedule_keys: Optional[dict[RaidenId, int]] = None,
       parallelism: int = 0,
       num_tokens: int = 0,
+      dst_expected_extent_bytes: Optional[typing.Sequence[int]] = None,
   ) -> bool:
     """Inter-controller RPC to register computed push schedules and prepare receivers."""
     start_req = self._raiden_proto_module.StartTransferRequest(
@@ -4243,6 +4337,8 @@ class RaidenControllerClientFacade:
       start_req.pool_dtype_tags.extend(pool_dtype_tags)
     if dst_device_block_ids is not None:
       start_req.dst_device_block_ids.extend(dst_device_block_ids)
+    if dst_expected_extent_bytes:
+      start_req.dst_expected_extent_bytes.extend(dst_expected_extent_bytes)
 
     if src_schedule_keys is not None:
       if set(src_schedule_keys) != set(src_units):

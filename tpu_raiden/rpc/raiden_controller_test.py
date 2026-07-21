@@ -102,33 +102,6 @@ def _pool_manifest(
   return pools
 
 
-def _interleave_spans(
-    rank, *, num_tokens, interleave, parallelism=8, page_tokens=4096
-):
-  """Mirrors the kernel's rank-major interleave: the test is the producer."""
-  cycle_tokens = interleave * parallelism
-  first_rank_token = rank * interleave
-  owned_cycles = (
-      0
-      if num_tokens <= first_rank_token
-      else 1 + (num_tokens - 1 - first_rank_token) // cycle_tokens
-  )
-  spans = []
-  for cycle in range(owned_cycles):
-    start = cycle * cycle_tokens + rank * interleave
-    count = min(interleave, num_tokens - start)
-    local_token = cycle * interleave
-    spans.append(
-        raiden_controller.SourceSpan(
-            dst_token_start=start,
-            token_count=count,
-            src_block_ordinal=local_token // page_tokens,
-            src_block_token_offset=local_token % page_tokens,
-        )
-    )
-  return spans
-
-
 def _lookup_ids(controller, req_id, uuid, units, claim_owner=None):
   """Claims via _lookup_request_blocks and projects the block-id lists."""
   return {
@@ -139,22 +112,32 @@ def _lookup_ids(controller, req_id, uuid, units, claim_owner=None):
   }
 
 
-def _dense_spans(num_blocks, *, page_tokens=4096, tail_tokens=None, start=0):
-  """Dense rank-local spans: every block full except an optional tail."""
+def _dense_byte_registration(num_blocks, *, page_tokens=4096,
+                             tail_tokens=None, token_bytes=1024):
+  """Dense rank-local byte declaration: every block full except an optional
+  tail, one whole-block span per destination index."""
   spans = []
+  declared = 0
   for ordinal in range(num_blocks):
-    count = page_tokens
+    tokens = page_tokens
     if ordinal == num_blocks - 1 and tail_tokens is not None:
-      count = tail_tokens
+      tokens = tail_tokens
     spans.append(
-        raiden_controller.SourceSpan(
-            dst_token_start=start + ordinal * page_tokens,
-            token_count=count,
+        raiden_controller.PoolByteSpan(
             src_block_ordinal=ordinal,
-            src_block_token_offset=0,
+            src_offset_bytes=0,
+            dst_block_index=ordinal,
+            dst_offset_bytes=0,
+            size_bytes=tokens * token_bytes,
         )
     )
-  return spans
+    declared += tokens * token_bytes
+  return raiden_controller.PoolSpanRegistration(
+      tag="fa",
+      block_ids=tuple(range(num_blocks)),
+      spans=tuple(spans),
+      declared_bytes=declared,
+  )
 
 
 class RaidenControllerTest(absltest.TestCase):
@@ -195,34 +178,30 @@ class RaidenControllerTest(absltest.TestCase):
           transfer_rank=rank,
       )
       if register_blocks:
-        # The test plays the vLLM producer: it derives this rank's owned
-        # interleave slices and declares them as spans over a dense
-        # rank-major block packing. The controller never re-derives this.
-        first_rank_token = rank * src_page_slice_tokens
-        cycle_tokens = src_page_slice_tokens * 8
-        owned_cycles = (
-            0
-            if num_tokens <= first_rank_token
-            else 1 + (num_tokens - 1 - first_rank_token) // cycle_tokens
+        # The test plays the vLLM producer's lowering: this rank's owned
+        # interleave slices packed dense rank-major over its blocks, split
+        # at destination page boundaries, scaled to bytes. The controller
+        # never re-derives this.
+        spans, owned_tokens = _byte_spans_for_rank(
+            rank,
+            num_tokens=num_tokens,
+            interleave=src_page_slice_tokens,
+            dst_page_tokens=dst_page_tokens,
         )
-        chunks_per_block = 4096 // src_page_slice_tokens
-        owned_blocks = math.ceil(owned_cycles / chunks_per_block)
+        owned_blocks = math.ceil(owned_tokens / 4096)
         block_ids = [1000 + rank * 100 + i for i in range(owned_blocks)]
-        spans = []
-        for cycle in range(owned_cycles):
-          start = cycle * cycle_tokens + rank * src_page_slice_tokens
-          count = min(src_page_slice_tokens, num_tokens - start)
-          local_token = cycle * src_page_slice_tokens
-          spans.append(
-              raiden_controller.SourceSpan(
-                  dst_token_start=start,
-                  token_count=count,
-                  src_block_ordinal=local_token // 4096,
-                  src_block_token_offset=local_token % 4096,
+        entries = []
+        if spans:
+          entries = [
+              raiden_controller.PoolSpanRegistration(
+                  tag="fa",
+                  block_ids=tuple(block_ids),
+                  spans=tuple(spans),
+                  declared_bytes=owned_tokens * 1024,
               )
-          )
+          ]
         controller.register_request_blocks(
-            "request", 123, unit, block_ids, spans=spans
+            "request", 123, unit, block_ids, pool_spans=entries
         )
 
     dst_unit = raiden_controller.RaidenId(
@@ -321,17 +300,19 @@ class RaidenControllerTest(absltest.TestCase):
       self.assertEqual(metadata[0].transfer_rank, 0)
 
       facade.register_request_blocks(
-          "roundtrip", 44, unit, [7, 9], spans=_dense_spans(2)
+          "roundtrip", 44, unit, [7, 9],
+          pool_spans=[_dense_byte_registration(2)]
       )
       looked_up = controller._lookup_request_blocks("roundtrip", 44, [unit])
       self.assertEqual(looked_up[unit].block_ids, (7, 9))
-      self.assertLen(looked_up[unit].spans, 2)
+      self.assertLen(looked_up[unit].pool_spans[0].spans, 2)
       facade.complete_request_blocks("roundtrip", 44, unit=unit)
       with self.assertRaisesRegex(ValueError, "Missing producer block"):
         _lookup_ids(controller, "roundtrip", 44, [unit])
 
       facade.register_request_blocks(
-          "cancel-roundtrip", 45, unit, [11], spans=_dense_spans(1)
+          "cancel-roundtrip", 45, unit, [11],
+          pool_spans=[_dense_byte_registration(1)]
       )
       self.assertTrue(
           facade.cancel_request_blocks_if_unclaimed("cancel-roundtrip", 45)
@@ -341,14 +322,16 @@ class RaidenControllerTest(absltest.TestCase):
       )
       with self.assertRaisesRegex(RuntimeError, "cancelled"):
         facade.register_request_blocks(
-            "cancel-roundtrip", 45, unit, [11], spans=_dense_spans(1)
+            "cancel-roundtrip", 45, unit, [11],
+            pool_spans=[_dense_byte_registration(1)]
         )
 
       # Force release clears the cancellation tombstone. A subsequent lookup
       # claims the new snapshot, after which cancellation must lose.
       facade.release_request_blocks("cancel-roundtrip", 45)
       facade.register_request_blocks(
-          "cancel-roundtrip", 45, unit, [12], spans=_dense_spans(1)
+          "cancel-roundtrip", 45, unit, [12],
+          pool_spans=[_dense_byte_registration(1)]
       )
       self.assertEqual(
           controller._lookup_request_blocks("cancel-roundtrip", 45, [unit])[
@@ -639,6 +622,7 @@ class RaidenControllerTest(absltest.TestCase):
           src_schedule_keys=plan.src_schedule_keys,
           parallelism=plan.parallelism,
           num_tokens=plan.num_tokens,
+          dst_expected_extent_bytes=plan.dst_expected_extent_bytes,
       )
 
     token_bytes = 1024
@@ -682,6 +666,7 @@ class RaidenControllerTest(absltest.TestCase):
           src_schedule_keys=plan.src_schedule_keys,
           parallelism=plan.parallelism,
           num_tokens=plan.num_tokens,
+          dst_expected_extent_bytes=plan.dst_expected_extent_bytes,
       )
 
     self.assertEmpty(client.calls)
@@ -794,26 +779,30 @@ class RaidenControllerTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "duplicates"):
       controller.register_request_blocks("bad", 123, src_units[0], [1, 1])
     controller.register_request_blocks(
-        "bad", 123, src_units[0], [1], spans=_dense_spans(1)
+        "bad", 123, src_units[0], [1],
+        pool_spans=[_dense_byte_registration(1)]
     )
     with self.assertRaisesRegex(ValueError, "Conflicting"):
       controller.register_request_blocks(
-          "bad", 123, src_units[0], [2], spans=_dense_spans(1)
+          "bad", 123, src_units[0], [2],
+          pool_spans=[_dense_byte_registration(1)]
       )
     with self.assertRaisesRegex(ValueError, "Conflicting"):
-      # Same blocks with different declared spans is a conflict too.
+      # Same blocks with a different declared payload is a conflict too.
       controller.register_request_blocks(
           "bad",
           123,
           src_units[0],
           [1],
-          spans=_dense_spans(1, tail_tokens=17),
+          pool_spans=[_dense_byte_registration(1, tail_tokens=17)],
       )
 
+    # A short destination list is rejected against the registered
+    # declarations (an out-of-range destination index); that row lives in
+    # the byte battery's bv5 case, which registers first.
     cases = (
         ([-1] + dst_ids[1:], "non-negative"),
         ([dst_ids[0], dst_ids[0]] + dst_ids[2:], "duplicates"),
-        (dst_ids[:-1], "page count"),
     )
     for bad_ids, message in cases:
       future = controller.start_transfer(
@@ -847,70 +836,6 @@ class RaidenControllerTest(absltest.TestCase):
       asyncio.run(future.wait())
     self.assertIsNone(controller.get_plan("request"))
     self.assertEmpty(client.calls)
-
-  def test_span_declarations_fail_closed_at_registration(self):
-    controller, _, src_units, _, _ = self._stage3_fixture(register_blocks=False)
-    unit = src_units[0]
-    span = raiden_controller.SourceSpan
-
-    with self.assertRaisesRegex(ValueError, "ordinal.*outside"):
-      controller.register_request_blocks(
-          "bad-spans",
-          5,
-          unit,
-          [1],
-          spans=[span(0, 4096, 1, 0)],
-      )
-    with self.assertRaisesRegex(ValueError, "crosses its source block"):
-      controller.register_request_blocks(
-          "bad-spans",
-          5,
-          unit,
-          [1],
-          spans=[span(0, 256, 0, 4000)],
-      )
-    with self.assertRaisesRegex(ValueError, "token_count must be positive"):
-      controller.register_request_blocks(
-          "bad-spans",
-          5,
-          unit,
-          [1],
-          spans=[span(0, 0, 0, 0)],
-      )
-    with self.assertRaisesRegex(ValueError, "must be non-negative"):
-      controller.register_request_blocks(
-          "bad-spans",
-          5,
-          unit,
-          [1],
-          spans=[span(-1, 256, 0, 0)],
-      )
-    with self.assertRaisesRegex(ValueError, "every registered block"):
-      # Two blocks registered, spans only reference block 0.
-      controller.register_request_blocks(
-          "bad-spans",
-          5,
-          unit,
-          [1, 2],
-          spans=[span(0, 4096, 0, 0)],
-      )
-    with self.assertRaisesRegex(ValueError, "dense packing requires"):
-      # Non-final block only partially covered.
-      controller.register_request_blocks(
-          "bad-spans",
-          5,
-          unit,
-          [1, 2],
-          spans=[span(0, 256, 0, 0), span(256, 256, 1, 0)],
-      )
-    with self.assertRaisesRegex(ValueError, "without any registered block"):
-      controller.register_request_blocks(
-          "bad-spans",
-          5,
-          unit,
-          [],
-          spans=[span(0, 256, 0, 0)],
-      )
 
   def test_pool_tag_selection_is_request_data(self):
     # An unmatched tag is refused before any claim.
@@ -965,7 +890,7 @@ class RaidenControllerTest(absltest.TestCase):
         num_tokens=1024
     )
     over_length_pages = list(range(2000, 2000 + 2))
-    with self.assertRaisesRegex(ValueError, "exceeds the declared prompt"):
+    with self.assertRaisesRegex(ValueError, "has no declared coverage"):
       controller._build_pool_reshard_plan(
           src_units=src_units,
           dst_units=[dst_unit],
@@ -990,13 +915,23 @@ class RaidenControllerTest(absltest.TestCase):
     # global token partition. The cross-rank tiling check must reject the
     # plan and roll back the claim so cancellation can win.
     for rank, unit in enumerate(src_units):
-      spans = _interleave_spans(rank, num_tokens=65536, interleave=256)
+      spans, owned_tokens = _byte_spans_for_rank(
+          rank, num_tokens=65536, interleave=256)
       block_ids = [1000 + rank * 100, 1001 + rank * 100]
       if rank == 0:
         block_ids.pop()
         spans = [span for span in spans if span.src_block_ordinal == 0]
+        owned_tokens = sum(span.size_bytes for span in spans) // 1024
       controller.register_request_blocks(
-          "request", 123, unit, block_ids, spans=spans
+          "request", 123, unit, block_ids,
+          pool_spans=[
+              raiden_controller.PoolSpanRegistration(
+                  tag="fa",
+                  block_ids=tuple(block_ids),
+                  spans=tuple(spans),
+                  declared_bytes=owned_tokens * 1024,
+              )
+          ],
       )
 
     with self.assertRaisesRegex(ValueError, "coverage gap"):
@@ -1754,6 +1689,51 @@ class RaidenControllerTest(absltest.TestCase):
         RuntimeError, "Simulated start_transfer failure"
     ):
       asyncio.run(future.wait())
+
+
+def _byte_spans_for_rank(
+    rank,
+    *,
+    num_tokens,
+    interleave=256,
+    parallelism=8,
+    src_page_tokens=4096,
+    dst_page_tokens=1024,
+    token_bytes=1024,
+):
+  """The test plays the vLLM producer's byte-span lowering: rank-major
+  interleave ownership packed dense over local blocks, split at destination
+  page boundaries, scaled to bytes."""
+  cycle = interleave * parallelism
+  owned = []
+  start = rank * interleave
+  while start < num_tokens:
+    owned.append((start, min(start + interleave, num_tokens)))
+    start += cycle
+  spans = []
+  local_cursor = 0
+  for start, end in owned:
+    cursor = start
+    while cursor < end:
+      block_ordinal, block_offset = divmod(local_cursor, src_page_tokens)
+      run_end = min(end, cursor + src_page_tokens - block_offset)
+      sub = cursor
+      while sub < run_end:
+        dst_page = sub // dst_page_tokens
+        page_end = min((dst_page + 1) * dst_page_tokens, run_end)
+        spans.append(
+            raiden_controller.PoolByteSpan(
+                src_block_ordinal=block_ordinal,
+                src_offset_bytes=(block_offset + (sub - cursor)) * token_bytes,
+                dst_block_index=dst_page,
+                dst_offset_bytes=(sub - dst_page * dst_page_tokens)
+                * token_bytes,
+                size_bytes=(page_end - sub) * token_bytes,
+            ))
+        sub = page_end
+      local_cursor += run_end - cursor
+      cursor = run_end
+  return spans, local_cursor
 
 
 if __name__ == "__main__":
