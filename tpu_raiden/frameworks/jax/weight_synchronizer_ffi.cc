@@ -190,6 +190,7 @@ xla::ffi::Error TriggerWeightSynchronizerInitImpl(
 // FFI execution handler for WeightSynchronizer Init and D2H (Host CPU Executed)
 xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
     xla::ffi::AnyBuffer x, xla::ffi::AnyBuffer shard_idx_buf,
+    xla::ffi::AnyBuffer logical_idx_buf,
     int64_t slice_byte_size, int32_t local_port, int32_t parallelism,
     int32_t num_layers, int32_t listener_port,
     xla::ffi::Result<xla::ffi::AnyBuffer> out) {
@@ -200,6 +201,12 @@ xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
   }
   int32_t shard_idx =
       *reinterpret_cast<const int32_t*>(shard_idx_buf.untyped_data());
+  if (logical_idx_buf.untyped_data() == nullptr) {
+    return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
+                           "logical_idx_buf null.");
+  }
+  int32_t logical_idx =
+      *reinterpret_cast<const int32_t*>(logical_idx_buf.untyped_data());
   if (shard_idx < 0 || shard_idx >= 32) {
     return xla::ffi::Error(
         xla::ffi::ErrorCode::kInvalidArgument,
@@ -282,8 +289,16 @@ xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
 
   // --- D2H Part ---
   size_t size = g_weight_synchronizers[shard_idx]->slice_byte_size();
-  size_t local_slot = static_cast<size_t>(shard_idx) %
-                      g_weight_synchronizers[shard_idx]->num_shards();
+  size_t num_shards_v = g_weight_synchronizers[shard_idx]->num_shards();
+  if (logical_idx < 0 || static_cast<size_t>(logical_idx) >= num_shards_v) {
+    return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
+        absl::StrCat("logical_idx out of range: logical_idx=", logical_idx,
+                     ", num_shards=", num_shards_v,
+                     ", device_ordinal=", shard_idx));
+  }
+  size_t local_slot = static_cast<size_t>(logical_idx);
+  VLOG(1) << "[D2H] device_ordinal=" << shard_idx
+          << " logical=" << logical_idx << " local_slot=" << local_slot;
   uint8_t* dst_host_ptr = const_cast<uint8_t*>(
       g_weight_synchronizers[shard_idx]->GetHostBufferPtr(0, local_slot));
   const uint8_t* src_device_ptr =
@@ -318,11 +333,11 @@ xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
 
 // FFI custom call handler executing asynchronous Host-to-Device (H2D) memory
 // transfers from local staging buffers (`GetHostBufferPtr`) directly onto
-// device memory buffers. Uses multi-host modulo indexing (`shard_idx %
-// num_shards()`) to ensure global shard indices map to the correct local
-// staging slot.
+// device memory buffers. Uses explicit logical index from JAX to ensure global
+// shard indices map to the correct local staging slot.
 xla::ffi::Error TriggerH2DImpl(xla::ffi::AnyBuffer anchor,
                                xla::ffi::AnyBuffer shard_idx_buf,
+                               xla::ffi::AnyBuffer logical_idx_buf,
                                xla::ffi::Result<xla::ffi::AnyBuffer> out) {
   (void)anchor;
   if (shard_idx_buf.untyped_data() == nullptr) {
@@ -331,6 +346,12 @@ xla::ffi::Error TriggerH2DImpl(xla::ffi::AnyBuffer anchor,
   }
   int32_t shard_idx =
       *reinterpret_cast<const int32_t*>(shard_idx_buf.untyped_data());
+  if (logical_idx_buf.untyped_data() == nullptr) {
+    return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
+                           "logical_idx_buf null.");
+  }
+  int32_t logical_idx =
+      *reinterpret_cast<const int32_t*>(logical_idx_buf.untyped_data());
   if (shard_idx < 0 || shard_idx >= 32 ||
       g_weight_synchronizers[shard_idx] == nullptr) {
     return xla::ffi::Error(xla::ffi::ErrorCode::kInternal,
@@ -338,8 +359,16 @@ xla::ffi::Error TriggerH2DImpl(xla::ffi::AnyBuffer anchor,
   }
 
   size_t size = g_weight_synchronizers[shard_idx]->slice_byte_size();
-  size_t local_slot = static_cast<size_t>(shard_idx) %
-                      g_weight_synchronizers[shard_idx]->num_shards();
+  size_t num_shards_v = g_weight_synchronizers[shard_idx]->num_shards();
+  if (logical_idx < 0 || static_cast<size_t>(logical_idx) >= num_shards_v) {
+    return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
+        absl::StrCat("logical_idx out of range: logical_idx=", logical_idx,
+                     ", num_shards=", num_shards_v,
+                     ", device_ordinal=", shard_idx));
+  }
+  size_t local_slot = static_cast<size_t>(logical_idx);
+  VLOG(1) << "[H2D] device_ordinal=" << shard_idx
+          << " logical=" << logical_idx << " local_slot=" << local_slot;
   const uint8_t* src_host_ptr =
       g_weight_synchronizers[shard_idx]->GetHostBufferPtr(0, local_slot);
   uint8_t* d_base = reinterpret_cast<uint8_t*>(out->untyped_data());
@@ -382,6 +411,7 @@ XLA_FFI_DEFINE_HANDLER(
     xla::ffi::Ffi::Bind()
         .Arg<xla::ffi::AnyBuffer>()  // anchor JAX input array (Arg 0)
         .Arg<xla::ffi::AnyBuffer>()  // shard_idx JAX input array (Arg 1)
+        .Arg<xla::ffi::AnyBuffer>()  // logical_shard_idx
         .Attr<int64_t>("slice_byte_size")
         .Attr<int32_t>("local_port")
         .Attr<int32_t>("parallelism")
@@ -394,6 +424,7 @@ XLA_FFI_DEFINE_HANDLER(
     xla::ffi::Ffi::Bind()
         .Arg<xla::ffi::AnyBuffer>()  // anchor
         .Arg<xla::ffi::AnyBuffer>()  // shard_idx_buf
+        .Arg<xla::ffi::AnyBuffer>()  // logical_shard_idx
         .Ret<xla::ffi::AnyBuffer>()  // result (aliased to anchor)
 );
 

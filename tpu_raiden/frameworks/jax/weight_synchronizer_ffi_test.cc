@@ -92,7 +92,7 @@ class WeightSynchronizerFfiParamTest : public WeightSynchronizerFfiTest,
           num_layers, listener_port, out);
     } else {
       return TriggerWeightSynchronizerInitAndD2hImpl(
-          x, shard_idx_buf, slice_byte_size, local_port, parallelism,
+          x, shard_idx_buf, shard_idx_buf, slice_byte_size, local_port, parallelism,
           num_layers, listener_port, out);
     }
   }
