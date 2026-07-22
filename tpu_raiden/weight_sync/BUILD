@@ -17,6 +17,23 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
+    name = "tiling_utils",
+    srcs = ["tiling_utils.cc"],
+    hdrs = ["tiling_utils.h"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/types:span",
+        "@xla//xla:shape_util",
+        "@xla//xla:util",
+    ],
+)
+
+cc_library(
     name = "weight_synchronizer_base",
     srcs = [
         "weight_synchronizer_base.cc",
@@ -33,6 +50,7 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":tiling_utils",
         "//tpu_raiden/core:raiden_manager_base",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core:status_macros",
@@ -80,5 +98,21 @@ cc_test(
         "//tpu_raiden/rpc:raiden_service_cc_proto",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "tiling_utils_test",
+    srcs = ["tiling_utils_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":tiling_utils",
+        "@com_google_absl//absl/status",
+        "@com_google_googletest//:gtest_main",
+        "@xla//xla:shape_util",
     ],
 )
