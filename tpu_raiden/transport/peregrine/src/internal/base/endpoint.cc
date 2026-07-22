@@ -29,7 +29,7 @@ namespace peregrine::internal {
 
 namespace {
 inline bool LooksLikeIPv6(std::string_view addr) {
-  return addr.starts_with('[') && addr.ends_with(']');
+  return addr.size() >= 2 && addr.front() == '[' && addr.back() == ']';
 }
 }  // namespace
 

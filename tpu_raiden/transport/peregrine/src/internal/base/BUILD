@@ -19,12 +19,6 @@ package(default_visibility = ["//visibility:public"])
 cc_library(
     name = "strong_int",
     hdrs = ["strong_int.h"],
-    deps = [
-        "@com_google_absl//absl/base:core_headers",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:str_format",
-        "@com_google_absl//absl/strings:string_view",
-    ],
 )
 
 cc_library(
