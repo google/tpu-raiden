@@ -247,7 +247,7 @@ class BlockTransport : public lib::RawBufferTransport {
 
   // Drops receive-progress counters belonging to a finished, failed, or
   // timed-out plan so the UUID can be safely reused.
-  void ForgetPushProgress(uint64_t uuid);
+  void ForgetPushProgress(uint64_t uuid) override;
 
  private:
   absl::Status HandleCustomRequest(int client_fd,

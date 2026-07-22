@@ -20,6 +20,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <thread>  // NOLINT
 #include <vector>
@@ -34,6 +35,11 @@
 #include "absl/synchronization/mutex.h"
 
 namespace tpu_raiden::transport::lib {
+
+struct RawProgress {
+  uint32_t completed_chunks = 0;
+  std::optional<uint32_t> expected_chunks;
+};
 
 // Foundational delegate interface for RawBufferTransport to query base host
 // memory.
@@ -84,7 +90,12 @@ class RawBufferTransport {
   // offset of a remote peer's buffer.
   absl::Status PushBuffer(absl::string_view peer, size_t buffer_id,
                           size_t dst_shard_idx, size_t dst_offset_bytes,
-                          const uint8_t* data_ptr, size_t size_bytes);
+                          const uint8_t* data_ptr, size_t size_bytes,
+                          uint64_t uuid = 0);
+
+  absl::Status RegisterExpectedChunks(uint64_t uuid, uint32_t expected_chunks);
+
+  virtual void ForgetPushProgress(uint64_t uuid);
 
   int local_port() const { return local_port_; }
   const std::string& bound_ip() const { return bound_ip_; }
@@ -126,6 +137,10 @@ class RawBufferTransport {
   absl::Mutex pool_mu_;
   absl::flat_hash_map<std::string, std::vector<int>> conn_pool_
       ABSL_GUARDED_BY(pool_mu_);
+
+  absl::Mutex raw_progress_mu_;
+  absl::flat_hash_map<uint64_t, RawProgress> raw_progress_
+      ABSL_GUARDED_BY(raw_progress_mu_);
 
   std::thread listener_thread_;
   std::vector<std::thread> worker_threads_;

@@ -58,8 +58,7 @@ WeightSynchronizerBase::WeightSynchronizerBase(
     std::optional<int> local_port,
     std::optional<std::vector<const uint8_t*>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism,
-    std::optional<int> listener_port,
-    std::optional<std::string> bind_ip)
+    std::optional<int> listener_port, std::optional<std::string> bind_ip)
     : tpu_raiden::RaidenManagerBase(
           layer_buffers.size(),
           layer_buffers.empty() ? 0 : layer_buffers[0].size(),
@@ -267,8 +266,6 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::H2d() {
       xla::JoinFutures(absl::MakeSpan(shard_futures_to_join)));
 }
 
-
-
 absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2h() {
   if (buffer_holds_.empty()) {
     return raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{});
@@ -379,7 +376,8 @@ absl::Status WeightSynchronizerBase::PushWeightsResharded(
 
         const uint8_t* data_ptr = base_host_ptr + curr_src_offset;
         TF_RETURN_IF_ERROR(PushWeightsChunk(dst_peer, dst_shard_idx,
-                                            curr_dst_offset, data_ptr, size));
+                                            curr_dst_offset, data_ptr, size,
+                                            request.uuid()));
       }
     }
   }

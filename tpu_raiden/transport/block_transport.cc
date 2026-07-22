@@ -908,6 +908,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
 }
 
 void BlockTransport::ForgetPushProgress(uint64_t uuid) {
+  RawBufferTransport::ForgetPushProgress(uuid);
   absl::MutexLock lock(progress_mu_);
   for (auto it = layer_progress_.begin(); it != layer_progress_.end();) {
     if (it->first.first == uuid) {

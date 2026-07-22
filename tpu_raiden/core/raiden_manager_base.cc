@@ -284,18 +284,34 @@ absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hReadDirect(
   return server_->SyncPull(peers, src_block_ids, {}, {}, parallelism_);
 }
 
-absl::Status RaidenManagerBase::PushWeightsChunk(absl::string_view peer,
-                                                 size_t dst_shard_idx,
-                                                 size_t dst_offset_bytes,
-                                                 const uint8_t* data_ptr,
-                                                 size_t size_bytes) {
+absl::Status RaidenManagerBase::PushWeightsChunk(
+    absl::string_view peer, size_t dst_shard_idx, size_t dst_offset_bytes,
+    const uint8_t* data_ptr, size_t size_bytes, uint64_t uuid) {
   InitTransportServer();
   absl::MutexLock lock(server_init_mu_);
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
   return server_->PushBuffer(peer, /*buffer_id=*/0, dst_shard_idx,
-                             dst_offset_bytes, data_ptr, size_bytes);
+                             dst_offset_bytes, data_ptr, size_bytes, uuid);
+}
+
+absl::Status RaidenManagerBase::RegisterExpectedChunks(
+    uint64_t uuid, uint32_t expected_chunks) {
+  InitTransportServer();
+  absl::MutexLock lock(server_init_mu_);
+  if (!server_) {
+    return absl::FailedPreconditionError("Transport server is not running");
+  }
+  return server_->RegisterExpectedChunks(uuid, expected_chunks);
+}
+
+void RaidenManagerBase::ForgetPushProgress(uint64_t uuid) {
+  InitTransportServer();
+  absl::MutexLock lock(server_init_mu_);
+  if (server_) {
+    server_->ForgetPushProgress(uuid);
+  }
 }
 
 size_t RaidenManagerBase::bytes_per_block() const { return slice_byte_size_; }

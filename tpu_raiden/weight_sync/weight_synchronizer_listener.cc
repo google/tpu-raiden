@@ -23,6 +23,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <thread>  // NOLINT
 #include <vector>
@@ -196,8 +197,33 @@ void WeightSynchronizerListener::ConnectionWorker(int client_fd) {
         }
       }
     } else {
-      LOG(INFO) << "C++ Listener received START_TRANSFER (Receiver) - no-op "
-                   "for weight sync";
+      LOG(INFO) << "C++ Listener received START_TRANSFER (Receiver) - "
+                   "registering expected block count";
+      int64_t expected_block_count =
+          req.start_transfer_request().expected_block_count();
+      if (expected_block_count <= 0 ||
+          expected_block_count > std::numeric_limits<uint32_t>::max()) {
+        resp.set_success(false);
+        resp.set_message(
+            "expected_block_count must be positive and fit in 32-bit uint");
+        LOG(ERROR) << "Invalid expected_block_count: " << expected_block_count;
+        std::string resp_str;
+        if (resp.SerializeToString(&resp_str)) {
+          uint32_t resp_net_len = htonl(resp_str.size());
+          write(client_fd, &resp_net_len, sizeof(resp_net_len));
+          write(client_fd, resp_str.data(), resp_str.size());
+        }
+        close(client_fd);
+        return;
+      }
+      uint64_t uuid = req.start_transfer_request().uuid();
+      absl::Status status = engine_->RegisterExpectedChunks(
+          uuid, static_cast<uint32_t>(expected_block_count));
+      if (!status.ok()) {
+        resp.set_success(false);
+        resp.set_message(std::string(status.message()));
+        LOG(ERROR) << "RegisterExpectedChunks failed: " << status;
+      }
     }
   } else if (req.command() ==
              tpu_raiden::rpc::ControlRequest::COMMAND_SHUTDOWN) {

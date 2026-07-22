@@ -241,6 +241,30 @@ absl::Status RawBufferTransport::ProcessPeerRequest(int client_fd) {
     uint8_t* const dest_ptr = base_host_ptr + dst_offset;
     RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, size_bytes));
 
+    bool trigger_h2d = false;
+    if (header.uuid > 0) {
+      absl::MutexLock lock(raw_progress_mu_);
+      auto& prog = raw_progress_[header.uuid];
+      prog.completed_chunks++;
+      VLOG(1) << "Received chunk for uuid=" << header.uuid
+              << " shard=" << dst_shard_idx << " offset=" << dst_offset
+              << " size=" << size_bytes << " progress=" << prog.completed_chunks
+              << "/"
+              << (prog.expected_chunks.has_value()
+                      ? std::to_string(*prog.expected_chunks)
+                      : "unknown");
+      if (prog.expected_chunks.has_value() &&
+          prog.completed_chunks == *prog.expected_chunks) {
+        raw_progress_.erase(header.uuid);
+        trigger_h2d = true;
+        VLOG(1) << "Triggering H2D for uuid=" << header.uuid;
+      }
+    }
+
+    if (trigger_h2d) {
+      RETURN_IF_ERROR(raw_delegate_->OnDataReceived());
+    }
+
     uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
     return absl::OkStatus();
@@ -374,9 +398,40 @@ absl::Status RawBufferTransport::PullBuffer(
   return absl::OkStatus();
 }
 
-absl::Status RawBufferTransport::PushBuffer(
-    absl::string_view peer, size_t buffer_id, size_t dst_shard_idx,
-    size_t dst_offset_bytes, const uint8_t* data_ptr, size_t size_bytes) {
+absl::Status RawBufferTransport::RegisterExpectedChunks(
+    uint64_t uuid, uint32_t expected_chunks) {
+  if (expected_chunks == 0) {
+    return absl::InvalidArgumentError("expected_chunks must be positive");
+  }
+
+  bool trigger_h2d = false;
+  {
+    absl::MutexLock lock(raw_progress_mu_);
+    auto& prog = raw_progress_[uuid];
+    prog.expected_chunks = expected_chunks;
+    VLOG(1) << "RegisterExpectedChunks: uuid=" << uuid
+            << " expected_chunks=" << expected_chunks
+            << " completed_chunks=" << prog.completed_chunks;
+    if (prog.completed_chunks == expected_chunks) {
+      raw_progress_.erase(uuid);
+      trigger_h2d = true;
+      VLOG(1) << "RegisterExpectedChunks triggering H2D for uuid=" << uuid;
+    }
+  }
+
+  if (trigger_h2d) {
+    RETURN_IF_ERROR(raw_delegate_->OnDataReceived());
+  }
+
+  return absl::OkStatus();
+}
+
+absl::Status RawBufferTransport::PushBuffer(absl::string_view peer,
+                                            size_t buffer_id,
+                                            size_t dst_shard_idx,
+                                            size_t dst_offset_bytes,
+                                            const uint8_t* data_ptr,
+                                            size_t size_bytes, uint64_t uuid) {
   if (peer.empty()) {
     return absl::InvalidArgumentError(
         "Destination peer address cannot be empty");
@@ -393,7 +448,13 @@ absl::Status RawBufferTransport::PushBuffer(
       .remote_id = static_cast<uint32_t>(dst_offset_bytes),
       .local_id = static_cast<uint32_t>(dst_shard_idx),
       .count_or_size = static_cast<uint32_t>(size_bytes),
+      .uuid = uuid,
   };
+
+  VLOG(1) << "Pushing chunk to peer=" << peer << " uuid=" << uuid
+          << " dst_shard=" << dst_shard_idx
+          << " dst_offset=" << dst_offset_bytes << " size=" << size_bytes;
+
   RETURN_IF_ERROR(WriteExact(fd, &header, sizeof(header)));
   RETURN_IF_ERROR(WriteExact(fd, data_ptr, size_bytes));
 
@@ -405,6 +466,11 @@ absl::Status RawBufferTransport::PushBuffer(
 
   ok_to_pool = true;
   return absl::OkStatus();
+}
+
+void RawBufferTransport::ForgetPushProgress(uint64_t uuid) {
+  absl::MutexLock lock(raw_progress_mu_);
+  raw_progress_.erase(uuid);
 }
 
 }  // namespace tpu_raiden::transport::lib

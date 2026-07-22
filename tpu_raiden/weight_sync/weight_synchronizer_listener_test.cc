@@ -174,8 +174,9 @@ TEST(WeightSynchronizerListenerTest, PushWeightsReshardedSuccess) {
   WeightSynchronizerBase dst_engine(
       /*num_layers=*/1, /*num_shards=*/4, /*slice_byte_size=*/16,
       /*local_port=*/0, /*host_blocks_to_allocate=*/1,
-      /*parallelism=*/1, /*listener_port=*/std::nullopt);
+      /*parallelism=*/1, /*listener_port=*/0);
   ASSERT_TRUE(dst_engine.local_port().has_value());
+  ASSERT_TRUE(dst_engine.listener_port().has_value());
   std::string dst_peer =
       "127.0.0.1:" + std::to_string(*dst_engine.local_port());
 
@@ -193,11 +194,51 @@ TEST(WeightSynchronizerListenerTest, PushWeightsReshardedSuccess) {
     std::memcpy(ptr, src_data[i].data(), 16);
   }
 
+  uint64_t test_uuid = 98765;
+
+  // Send START_TRANSFER (Receiver) payload to target peer to register expected
+  // chunks before initiating sender's resharded push transfer.
+  int dst_sock = ConnectToListenerPort(*dst_engine.listener_port());
+  ASSERT_GE(dst_sock, 0);
+
+  ControlRequest dst_req;
+  dst_req.set_command(ControlRequest::COMMAND_START_TRANSFER);
+  StartTransferRequest* dst_start_req =
+      dst_req.mutable_start_transfer_request();
+  dst_start_req->set_is_sender(false);
+  dst_start_req->set_uuid(test_uuid);
+  dst_start_req->set_expected_block_count(8);
+
+  std::string dst_payload;
+  ASSERT_TRUE(dst_req.SerializeToString(&dst_payload));
+  uint32_t dst_req_len = htonl(dst_payload.size());
+
+  EXPECT_EQ(write(dst_sock, &dst_req_len, sizeof(dst_req_len)),
+            sizeof(dst_req_len));
+  EXPECT_EQ(write(dst_sock, dst_payload.data(), dst_payload.size()),
+            dst_payload.size());
+
+  // Read response
+  uint32_t dst_resp_len_net = 0;
+  ASSERT_EQ(read(dst_sock, &dst_resp_len_net, sizeof(dst_resp_len_net)),
+            sizeof(dst_resp_len_net));
+  uint32_t dst_resp_len = ntohl(dst_resp_len_net);
+
+  std::string dst_resp_bytes(dst_resp_len, '\0');
+  ASSERT_EQ(read(dst_sock, dst_resp_bytes.data(), dst_resp_len), dst_resp_len);
+
+  ControlResponse dst_resp;
+  ASSERT_TRUE(dst_resp.ParseFromString(dst_resp_bytes));
+  EXPECT_TRUE(dst_resp.success()) << dst_resp.message();
+
+  close(dst_sock);
+
   ControlRequest req;
   req.set_command(ControlRequest::COMMAND_START_TRANSFER);
 
   StartTransferRequest* start_req = req.mutable_start_transfer_request();
   start_req->set_is_sender(true);
+  start_req->set_uuid(test_uuid);
 
   // Construct precise resharding push schedules for S0 and S2 pushing to D0
   auto& push_schedules = *start_req->mutable_shard_push_schedules();

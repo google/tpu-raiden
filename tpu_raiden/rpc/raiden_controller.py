@@ -2118,7 +2118,7 @@ class RaidenController:
 
     available_sources = [src_unit]
     node_slice_offsets = {
-        src_unit: (src_block_id, src_block_offset, src_stride)
+        src_unit: (shard_idx, src_block_id, src_block_offset, src_stride)
     }
 
     pending_targets = list(targets)
@@ -2143,7 +2143,9 @@ class RaidenController:
           active_pushes[s] += 1
           scheduled_any = True
 
-          s_block_id, s_block_offset, s_stride = node_slice_offsets[s]
+          s_shard_idx, s_block_id, s_block_offset, s_stride = (
+              node_slice_offsets[s]
+          )
 
           entry = (
               dst_peer,
@@ -2158,9 +2160,9 @@ class RaidenController:
               count,
           )
 
-          sub_schedule = {s: {shard_idx if s == src_unit else 0: [entry]}}
           hop_uuid = random.randint(1, 2**63 - 1)
           hop_req_id = f"{req_id}_{hop_uuid}"
+          sub_schedule = {s: {s_shard_idx: [entry]}}
           sub_plan = TransferPlan(
               src_units=[s],
               dst_units=[dst_unit],
@@ -2172,7 +2174,7 @@ class RaidenController:
               dst_mem_type=dst_mem_type,
               use_block_chunks=True,
               is_sender=True,
-              expected_block_count=1,
+              expected_block_count=count,
               req_id=hop_req_id,
           )
 
@@ -2190,7 +2192,7 @@ class RaidenController:
                   [d_node],
                   plan.req_id,
                   True,
-                  False,
+                  s_node not in self._registered_shards,
                   plan.expected_block_count,
                   plan.uuid,
                   dst_controller_address,
@@ -2245,6 +2247,7 @@ class RaidenController:
           active_pushes[s] -= 1
           available_sources.append(dst_unit)
           node_slice_offsets[dst_unit] = (
+              t[2],  # dst_shard_idx
               dst_block_id,
               dst_block_offset,
               dst_stride,
@@ -3004,16 +3007,22 @@ class RaidenController:
           )
 
           # 4. Trigger COMMAND_START_TRANSFER (is_sender=False) on local workers
-          logging.info(
-              "Triggering preparation RPCs on local destination workers: %s,"
-              " expected blocks: %d",
-              local_dst_units,
-              expected_block_count,
-          )
-          await asyncio.gather(*[
-              self.worker_rpc_client.start_transfer(unit, receiver_plan)
-              for unit in local_dst_units
-          ])
+          if expected_block_count > 0:
+            logging.info(
+                "Triggering preparation RPCs on local destination workers: %s,"
+                " expected blocks: %d",
+                local_dst_units,
+                expected_block_count,
+            )
+            await asyncio.gather(*[
+                self.worker_rpc_client.start_transfer(unit, receiver_plan)
+                for unit in local_dst_units
+            ])
+          else:
+            logging.info(
+                "Skipping preparation RPCs on local destination workers because "
+                "expected_block_count is 0"
+            )
           logging.info(
               "Symmetric preparation complete on all local destination workers."
           )
@@ -3481,7 +3490,8 @@ class RaidenController:
                       " controller",
                       req_id,
                   )
-              await asyncio.gather(*tree_broadcast_tasks)
+              for task in tree_broadcast_tasks:
+                await task
 
       else:
         # === OLD PLAN-BASED WORKFLOW (Backward Compatibility) ===
@@ -3952,7 +3962,7 @@ class RaidenControllerServer:
               )
             else:
               shard_push_schedules = {}
-              if len(srcs) == 1 and len(start_req.shard_push_schedules) > 1:
+              if len(srcs) == 1:
                 unit_schedules = {}
                 for (
                     key_idx,
@@ -4390,7 +4400,7 @@ class RaidenControllerClientFacade:
           else:
             key_idx = (
                 int(src_unit.job_replica_id)
-                if num_src_shards == 1
+                if (len(src_units) > 1 and num_src_shards == 1)
                 else shard_idx
             )
           schedule_proto = self._raiden_proto_module.ShardPushScheduleProto()
