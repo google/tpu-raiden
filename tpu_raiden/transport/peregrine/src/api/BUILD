@@ -42,6 +42,7 @@ cc_library(
 cc_test(
     name = "socket_util_test",
     srcs = ["socket_util_test.cc"],
+    shard_count = 8,
     deps = [
         ":socket_util",
         ":transport_types",

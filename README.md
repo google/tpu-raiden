@@ -23,16 +23,16 @@ source .venv312/bin/activate
 ```
 
 ### Installing Bazel
-To compile the `tpu_raiden` C++ extension binaries, you will need **Bazel 7.7.0**.
+To compile the `tpu_raiden` C++ extension binaries, you will need **Bazel**.
 
-**Option 1: Install Bazel 7.7.0 directly (Linux amd64)**
+**Option 1: Install Bazel 8.7.0 directly (Linux amd64)**
 ```bash
-sudo wget -O /usr/local/bin/bazel https://github.com/bazelbuild/bazel/releases/download/7.7.0/bazel-7.7.0-linux-x86_64
+sudo wget -O /usr/local/bin/bazel https://github.com/bazelbuild/bazel/releases/download/8.7.0/bazel-8.7.0-linux-x86_64
 sudo chmod +x /usr/local/bin/bazel
 ```
 
 **Option 2: Install via Bazelisk (npm)**
-Bazelisk is a wrapper that will automatically read the `.bazelversion` file in the project and download the correct version (7.7.0).
+Bazelisk is a wrapper that will automatically read the `.bazelversion` file in the project and download the correct version.
 ```bash
 npm install -g @bazel/bazelisk
 ```
