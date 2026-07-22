@@ -15,6 +15,7 @@
 #include "tpu_raiden/frameworks/torch/kv_cache_manager.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -23,6 +24,7 @@
 #include <vector>
 
 #include "ATen/core/TensorBody.h"
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/match.h"
@@ -30,7 +32,11 @@
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "tpu_raiden/core/controller/controller_client.h"
+#include "tpu_raiden/core/controller/worker_service_server.h"
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
+#include "tpu_raiden/core/kv_manager_holder.h"
+#include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/core/utils.h"
 #include "tpu_raiden/frameworks/torch/torch_utils.h"
 #include "tpu_raiden/kv_cache/kv_cache_listener.h"
@@ -61,7 +67,7 @@ std::string FormatAddressWithPort(absl::string_view ip, int port) {
 
 }  // namespace
 
-KVCacheManager::UnpackedLayers KVCacheManager::UnpackLayers(
+TorchKVCacheManager::UnpackedLayers TorchKVCacheManager::UnpackLayers(
     const std::vector<std::vector<at::Tensor>>& device_tensors) {
   // Retain the owning DeviceBufferRefs: for view tensors the materialized
   // buffers are fresh allocations owned solely by these refs, so they must
@@ -80,24 +86,23 @@ KVCacheManager::UnpackedLayers KVCacheManager::UnpackLayers(
   return unpacked;
 }
 
-KVCacheManager::KVCacheManager(
+TorchKVCacheManager::TorchKVCacheManager(
     const std::vector<std::vector<at::Tensor>>& device_tensors,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     bool unsafe_skip_buffer_lock, int parallelism)
-    : KVCacheManager(UnpackLayers(device_tensors), local_port,
-                     host_blocks_to_allocate, unsafe_skip_buffer_lock,
-                     parallelism, /*node_id=*/0, /*local_control_port=*/-1,
-                     /*max_blocks=*/0, /*num_slots=*/0, /*timeout_s=*/120.0,
-                     /*kv_caches=*/{}) {}
+    : TorchKVCacheManager(
+          UnpackLayers(device_tensors), local_port, host_blocks_to_allocate,
+          unsafe_skip_buffer_lock, parallelism, /*node_id=*/0,
+          /*local_control_port=*/-1,
+          /*max_blocks=*/0, /*num_slots=*/0, /*timeout_s=*/120.0,
+          /*kv_caches=*/{}) {}
 
-KVCacheManager::KVCacheManager(UnpackedLayers unpacked,
-                               std::optional<int> local_port,
-                               std::optional<int> host_blocks_to_allocate,
-                               bool unsafe_skip_buffer_lock, int parallelism,
-                               int64_t node_id, int64_t local_control_port,
-                               int64_t max_blocks, int64_t num_slots,
-                               double timeout_s,
-                               std::vector<at::Tensor> kv_caches)
+TorchKVCacheManager::TorchKVCacheManager(
+    UnpackedLayers unpacked, std::optional<int> local_port,
+    std::optional<int> host_blocks_to_allocate, bool unsafe_skip_buffer_lock,
+    int parallelism, int64_t node_id, int64_t local_control_port,
+    int64_t max_blocks, int64_t num_slots, double timeout_s,
+    std::vector<at::Tensor> kv_caches)
     : KVCacheManagerWithTransfer(
           unpacked.buffers,
           unpacked.has_logical_metadata ? unpacked.logical_slice_byte_size : 0,
@@ -106,7 +111,7 @@ KVCacheManager::KVCacheManager(UnpackedLayers unpacked,
           unpacked.has_logical_metadata ? unpacked.logical_physical_size : 0,
           local_port, host_blocks_to_allocate, unsafe_skip_buffer_lock,
           parallelism,
-          tpu_raiden::CreateHostMemoryAllocator(
+          CreateHostMemoryAllocator(
               unpacked.client, max_blocks,
               (unpacked.buffers.empty() || unpacked.buffers[0].empty() ||
                unpacked.buffers[0][0] == nullptr)
@@ -119,29 +124,27 @@ KVCacheManager::KVCacheManager(UnpackedLayers unpacked,
       // buffers; they pin the materialized device buffers for our lifetime.
       buffer_refs_(std::move(unpacked.refs)) {}
 
-KVCacheManager::KVCacheManager(const std::vector<at::Tensor>& kv_caches,
-                               int64_t node_id, int64_t local_control_port,
-                               int64_t max_blocks, int64_t num_slots,
-                               double timeout_s, bool unsafe_skip_buffer_lock,
-                               int parallelism,
-                               std::optional<int> listener_port)
-    : KVCacheManager(UnpackLayers(SingleShardLayers(kv_caches)),
-                     /*local_port=*/std::nullopt,
-                     /*host_blocks_to_allocate=*/std::nullopt,
-                     unsafe_skip_buffer_lock, parallelism, node_id,
-                     local_control_port, max_blocks, num_slots, timeout_s,
-                     kv_caches) {
+TorchKVCacheManager::TorchKVCacheManager(
+    const std::vector<at::Tensor>& kv_caches, int64_t node_id,
+    int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
+    double timeout_s, bool unsafe_skip_buffer_lock, int parallelism,
+    std::optional<int> listener_port)
+    : TorchKVCacheManager(UnpackLayers(SingleShardLayers(kv_caches)),
+                          /*local_port=*/std::nullopt,
+                          /*host_blocks_to_allocate=*/std::nullopt,
+                          unsafe_skip_buffer_lock, parallelism, node_id,
+                          local_control_port, max_blocks, num_slots, timeout_s,
+                          kv_caches) {
   if (listener_port) {
-    listener_ = std::make_unique<tpu_raiden::kv_cache::KVCacheListener>(
-        this, *listener_port);
+    listener_ =
+        std::make_unique<kv_cache::KVCacheListener>(this, *listener_port);
   }
 }
 
-KVCacheManager::KVCacheManager(size_t num_layers, size_t num_shards,
-                               size_t slice_byte_size, int64_t node_id,
-                               std::optional<int> local_port,
-                               std::optional<int> host_blocks_to_allocate,
-                               int parallelism)
+TorchKVCacheManager::TorchKVCacheManager(
+    size_t num_layers, size_t num_shards, size_t slice_byte_size,
+    int64_t node_id, std::optional<int> local_port,
+    std::optional<int> host_blocks_to_allocate, int parallelism)
     : KVCacheManagerWithTransfer(
           num_layers, num_shards, slice_byte_size, local_port,
           host_blocks_to_allocate, parallelism, node_id,
@@ -150,35 +153,35 @@ KVCacheManager::KVCacheManager(size_t num_layers, size_t num_shards,
           /*num_slots=*/0, /*timeout_s=*/120.0),
       kv_caches_({}) {}
 
-KVCacheManager::~KVCacheManager() = default;
+TorchKVCacheManager::~TorchKVCacheManager() = default;
 
-std::optional<int> KVCacheManager::listener_port() const {
+std::optional<int> TorchKVCacheManager::listener_port() const {
   if (listener_) {
     return listener_->listener_port();
   }
   return std::nullopt;
 }
 
-bool KVCacheManager::is_listener_active() const {
+bool TorchKVCacheManager::is_listener_active() const {
   if (listener_) {
     return listener_->is_active();
   }
   return false;
 }
 
-std::string KVCacheManager::transfer_address() const {
+std::string TorchKVCacheManager::transfer_address() const {
   auto port = local_port();
   if (!port.has_value()) return "";
   return FormatAddressWithPort(local_ip(), *port);
 }
 
-std::string KVCacheManager::listener_address() const {
+std::string TorchKVCacheManager::listener_address() const {
   auto port = listener_port();
   if (!port.has_value()) return "";
   return FormatAddressWithPort(local_ip(), *port);
 }
 
-absl::Status KVCacheManager::PushRegisteredPlan(
+absl::Status TorchKVCacheManager::PushRegisteredPlan(
     uint64_t uuid, const std::string& peer,
     const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, int layer_idx, int parallelism) {
@@ -196,7 +199,7 @@ absl::Status KVCacheManager::PushRegisteredPlan(
   // Copy the transport pointer and release server_init_mu_ before the blocking
   // Push: holding the lock across it serializes concurrent pushes from the
   // same manager (one per destination peer).
-  tpu_raiden::transport::BlockTransport* transport = nullptr;
+  transport::BlockTransport* transport = nullptr;
   {
     absl::MutexLock lock(server_init_mu_);
     transport = server_.get();
@@ -204,18 +207,17 @@ absl::Status KVCacheManager::PushRegisteredPlan(
   if (!transport) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
-  auto status_or = transport->SyncPush(
-      {peer}, src_block_ids, dst_block_ids, parallelism,
-      tpu_raiden::transport::MajorOrder::kLayerMajor, uuid, layer_idx);
+  auto status_or =
+      transport->SyncPush({peer}, src_block_ids, dst_block_ids, parallelism,
+                          transport::MajorOrder::kLayerMajor, uuid, layer_idx);
   if (!status_or.ok()) {
     return status_or.status();
   }
   return absl::OkStatus();
 }
 
-absl::StatusOr<std::string> KVCacheManager::ReadBlockBytes(size_t layer_idx,
-                                                           int block_id,
-                                                           size_t shard_idx) {
+absl::StatusOr<std::string> TorchKVCacheManager::ReadBlockBytes(
+    size_t layer_idx, int block_id, size_t shard_idx) {
   if (block_id < 0) {
     return absl::InvalidArgumentError("block_id must be non-negative");
   }
@@ -234,9 +236,10 @@ absl::StatusOr<std::string> KVCacheManager::ReadBlockBytes(size_t layer_idx,
   return std::string(ptr, block_bytes);
 }
 
-absl::Status KVCacheManager::WriteBlockBytes(size_t layer_idx, int block_id,
-                                             absl::string_view payload,
-                                             size_t shard_idx) {
+absl::Status TorchKVCacheManager::WriteBlockBytes(size_t layer_idx,
+                                                  int block_id,
+                                                  absl::string_view payload,
+                                                  size_t shard_idx) {
   if (block_id < 0) {
     return absl::InvalidArgumentError("block_id must be non-negative");
   }
@@ -258,6 +261,125 @@ absl::Status KVCacheManager::WriteBlockBytes(size_t layer_idx, int block_id,
   }
   std::memcpy(base + block * block_bytes, payload.data(), block_bytes);
   return absl::OkStatus();
+}
+
+KVCacheManager::KVCacheManager(
+    const std::vector<std::vector<at::Tensor>>& device_tensors,
+    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
+    bool unsafe_skip_buffer_lock, int parallelism, int raiden_worker_port,
+    std::optional<std::string> raiden_controller_address,
+    std::optional<std::string> worker_id)
+    : torch_manager_(std::make_unique<TorchKVCacheManager>(
+          device_tensors, local_port, host_blocks_to_allocate,
+          unsafe_skip_buffer_lock, parallelism)) {
+  StartGrpcServer(raiden_worker_port, raiden_controller_address, worker_id);
+}
+
+KVCacheManager::KVCacheManager(
+    const std::vector<at::Tensor>& kv_caches, int64_t node_id,
+    int64_t local_control_port, int64_t max_blocks, int64_t num_slots,
+    double timeout_s, bool unsafe_skip_buffer_lock, int parallelism,
+    std::optional<int> listener_port, int raiden_worker_port,
+    std::optional<std::string> raiden_controller_address,
+    std::optional<std::string> worker_id)
+    : torch_manager_(std::make_unique<TorchKVCacheManager>(
+          kv_caches, node_id, local_control_port, max_blocks, num_slots,
+          timeout_s, unsafe_skip_buffer_lock, parallelism, listener_port)) {
+  StartGrpcServer(raiden_worker_port, raiden_controller_address, worker_id);
+}
+
+KVCacheManager::KVCacheManager(
+    size_t num_layers, size_t num_shards, size_t slice_byte_size,
+    int64_t node_id, std::optional<int> local_port,
+    std::optional<int> host_blocks_to_allocate, int parallelism,
+    int raiden_worker_port,
+    std::optional<std::string> raiden_controller_address,
+    std::optional<std::string> worker_id)
+    : torch_manager_(std::make_unique<TorchKVCacheManager>(
+          num_layers, num_shards, slice_byte_size, node_id, local_port,
+          host_blocks_to_allocate, parallelism)) {
+  StartGrpcServer(raiden_worker_port, raiden_controller_address, worker_id);
+}
+
+KVCacheManager::~KVCacheManager() = default;
+
+void KVCacheManager::StartGrpcServer(
+    int raiden_worker_port,
+    std::optional<std::string> raiden_controller_address,
+    std::optional<std::string> worker_id) {
+  if (!raiden_controller_address.has_value() ||
+      raiden_controller_address->empty()) {
+    return;
+  }
+
+  bool use_private_server = false;
+  const char* disable_singleton =
+      std::getenv("RAIDEN_DISABLE_SINGLETON_WORKER");
+  if (disable_singleton != nullptr &&
+      (std::strcmp(disable_singleton, "true") == 0 ||
+       std::strcmp(disable_singleton, "1") == 0)) {
+    use_private_server = true;
+  }
+
+  absl::Status status;
+  if (use_private_server) {
+    private_grpc_server_ = controller::WorkerServiceServer::Create();
+    status = private_grpc_server_->StartServer(
+        /*host_allocator=*/nullptr, KVManagerHolder(torch_manager_.get()),
+        raiden_worker_port);
+  } else {
+    status = controller::WorkerServiceServer::GetInstance().StartServer(
+        /*host_allocator=*/nullptr, KVManagerHolder(torch_manager_.get()),
+        raiden_worker_port);
+  }
+
+  if (!status.ok()) {
+    throw std::runtime_error(absl::StrCat(
+        "Failed to start gRPC server in KVCacheManager: ", status.message()));
+  }
+
+  if (raiden_controller_address.has_value() &&
+      !raiden_controller_address->empty()) {
+    int bound_port = GetRaidenWorkerPort();
+    std::string w_id = worker_id.value_or("worker_0");
+
+    std::string worker_ip = "127.0.0.1";
+    auto ips = GetLocalHostIpAddresses();
+    if (!ips.empty()) {
+      worker_ip = ips[0];
+    }
+    std::string worker_endpoint;
+    if (absl::StrContains(worker_ip, ":")) {
+      worker_endpoint = absl::StrCat("[", worker_ip, "]:", bound_port);
+    } else {
+      worker_endpoint = absl::StrCat(worker_ip, ":", bound_port);
+    }
+
+    std::string transfer_endpoint = "";
+    auto local_eps = torch_manager_->get_local_endpoints();
+    if (!local_eps.empty()) {
+      transfer_endpoint = local_eps[0].endpoint;
+    }
+
+    core::controller::RaidenControllerClient client(*raiden_controller_address);
+    status = client.RegisterWorker(w_id, worker_endpoint, local_eps);
+    if (!status.ok()) {
+      LOG(ERROR) << "Failed to register worker with controller: "
+                 << status.message();
+    } else {
+      LOG(INFO) << "Successfully registered worker " << w_id
+                << " (worker_endpoint=" << worker_endpoint
+                << ", transfer_endpoint=" << transfer_endpoint
+                << ") with controller at " << *raiden_controller_address;
+    }
+  }
+}
+
+int KVCacheManager::GetRaidenWorkerPort() const {
+  if (private_grpc_server_) {
+    return private_grpc_server_->GetRaidenWorkerPort();
+  }
+  return controller::WorkerServiceServer::GetInstance().GetRaidenWorkerPort();
 }
 
 }  // namespace torch

@@ -78,6 +78,9 @@ class KVCacheManager:
       parallelism: int = 4,
       node_id: int = 0,
       listener_port: Optional[int] = None,
+      raiden_worker_port: int = 0,
+      raiden_controller_address: Optional[str] = None,
+      worker_id: Optional[str] = None,
   ):
     """Instantiates the TransferEngine-based KVCacheManager.
 
@@ -95,6 +98,10 @@ class KVCacheManager:
       node_id: Unique identifier for this host/node in the distributed mesh.
       listener_port: Sockets server port for incoming C++ KVCacheListener
         commands.
+      raiden_worker_port: Port for the gRPC Raiden Worker service.
+      raiden_controller_address: Address of the Raiden Controller.
+      worker_id: Unique identifier for the worker node registered with
+        controller.
     """
     self._admission_summary = None
     impl = _torch_impl()
@@ -105,6 +112,9 @@ class KVCacheManager:
           host_blocks_to_allocate,
           unsafe_skip_buffer_lock,
           parallelism,
+          raiden_worker_port,
+          raiden_controller_address,
+          worker_id,
       )
     else:
       if max_blocks is None or num_slots is None:
@@ -122,6 +132,9 @@ class KVCacheManager:
           unsafe_skip_buffer_lock=unsafe_skip_buffer_lock,
           listener_port=listener_port,
           parallelism=parallelism,
+          raiden_worker_port=raiden_worker_port,
+          raiden_controller_address=raiden_controller_address,
+          worker_id=worker_id,
       )
 
   @classmethod
@@ -154,6 +167,11 @@ class KVCacheManager:
   def node_id(self) -> int:
     """Returns the active Worker or Shard ID."""
     return self._impl.node_id()
+
+  @property
+  def raiden_worker_port(self) -> int:
+    """Returns the active gRPC worker service port."""
+    return self._impl.get_raiden_worker_port()
 
   def get_local_endpoints(self) -> List[Dict[str, Any]]:
     """Returns the active Raiden endpoint descriptors."""

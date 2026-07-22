@@ -15,12 +15,17 @@
 #include "tpu_raiden/frameworks/torch/kv_cache_manager.h"
 
 #include <memory>
+#include <optional>
+#include <string>
 #include <vector>
 
+#include "absl/strings/match.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/plugin/xla_cpu/xla_cpu_pjrt_client.h"
 #include "xla/tsl/platform/statusor.h"
 #include "xla/tsl/platform/test.h"
+#include "tpu_raiden/core/controller/controller_service.h"
+#include "tpu_raiden/core/controller/test_util.h"
 #include "tpu_raiden/frameworks/torch/torch_tpu_utils_mock.h"
 #include "torch/torch.h"
 
@@ -68,6 +73,51 @@ TEST_F(KVCacheManagerTorchTest, ConstructorSucceedsWithMocks) {
                          /*host_blocks_to_allocate=*/8);
 
   EXPECT_EQ(manager.bytes_per_block(), 1024 * sizeof(float));
+}
+
+TEST_F(KVCacheManagerTorchTest, GrpcServerOptionalAndOffByDefault) {
+  KVCacheManager mgr_default(/*num_layers=*/1, /*num_shards=*/1,
+                             /*slice_byte_size=*/1024, /*node_id=*/0,
+                             /*local_port=*/std::nullopt,
+                             /*host_blocks_to_allocate=*/8);
+  EXPECT_EQ(mgr_default.GetRaidenWorkerPort(), 0);
+
+  KVCacheManager mgr_explicit_off(/*num_layers=*/1, /*num_shards=*/1,
+                                  /*slice_byte_size=*/1024, /*node_id=*/0,
+                                  /*local_port=*/std::nullopt,
+                                  /*host_blocks_to_allocate=*/8,
+                                  /*parallelism=*/1, /*raiden_worker_port=*/0,
+                                  /*raiden_controller_address=*/std::nullopt);
+  EXPECT_EQ(mgr_explicit_off.GetRaidenWorkerPort(), 0);
+
+  KVCacheManager mgr_started(/*num_layers=*/1, /*num_shards=*/1,
+                             /*slice_byte_size=*/1024, /*node_id=*/0,
+                             /*local_port=*/std::nullopt,
+                             /*host_blocks_to_allocate=*/8,
+                             /*parallelism=*/1, /*raiden_worker_port=*/0,
+                             /*raiden_controller_address=*/"localhost:12345");
+  EXPECT_GT(mgr_started.GetRaidenWorkerPort(), 0);
+}
+
+TEST_F(KVCacheManagerTorchTest, WorkerSelfRegistrationWithControllerSuccess) {
+  auto test_server = core::controller::CreateTestControllerServer();
+  ASSERT_NE(test_server, nullptr);
+
+  std::string raiden_controller_address = test_server->server_address;
+
+  KVCacheManager mgr(/*num_layers=*/1, /*num_shards=*/1,
+                     /*slice_byte_size=*/1024, /*node_id=*/0,
+                     /*local_port=*/std::nullopt,
+                     /*host_blocks_to_allocate=*/8,
+                     /*parallelism=*/1, /*raiden_worker_port=*/0,
+                     raiden_controller_address, "torch_worker_0");
+
+  auto workers =
+      test_server->service->worker_registry()->GetRegisteredWorkers();
+  ASSERT_EQ(workers.size(), 1);
+  EXPECT_EQ(workers[0].worker_id, "torch_worker_0");
+  EXPECT_TRUE(absl::StrContains(workers[0].raiden_worker_endpoint,
+                                std::to_string(mgr.GetRaidenWorkerPort())));
 }
 
 }  // namespace

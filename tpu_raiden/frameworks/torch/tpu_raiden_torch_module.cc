@@ -123,26 +123,37 @@ NB_MODULE(_tpu_raiden_torch, m) {
   auto manager_cls = nb::class_<KVCacheManager>(m, "KVCacheManager");
   manager_cls
       .def(nb::init<const std::vector<std::vector<at::Tensor>>&,
-                    std::optional<int>, std::optional<int>, bool, int>(),
+                    std::optional<int>, std::optional<int>, bool, int, int,
+                    std::optional<std::string>, std::optional<std::string>>(),
            nb::arg("device_tensors"), nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
            nb::arg("unsafe_skip_buffer_lock") = false,
-           nb::arg("parallelism") = 1)
+           nb::arg("parallelism") = 1, nb::arg("raiden_worker_port") = 0,
+           nb::arg("raiden_controller_address") = nb::none(),
+           nb::arg("worker_id") = nb::none())
       .def(nb::init<const std::vector<at::Tensor>&, int64_t, int64_t, int64_t,
-                    int64_t, double, bool, int, std::optional<int>>(),
+                    int64_t, double, bool, int, std::optional<int>, int,
+                    std::optional<std::string>, std::optional<std::string>>(),
            nb::arg("kv_caches"), nb::arg("node_id"),
            nb::arg("local_control_port"), nb::arg("max_blocks"),
            nb::arg("num_slots"), nb::arg("timeout_s") = 120.0,
            nb::arg("unsafe_skip_buffer_lock") = true,
-           nb::arg("parallelism") = 4, nb::arg("listener_port") = nb::none())
+           nb::arg("parallelism") = 4, nb::arg("listener_port") = nb::none(),
+           nb::arg("raiden_worker_port") = 0,
+           nb::arg("raiden_controller_address") = nb::none(),
+           nb::arg("worker_id") = nb::none())
       .def(nb::init<size_t, size_t, size_t, int64_t, std::optional<int>,
-                    std::optional<int>, int>(),
+                    std::optional<int>, int, int, std::optional<std::string>,
+                    std::optional<std::string>>(),
            nb::arg("num_layers"), nb::arg("num_shards"),
            nb::arg("slice_byte_size"), nb::arg("node_id"),
            nb::arg("local_port") = nb::none(),
            nb::arg("host_blocks_to_allocate") = nb::none(),
-           nb::arg("parallelism") = 1)
+           nb::arg("parallelism") = 1, nb::arg("raiden_worker_port") = 0,
+           nb::arg("raiden_controller_address") = nb::none(),
+           nb::arg("worker_id") = nb::none())
       .def("node_id", &KVCacheManager::node_id)
+      .def("get_raiden_worker_port", &KVCacheManager::GetRaidenWorkerPort)
       .def(
           "register_active_plan",
           [](KVCacheManager& self, uint64_t uuid,
