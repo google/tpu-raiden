@@ -37,6 +37,8 @@ message CoordinateTransferRequest {
   // Block-granular reshard inputs. Source block IDs are looked up from the
   // producer-side registry and deliberately never cross vLLM metadata.
   repeated int64 dst_device_block_ids = 11;
+  // Opaque audit metadata echoed into controller log events; planning and
+  // receiver validation never consume it (extents carry the coverage).
   int64 num_tokens = 12;
   // Pool tags the consumer wants moved (e.g. "fa"). The controller resolves
   // tags against both peers' registered manifests; the complement becomes the
@@ -44,27 +46,53 @@ message CoordinateTransferRequest {
   repeated string transfer_pool_tags = 13;
 }
 
-// One contiguous run of destination tokens materialized from one source
-// block, declared by the producer rank that owns it. Spans are controller
-// -plane data only: the worker wire never sees them.
-message SourceSpan {
-  // Global token index in request order where this run lands.
-  int64 dst_token_start = 1;
-  int64 token_count = 2;
-  // Index into the owning registration's block_ids list — never a physical
-  // block id.
-  int64 src_block_ordinal = 3;
-  int64 src_block_token_offset = 4;
+// One contiguous (or uniformly strided) byte copy between one source block
+// and one destination block of the same pool. Ordinals index the owning
+// registration's block_ids / the transfer's destination block id list —
+// never physical ids. This is the byte-span registration IR: it mirrors the
+// executor wire (ShardPushEntryProto fields 3-10) so the controller binds
+// and re-keys without any token or unit arithmetic.
+message PoolByteSpan {
+  int64 src_block_ordinal = 1;
+  int64 src_offset_bytes = 2;
+  // Index into the transfer's destination block id list.
+  int64 dst_block_index = 3;
+  int64 dst_offset_bytes = 4;
+  int64 size_bytes = 5;
+  // Optional uniformly-strided repeat (mirrors ShardPushEntryProto 8-10).
+  // count <= 1 with zero strides means a plain contiguous range.
+  int64 src_stride_bytes = 6;
+  int64 dst_stride_bytes = 7;
+  int32 count = 8;
+}
+
+// A rank's declared contribution to one pool tag, lowered to bytes by the
+// producer. A tag naming a tag class (e.g. "fa") applies to every selected
+// pool of that class; group-suffixed tags (e.g. "gdn.ssm.g1") register one
+// entry each. Raiden attaches no meaning to any tag value.
+message PoolSpanRegistration {
+  string tag = 1;
+  // This rank's source blocks for the tag.
+  repeated int64 block_ids = 2;
+  repeated PoolByteSpan spans = 3;
+  // Bytes this rank contributes to the tag; cross-checked against the sum
+  // of spans and, over the claimed union of ranks, against the destination
+  // byte coverage.
+  int64 declared_bytes = 4;
 }
 
 message RegisterRequestBlocksRequest {
+  // Field 5 carried the retired token-addressed SourceSpan vocabulary; the
+  // byte-span IR (pool_spans) replaced it.
+  reserved 5;
+  reserved "spans";
   string req_id = 1;
   int64 uuid = 2;
   RaidenIdProto unit = 3;
   repeated int64 block_ids = 4;
-  // The registering rank's declared source map. A span never crosses a
-  // source block boundary (offset + count <= page_tokens).
-  repeated SourceSpan spans = 5;
+  // The registering rank's declared source map: byte-span IR declarations,
+  // one per pool tag, lowered by the producer.
+  repeated PoolSpanRegistration pool_spans = 7;
 }
 
 message ReleaseRequestBlocksRequest {

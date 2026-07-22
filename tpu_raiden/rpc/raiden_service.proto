@@ -152,6 +152,11 @@ message StartTransferRequest {
   repeated int64 dst_device_block_ids = 14;
   int32 parallelism = 15;
   int64 num_tokens = 16;
+  // Byte-span reshard plans: the expected destination coverage end per
+  // entry of dst_device_block_ids. Non-empty selects the byte-level
+  // receiver validation (no token arithmetic); empty preserves the legacy
+  // token/state validation driven by num_tokens.
+  repeated int64 dst_expected_extent_bytes = 17;
 }
 
 message GetMetadataResponse {

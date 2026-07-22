@@ -39,7 +39,57 @@ _sym_db = _symbol_database.Default()
 from tpu_raiden.rpc import raiden_service_pb2 as tpu__raiden_dot_rpc_dot_raiden__service__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\'tpu_raiden/rpc/controller_service.proto\x12\x0etpu_raiden.rpc\x1a#tpu_raiden/rpc/raiden_service.proto\"\xa8\x03\n\x19\x43oordinateTransferRequest\x12\x30\n\tsrc_units\x18\x01 \x03(\x0b\x32\x1d.tpu_raiden.rpc.RaidenIdProto\x12\x30\n\tdst_units\x18\x02 \x03(\x0b\x32\x1d.tpu_raiden.rpc.RaidenIdProto\x12\x0c\n\x04uuid\x18\x03 \x01(\x03\x12\x11\n\tis_sender\x18\x04 \x01(\x08\x12\x30\n\x0c\x64st_mem_type\x18\x05 \x01(\x0e\x32\x1a.tpu_raiden.rpc.MemoryType\x12\x18\n\x10use_block_chunks\x18\x06 \x01(\x08\x12\x1c\n\x14\x65xpected_block_count\x18\x07 \x01(\x03\x12\x0e\n\x06req_id\x18\x08 \x01(\t\x12\x1e\n\x16src_controller_address\x18\t \x01(\t\x12\x1e\n\x16\x64st_controller_address\x18\n \x01(\t\x12\x1c\n\x14\x64st_device_block_ids\x18\x0b \x03(\x03\x12\x12\n\nnum_tokens\x18\x0c \x01(\x03\x12\x1a\n\x12transfer_pool_tags\x18\r \x03(\t\"u\n\nSourceSpan\x12\x17\n\x0f\x64st_token_start\x18\x01 \x01(\x03\x12\x13\n\x0btoken_count\x18\x02 \x01(\x03\x12\x19\n\x11src_block_ordinal\x18\x03 \x01(\x03\x12\x1e\n\x16src_block_token_offset\x18\x04 \x01(\x03\"\xa7\x01\n\x1cRegisterRequestBlocksRequest\x12\x0e\n\x06req_id\x18\x01 \x01(\t\x12\x0c\n\x04uuid\x18\x02 \x01(\x03\x12+\n\x04unit\x18\x03 \x01(\x0b\x32\x1d.tpu_raiden.rpc.RaidenIdProto\x12\x11\n\tblock_ids\x18\x04 \x03(\x03\x12)\n\x05spans\x18\x05 \x03(\x0b\x32\x1a.tpu_raiden.rpc.SourceSpan\"J\n\x1bReleaseRequestBlocksRequest\x12\x0e\n\x06req_id\x18\x01 \x01(\t\x12\x0c\n\x04uuid\x18\x02 \x01(\x03\x12\r\n\x05\x66orce\x18\x03 \x01(\x08\"i\n\x1c\x43ompleteRequestBlocksRequest\x12\x0e\n\x06req_id\x18\x01 \x01(\t\x12\x0c\n\x04uuid\x18\x02 \x01(\x03\x12+\n\x04unit\x18\x03 \x01(\x0b\x32\x1d.tpu_raiden.rpc.RaidenIdProto\"E\n%CancelRequestBlocksIfUnclaimedRequest\x12\x0e\n\x06req_id\x18\x01 \x01(\t\x12\x0c\n\x04uuid\x18\x02 \x01(\x03\"8\n\x18GetTransferStatusRequest\x12\x0e\n\x06req_id\x18\x01 \x01(\t\x12\x0c\n\x04uuid\x18\x02 \x01(\x03\"\xd8\x01\n\x19GetTransferStatusResponse\x12@\n\x06status\x18\x01 \x01(\x0e\x32\x30.tpu_raiden.rpc.GetTransferStatusResponse.Status\"y\n\x06Status\x12\x16\n\x12STATUS_UNSPECIFIED\x10\x00\x12\x16\n\x12STATUS_NOT_STARTED\x10\x01\x12\x16\n\x12STATUS_IN_PROGRESS\x10\x02\x12\x14\n\x10STATUS_COMPLETED\x10\x03\x12\x11\n\rSTATUS_FAILED\x10\x04\"\xe1\x06\n\x11\x43ontrollerRequest\x12:\n\x07\x63ommand\x18\x01 \x01(\x0e\x32).tpu_raiden.rpc.ControllerRequest.Command\x12N\n\x1b\x63oordinate_transfer_request\x18\x02 \x01(\x0b\x32).tpu_raiden.rpc.CoordinateTransferRequest\x12M\n\x1bget_transfer_status_request\x18\x03 \x01(\x0b\x32(.tpu_raiden.rpc.GetTransferStatusRequest\x12U\n\x1fregister_request_blocks_request\x18\x08 \x01(\x0b\x32,.tpu_raiden.rpc.RegisterRequestBlocksRequest\x12S\n\x1erelease_request_blocks_request\x18\t \x01(\x0b\x32+.tpu_raiden.rpc.ReleaseRequestBlocksRequest\x12U\n\x1f\x63omplete_request_blocks_request\x18\n \x01(\x0b\x32,.tpu_raiden.rpc.CompleteRequestBlocksRequest\x12i\n*cancel_request_blocks_if_unclaimed_request\x18\x0b \x01(\x0b\x32\x35.tpu_raiden.rpc.CancelRequestBlocksIfUnclaimedRequest\"\x82\x02\n\x07\x43ommand\x12\x17\n\x13\x43OMMAND_UNSPECIFIED\x10\x00\x12\x1f\n\x1b\x43OMMAND_COORDINATE_TRANSFER\x10\x01\x12\x1f\n\x1b\x43OMMAND_GET_TRANSFER_STATUS\x10\x02\x12#\n\x1f\x43OMMAND_REGISTER_REQUEST_BLOCKS\x10\x03\x12\"\n\x1e\x43OMMAND_RELEASE_REQUEST_BLOCKS\x10\x04\x12#\n\x1f\x43OMMAND_COMPLETE_REQUEST_BLOCKS\x10\x05\x12.\n*COMMAND_CANCEL_REQUEST_BLOCKS_IF_UNCLAIMED\x10\x06\"\x9e\x01\n\x12\x43ontrollerResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\x12O\n\x1cget_transfer_status_response\x18\x03 \x01(\x0b\x32).tpu_raiden.rpc.GetTransferStatusResponse\x12\x15\n\rresponse_data\x18\x04 \x01(\tB\x1a\x42\x16\x43ontrollerServiceProtoP\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
+    b'\n\'tpu_raiden/rpc/controller_service.proto\x12\x0etpu_raiden.rpc\x1a#tpu_raiden/rpc/raiden_service.proto"\xa8\x03\n\x19\x43oordinateTransferRequest\x12\x30\n\tsrc_units\x18\x01'
+    b' \x03(\x0b\x32\x1d.tpu_raiden.rpc.RaidenIdProto\x12\x30\n\tdst_units\x18\x02'
+    b' \x03(\x0b\x32\x1d.tpu_raiden.rpc.RaidenIdProto\x12\x0c\n\x04uuid\x18\x03'
+    b' \x01(\x03\x12\x11\n\tis_sender\x18\x04'
+    b' \x01(\x08\x12\x30\n\x0c\x64st_mem_type\x18\x05'
+    b' \x01(\x0e\x32\x1a.tpu_raiden.rpc.MemoryType\x12\x18\n\x10use_block_chunks\x18\x06'
+    b' \x01(\x08\x12\x1c\n\x14\x65xpected_block_count\x18\x07'
+    b' \x01(\x03\x12\x0e\n\x06req_id\x18\x08'
+    b' \x01(\t\x12\x1e\n\x16src_controller_address\x18\t'
+    b' \x01(\t\x12\x1e\n\x16\x64st_controller_address\x18\n'
+    b' \x01(\t\x12\x1c\n\x14\x64st_device_block_ids\x18\x0b'
+    b' \x03(\x03\x12\x12\n\nnum_tokens\x18\x0c'
+    b' \x01(\x03\x12\x1a\n\x12transfer_pool_tags\x18\r'
+    b' \x03(\t"\xcd\x01\n\x0cPoolByteSpan\x12\x19\n\x11src_block_ordinal\x18\x01'
+    b' \x01(\x03\x12\x18\n\x10src_offset_bytes\x18\x02'
+    b' \x01(\x03\x12\x17\n\x0f\x64st_block_index\x18\x03'
+    b' \x01(\x03\x12\x18\n\x10\x64st_offset_bytes\x18\x04'
+    b' \x01(\x03\x12\x12\n\nsize_bytes\x18\x05'
+    b' \x01(\x03\x12\x18\n\x10src_stride_bytes\x18\x06'
+    b' \x01(\x03\x12\x18\n\x10\x64st_stride_bytes\x18\x07'
+    b' \x01(\x03\x12\r\n\x05\x63ount\x18\x08'
+    b' \x01(\x05"{\n\x14PoolSpanRegistration\x12\x0b\n\x03tag\x18\x01'
+    b' \x01(\t\x12\x11\n\tblock_ids\x18\x02 \x03(\x03\x12+\n\x05spans\x18\x03'
+    b' \x03(\x0b\x32\x1c.tpu_raiden.rpc.PoolByteSpan\x12\x16\n\x0e\x64\x65\x63lared_bytes\x18\x04'
+    b' \x01(\x03"\xc3\x01\n\x1cRegisterRequestBlocksRequest\x12\x0e\n\x06req_id\x18\x01'
+    b' \x01(\t\x12\x0c\n\x04uuid\x18\x02 \x01(\x03\x12+\n\x04unit\x18\x03'
+    b' \x01(\x0b\x32\x1d.tpu_raiden.rpc.RaidenIdProto\x12\x11\n\tblock_ids\x18\x04'
+    b' \x03(\x03\x12\x38\n\npool_spans\x18\x07'
+    b' \x03(\x0b\x32$.tpu_raiden.rpc.PoolSpanRegistrationJ\x04\x08\x05\x10\x06R\x05spans"J\n\x1bReleaseRequestBlocksRequest\x12\x0e\n\x06req_id\x18\x01'
+    b' \x01(\t\x12\x0c\n\x04uuid\x18\x02 \x01(\x03\x12\r\n\x05\x66orce\x18\x03'
+    b' \x01(\x08"i\n\x1c\x43ompleteRequestBlocksRequest\x12\x0e\n\x06req_id\x18\x01'
+    b' \x01(\t\x12\x0c\n\x04uuid\x18\x02 \x01(\x03\x12+\n\x04unit\x18\x03'
+    b' \x01(\x0b\x32\x1d.tpu_raiden.rpc.RaidenIdProto"E\n%CancelRequestBlocksIfUnclaimedRequest\x12\x0e\n\x06req_id\x18\x01'
+    b' \x01(\t\x12\x0c\n\x04uuid\x18\x02'
+    b' \x01(\x03"8\n\x18GetTransferStatusRequest\x12\x0e\n\x06req_id\x18\x01'
+    b' \x01(\t\x12\x0c\n\x04uuid\x18\x02'
+    b' \x01(\x03"\xd8\x01\n\x19GetTransferStatusResponse\x12@\n\x06status\x18\x01'
+    b' \x01(\x0e\x32\x30.tpu_raiden.rpc.GetTransferStatusResponse.Status"y\n\x06Status\x12\x16\n\x12STATUS_UNSPECIFIED\x10\x00\x12\x16\n\x12STATUS_NOT_STARTED\x10\x01\x12\x16\n\x12STATUS_IN_PROGRESS\x10\x02\x12\x14\n\x10STATUS_COMPLETED\x10\x03\x12\x11\n\rSTATUS_FAILED\x10\x04"\xe1\x06\n\x11\x43ontrollerRequest\x12:\n\x07\x63ommand\x18\x01'
+    b' \x01(\x0e\x32).tpu_raiden.rpc.ControllerRequest.Command\x12N\n\x1b\x63oordinate_transfer_request\x18\x02'
+    b' \x01(\x0b\x32).tpu_raiden.rpc.CoordinateTransferRequest\x12M\n\x1bget_transfer_status_request\x18\x03'
+    b' \x01(\x0b\x32(.tpu_raiden.rpc.GetTransferStatusRequest\x12U\n\x1fregister_request_blocks_request\x18\x08'
+    b' \x01(\x0b\x32,.tpu_raiden.rpc.RegisterRequestBlocksRequest\x12S\n\x1erelease_request_blocks_request\x18\t'
+    b' \x01(\x0b\x32+.tpu_raiden.rpc.ReleaseRequestBlocksRequest\x12U\n\x1f\x63omplete_request_blocks_request\x18\n'
+    b' \x01(\x0b\x32,.tpu_raiden.rpc.CompleteRequestBlocksRequest\x12i\n*cancel_request_blocks_if_unclaimed_request\x18\x0b'
+    b' \x01(\x0b\x32\x35.tpu_raiden.rpc.CancelRequestBlocksIfUnclaimedRequest"\x82\x02\n\x07\x43ommand\x12\x17\n\x13\x43OMMAND_UNSPECIFIED\x10\x00\x12\x1f\n\x1b\x43OMMAND_COORDINATE_TRANSFER\x10\x01\x12\x1f\n\x1b\x43OMMAND_GET_TRANSFER_STATUS\x10\x02\x12#\n\x1f\x43OMMAND_REGISTER_REQUEST_BLOCKS\x10\x03\x12"\n\x1e\x43OMMAND_RELEASE_REQUEST_BLOCKS\x10\x04\x12#\n\x1f\x43OMMAND_COMPLETE_REQUEST_BLOCKS\x10\x05\x12.\n*COMMAND_CANCEL_REQUEST_BLOCKS_IF_UNCLAIMED\x10\x06"\x9e\x01\n\x12\x43ontrollerResponse\x12\x0f\n\x07success\x18\x01'
+    b' \x01(\x08\x12\x0f\n\x07message\x18\x02'
+    b' \x01(\t\x12O\n\x1cget_transfer_status_response\x18\x03'
+    b' \x01(\x0b\x32).tpu_raiden.rpc.GetTransferStatusResponse\x12\x15\n\rresponse_data\x18\x04'
+    b' \x01(\tB\x1a\x42\x16\x43ontrollerServiceProtoP\x01\x62\x06proto3'
+)
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -49,26 +99,28 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._serialized_options = b'B\026ControllerServiceProtoP\001'
   _globals['_COORDINATETRANSFERREQUEST']._serialized_start=97
   _globals['_COORDINATETRANSFERREQUEST']._serialized_end=521
-  _globals['_SOURCESPAN']._serialized_start=523
-  _globals['_SOURCESPAN']._serialized_end=640
-  _globals['_REGISTERREQUESTBLOCKSREQUEST']._serialized_start=643
-  _globals['_REGISTERREQUESTBLOCKSREQUEST']._serialized_end=810
-  _globals['_RELEASEREQUESTBLOCKSREQUEST']._serialized_start=812
-  _globals['_RELEASEREQUESTBLOCKSREQUEST']._serialized_end=886
-  _globals['_COMPLETEREQUESTBLOCKSREQUEST']._serialized_start=888
-  _globals['_COMPLETEREQUESTBLOCKSREQUEST']._serialized_end=993
-  _globals['_CANCELREQUESTBLOCKSIFUNCLAIMEDREQUEST']._serialized_start=995
-  _globals['_CANCELREQUESTBLOCKSIFUNCLAIMEDREQUEST']._serialized_end=1064
-  _globals['_GETTRANSFERSTATUSREQUEST']._serialized_start=1066
-  _globals['_GETTRANSFERSTATUSREQUEST']._serialized_end=1122
-  _globals['_GETTRANSFERSTATUSRESPONSE']._serialized_start=1125
-  _globals['_GETTRANSFERSTATUSRESPONSE']._serialized_end=1341
-  _globals['_GETTRANSFERSTATUSRESPONSE_STATUS']._serialized_start=1220
-  _globals['_GETTRANSFERSTATUSRESPONSE_STATUS']._serialized_end=1341
-  _globals['_CONTROLLERREQUEST']._serialized_start=1344
-  _globals['_CONTROLLERREQUEST']._serialized_end=2209
-  _globals['_CONTROLLERREQUEST_COMMAND']._serialized_start=1951
-  _globals['_CONTROLLERREQUEST_COMMAND']._serialized_end=2209
-  _globals['_CONTROLLERRESPONSE']._serialized_start=2212
-  _globals['_CONTROLLERRESPONSE']._serialized_end=2370
+  _globals['_POOLBYTESPAN']._serialized_start = 524
+  _globals['_POOLBYTESPAN']._serialized_end = 729
+  _globals['_POOLSPANREGISTRATION']._serialized_start = 731
+  _globals['_POOLSPANREGISTRATION']._serialized_end = 854
+  _globals['_REGISTERREQUESTBLOCKSREQUEST']._serialized_start = 857
+  _globals['_REGISTERREQUESTBLOCKSREQUEST']._serialized_end = 1052
+  _globals['_RELEASEREQUESTBLOCKSREQUEST']._serialized_start = 1054
+  _globals['_RELEASEREQUESTBLOCKSREQUEST']._serialized_end = 1128
+  _globals['_COMPLETEREQUESTBLOCKSREQUEST']._serialized_start = 1130
+  _globals['_COMPLETEREQUESTBLOCKSREQUEST']._serialized_end = 1235
+  _globals['_CANCELREQUESTBLOCKSIFUNCLAIMEDREQUEST']._serialized_start = 1237
+  _globals['_CANCELREQUESTBLOCKSIFUNCLAIMEDREQUEST']._serialized_end = 1306
+  _globals['_GETTRANSFERSTATUSREQUEST']._serialized_start = 1308
+  _globals['_GETTRANSFERSTATUSREQUEST']._serialized_end = 1364
+  _globals['_GETTRANSFERSTATUSRESPONSE']._serialized_start = 1367
+  _globals['_GETTRANSFERSTATUSRESPONSE']._serialized_end = 1583
+  _globals['_GETTRANSFERSTATUSRESPONSE_STATUS']._serialized_start = 1462
+  _globals['_GETTRANSFERSTATUSRESPONSE_STATUS']._serialized_end = 1583
+  _globals['_CONTROLLERREQUEST']._serialized_start = 1586
+  _globals['_CONTROLLERREQUEST']._serialized_end = 2451
+  _globals['_CONTROLLERREQUEST_COMMAND']._serialized_start = 2193
+  _globals['_CONTROLLERREQUEST_COMMAND']._serialized_end = 2451
+  _globals['_CONTROLLERRESPONSE']._serialized_start = 2454
+  _globals['_CONTROLLERRESPONSE']._serialized_end = 2612
 # @@protoc_insertion_point(module_scope)
