@@ -78,7 +78,7 @@ cd "${WORKSPACE_DIR}"
 TORCH_TPU_MODULE_PATH="${TORCH_TPU_MODULE_PATH:-../torch_tpu}"
 
 # 0. Set up standalone Bazel environment based on .bazelversion in /tmp
-BAZEL_VERSION="7.7.0"
+BAZEL_VERSION="8.7.0"
 VERSION_FILE="${WORKSPACE_DIR}/.bazelversion"
 if [[ -f "${VERSION_FILE}" ]]; then
   BAZEL_VERSION="$(cat "${VERSION_FILE}" | tr -d '\r\n ')"
