@@ -19,7 +19,7 @@
 
 #include <cstdint>
 
-#include "third_party/gloop/util/intops/strong_int.h"
+#include "gloop/util/intops/strong_int.h"
 
 namespace peregrine::internal {
 

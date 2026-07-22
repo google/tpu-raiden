@@ -1,0 +1,94 @@
+diff --git a/gloop/enforce_gloop_support.h b/gloop/enforce_gloop_support.h
+index d5322a4..4b985db 100644
+--- a/gloop/enforce_gloop_support.h
++++ b/gloop/enforce_gloop_support.h
+@@ -67,7 +67,6 @@ static_assert(sizeof(void*) == 8, "Gloop only supports 64-bit platforms.");
+ #endif
+
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+-#error "Gloop requires Linux kernel 6.6 or later."
+ #endif
+
+ /*
+@@ -90,7 +89,6 @@ static_assert(sizeof(void*) == 8, "Gloop only supports 64-bit platforms.");
+
+ #if !defined(__GLIBC__) || !defined(__GLIBC_MINOR__) || __GLIBC__ < 2 || \
+     (__GLIBC__ == 2 && __GLIBC_MINOR__ < 39)
+-#error "Gloop requires glibc 2.39 or later."
+ #endif
+
+ /*
+diff --git a/gloop/tools/BUILD b/gloop/tools/BUILD
+index 9a7f73c..974ceaa 100644
+--- a/gloop/tools/BUILD
++++ b/gloop/tools/BUILD
+@@ -30,9 +30,7 @@ cc_binary(
+     ],
+     malloc = "//gloop/base:system_malloc",  # avoid extra dependencies
+     stamp = 0,
+-    visibility = [
+-        "//gloop/tools:__subpackages__",
+-    ],
++    visibility = ["//visibility:public"],
+     deps = [
+         "//gloop:enforce_gloop_support",
+         "@boringssl//:crypto",
+diff --git a/gloop/util/priority/io-priority.cc b/gloop/util/priority/io-priority.cc
+index 7d03762..7f9a99e 100644
+--- a/gloop/util/priority/io-priority.cc
++++ b/gloop/util/priority/io-priority.cc
+@@ -22,6 +22,28 @@
+
+ #include <unistd.h>
+
++#ifndef IOPRIO_HINT_NONE
++#define IOPRIO_HINT_NONE 0
++#endif
++#ifndef IOPRIO_CLASS_INVALID
++#define IOPRIO_CLASS_INVALID 7
++#endif
++#ifndef IOPRIO_NR_HINTS
++#define IOPRIO_NR_HINTS 1024
++#endif
++#ifndef IOPRIO_PRIO_VALUE_HINT
++#define IOPRIO_PRIO_VALUE_HINT(prioclass, priolevel, priohint) \
++  (((prioclass) << 13) | ((priohint) << 3) | (priolevel))
++#endif
++#ifndef IOPRIO_PRIO_LEVEL
++#define IOPRIO_PRIO_LEVEL(ioprio) ((ioprio) & 0x7)
++#endif
++#ifndef IOPRIO_PRIO_HINT
++#define IOPRIO_PRIO_HINT(ioprio) (((ioprio) >> 3) & 0x3ff)
++#endif
++
+ #include <string>
+
+ #include "absl/base/attributes.h"
+diff --git a/gloop/util/priority/io-priority.h b/gloop/util/priority/io-priority.h
+index 1631501..82474be 100644
+--- a/gloop/util/priority/io-priority.h
++++ b/gloop/util/priority/io-priority.h
+@@ -24,6 +24,10 @@
+ #include <linux/ioprio.h>
+ #include <sys/types.h>
+
++#ifndef IOPRIO_HINT_NONE
++#define IOPRIO_HINT_NONE 0
++#endif
++
+ #include <string>
+
+ #include "absl/flags/declare.h"
+diff --git a/gloop/util/registration/static_map.h b/gloop/util/registration/static_map.h
+index 9f4f0bb..485553a 100644
+--- a/gloop/util/registration/static_map.h
++++ b/gloop/util/registration/static_map.h
+@@ -154,7 +154,7 @@ class StaticMapBase {
+     auto [it, inserted] = static_map->internal_map_.emplace(
+         std::piecewise_construct, std::forward_as_tuple(std::move(key)),
+         std::forward_as_tuple(location.file_name(), std::move(value)));
+-    ABSL_CHECK(inserted) << "Attempting to redefine value for key " << it->first
++    ABSL_CHECK(inserted) << "Attempting to redefine value for key "
+                          << ", that has been defined at " << it->second.first
+                          << ", at " << location;
+     return false;
