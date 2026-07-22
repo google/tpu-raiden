@@ -53,6 +53,7 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
 #include "tpu_raiden/transport/block_transport.h"
@@ -60,11 +61,6 @@
 namespace tpu_raiden {
 
 class MetricsCollector;
-
-struct EndpointDescriptor {
-  std::string endpoint;
-  std::vector<int64_t> shards;
-};
 
 class TransferFuture {
  public:
@@ -243,13 +239,13 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
                                 uint64_t uuid = 0) override;
 
-  virtual std::vector<EndpointDescriptor> get_local_endpoints() const;
+  virtual std::vector<RaidenTransferEndpoint> get_local_endpoints() const;
 
   static bool EncodeIpToIpv6Bytes(const std::string& ip, uint8_t out[16]);
 
   virtual void StartRead(
       const std::string& req_id, uint64_t uuid,
-      const std::vector<EndpointDescriptor>& remote_descriptors,
+      const std::vector<RaidenTransferEndpoint>& remote_descriptors,
       const std::vector<int64_t>& remote_block_ids,
       const std::vector<int64_t>& local_block_ids, int parallelism = 1,
       std::optional<std::vector<int64_t>> local_host_block_ids = std::nullopt);

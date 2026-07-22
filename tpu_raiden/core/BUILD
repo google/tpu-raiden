@@ -26,6 +26,19 @@ header_only_cc_info(
 )
 
 cc_library(
+    name = "raiden_transfer_endpoint",
+    hdrs = [
+        "raiden_transfer_endpoint.h",
+    ],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "status_macros",
     hdrs = [
         "status_macros.h",
@@ -279,6 +292,7 @@ cc_library(
         ":host_memory_allocator",
         ":metrics_collector",
         ":raiden_manager_base",
+        ":raiden_transfer_endpoint",
         ":raw_transfer_core",
         ":status_macros",
         ":tpu_utils",

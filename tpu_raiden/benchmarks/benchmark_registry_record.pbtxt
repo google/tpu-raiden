@@ -1,4 +1,4 @@
-benchmarks{
+benchmarks {
   name: "h2d_d2h_record"
   description: "Re-measure and emit gating_baselines.json as a workload artifact."
   owner: "raiden-dev"

@@ -64,11 +64,12 @@ class KVCacheStoreWrapper {
                                std::string global_registry_address = "",
                                RaidenId raiden_id = {}, int num_shards = 0,
                                int64_t shard_size_bytes = 0,
-                               int raiden_controller_port = 0,
-                               std::string raiden_orchestrator_address = "") {
+                               std::string raiden_orchestrator_address = "",
+                               std::string raiden_controller_address = "") {
     controller_ = std::make_unique<KVCacheStore>(
         lru_capacity, global_registry_address, std::move(raiden_id), num_shards,
-        shard_size_bytes, raiden_controller_port, raiden_orchestrator_address);
+        shard_size_bytes, raiden_orchestrator_address,
+        raiden_controller_address);
   }
   KVCacheStore* operator->() { return controller_.get(); }
   KVCacheStore& operator*() { return *controller_; }
@@ -271,11 +272,11 @@ NB_MODULE(_tpu_raiden_jax, m) {
                              remote_block_ids, local_block_ids, parallelism,
                              local_host_block_ids);
             } else if (nb::isinstance<nb::list>(remote_endpoint)) {
-              std::vector<tpu_raiden::EndpointDescriptor> descriptors;
+              std::vector<tpu_raiden::RaidenTransferEndpoint> descriptors;
               nb::list ep_list = nb::cast<nb::list>(remote_endpoint);
               for (size_t i = 0; i < ep_list.size(); ++i) {
                 nb::dict d = nb::cast<nb::dict>(ep_list[i]);
-                tpu_raiden::EndpointDescriptor desc;
+                tpu_raiden::RaidenTransferEndpoint desc;
                 desc.endpoint = nb::cast<std::string>(d["endpoint"]);
                 desc.shards = nb::cast<std::vector<int64_t>>(d["shards"]);
                 descriptors.push_back(std::move(desc));
@@ -412,21 +413,21 @@ NB_MODULE(_tpu_raiden_jax, m) {
 
   nb::class_<tpu_raiden::kv_cache::KVCacheStoreWrapper>(m, "KVCacheStore")
       .def(nb::init<size_t, std::string, tpu_raiden::kv_cache::RaidenId, int,
-                    int64_t, int, std::string>(),
+                    int64_t, std::string, std::string>(),
            nb::arg("capacity"), nb::arg("global_registry_address") = "",
            nb::arg("raiden_id") = tpu_raiden::kv_cache::RaidenId(),
            nb::arg("num_shards") = 0, nb::arg("shard_size_bytes") = 0,
-           nb::arg("raiden_controller_port") = 0,
-           nb::arg("raiden_orchestrator_address") = "")
+           nb::arg("raiden_orchestrator_address") = "",
+           nb::arg("raiden_controller_address") = "")
       .def_prop_ro(
           "raiden_id",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
             return (*self).raiden_id();
           },
           "Returns the RaidenId associated with this store.")
-      .def_prop_ro("raiden_controller_port",
+      .def_prop_ro("raiden_controller_address",
                    [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
-                     return self->raiden_controller_port();
+                     return self->raiden_controller_address();
                    })
       .def(
           "lookup",

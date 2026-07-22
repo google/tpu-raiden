@@ -28,6 +28,7 @@
 #include "xla/tsl/platform/test.h"
 // clang-format off
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/frameworks/jax/kv_cache_manager.h"
 #include "tpu_raiden/core/controller/controller_service.h"
@@ -216,7 +217,7 @@ TEST(KVCacheManagerWrapperTest,
   // Local sub0 holds shards [4, 5, 6, 7], sub1 holds [0, 1, 2, 3]
   mgr.SetSubmanagerShardsForTesting({{4, 5, 6, 7}, {0, 1, 2, 3}});
 
-  std::vector<EndpointDescriptor> remote_descs = {
+  std::vector<RaidenTransferEndpoint> remote_descs = {
       {"10.0.0.1:45000", {0, 1, 2, 3}}, {"10.0.0.2:45000", {4, 5, 6, 7}}};
 
   std::vector<int64_t> remote_blocks = {10, 20};
@@ -247,10 +248,11 @@ TEST(KVCacheManagerWrapperTest, StartReadUnifiedMultiEndpointMultiSubManager) {
   // Local sub0 holds shards [0, 1], sub1 holds [2, 3]
   mgr.SetSubmanagerShardsForTesting({{0, 1}, {2, 3}});
 
-  std::vector<EndpointDescriptor> remote_descs = {{"10.0.0.1:45000", {0, 1}},
-                                                  {"10.0.0.2:45000", {0, 1}},
-                                                  {"10.0.0.3:45000", {2, 3}},
-                                                  {"10.0.0.4:45000", {2, 3}}};
+  std::vector<RaidenTransferEndpoint> remote_descs = {
+      {"10.0.0.1:45000", {0, 1}},
+      {"10.0.0.2:45000", {0, 1}},
+      {"10.0.0.3:45000", {2, 3}},
+      {"10.0.0.4:45000", {2, 3}}};
 
   std::vector<int64_t> remote_blocks = {10, 20, 30, 40, 50};
   std::vector<int64_t> local_blocks = {100, 200, 300, 400, 500};
@@ -302,7 +304,7 @@ TEST(KVCacheManagerWrapperTest, StartReadInputVectorValidation) {
 
   KVCacheManager mgr(std::move(subs));
 
-  std::vector<EndpointDescriptor> remote_descs = {{"10.0.0.1:45000", {0}}};
+  std::vector<RaidenTransferEndpoint> remote_descs = {{"10.0.0.1:45000", {0}}};
   std::vector<int64_t> remote_blocks = {10, 20};
   std::vector<int64_t> local_blocks = {100};  // Size mismatch!
 
@@ -357,11 +359,15 @@ TEST(KVCacheManagerWrapperTest, RaidenControllerTransferBuffersIntegration) {
   std::vector<int64_t> dst_offsets = {20, 40};
   std::vector<int64_t> copy_sizes = {1, 2};
 
-  auto status_d2h = controller.TransferBuffers(
-                                "worker_0", rpc::MEMORY_TYPE_HBM,
-                                rpc::MEMORY_TYPE_DRAM, src_offsets,
-                                dst_offsets, copy_sizes)
-                            .Await();
+  Buffer src_d2h_1(10, {}, std::nullopt, rpc::MEMORY_TYPE_HBM);
+  Buffer src_d2h_2(30, {}, std::nullopt, rpc::MEMORY_TYPE_HBM);
+  Buffer dst_d2h_1(20, {}, std::nullopt, rpc::MEMORY_TYPE_DRAM);
+  Buffer dst_d2h_2(40, {}, std::nullopt, rpc::MEMORY_TYPE_DRAM);
+
+  auto status_d2h = controller
+                        .TransferBuffers("worker_0", {src_d2h_1, src_d2h_2},
+                                         {dst_d2h_1, dst_d2h_2}, copy_sizes)
+                        .Await();
   ASSERT_TRUE(status_d2h.ok());
   EXPECT_EQ(ptr0->d2h_calls, 1);
   EXPECT_EQ(ptr0->h2d_calls, 0);
@@ -369,11 +375,15 @@ TEST(KVCacheManagerWrapperTest, RaidenControllerTransferBuffersIntegration) {
   EXPECT_EQ(ptr0->last_d2h_dst_offsets, dst_offsets);
   EXPECT_EQ(ptr0->last_d2h_copy_sizes, copy_sizes);
 
-  auto status_h2d = controller.TransferBuffers(
-                                "worker_0", rpc::MEMORY_TYPE_DRAM,
-                                rpc::MEMORY_TYPE_HBM, src_offsets,
-                                dst_offsets, copy_sizes)
-                            .Await();
+  Buffer src_h2d_1(10, {}, std::nullopt, rpc::MEMORY_TYPE_DRAM);
+  Buffer src_h2d_2(30, {}, std::nullopt, rpc::MEMORY_TYPE_DRAM);
+  Buffer dst_h2d_1(20, {}, std::nullopt, rpc::MEMORY_TYPE_HBM);
+  Buffer dst_h2d_2(40, {}, std::nullopt, rpc::MEMORY_TYPE_HBM);
+
+  auto status_h2d = controller
+                        .TransferBuffers("worker_0", {src_h2d_1, src_h2d_2},
+                                         {dst_h2d_1, dst_h2d_2}, copy_sizes)
+                        .Await();
   ASSERT_TRUE(status_h2d.ok());
   EXPECT_EQ(ptr0->d2h_calls, 1);
   EXPECT_EQ(ptr0->h2d_calls, 1);
@@ -399,9 +409,9 @@ TEST(KVCacheManagerWrapperTest, WorkerSelfRegistrationWithControllerSuccess) {
       test_server->service->worker_registry()->GetRegisteredWorkers();
   ASSERT_EQ(workers.size(), 1);
   EXPECT_EQ(workers[0].worker_id, "test_worker_node");
-  EXPECT_NE(
-      workers[0].raiden_worker_endpoint.find(std::to_string(mgr.GetRaidenWorkerPort())),
-      std::string::npos);
+  EXPECT_NE(workers[0].raiden_worker_endpoint.find(
+                std::to_string(mgr.GetRaidenWorkerPort())),
+            std::string::npos);
 }
 
 }  // namespace

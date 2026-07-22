@@ -66,8 +66,8 @@ class RaidenController {
   // normally.
   RaidenController(const rpc::RaidenIdProto& unit, int num_blocks,
                    int num_shards, int64_t shard_size_bytes,
-                   int raiden_controller_port = 0,
-                   absl::string_view raiden_orchestrator_address = "");
+                   absl::string_view raiden_orchestrator_address = "",
+                   absl::string_view raiden_controller_address = "");
 
   // Constructs a RaidenController for multiple worker addresses.
   // It will also start the ControllerServer to allow dynamic registrations
@@ -75,8 +75,8 @@ class RaidenController {
   RaidenController(const rpc::RaidenIdProto& unit,
                    absl::Span<const std::string> worker_addresses,
                    int num_blocks, int num_shards, int64_t shard_size_bytes,
-                   int raiden_controller_port = 0,
-                   absl::string_view raiden_orchestrator_address = "");
+                   absl::string_view raiden_orchestrator_address = "",
+                   absl::string_view raiden_controller_address = "");
   // Destructor automatically calls DeleteBuffers to clean up all pre-created
   // buffers on the registered workers.
   ~RaidenController();
@@ -127,8 +127,6 @@ class RaidenController {
                                 absl::Span<const Buffer> dst_buffers,
                                 absl::Span<const int64_t> copy_sizes = {});
 
-
-
   // Initiates remote read from source controller.
   tsl::Future<> ReadRemote(const kv_cache::RaidenId& src_raiden_id,
                            const std::vector<int32_t>& src_host_block_ids,
@@ -150,10 +148,10 @@ class RaidenController {
 
   int num_shards() const { return num_shards_; }
   int64_t shard_size_bytes() const { return shard_size_bytes_; }
+  std::string controller_address() const { return raiden_controller_address_; }
   const std::vector<proto::BufferProto>& all_sharded_buffers() const {
     return all_sharded_buffers_;
   }
-  int raiden_controller_port() const { return raiden_controller_port_; }
 
  private:
   absl::StatusOr<proto::TransferBuffersRequest> BuildTransferBuffersRequest(
@@ -161,9 +159,9 @@ class RaidenController {
       absl::Span<const Buffer> dst_buffers,
       absl::Span<const int64_t> copy_sizes);
 
-
   void Init(absl::Span<const std::string> worker_addresses,
-            absl::string_view raiden_orchestrator_address);
+            absl::string_view raiden_orchestrator_address,
+            absl::string_view raiden_controller_address);
 
   absl::Status InitializeWorkerBuffers(
       core::controller::WorkerRegistration& reg);
@@ -177,8 +175,8 @@ class RaidenController {
   mutable absl::Mutex mutex_;
   std::unique_ptr<kv_cache::LogicalBlockManager> block_manager_
       ABSL_GUARDED_BY(mutex_);
+  std::string raiden_controller_address_;
 
-  int raiden_controller_port_;
   std::unique_ptr<core::controller::ControllerServer>
       private_controller_server_;
   std::unique_ptr<OrchestratorServiceClient> orchestrator_client_;

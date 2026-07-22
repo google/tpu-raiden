@@ -25,6 +25,7 @@
 #include "absl/status/status.h"
 #include "tpu_raiden/core/controller/controller_client.h"
 #include "tpu_raiden/core/controller/test_util.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 
 namespace tpu_raiden {
 namespace core {
@@ -43,7 +44,8 @@ class RaidenControllerTest : public ::testing::Test {
 TEST_F(RaidenControllerTest, RegisterWorkerSuccessfully) {
   std::string transfer_addr = "10.0.0.1:8000";
   absl::Status status = test_server_->client->RegisterWorker(
-      "worker_0", "10.0.0.1:9000", transfer_addr);
+      "worker_0", "10.0.0.1:9000",
+      {::tpu_raiden::RaidenTransferEndpoint{transfer_addr, {}}});
   EXPECT_OK(status);
 
   auto workers =
@@ -51,13 +53,15 @@ TEST_F(RaidenControllerTest, RegisterWorkerSuccessfully) {
   ASSERT_EQ(workers.size(), 1);
   EXPECT_EQ(workers[0].worker_id, "worker_0");
   EXPECT_EQ(workers[0].raiden_worker_endpoint, "10.0.0.1:9000");
-  EXPECT_EQ(workers[0].raiden_transfer_endpoint, transfer_addr);
+  ASSERT_EQ(workers[0].raiden_transfer_endpoints.size(), 1);
+  EXPECT_EQ(workers[0].raiden_transfer_endpoints[0].endpoint, transfer_addr);
 }
 
 TEST_F(RaidenControllerTest, RegisterWorkerAliasSnakeCase) {
   std::string transfer_addr = "10.0.0.2:8000";
   absl::Status status = test_server_->client->register_worker(
-      "worker_1", "10.0.0.2:9000", transfer_addr);
+      "worker_1", "10.0.0.2:9000",
+      {::tpu_raiden::RaidenTransferEndpoint{transfer_addr, {}}});
   EXPECT_OK(status);
 
   auto worker_or =
@@ -65,13 +69,15 @@ TEST_F(RaidenControllerTest, RegisterWorkerAliasSnakeCase) {
   ASSERT_OK(worker_or);
   EXPECT_EQ(worker_or->worker_id, "worker_1");
   EXPECT_EQ(worker_or->raiden_worker_endpoint, "10.0.0.2:9000");
-  EXPECT_EQ(worker_or->raiden_transfer_endpoint, transfer_addr);
+  ASSERT_EQ(worker_or->raiden_transfer_endpoints.size(), 1);
+  EXPECT_EQ(worker_or->raiden_transfer_endpoints[0].endpoint, transfer_addr);
 }
 
 TEST_F(RaidenControllerTest, ConstructWithEndpointString) {
   RaidenControllerClient client(test_server_->server_address);
-  absl::Status status = client.RegisterWorker("worker_endpoint_ctor",
-                                              "10.0.0.1:9000", "10.0.0.1:8000");
+  absl::Status status = client.RegisterWorker(
+      "worker_endpoint_ctor", "10.0.0.1:9000",
+      {::tpu_raiden::RaidenTransferEndpoint{"10.0.0.1:8000", {}}});
   EXPECT_OK(status);
 
   auto workers =
@@ -81,15 +87,16 @@ TEST_F(RaidenControllerTest, ConstructWithEndpointString) {
 }
 
 TEST_F(RaidenControllerTest, RegisterWorkerEmptyIdFails) {
-  absl::Status status =
-      test_server_->client->RegisterWorker("", "10.0.0.1:9000", "10.0.0.1:8000");
+  absl::Status status = test_server_->client->RegisterWorker(
+      "", "10.0.0.1:9000",
+      {::tpu_raiden::RaidenTransferEndpoint{"10.0.0.1:8000", {}}});
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.code(), absl::StatusCode::kFailedPrecondition);
 }
 
 TEST_F(RaidenControllerTest, RegisterWorkerNoAddressesFails) {
-  absl::Status status = test_server_->client->RegisterWorker("worker_no_addrs",
-                                                              "", "");
+  absl::Status status =
+      test_server_->client->RegisterWorker("worker_no_addrs", "", {});
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.code(), absl::StatusCode::kFailedPrecondition);
 }

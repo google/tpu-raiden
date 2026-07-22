@@ -25,13 +25,18 @@ service RaidenControllerService {
   rpc ReadRemote(ReadRemoteRequest) returns (ReadRemoteResponse) {  }
 }
 
+message RaidenTransferEndpointProto {
+  string endpoint = 1;
+  repeated int64 shards = 2;
+}
+
 message RegisterWorkerRequest {
   // Unique identifier for the worker (e.g., job_name/replica_id or uuid).
   string worker_id = 1;
   // Control-plane RPC address of the worker (e.g., "ip:port" or BNS).
   string raiden_worker_endpoint = 2;
   // Data-plane socket addresses/endpoints owned by this worker.
-  string raiden_transfer_endpoint = 3;
+  repeated RaidenTransferEndpointProto raiden_transfer_endpoints = 3;
 }
 
 message RegisterWorkerResponse {
@@ -44,7 +49,7 @@ message ReadRemoteRequest {
   repeated int32 dest_host_block_ids = 2;
   // The transfer endpoints of the destination workers.
   // This list must be sorted by destination worker_id ascending.
-  repeated string dest_worker_endpoints = 3;
+  repeated RaidenTransferEndpointProto dest_raiden_transfer_endpoints = 3;
 }
 
 message ReadRemoteResponse {}

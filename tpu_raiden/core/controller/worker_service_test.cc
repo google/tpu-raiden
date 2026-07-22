@@ -156,7 +156,8 @@ TEST_F(WorkerServiceTest, TransferBuffersH2hMissingPeerFails) {
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
   EXPECT_FALSE(status.ok());
-  EXPECT_THAT(status.message(), HasSubstr("Peer address must be provided"));
+  EXPECT_THAT(status.message(),
+              HasSubstr("Peer address must be provided for H2H transfers"));
 }
 
 TEST_F(WorkerServiceTest, TransferBuffersH2hInvalidCopySizeFails) {

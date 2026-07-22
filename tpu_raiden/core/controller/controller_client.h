@@ -24,6 +24,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "grpcpp/channel.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/proto/controller_service.grpc.pb.h"
 #include "tpu_raiden/proto/controller_service.pb.h"
 
@@ -37,16 +38,18 @@ class RaidenControllerClient {
   explicit RaidenControllerClient(absl::string_view endpoint);
 
   // Registers a worker with the controller.
-  absl::Status RegisterWorker(absl::string_view worker_id,
-                              absl::string_view raiden_worker_endpoint,
-                              absl::string_view raiden_transfer_endpoint);
+  absl::Status RegisterWorker(
+      absl::string_view worker_id, absl::string_view raiden_worker_endpoint,
+      const std::vector<::tpu_raiden::RaidenTransferEndpoint>&
+          raiden_transfer_endpoints);
 
   // Alias for snake_case callers.
-  absl::Status register_worker(absl::string_view worker_id,
-                               absl::string_view raiden_worker_endpoint,
-                               absl::string_view raiden_transfer_endpoint) {
+  absl::Status register_worker(
+      absl::string_view worker_id, absl::string_view raiden_worker_endpoint,
+      const std::vector<::tpu_raiden::RaidenTransferEndpoint>&
+          raiden_transfer_endpoints) {
     return RegisterWorker(worker_id, raiden_worker_endpoint,
-                          raiden_transfer_endpoint);
+                          raiden_transfer_endpoints);
   }
 
  private:

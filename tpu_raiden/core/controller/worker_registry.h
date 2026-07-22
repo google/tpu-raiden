@@ -21,12 +21,13 @@
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/functional/any_invocable.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
-#include "absl/functional/any_invocable.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
 
 namespace tpu_raiden {
@@ -36,7 +37,7 @@ namespace controller {
 struct WorkerRegistration {
   std::string worker_id;
   std::string raiden_worker_endpoint;
-  std::string raiden_transfer_endpoint;
+  std::vector<::tpu_raiden::RaidenTransferEndpoint> raiden_transfer_endpoints;
   std::shared_ptr<::tpu_raiden::controller::WorkerServiceClient>
       worker_service_client;
   std::vector<::tpu_raiden::proto::BufferProto> buffers;
@@ -61,9 +62,10 @@ class WorkerRegistry {
 
   // Registers or updates a worker registration.
   absl::Status RegisterWorker(const WorkerRegistration& reg);
-  absl::Status RegisterWorker(absl::string_view worker_id,
-                              absl::string_view raiden_worker_endpoint,
-                              absl::string_view raiden_transfer_endpoint);
+  absl::Status RegisterWorker(
+      absl::string_view worker_id, absl::string_view raiden_worker_endpoint,
+      const std::vector<::tpu_raiden::RaidenTransferEndpoint>&
+          raiden_transfer_endpoints);
 
   // Retrieves all registered workers.
   std::vector<WorkerRegistration> GetRegisteredWorkers() const;

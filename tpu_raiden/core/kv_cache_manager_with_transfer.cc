@@ -81,6 +81,7 @@
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/metrics_collector.h"
 #include "tpu_raiden/core/raiden_manager_base.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
@@ -672,7 +673,8 @@ absl::Status KVCacheManagerWithTransfer::RegisterActivePlan(
     absl::flat_hash_set<int> unique_dst_blocks;
     for (const auto& [src_replica_idx, schedule] :
          request.shard_push_schedules()) {
-      absl::flat_hash_set<std::pair<int, int>> unique_transfers_from_this_source;
+      absl::flat_hash_set<std::pair<int, int>>
+          unique_transfers_from_this_source;
       for (const auto& push_entry : schedule.entries()) {
         recv_entry.host_to_chip[push_entry.dst_block_id()] =
             push_entry.dst_block_id();
@@ -1134,7 +1136,7 @@ absl::Status KVCacheManagerWithTransfer::PoolReshardRegisterRecv(
   return absl::OkStatus();
 }
 
-std::vector<EndpointDescriptor>
+std::vector<RaidenTransferEndpoint>
 KVCacheManagerWithTransfer::get_local_endpoints() const {
   std::vector<int64_t> all_shards(num_shards_);
   for (size_t i = 0; i < num_shards_; ++i) {
@@ -1142,7 +1144,7 @@ KVCacheManagerWithTransfer::get_local_endpoints() const {
   }
   int64_t port =
       local_control_port_ > 0 ? local_control_port_ : local_port().value_or(0);
-  std::vector<EndpointDescriptor> eps;
+  std::vector<RaidenTransferEndpoint> eps;
   for (const auto& ip : local_ips()) {
     std::string endpoint = absl::StrContains(ip, ':')
                                ? absl::StrCat("[", ip, "]:", port)
@@ -1181,7 +1183,7 @@ void KVCacheManagerWithTransfer::StartRead(
 
 void KVCacheManagerWithTransfer::StartRead(
     const std::string& req_id, uint64_t uuid,
-    const std::vector<EndpointDescriptor>& remote_descriptors,
+    const std::vector<RaidenTransferEndpoint>& remote_descriptors,
     const std::vector<int64_t>& remote_block_ids,
     const std::vector<int64_t>& local_block_ids, int parallelism,
     std::optional<std::vector<int64_t>> local_host_block_ids) {

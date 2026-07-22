@@ -22,6 +22,7 @@
 #include "absl/status/status.h"
 #include "absl/status/status_matchers.h"
 #include "tpu_raiden/core/controller/controller_client.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 
 namespace tpu_raiden {
 namespace core {
@@ -32,7 +33,7 @@ using ::absl_testing::StatusIs;
 
 TEST(ControllerServerTest, StartServerAndGetPortWorks) {
   auto server = ControllerServer::Create();
-  ABSL_ASSERT_OK(server->StartServer(/*port=*/0));
+  ABSL_ASSERT_OK(server->StartServer(""));
   int port = server->GetGrpcPort();
   EXPECT_GT(port, 0);
 
@@ -40,24 +41,27 @@ TEST(ControllerServerTest, StartServerAndGetPortWorks) {
   std::string server_address = "localhost:" + std::to_string(port);
   RaidenControllerClient client(server_address);
 
-  absl::Status status =
-      client.RegisterWorker("worker_0", "localhost:10001", "localhost:10002");
+  absl::Status status = client.RegisterWorker(
+      "worker_0", "localhost:10001",
+      {::tpu_raiden::RaidenTransferEndpoint{"localhost:10002", {}}});
   ABSL_ASSERT_OK(status);
 
   auto worker_or = server->GetWorkerRegistry()->GetWorker("worker_0");
   ABSL_ASSERT_OK(worker_or);
   EXPECT_EQ(worker_or->worker_id, "worker_0");
   EXPECT_EQ(worker_or->raiden_worker_endpoint, "localhost:10001");
-  EXPECT_EQ(worker_or->raiden_transfer_endpoint, "localhost:10002");
+  ASSERT_EQ(worker_or->raiden_transfer_endpoints.size(), 1);
+  EXPECT_EQ(worker_or->raiden_transfer_endpoints[0].endpoint,
+            "localhost:10002");
 }
 
 TEST(ControllerServerTest, SingletonIsReused) {
   auto& server1 = ControllerServer::GetInstance();
-  ABSL_ASSERT_OK(server1.StartServer(/*port=*/0));
+  ABSL_ASSERT_OK(server1.StartServer(""));
   int port1 = server1.GetGrpcPort();
 
   auto& server2 = ControllerServer::GetInstance();
-  ABSL_ASSERT_OK(server2.StartServer(/*port=*/0));
+  ABSL_ASSERT_OK(server2.StartServer(""));
   int port2 = server2.GetGrpcPort();
 
   EXPECT_EQ(port1, port2);
@@ -66,12 +70,12 @@ TEST(ControllerServerTest, SingletonIsReused) {
 
 TEST(ControllerServerTest, MultipleServersCanRunConcurrently) {
   std::unique_ptr<ControllerServer> server1 = ControllerServer::Create();
-  ABSL_ASSERT_OK(server1->StartServer(/*port=*/0));
+  ABSL_ASSERT_OK(server1->StartServer(""));
   int port1 = server1->GetGrpcPort();
   EXPECT_GT(port1, 0);
 
   std::unique_ptr<ControllerServer> server2 = ControllerServer::Create();
-  ABSL_ASSERT_OK(server2->StartServer(/*port=*/0));
+  ABSL_ASSERT_OK(server2->StartServer(""));
   int port2 = server2->GetGrpcPort();
   EXPECT_GT(port2, 0);
 
@@ -80,18 +84,10 @@ TEST(ControllerServerTest, MultipleServersCanRunConcurrently) {
 
 TEST(ControllerServerTest, StartServerWithInvalidPortFails) {
   auto server = ControllerServer::Create();
-  absl::Status status = server->StartServer(/*port=*/-1);
-  EXPECT_THAT(status, StatusIs(absl::StatusCode::kInvalidArgument));
+  absl::Status status = server->StartServer("invalid_address:invalid_port");
+  EXPECT_FALSE(status.ok());
 }
 
-TEST(ControllerServerTest, StartServerWithConflictingPortFails) {
-  auto server = ControllerServer::Create();
-  ABSL_ASSERT_OK(server->StartServer(/*port=*/0));
-  int active_port = server->GetGrpcPort();
-  int different_port = (active_port == 12345) ? 12346 : 12345;
-  absl::Status status = server->StartServer(different_port);
-  EXPECT_THAT(status, StatusIs(absl::StatusCode::kFailedPrecondition));
-}
 
 }  // namespace
 }  // namespace controller

@@ -55,8 +55,9 @@ namespace kv_cache {
 KVCacheStore::KVCacheStore(size_t capacity,
                            absl::string_view global_registry_address,
                            RaidenId raiden_id, int num_shards,
-                           int64_t shard_size_bytes, int raiden_controller_port,
-                           absl::string_view raiden_orchestrator_address)
+                           int64_t shard_size_bytes,
+                           absl::string_view raiden_orchestrator_address,
+                           absl::string_view raiden_controller_address)
     : lru_cache_(capacity),
       raiden_id_(std::move(raiden_id)),
       write_through_pool_(std::make_unique<::tpu_raiden::NumaThreadPool>(4)) {
@@ -76,7 +77,7 @@ KVCacheStore::KVCacheStore(size_t capacity,
     raiden_controller_ =
         std::make_unique<::tpu_raiden::controller::RaidenController>(
             unit_proto, capacity, num_shards, shard_size_bytes,
-            raiden_controller_port, raiden_orchestrator_address);
+            raiden_orchestrator_address, raiden_controller_address);
   }
   if (raiden_controller_) {
     poller_thread_ =
@@ -646,6 +647,13 @@ size_t KVCacheStore::capacity() const {
   return lru_cache_.capacity();
 }
 
+std::string KVCacheStore::raiden_controller_address() const {
+  if (raiden_controller_) {
+    return raiden_controller_->controller_address();
+  }
+  return "";
+}
+
 std::tuple<std::vector<std::string>, std::vector<std::string>,
            std::vector<std::string>>
 KVCacheStore::PollSaveStatus() {
@@ -1040,13 +1048,6 @@ size_t KVCacheStore::Evict(const std::vector<std::string>& block_hashes) {
   DeallocateBlockIds(host_ids_to_deallocate);
 
   return host_ids_to_deallocate.size();
-}
-
-int KVCacheStore::raiden_controller_port() const {
-  if (raiden_controller_) {
-    return raiden_controller_->raiden_controller_port();
-  }
-  return 0;
 }
 
 std::vector<std::string> KVCacheStore::GetSortedHashes(

@@ -46,6 +46,7 @@
 #include "tpu_raiden/core/kv_cache_manager_with_transfer.h"
 #include "tpu_raiden/core/kv_manager_holder.h"
 #include "tpu_raiden/core/metrics_collector.h"  // IWYU pragma: keep
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
@@ -334,13 +335,20 @@ void NumaAwareKVCacheManager::InitSubManagers(
         host_alloc = LocalCreateHostMemoryAllocator(client);
       }
 
+      // Bind sub-managers on CONSECUTIVE data-plane ports so a peer can address
+      // every sub-manager from a single advertised base ("ip:base_port" +
+      // sub_idx). This must hold even for an ephemeral base (local_port ==
+      // nullopt/0): once sub-manager 0 binds a kernel-assigned base P (captured
+      // into bound_base_port below), the rest must bind P+1, P+2, ...
+      // explicitly — otherwise each gets a random ephemeral port and the
+      // sender's base+idx assumption fails with "connection refused"
+      // (multi-NUMA read_remote).
+      // TOOD(jcgu): we will remove the sender's assumption soon.
       std::optional<int> sub_port = local_port;
-      if (sub_port.has_value()) {
-        if (bound_base_port.has_value()) {
-          sub_port = *bound_base_port + sub_idx;
-        } else if (*sub_port > 0) {
-          sub_port = *sub_port + sub_idx;
-        }
+      if (bound_base_port.has_value()) {
+        sub_port = *bound_base_port + sub_idx;
+      } else if (sub_port.has_value() && *sub_port > 0) {
+        sub_port = *sub_port + sub_idx;
       }
       int64_t sub_ctrl_port = local_control_port > 0
                                   ? local_control_port + sub_idx
@@ -428,9 +436,9 @@ int64_t NumaAwareKVCacheManager::NotifyForRead(
   return res;
 }
 
-std::vector<EndpointDescriptor> NumaAwareKVCacheManager::get_local_endpoints()
-    const {
-  std::vector<EndpointDescriptor> res;
+std::vector<RaidenTransferEndpoint>
+NumaAwareKVCacheManager::get_local_endpoints() const {
+  std::vector<RaidenTransferEndpoint> res;
   for (size_t s = 0; s < sub_managers_.size(); ++s) {
     auto sub_eps = sub_managers_[s]->get_local_endpoints();
     if (!sub_eps.empty()) {
@@ -448,7 +456,7 @@ std::vector<EndpointDescriptor> NumaAwareKVCacheManager::get_local_endpoints()
 
 void NumaAwareKVCacheManager::StartRead(
     const std::string& req_id, uint64_t uuid,
-    const std::vector<EndpointDescriptor>& remote_descriptors,
+    const std::vector<RaidenTransferEndpoint>& remote_descriptors,
     const std::vector<int64_t>& remote_block_ids,
     const std::vector<int64_t>& local_block_ids, int parallelism,
     std::optional<std::vector<int64_t>> local_host_block_ids) {
@@ -467,7 +475,7 @@ void NumaAwareKVCacheManager::StartRead(
                         submanager_to_global_shards_[s].end());
     }
 
-    std::vector<EndpointDescriptor> matched_descs;
+    std::vector<RaidenTransferEndpoint> matched_descs;
     for (const auto& desc : remote_descriptors) {
       bool match = false;
       for (int64_t rsh : desc.shards) {
@@ -703,7 +711,7 @@ NumaAwareKVCacheManager::H2hRead(std::string peer,
 
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
 NumaAwareKVCacheManager::H2hWrite(
-    const std::vector<EndpointDescriptor>& remote_descriptors,
+    const std::vector<RaidenTransferEndpoint>& remote_descriptors,
     const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, uint64_t uuid, int layer_idx) {
   if (sub_managers_.empty()) {
@@ -747,7 +755,7 @@ NumaAwareKVCacheManager::H2hWrite(
 
 absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
 NumaAwareKVCacheManager::H2hRead(
-    const std::vector<EndpointDescriptor>& remote_descriptors,
+    const std::vector<RaidenTransferEndpoint>& remote_descriptors,
     const std::vector<int>& src_block_ids) {
   if (sub_managers_.empty()) {
     return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
@@ -907,22 +915,23 @@ void KVCacheManager::StartGrpcServer(
       worker_endpoint = absl::StrCat(worker_ip, ":", bound_port);
     }
 
-    std::string transfer_endpoint = "";
     auto local_eps = numa_manager_->get_local_endpoints();
-    if (!local_eps.empty()) {
-      transfer_endpoint = local_eps[0].endpoint;
+    std::string transfer_endpoints_log = "";
+    for (size_t i = 0; i < local_eps.size(); ++i) {
+      if (i > 0) absl::StrAppend(&transfer_endpoints_log, ", ");
+      absl::StrAppend(&transfer_endpoints_log, local_eps[i].endpoint);
     }
 
     core::controller::RaidenControllerClient client(*raiden_controller_address);
-    status = client.RegisterWorker(w_id, worker_endpoint, transfer_endpoint);
+    status = client.RegisterWorker(w_id, worker_endpoint, local_eps);
     if (!status.ok()) {
       LOG(ERROR) << "Failed to register worker with controller: "
                  << status.message();
     } else {
       LOG(INFO) << "Successfully registered worker " << w_id
                 << " (worker_endpoint=" << worker_endpoint
-                << ", transfer_endpoint=" << transfer_endpoint
-                << ") with controller at " << *raiden_controller_address;
+                << ", transfer_endpoints=[" << transfer_endpoints_log
+                << "]) with controller at " << *raiden_controller_address;
     }
   }
 }

@@ -253,6 +253,7 @@ cc_library(
         ":raiden_id",
         "//tpu_raiden/core:buffer",
         "//tpu_raiden/core:numa_thread_pool",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core/controller:raiden_controller",
         "//tpu_raiden/kv_cache/global_registry:global_registry_client_cc",

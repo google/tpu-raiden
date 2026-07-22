@@ -46,6 +46,7 @@
 #include "tpu_raiden/core/controller/orchestrator_service_client.h"
 #include "tpu_raiden/core/controller/worker_registry.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
 #include "tpu_raiden/kv_cache/raiden_id.h"
@@ -85,21 +86,20 @@ absl::StatusOr<proto::CreateBuffersResponse> CreateBuffersForWorker(
     absl::string_view worker_id, int num_blocks) {
   auto resp_or = client.CreateBuffers(request).Await();
   if (!resp_or.ok()) {
-    return absl::Status(resp_or.status().code(),
-                        absl::StrCat("Failed to create buffers on worker ",
-                                     worker_id, ": ",
-                                     resp_or.status().message()));
+    return absl::Status(
+        resp_or.status().code(),
+        absl::StrCat("Failed to create buffers on worker ", worker_id, ": ",
+                     resp_or.status().message()));
   }
   if (!resp_or->success()) {
     return absl::FailedPreconditionError(
-        absl::StrCat("WorkerService CreateBuffers failed on worker ",
-                     worker_id, ": ", resp_or->message()));
+        absl::StrCat("WorkerService CreateBuffers failed on worker ", worker_id,
+                     ": ", resp_or->message()));
   }
   if (resp_or->buffers_size() != num_blocks) {
-    return absl::FailedPreconditionError(
-        absl::StrCat("WorkerService returned unexpected number of buffers on ",
-                     worker_id, ": ", resp_or->buffers_size(),
-                     " vs expected ", num_blocks));
+    return absl::FailedPreconditionError(absl::StrCat(
+        "WorkerService returned unexpected number of buffers on ", worker_id,
+        ": ", resp_or->buffers_size(), " vs expected ", num_blocks));
   }
   return *resp_or;
 }
@@ -107,7 +107,8 @@ absl::StatusOr<proto::CreateBuffersResponse> CreateBuffersForWorker(
 }  // namespace
 
 void RaidenController::Init(absl::Span<const std::string> worker_addresses,
-                            absl::string_view raiden_orchestrator_address) {
+                            absl::string_view raiden_orchestrator_address,
+                            absl::string_view raiden_controller_address) {
   // 1. Set callback on registry
   worker_registry_->SetOnRegisterCallback(
       [this](core::controller::WorkerRegistration& reg) {
@@ -129,12 +130,12 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
   if (use_private_server) {
     private_controller_server_ = core::controller::ControllerServer::Create();
     server_status = private_controller_server_->StartServer(
-        worker_registry_, raiden_controller_port_);
+        worker_registry_, raiden_controller_address);
     server_ptr = private_controller_server_.get();
   } else {
     auto& server = core::controller::ControllerServer::GetInstance();
     server_status =
-        server.StartServer(worker_registry_, raiden_controller_port_);
+        server.StartServer(worker_registry_, raiden_controller_address);
     server_ptr = &server;
   }
 
@@ -142,15 +143,30 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
     LOG(WARNING) << "Failed to start ControllerServer in RaidenController: "
                  << server_status.message();
   }
-  // Store the actual port the server bound to
-  raiden_controller_port_ = server_ptr->GetGrpcPort();
+
+  int actual_port = server_ptr->GetGrpcPort();
+  if (raiden_controller_address.empty()) {
+    raiden_controller_address_ = absl::StrCat("[::]:", actual_port);
+  } else {
+    absl::string_view host = raiden_controller_address;
+    size_t closing_bracket = host.rfind(']');
+    if (closing_bracket != absl::string_view::npos) {
+      host = host.substr(0, closing_bracket + 1);
+    } else {
+      size_t colon_pos = host.rfind(':');
+      if (colon_pos != absl::string_view::npos) {
+        host = host.substr(0, colon_pos);
+      }
+    }
+    raiden_controller_address_ = absl::StrCat(host, ":", actual_port);
+  }
 
   server_ptr->SetTransferBuffersCallback(
       [this](rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
              absl::Span<const int64_t> src_offsets,
              absl::Span<const int64_t> dst_offsets,
              absl::Span<const int64_t> copy_sizes,
-             absl::Span<const std::string> peers) {
+             absl::Span<const ::tpu_raiden::RaidenTransferEndpoint> peers) {
         if (src_offsets.empty() || src_offsets.size() != dst_offsets.size()) {
           return tsl::Future<>(
               absl::InvalidArgumentError("Source and destination offsets must "
@@ -179,7 +195,8 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
         worker_futures.reserve(workers.size());
         for (size_t i = 0; i < workers.size(); ++i) {
           std::optional<std::string> peer =
-              peers.empty() ? std::nullopt : std::make_optional(peers[i]);
+              peers.empty() ? std::nullopt
+                            : std::make_optional(peers[i].endpoint);
           std::vector<Buffer> src_buffers;
           src_buffers.reserve(src_offsets.size());
           for (int64_t offset : src_offsets) {
@@ -202,11 +219,11 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
   for (size_t i = 0; i < worker_addresses.size(); ++i) {
     std::string worker_id = absl::StrCat("worker_", i);
     absl::Status status = worker_registry_->RegisterWorker(
-        worker_id, worker_addresses[i], /*raiden_transfer_endpoint=*/"");
+        worker_id, worker_addresses[i], /*raiden_transfer_endpoints=*/{});
     if (!status.ok()) {
-      throw std::runtime_error(absl::StrCat(
-          "Failed to register static worker ", worker_addresses[i],
-          ": ", status.message()));
+      throw std::runtime_error(absl::StrCat("Failed to register static worker ",
+                                            worker_addresses[i], ": ",
+                                            status.message()));
     }
   }
 
@@ -215,10 +232,8 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
     orchestrator_client_ = std::make_unique<OrchestratorServiceClient>(
         grpc::CreateChannel(std::string(raiden_orchestrator_address),
                             grpc::InsecureChannelCredentials()));
-    std::string my_endpoint =
-        absl::StrCat("localhost:", raiden_controller_port_);
-    absl::Status status =
-        orchestrator_client_->RegisterController(unit_, my_endpoint);
+    absl::Status status = orchestrator_client_->RegisterController(
+        unit_, raiden_controller_address_);
     if (!status.ok()) {
       throw std::runtime_error(absl::StrCat(
           "Failed to register with orchestrator: ", status.message()));
@@ -228,33 +243,34 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
 
 RaidenController::RaidenController(
     const rpc::RaidenIdProto& unit, int num_blocks, int num_shards,
-    int64_t shard_size_bytes, int raiden_controller_port,
-    absl::string_view raiden_orchestrator_address)
+    int64_t shard_size_bytes, absl::string_view raiden_orchestrator_address,
+    absl::string_view raiden_controller_address)
     : unit_(unit),
       num_shards_(num_shards),
       shard_size_bytes_(shard_size_bytes),
       num_total_blocks_(num_blocks),
       worker_registry_(std::make_shared<core::controller::WorkerRegistry>()),
       block_manager_(
-          std::make_unique<kv_cache::LogicalBlockManager>(num_blocks)),
-      raiden_controller_port_(raiden_controller_port) {
-  Init(/*worker_addresses=*/{}, raiden_orchestrator_address);
+          std::make_unique<kv_cache::LogicalBlockManager>(num_blocks)) {
+  Init(/*worker_addresses=*/{}, raiden_orchestrator_address,
+       raiden_controller_address);
 }
 
 RaidenController::RaidenController(
     const rpc::RaidenIdProto& unit,
     absl::Span<const std::string> worker_addresses, int num_blocks,
-    int num_shards, int64_t shard_size_bytes, int raiden_controller_port,
-    absl::string_view raiden_orchestrator_address)
+    int num_shards, int64_t shard_size_bytes,
+    absl::string_view raiden_orchestrator_address,
+    absl::string_view raiden_controller_address)
     : unit_(unit),
       num_shards_(num_shards),
       shard_size_bytes_(shard_size_bytes),
       num_total_blocks_(num_blocks),
       worker_registry_(std::make_shared<core::controller::WorkerRegistry>()),
       block_manager_(
-          std::make_unique<kv_cache::LogicalBlockManager>(num_blocks)),
-      raiden_controller_port_(raiden_controller_port) {
-  Init(worker_addresses, raiden_orchestrator_address);
+          std::make_unique<kv_cache::LogicalBlockManager>(num_blocks)) {
+  Init(worker_addresses, raiden_orchestrator_address,
+       raiden_controller_address);
 }
 
 RaidenController::~RaidenController() {
@@ -505,8 +521,6 @@ tsl::Future<> RaidenController::TransferBuffers(
   return tsl::JoinFutures(absl::MakeSpan(worker_futures));
 }
 
-
-
 absl::StatusOr<std::string> RaidenController::ResolvePeerController(
     const rpc::RaidenIdProto& peer_id) {
   if (!orchestrator_client_) {
@@ -535,10 +549,16 @@ tsl::Future<> RaidenController::ReadRemote(
               return CompareWorkerIds(a.worker_id, b.worker_id);
             });
 
-  std::vector<std::string> dest_worker_endpoints;
-  dest_worker_endpoints.reserve(workers.size());
+  size_t total_eps = 0;
   for (const auto& reg : workers) {
-    dest_worker_endpoints.push_back(reg.raiden_transfer_endpoint);
+    total_eps += reg.raiden_transfer_endpoints.size();
+  }
+  std::vector<::tpu_raiden::RaidenTransferEndpoint> dest_worker_endpoints;
+  dest_worker_endpoints.reserve(total_eps);
+  for (const auto& reg : workers) {
+    for (const auto& ep : reg.raiden_transfer_endpoints) {
+      dest_worker_endpoints.push_back(ep);
+    }
   }
 
   std::string controller_address;
@@ -591,8 +611,12 @@ tsl::Future<> RaidenController::ReadRemote(
   for (int32_t id : dest_host_block_ids) {
     request.add_dest_host_block_ids(id);
   }
-  for (const auto& endpoint : dest_worker_endpoints) {
-    request.add_dest_worker_endpoints(endpoint);
+  for (const auto& ep : dest_worker_endpoints) {
+    auto* proto_ep = request.add_dest_raiden_transfer_endpoints();
+    proto_ep->set_endpoint(ep.endpoint);
+    for (int64_t shard : ep.shards) {
+      proto_ep->add_shards(shard);
+    }
   }
 
   auto [promise, future] = tsl::MakePromise<>();
