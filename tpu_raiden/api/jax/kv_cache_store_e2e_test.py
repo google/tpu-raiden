@@ -266,7 +266,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         raiden_id=rid,
         num_shards=self.num_devices,
         shard_size_bytes=shard_size_bytes,
-        raiden_controller_port=controller_port,
+        raiden_controller_address=f"localhost:{controller_port}",
     )
 
     # 4. Create KVCacheManager (Worker)
@@ -423,6 +423,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     num_shards = len(self.devices)
     shard_size_bytes = (block_elements * 4) // num_shards
 
+    controller_port = find_free_port()
     worker_port_a = find_free_port()
     worker_port_b = find_free_port()
 
@@ -434,8 +435,8 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         raiden_id=rid_a,
         num_shards=num_shards,
         shard_size_bytes=shard_size_bytes,
-        raiden_controller_port=0,
         raiden_orchestrator_address=f"localhost:{_orchestrator_port}",
+        raiden_controller_address=f"localhost:{controller_port}",
     )
     manager_a = kv_cache_manager.KVCacheManager(
         kv_caches=[tpu_cache_a],
@@ -444,10 +445,11 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         num_slots=2,
         unsafe_skip_buffer_lock=self.skip_lock,
         raiden_worker_port=worker_port_a,
-        raiden_controller_address=f"localhost:{store_a.raiden_controller_port}",
+        raiden_controller_address=f"localhost:{controller_port}",
         worker_id="worker_a",
     )
 
+    controller_port_b = find_free_port()
     # 3. Create Job B's KVCacheStore & KVCacheManager
     rid_b = kv_cache_store.RaidenId("job_b", "0", "cache_b", 0)
     store_b = kv_cache_store.KVCacheStore(
@@ -456,8 +458,8 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         raiden_id=rid_b,
         num_shards=num_shards,
         shard_size_bytes=shard_size_bytes,
-        raiden_controller_port=0,
         raiden_orchestrator_address=f"localhost:{_orchestrator_port}",
+        raiden_controller_address=f"localhost:{controller_port_b}",
     )
     manager_b = kv_cache_manager.KVCacheManager(
         kv_caches=[tpu_cache_b],
@@ -466,7 +468,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         num_slots=2,
         unsafe_skip_buffer_lock=self.skip_lock,
         raiden_worker_port=worker_port_b,
-        raiden_controller_address=f"localhost:{store_b.raiden_controller_port}",
+        raiden_controller_address=f"localhost:{controller_port_b}",
         worker_id="worker_b",
         host_blocks_to_allocate=4,  # Allocating enough space for receiver host blocks
     )

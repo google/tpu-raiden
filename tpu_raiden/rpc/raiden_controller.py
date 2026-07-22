@@ -30,6 +30,7 @@
 import asyncio
 import dataclasses
 import enum
+import json
 import logging
 import math
 import os
@@ -40,7 +41,7 @@ import time
 import typing
 from typing import Any, Optional, Union
 
-from tpu_raiden.frameworks.jax import resharding_planner
+from tpu_raiden.kv_cache import nd_slice_math
 from tpu_raiden.rpc import controller_service_pb2
 from tpu_raiden.rpc import raiden_service_pb2
 
@@ -95,7 +96,119 @@ class RaidenId:
   data_replica_idx: int = 0
 
 
+def _raiden_id_from_proto(unit: Any) -> RaidenId:
+  return RaidenId(
+      job_name=unit.job_name,
+      job_replica_id=unit.job_replica_id,
+      data_name=unit.data_name,
+      data_replica_idx=unit.data_replica_idx,
+  )
+
+
 NDSlice = list[tuple[int, int]]
+
+
+def _get_global_indices(
+    unit: RaidenId,
+    shards: list[str],
+    logical_mesh_shape: list[int],
+    layout: list[int],
+    num_physical_hosts: int,
+) -> list[tuple[int, int]]:
+  """Maps local shard indices to global slice indices, handling replication."""
+  num_shards = len(shards)
+  if num_shards == 0:
+    return []
+
+  try:
+    replica_id = int(unit.job_replica_id)
+  except ValueError:
+    replica_id = 0
+
+  if not logical_mesh_shape:
+    return [(i, i) for i in range(num_shards)]
+
+  major_to_minor = list(reversed(layout))
+  phys_mesh = [logical_mesh_shape[d] for d in major_to_minor]
+
+  # Find the host axis in logical mesh.
+  # We assume it is the axis that matches num_physical_hosts.
+  host_axis_logical = None
+  for d, size in enumerate(logical_mesh_shape):
+    if size == num_physical_hosts:
+      host_axis_logical = d
+      break
+
+  if host_axis_logical is not None:
+    try:
+      host_axis_physical = major_to_minor.index(host_axis_logical)
+    except ValueError:
+      host_axis_physical = None
+  else:
+    host_axis_physical = None
+
+  indices = []
+
+  # Log details for debugging
+  logging.info(
+      "_get_global_indices unit=%s, shards=%s, logical_mesh=%s, layout=%s,"
+      " phys_mesh=%s, host_axis_logical=%s, host_axis_physical=%s",
+      unit,
+      shards,
+      logical_mesh_shape,
+      layout,
+      phys_mesh,
+      host_axis_logical,
+      host_axis_physical,
+  )
+
+  if host_axis_physical is not None:
+    logical_H = phys_mesh[
+        host_axis_physical
+    ]  # should be equal to num_physical_hosts
+    non_host_axes = [
+        ax for ax in range(len(phys_mesh)) if ax != host_axis_physical
+    ]
+
+    # We need to decompose local shard index 'j' into coordinates for non-host axes.
+    for j in range(num_shards):
+      coords = [0] * len(phys_mesh)
+      coords[host_axis_physical] = replica_id % logical_H
+
+      temp = j
+      # Decompose j into non-host coordinates (right-to-left)
+      for ax in reversed(non_host_axes):
+        size = phys_mesh[ax]
+        coords[ax] = temp % size
+        temp = temp // size
+
+      # Convert coordinates to flat global index (row-major)
+      global_idx = 0
+      stride = 1
+      for val, size in zip(reversed(coords), reversed(phys_mesh)):
+        global_idx += val * stride
+        stride *= size
+      indices.append((j, global_idx))
+  else:
+    # Replication case (no host axis found, map all replica IDs to same logical hosts).
+    # Decompose j into all physical mesh dimensions.
+    for j in range(num_shards):
+      coords = [0] * len(phys_mesh)
+      temp = j
+      for ax in reversed(range(len(phys_mesh))):
+        size = phys_mesh[ax]
+        coords[ax] = temp % size
+        temp = temp // size
+
+      global_idx = 0
+      stride = 1
+      for val, size in zip(reversed(coords), reversed(phys_mesh)):
+        global_idx += val * stride
+        stride *= size
+      indices.append((j, global_idx))
+
+  logging.info("_get_global_indices computed indices: %s", indices)
+  return indices
 
 
 @dataclasses.dataclass
@@ -131,6 +244,155 @@ class TransferPlan:
   is_sender: bool = True
   expected_block_count: int = 0
   req_id: str = ""
+  expected_pushes_per_pool: int = 0
+  transfer_pool_indices: list[int] = dataclasses.field(default_factory=list)
+  pool_dtype_tags: list[str] = dataclasses.field(default_factory=list)
+  src_block_ids: dict[RaidenId, list[int]] = dataclasses.field(
+      default_factory=dict
+  )
+  dst_device_block_ids: list[int] = dataclasses.field(default_factory=list)
+  src_schedule_keys: dict[RaidenId, int] = dataclasses.field(
+      default_factory=dict
+  )
+  parallelism: int = 1
+  num_tokens: int = 0
+  skipped_pool_counts: dict[str, int] = dataclasses.field(default_factory=dict)
+  # Byte-span plans: the expected destination coverage end per registered
+  # destination block, in dst_device_block_ids order. Empty on legacy
+  # token plans; non-empty selects the byte-level receiver
+  # validation with no token arithmetic.
+  dst_expected_extent_bytes: list[int] = dataclasses.field(default_factory=list)
+  request_block_claim_owner: Any = dataclasses.field(
+      default=None, repr=False, compare=False
+  )
+
+
+@dataclasses.dataclass(frozen=True)
+class PoolByteSpan:
+  """One contiguous (or uniformly strided) byte copy between one source and
+
+  one destination block of the same pool.
+
+  The byte-span registration IR: it mirrors ShardPushEntryProto fields 3-10,
+  so planning reduces to validate/bind/re-key with no token or unit
+  arithmetic. The ordinal indexes the owning registration's block_ids list;
+  the destination index addresses the transfer's destination id list —
+  never physical ids.
+  """
+
+  src_block_ordinal: int
+  src_offset_bytes: int
+  dst_block_index: int
+  dst_offset_bytes: int
+  size_bytes: int
+  src_stride_bytes: int = 0
+  dst_stride_bytes: int = 0
+  count: int = 1
+
+
+@dataclasses.dataclass(frozen=True)
+class PoolSpanRegistration:
+  """One rank's declared byte-span contribution to one pool tag."""
+
+  tag: str
+  block_ids: tuple[int, ...]
+  spans: tuple[PoolByteSpan, ...]
+  declared_bytes: int
+
+
+@dataclasses.dataclass(frozen=True)
+class RequestBlockRegistration:
+  """Producer-owned block IDs and byte-span declarations for one request
+
+  and unit.
+  """
+
+  uuid: int
+  block_ids: tuple[int, ...]
+  expires_at: float
+  pool_spans: tuple[PoolSpanRegistration, ...] = ()
+
+
+@dataclasses.dataclass
+class RequestBlockCompletions:
+  """Per-rank terminal votes retained until the complete PCP group votes."""
+
+  units: set[RaidenId]
+  expires_at: float
+
+
+# Head-split (TP>1) destinations are fenced by the live==stride admission
+# check; this archived design is the recorded fallback for that day.
+_TP_GATHER_DESIGN = (
+    "archive/stage3-pre-controller/RESHARD_STAGE3_P0_2_FP8_HEAD_GATHER.md"
+)
+
+
+def _coerce_pool_spec_proto(pool: Any) -> Any:
+  """Returns an owned PoolSpecProto from a proto, mapping, or dataclass."""
+  result = raiden_service_pb2.PoolSpecProto()
+  if isinstance(pool, raiden_service_pb2.PoolSpecProto):
+    result.CopyFrom(pool)
+    return result
+
+  def value(name: str, default: Any = None) -> Any:
+    if isinstance(pool, typing.Mapping):
+      return pool.get(name, default)
+    return getattr(pool, name, default)
+
+  result.tag = str(value("tag", ""))
+  result.storage_index = int(value("storage_index", 0))
+  result.base_offset_bytes = int(value("base_offset_bytes", 0))
+  result.block_stride_bytes = int(value("block_stride_bytes", 0))
+  result.num_blocks = int(value("num_blocks", 0))
+  result.dtype_tag = str(value("dtype_tag", ""))
+  for region in value("regions", ()):
+    if isinstance(region, typing.Mapping):
+      region_value = region.get
+    else:
+      region_value = lambda name, default=None, r=region: getattr(
+          r, name, default
+      )
+    region_proto = result.regions.add()
+    region_proto.name = str(region_value("name", ""))
+    region_proto.offset_bytes = int(region_value("offset_bytes", 0))
+    region_proto.stride_bytes = int(region_value("stride_bytes", 0))
+    region_proto.unit_bytes = int(region_value("unit_bytes", 0))
+    region_proto.num_units = int(region_value("num_units", 0))
+    region_proto.units_per_stride = int(region_value("units_per_stride", 1))
+  return result
+
+
+def _pool_live_bytes(pool: Any) -> int:
+  return sum(
+      int(region.unit_bytes)
+      * int(region.num_units)
+      * int(region.units_per_stride)
+      for region in pool.regions
+  )
+
+
+def _pool_geometry_signature(pool: Any) -> tuple[Any, ...]:
+  """Returns the registration fields that define one pool's byte geometry."""
+  return (
+      str(pool.tag),
+      int(pool.storage_index),
+      int(pool.base_offset_bytes),
+      int(pool.block_stride_bytes),
+      int(pool.num_blocks),
+      str(pool.dtype_tag),
+      tuple(
+          (
+              str(region.name),
+              int(region.offset_bytes),
+              int(region.stride_bytes),
+              int(region.unit_bytes),
+              int(region.num_units),
+              int(region.units_per_stride),
+          )
+          for region in pool.regions
+      ),
+  )
 
 
 def create_server_socket(port: int) -> socket.socket:
@@ -222,6 +484,10 @@ class WorkerRpcClient:
     self._name_resolver = name_resolver
     self._proto_module = proto_module or raiden_service_pb2
 
+  @property
+  def name_resolver(self) -> Optional[NameResolver]:
+    return self._name_resolver
+
   def register_worker_endpoint(
       self, worker_name: RaidenId, rpc_address: str
   ) -> None:
@@ -238,6 +504,10 @@ class WorkerRpcClient:
     future = self._pending_endpoints.pop(worker_name, None)
     if future and not future.done():
       future.set_result(rpc_address)
+
+  def unregister_worker_endpoint(self, worker_name: RaidenId) -> None:
+    """Removes a stale worker endpoint during work-unit replacement."""
+    self._endpoints.pop(worker_name, None)
 
   async def _resolve_endpoint(self, target_id: RaidenId) -> str:
     """Resolves worker RPC address asynchronously or suspends execution until registered.
@@ -327,6 +597,7 @@ class WorkerRpcClient:
         job_name=unit.job_name,
         job_replica_id=unit.job_replica_id,
         data_name=unit.data_name,
+        data_replica_idx=unit.data_replica_idx,
     )
 
   def _encode_start_transfer(
@@ -349,9 +620,9 @@ class WorkerRpcClient:
 
     peers = []
     for dst in transfer_plan.dst_units:
-      dst_coords = transfer_plan.worker_data_addresses.get(
-          dst, ["127.0.0.1:8000"]
-      )
+      dst_coords = transfer_plan.worker_data_addresses.get(dst)
+      if not dst_coords:
+        raise ValueError(f"No data-plane endpoint registered for {dst}")
       peers.extend(dst_coords)
 
     req = self._proto_module.ControlRequest(
@@ -373,6 +644,13 @@ class WorkerRpcClient:
         use_block_chunks=transfer_plan.use_block_chunks,
         expected_block_count=transfer_plan.expected_block_count,
         req_id=transfer_plan.req_id,
+        expected_pushes_per_pool=transfer_plan.expected_pushes_per_pool,
+        transfer_pool_indices=transfer_plan.transfer_pool_indices,
+        pool_dtype_tags=transfer_plan.pool_dtype_tags,
+        src_block_ids=transfer_plan.src_block_ids.get(target_id, []),
+        dst_device_block_ids=transfer_plan.dst_device_block_ids,
+        parallelism=transfer_plan.parallelism,
+        num_tokens=transfer_plan.num_tokens,
     )
 
     if transfer_plan.shard_push_schedules:
@@ -388,11 +666,17 @@ class WorkerRpcClient:
         ) in transfer_plan.shard_push_schedules.items():
           num_src_shards = len(push_schedules)
           for shard_idx, schedule in push_schedules.items():
-            key_idx = (
-                int(src_unit.job_replica_id)
-                if num_src_shards == 1
-                else shard_idx
-            )
+            if num_src_shards == 1:
+              key_idx = transfer_plan.src_schedule_keys.get(src_unit)
+              if key_idx is None:
+                if len(transfer_plan.src_units) != 1:
+                  raise ValueError(
+                      "A schedule key is required for every source in a "
+                      "many-to-one transfer"
+                  )
+                key_idx = 0
+            else:
+              key_idx = shard_idx
             schedule_proto = self._proto_module.ShardPushScheduleProto()
             for (
                 dst_peer,
@@ -503,7 +787,6 @@ class WeightSyncWorkerRpcClient(WorkerRpcClient):
 
 
 class RaidenFuture:
-
   """Future representing an asynchronous transfer execution."""
 
   session_id: int
@@ -511,11 +794,29 @@ class RaidenFuture:
   def __init__(self, session_id: int = 0, transfer_task=None):
     self.session_id = session_id
     self._transfer_task = transfer_task
+    self._completed_event = threading.Event()
     self._completed = False
     self._exception = None
+    self._lock = threading.Lock()
+    self._started = False
+
+  def try_start(self) -> bool:
+    """Attempts to mark the future as started.
+
+    Returns True if this call successfully started it (first time).
+    Returns False if it was already started.
+    """
+    with self._lock:
+      if self._started:
+        return False
+      self._started = True
+      return True
 
   async def wait(self) -> None:
     """Waits asynchronously for the transfer operation to complete."""
+    with self._lock:
+      if not self._started:
+        self._started = True
     if self._transfer_task:
       try:
         await self._transfer_task
@@ -524,8 +825,16 @@ class RaidenFuture:
         raise e
       finally:
         self._completed = True
+        self._completed_event.set()
     else:
       self._completed = True
+      self._completed_event.set()
+
+  def wait_threadsafe(self, timeout=None) -> None:
+    """Blocks the calling thread until the transfer is complete."""
+    self._completed_event.wait(timeout)
+    if self._exception:
+      raise self._exception
 
   def done(self) -> bool:
     """Returns True if the transfer operation has completed."""
@@ -692,7 +1001,10 @@ class RaidenController:
   """High-level transfer controller managing active transfers and generating transfer plans."""
 
   def __init__(
-      self, port: int, worker_rpc_client: Optional[WorkerRpcClient] = None
+      self,
+      port: int,
+      worker_rpc_client: Optional[WorkerRpcClient] = None,
+      request_registry_ttl_s: float = 600.0,
   ):
     self.port = port
     self.broadcast_k = int(os.environ.get("RAIDEN_BROADCAST_K", "2"))
@@ -703,7 +1015,33 @@ class RaidenController:
     self._registered_layouts: dict[RaidenId, list[int]] = {}
     self._registered_global_shapes: dict[RaidenId, list[int]] = {}
     self._registered_itemsizes: dict[RaidenId, int] = {}
-    self._lock = threading.Lock()
+    self._computed_phys_meshes: dict[RaidenId, list[int]] = {}
+    self._lock = threading.RLock()
+    self._registered_pool_manifests: dict[RaidenId, list[Any]] = {}
+    self._registered_layout_fingerprints: dict[RaidenId, str] = {}
+    self._registered_page_tokens: dict[RaidenId, int] = {}
+    self._registered_transfer_parallelism: dict[RaidenId, int] = {}
+    self._registered_transfer_ranks: dict[RaidenId, int] = {}
+    self._request_blocks: dict[
+        tuple[str, RaidenId], RequestBlockRegistration
+    ] = {}
+    # Request-block lifecycle is keyed by the request's generation UUID. A
+    # planner claim freezes the D5 snapshot against cancellation; a cancellation
+    # tombstone prevents a producer's late D5 registration from resurrecting a
+    # request whose consumer has already given up. Both markers expire with the
+    # registry TTL so an abandoned request does not leak lifecycle state.
+    self._claimed_request_blocks: dict[tuple[str, int], float] = {}
+    self._claimed_request_block_units: dict[
+        tuple[str, int], frozenset[RaidenId]
+    ] = {}
+    self._claimed_request_block_owners: dict[tuple[str, int], Any] = {}
+    self._completed_request_block_units: dict[
+        tuple[str, int], RequestBlockCompletions
+    ] = {}
+    self._cancelled_request_blocks: dict[tuple[str, int], float] = {}
+    if request_registry_ttl_s <= 0:
+      raise ValueError("request_registry_ttl_s must be positive")
+    self._request_registry_ttl_s = request_registry_ttl_s
     self.worker_rpc_client = worker_rpc_client or WorkerRpcClient()
 
   def register_work_unit(
@@ -715,6 +1053,11 @@ class RaidenController:
       layout: Optional[typing.Sequence[int]] = None,
       global_shape: Optional[typing.Sequence[int]] = None,
       itemsize: Optional[int] = None,
+      pool_manifest: Optional[typing.Sequence[Any]] = None,
+      layout_fingerprint: Optional[str] = None,
+      page_tokens: Optional[int] = None,
+      transfer_parallelism: Optional[int] = None,
+      transfer_rank: Optional[int] = None,
   ) -> None:
     """Registers physical worker shard Data addresses and optional Control-Plane RPC endpoint."""
     has_metadata = (
@@ -732,51 +1075,528 @@ class RaidenController:
             " metadata is provided."
         )
 
+    has_reshard_metadata = any(
+        value is not None
+        for value in (
+            pool_manifest,
+            layout_fingerprint,
+            page_tokens,
+            transfer_parallelism,
+            transfer_rank,
+        )
+    )
+    if has_reshard_metadata:
+      if (
+          pool_manifest is None
+          or layout_fingerprint is None
+          or page_tokens is None
+          or transfer_parallelism is None
+          or transfer_rank is None
+      ):
+        raise ValueError(
+            "pool_manifest, layout_fingerprint, page_tokens, "
+            "transfer_parallelism, and transfer_rank must be provided "
+            "together for pool resharding"
+        )
+      if not pool_manifest:
+        raise ValueError("pool_manifest must not be empty")
+      if not layout_fingerprint:
+        raise ValueError("layout_fingerprint must not be empty")
+      if page_tokens <= 0:
+        raise ValueError("page_tokens must be positive")
+      if transfer_parallelism <= 0:
+        raise ValueError("transfer_parallelism must be positive")
+      if transfer_rank < 0:
+        raise ValueError("transfer_rank must be non-negative")
+      if transfer_rank >= transfer_parallelism:
+        raise ValueError("transfer_rank must be less than transfer_parallelism")
+      normalized_pools = [_coerce_pool_spec_proto(p) for p in pool_manifest]
+    else:
+      normalized_pools = []
+
+    if not shards or any(not shard for shard in shards):
+      raise ValueError("shards must contain at least one non-empty endpoint")
+    # Duplicate endpoints are legal: a single process serving several local
+    # devices (JAX/Pathways) shares one transfer port across its shards, so
+    # the shard list carries the shard COUNT while the addresses coincide.
+    # Delivery is per-unit (one RPC with the shard-indexed plan), so repeats
+    # never double-send. Pool/state reshard planning enforces its stricter
+    # one-endpoint-per-unit contract at plan time.
+
     with self._lock:
-      self._registered_shards[unit] = shards
-      if mesh_shape:
+      self._registered_shards[unit] = list(shards)
+      # A worker restart invalidates every request-local physical block ID
+      # previously reported by that identity.
+      for key in [key for key in self._request_blocks if key[1] == unit]:
+        del self._request_blocks[key]
+      # Registration is replacement, not a patch: stale optional metadata
+      # must disappear when a unit restarts with a different payload.
+      for registry in (
+          self._registered_mesh_shapes,
+          self._registered_layouts,
+          self._registered_global_shapes,
+          self._registered_itemsizes,
+          self._registered_pool_manifests,
+          self._registered_layout_fingerprints,
+          self._registered_page_tokens,
+          self._registered_transfer_parallelism,
+          self._registered_transfer_ranks,
+      ):
+        registry.pop(unit, None)
+      if mesh_shape is not None:
         self._registered_mesh_shapes[unit] = list(mesh_shape)
-      if layout:
+      if layout is not None:
         self._registered_layouts[unit] = list(layout)
-      if global_shape:
+      if global_shape is not None:
         self._registered_global_shapes[unit] = list(global_shape)
-      if itemsize:
+      if itemsize is not None:
         self._registered_itemsizes[unit] = itemsize
+      if has_reshard_metadata:
+        self._registered_pool_manifests[unit] = normalized_pools
+        self._registered_layout_fingerprints[unit] = layout_fingerprint
+        self._registered_page_tokens[unit] = page_tokens
+        self._registered_transfer_parallelism[unit] = transfer_parallelism
+        self._registered_transfer_ranks[unit] = transfer_rank
       if control_plane_rpc_address and hasattr(
           self.worker_rpc_client, "register_worker_endpoint"
       ):
         self.worker_rpc_client.register_worker_endpoint(
             unit, control_plane_rpc_address
         )
+      elif hasattr(self.worker_rpc_client, "unregister_worker_endpoint"):
+        self.worker_rpc_client.unregister_worker_endpoint(unit)
+
+  def _metadata_proto_locked(self, unit: RaidenId) -> Any:
+    """Builds an owned registration proto while `_lock` is held."""
+    reg_req = raiden_service_pb2.RegisterWorkUnitRequest(
+        unit=raiden_service_pb2.RaidenIdProto(
+            job_name=unit.job_name,
+            job_replica_id=unit.job_replica_id,
+            data_name=unit.data_name,
+            data_replica_idx=unit.data_replica_idx,
+        ),
+        shards=self._registered_shards[unit],
+        control_plane_rpc_address=(
+            self.worker_rpc_client.get_worker_endpoints().get(unit, "")
+        ),
+        itemsize=self._registered_itemsizes.get(unit, 0),
+        layout_fingerprint=self._registered_layout_fingerprints.get(unit, ""),
+        page_tokens=self._registered_page_tokens.get(unit, 0),
+        transfer_parallelism=self._registered_transfer_parallelism.get(unit, 0),
+        transfer_rank=self._registered_transfer_ranks.get(unit, 0),
+    )
+    reg_req.mesh_shape.extend(self._registered_mesh_shapes.get(unit, ()))
+    reg_req.layout.extend(self._registered_layouts.get(unit, ()))
+    reg_req.global_shape.extend(self._registered_global_shapes.get(unit, ()))
+    for pool in self._registered_pool_manifests.get(unit, ()):
+      reg_req.pools.add().CopyFrom(pool)
+    return reg_req
 
   def get_all_metadata(self) -> list[Any]:
-    """Returns a list of RegisterWorkUnitRequest protos for all registered units."""
-    protos = []
+    """Returns replacement-safe metadata for all registered work units."""
     with self._lock:
-      for unit in self._registered_shards:
-        reg_req = raiden_service_pb2.RegisterWorkUnitRequest(
-            unit=self.worker_rpc_client._raiden_id_to_proto(unit),
-            shards=self._registered_shards[unit],
-            control_plane_rpc_address=self.worker_rpc_client.get_worker_endpoints().get(
-                unit, ""
-            ),
-            itemsize=self._registered_itemsizes.get(unit, 0),
-        )
-        mesh = self._registered_mesh_shapes.get(unit)
-        if mesh:
-          reg_req.mesh_shape.extend(mesh)
-        lay = self._registered_layouts.get(unit)
-        if lay:
-          reg_req.layout.extend(lay)
-        glob_shape = self._registered_global_shapes.get(unit)
-        if glob_shape:
-          reg_req.global_shape.extend(glob_shape)
-        protos.append(reg_req)
-    return protos
+      return [
+          self._metadata_proto_locked(unit) for unit in self._registered_shards
+      ]
 
   def _resolve_shards(self, unit: RaidenId) -> list[str]:
     with self._lock:
-      return self._registered_shards.get(unit, ["10.0.0.1:8000"])
+      shards = self._registered_shards.get(unit)
+      if not shards:
+        raise ValueError(f"Work unit is not registered: {unit}")
+      return list(shards)
+
+  def _purge_expired_request_blocks_locked(self, now: float) -> None:
+    expired = [
+        key
+        for key, registration in self._request_blocks.items()
+        if registration.expires_at <= now
+    ]
+    for key in expired:
+      del self._request_blocks[key]
+
+  def _purge_expired_request_block_lifecycle_locked(self, now: float) -> None:
+    """Purges expired request block lifecycles (claimed, cancelled, completed)."""
+    for lifecycle in (
+        self._claimed_request_blocks,
+        self._cancelled_request_blocks,
+    ):
+      expired = [
+          key for key, expires_at in lifecycle.items() if expires_at <= now
+      ]
+      for key in expired:
+        del lifecycle[key]
+    expired_completions = [
+        key
+        for key, completion in self._completed_request_block_units.items()
+        if completion.expires_at <= now
+    ]
+    for key in expired_completions:
+      del self._completed_request_block_units[key]
+    for key in list(self._claimed_request_block_units):
+      if key not in self._claimed_request_blocks:
+        del self._claimed_request_block_units[key]
+        self._claimed_request_block_owners.pop(key, None)
+
+  def _retire_request_blocks_locked(
+      self, lifecycle_key: tuple[str, int]
+  ) -> int:
+    """Retires request blocks for a completed or cancelled request lifecycle."""
+    req_id, uuid = lifecycle_key
+    keys = [
+        key
+        for key, registration in self._request_blocks.items()
+        if key[0] == req_id and registration.uuid == uuid
+    ]
+    for key in keys:
+      del self._request_blocks[key]
+    self._claimed_request_blocks.pop(lifecycle_key, None)
+    self._claimed_request_block_units.pop(lifecycle_key, None)
+    self._claimed_request_block_owners.pop(lifecycle_key, None)
+    self._completed_request_block_units.pop(lifecycle_key, None)
+    self._cancelled_request_blocks.pop(lifecycle_key, None)
+    return len(keys)
+
+  def register_request_blocks(
+      self,
+      req_id: str,
+      uuid: int,
+      unit: RaidenId,
+      block_ids: typing.Sequence[int],
+      pool_spans: typing.Sequence[PoolSpanRegistration] = (),
+  ) -> None:
+    """Registers one producer rank's block IDs and byte-span declarations.
+
+    Declarations arrive only on the owning rank's registration; the
+    controller never derives ownership. Byte-span declarations (pool_spans)
+    are per-tag byte copies lowered by the producer. Per-span source bounds
+    are checked here against the registering unit's own manifest; the
+    cross-rank destination coverage check runs at planning time over the
+    claimed union.
+
+    Args:
+      req_id: The request ID.
+      uuid: The request UUID.
+      unit: The RaidenId of the worker registering block IDs.
+      block_ids: Sequence of physical block IDs.
+      pool_spans: Sequence of PoolSpanRegistration byte-span declarations.
+    """
+    if not req_id:
+      raise ValueError("req_id must not be empty")
+    if uuid <= 0:
+      raise ValueError("uuid must be positive")
+    normalized = tuple(int(block_id) for block_id in block_ids)
+    if any(block_id < 0 for block_id in normalized):
+      raise ValueError("block_ids must be non-negative")
+    if len(set(normalized)) != len(normalized):
+      raise ValueError("block_ids must not contain duplicates")
+
+    normalized_pool_spans: list[PoolSpanRegistration] = []
+    if pool_spans:
+      live_bytes_by_tag: dict[str, int] = {}
+      for pool in self._registered_pool_manifests.get(unit, ()):
+        tag = str(pool.tag)
+        live = _pool_live_bytes(pool)
+        if live_bytes_by_tag.setdefault(tag, live) != live:
+          raise ValueError(
+              f"pools tagged {tag} disagree on live bytes for {unit}; "
+              "byte-span registration requires one geometry per tag"
+          )
+      seen_pool_tags: set[str] = set()
+      for entry in pool_spans:
+        tag = str(entry.tag)
+        if not tag:
+          raise ValueError("pool span registration tag must not be empty")
+        if tag in seen_pool_tags:
+          raise ValueError(f"duplicate pool span registration tag: {tag}")
+        seen_pool_tags.add(tag)
+        if tag not in live_bytes_by_tag:
+          raise ValueError(
+              f"pool span registration {tag} does not match any registered "
+              f"pool for {unit}"
+          )
+        live = live_bytes_by_tag[tag]
+        entry_ids = tuple(int(block_id) for block_id in entry.block_ids)
+        if any(block_id < 0 for block_id in entry_ids):
+          raise ValueError(
+              f"pool span registration {tag} block_ids must be non-negative"
+          )
+        if len(set(entry_ids)) != len(entry_ids):
+          raise ValueError(
+              f"pool span registration {tag} block_ids must not contain "
+              "duplicates"
+          )
+        entry_spans = []
+        span_bytes = 0
+        for span in entry.spans:
+          span = PoolByteSpan(
+              src_block_ordinal=int(span.src_block_ordinal),
+              src_offset_bytes=int(span.src_offset_bytes),
+              dst_block_index=int(span.dst_block_index),
+              dst_offset_bytes=int(span.dst_offset_bytes),
+              size_bytes=int(span.size_bytes),
+              src_stride_bytes=int(span.src_stride_bytes),
+              dst_stride_bytes=int(span.dst_stride_bytes),
+              count=int(span.count),
+          )
+          if span.size_bytes <= 0:
+            raise ValueError(f"byte span size_bytes must be positive ({tag})")
+          if span.count <= 0:
+            raise ValueError(f"byte span count must be positive ({tag})")
+          if span.count > 1 << 20:
+            raise ValueError(
+                f"byte span count {span.count} exceeds the expansion "
+                f"bound ({tag})"
+            )
+          if (
+              span.src_offset_bytes < 0
+              or span.dst_offset_bytes < 0
+              or span.src_stride_bytes < 0
+              or span.dst_stride_bytes < 0
+              or span.dst_block_index < 0
+          ):
+            raise ValueError(f"byte span fields must be non-negative ({tag})")
+          if not 0 <= span.src_block_ordinal < len(entry_ids):
+            raise ValueError(
+                f"byte span ordinal {span.src_block_ordinal} is outside "
+                f"the registration's {len(entry_ids)} block ids ({tag})"
+            )
+          src_end = (
+              span.src_offset_bytes
+              + (span.count - 1) * span.src_stride_bytes
+              + span.size_bytes
+          )
+          if src_end > live:
+            raise ValueError(
+                f"byte span exceeds its source block live bytes ({tag}): "
+                f"end={src_end}, live={live}"
+            )
+          span_bytes += span.size_bytes * span.count
+          entry_spans.append(span)
+        if int(entry.declared_bytes) != span_bytes:
+          raise ValueError(
+              f"pool span registration {tag} declared_bytes "
+              f"{int(entry.declared_bytes)} disagrees with the span sum "
+              f"{span_bytes}"
+          )
+        normalized_pool_spans.append(
+            PoolSpanRegistration(
+                tag=tag,
+                block_ids=entry_ids,
+                spans=tuple(entry_spans),
+                declared_bytes=span_bytes,
+            )
+        )
+
+    now = time.monotonic()
+    registration = RequestBlockRegistration(
+        uuid=uuid,
+        block_ids=normalized,
+        expires_at=now + self._request_registry_ttl_s,
+        pool_spans=tuple(normalized_pool_spans),
+    )
+    key = (req_id, unit)
+    lifecycle_key = (req_id, uuid)
+    with self._lock:
+      self._purge_expired_request_blocks_locked(now)
+      self._purge_expired_request_block_lifecycle_locked(now)
+      if unit not in self._registered_shards:
+        raise ValueError(f"Work unit is not registered: {unit}")
+      if lifecycle_key in self._cancelled_request_blocks:
+        raise ValueError(
+            "Request block registration was cancelled for "
+            f"req_id={req_id}, uuid={uuid}"
+        )
+      if lifecycle_key in self._claimed_request_blocks:
+        raise ValueError(
+            "Request block registration is already claimed for "
+            f"req_id={req_id}, uuid={uuid}"
+        )
+      existing = self._request_blocks.get(key)
+      if existing is not None:
+        if (
+            existing.uuid != uuid
+            or existing.block_ids != normalized
+            or existing.pool_spans != tuple(normalized_pool_spans)
+        ):
+          raise ValueError(
+              "Conflicting request block registration for "
+              f"req_id={req_id}, unit={unit}"
+          )
+        # Duplicate request-finish notifications are idempotent and refresh
+        # the TTL while preserving the exact registered payload.
+      self._request_blocks[key] = registration
+
+  def release_request_blocks(self, req_id: str, uuid: int) -> int:
+    """Administratively force-retires all state for one generation."""
+    if not req_id:
+      raise ValueError("req_id must not be empty")
+    if uuid <= 0:
+      raise ValueError("uuid must be positive")
+    now = time.monotonic()
+    with self._lock:
+      self._purge_expired_request_blocks_locked(now)
+      self._purge_expired_request_block_lifecycle_locked(now)
+      lifecycle_key = (req_id, uuid)
+      return self._retire_request_blocks_locked(lifecycle_key)
+
+  def complete_request_blocks(
+      self, req_id: str, uuid: int, unit: RaidenId
+  ) -> int:
+    """Records one native-terminal vote and retires after all claimed ranks."""
+    if not req_id:
+      raise ValueError("req_id must not be empty")
+    if uuid <= 0:
+      raise ValueError("uuid must be positive")
+    now = time.monotonic()
+    with self._lock:
+      self._purge_expired_request_blocks_locked(now)
+      self._purge_expired_request_block_lifecycle_locked(now)
+      lifecycle_key = (req_id, uuid)
+      expected_units = self._claimed_request_block_units.get(lifecycle_key)
+      registration = self._request_blocks.get((req_id, unit))
+      if (
+          expected_units is None
+          and registration is not None
+          and registration.uuid == uuid
+          and registration.block_ids
+      ):
+        raise ValueError(
+            "Only an empty producer registration may complete before the "
+            "request block snapshot is claimed"
+        )
+      if (registration is None or registration.uuid != uuid) and (
+          expected_units is None or unit not in expected_units
+      ):
+        # Aggregate completion is idempotent after the last rank has
+        # already retired the generation.
+        return 0
+      completion = self._completed_request_block_units.get(lifecycle_key)
+      if completion is None:
+        completion = RequestBlockCompletions(
+            units=set(), expires_at=now + self._request_registry_ttl_s
+        )
+        self._completed_request_block_units[lifecycle_key] = completion
+      completion.units.add(unit)
+      completion.expires_at = now + self._request_registry_ttl_s
+      if expected_units is not None and expected_units <= completion.units:
+        return self._retire_request_blocks_locked(lifecycle_key)
+      return 0
+
+  def cancel_request_blocks_if_unclaimed(self, req_id: str, uuid: int) -> bool:
+    """Atomically cancels an unclaimed D5 snapshot.
+
+    Args:
+      req_id: The request ID.
+      uuid: The request UUID.
+
+    Returns:
+      True when cancellation owns the request (including an idempotent repeat),
+      or False once a planner lookup has claimed the snapshot. A successful
+      cancellation removes every current rank registration and leaves a
+      tombstone that rejects late registration and lookup until force release.
+    """
+    if not req_id:
+      raise ValueError("req_id must not be empty")
+    if uuid <= 0:
+      raise ValueError("uuid must be positive")
+    now = time.monotonic()
+    lifecycle_key = (req_id, uuid)
+    with self._lock:
+      self._purge_expired_request_block_lifecycle_locked(now)
+      if lifecycle_key in self._cancelled_request_blocks:
+        return True
+      if lifecycle_key in self._claimed_request_blocks:
+        return False
+
+      self._cancelled_request_blocks[lifecycle_key] = (
+          now + self._request_registry_ttl_s
+      )
+      self._completed_request_block_units.pop(lifecycle_key, None)
+      self._claimed_request_block_units.pop(lifecycle_key, None)
+      self._claimed_request_block_owners.pop(lifecycle_key, None)
+      keys = [
+          key
+          for key, registration in self._request_blocks.items()
+          if key[0] == req_id and registration.uuid == uuid
+      ]
+      for key in keys:
+        del self._request_blocks[key]
+      return True
+
+  def _lookup_request_blocks(
+      self,
+      req_id: str,
+      uuid: int,
+      units: typing.Sequence[RaidenId],
+      claim_owner: Any = None,
+  ) -> dict[RaidenId, RequestBlockRegistration]:
+    """Looks up registered request blocks for the given request ID and UUID."""
+    now = time.monotonic()
+    lifecycle_key = (req_id, uuid)
+    with self._lock:
+      self._purge_expired_request_blocks_locked(now)
+      self._purge_expired_request_block_lifecycle_locked(now)
+      if lifecycle_key in self._cancelled_request_blocks:
+        raise ValueError(
+            "Request block registration was cancelled for "
+            f"req_id={req_id}, uuid={uuid}"
+        )
+      claimed_units = frozenset(units)
+      existing_claimed_units = self._claimed_request_block_units.get(
+          lifecycle_key
+      )
+      if existing_claimed_units is not None:
+        existing_owner = self._claimed_request_block_owners.get(lifecycle_key)
+        if existing_owner is not claim_owner:
+          raise ValueError(
+              "Request block snapshot is already claimed by "
+              "another planning attempt"
+          )
+        if existing_claimed_units != claimed_units:
+          raise ValueError(
+              "Request block snapshot was already claimed for a "
+              "different source unit set"
+          )
+      result: dict[RaidenId, RequestBlockRegistration] = {}
+      for unit in units:
+        registration = self._request_blocks.get((req_id, unit))
+        if registration is None or registration.uuid != uuid:
+          raise ValueError(
+              "Missing producer block registration for "
+              f"req_id={req_id}, uuid={uuid}, unit={unit}"
+          )
+        result[unit] = registration
+      # This is the claim linearization point: every requested rank has been
+      # validated and copied while cancellation is excluded by `_lock`.
+      self._claimed_request_blocks[lifecycle_key] = (
+          now + self._request_registry_ttl_s
+      )
+      self._claimed_request_block_units[lifecycle_key] = claimed_units
+      self._claimed_request_block_owners[lifecycle_key] = claim_owner
+      completion = self._completed_request_block_units.get(lifecycle_key)
+      if completion is not None:
+        completion.expires_at = now + self._request_registry_ttl_s
+        if claimed_units <= completion.units:
+          self._retire_request_blocks_locked(lifecycle_key)
+      return result
+
+  def _abandon_request_blocks_claim(
+      self, req_id: str, uuid: int, claim_owner: Any
+  ) -> bool:
+    """Rolls back a claim before any sender has been dispatched."""
+    lifecycle_key = (req_id, uuid)
+    with self._lock:
+      if (
+          lifecycle_key not in self._claimed_request_blocks
+          or self._claimed_request_block_owners.get(lifecycle_key)
+          is not claim_owner
+      ):
+        return False
+      self._claimed_request_blocks.pop(lifecycle_key, None)
+      self._claimed_request_block_units.pop(lifecycle_key, None)
+      self._claimed_request_block_owners.pop(lifecycle_key, None)
+      return True
 
   def get_plan(self, req_id: str) -> Optional[TransferPlan]:
     """Returns the generated TransferPlan for a given transfer request ID."""
@@ -797,29 +1617,457 @@ class RaidenController:
     return list(resp.get_metadata_response.metadata)
 
   def _get_local_metadata(self, units: list[RaidenId]) -> list[Any]:
-    protos = []
     with self._lock:
-      for unit in units:
-        if unit in self._registered_shards:
-          reg_req = raiden_service_pb2.RegisterWorkUnitRequest(
-              unit=self.worker_rpc_client._raiden_id_to_proto(unit),
-              shards=self._registered_shards[unit],
-              control_plane_rpc_address=self.worker_rpc_client.get_worker_endpoints().get(
-                  unit, ""
-              ),
-              itemsize=self._registered_itemsizes.get(unit, 0),
+      missing = [unit for unit in units if unit not in self._registered_shards]
+      if missing:
+        raise ValueError(f"Work units are not registered: {missing}")
+      return [self._metadata_proto_locked(unit) for unit in units]
+
+  @staticmethod
+  def _metadata_by_unit(
+      metadata: typing.Sequence[Any], units: typing.Sequence[RaidenId]
+  ) -> dict[RaidenId, Any]:
+    """Selects exact requested metadata and rejects duplicate identities."""
+    requested = set(units)
+    result = {}
+    for item in metadata:
+      unit = _raiden_id_from_proto(item.unit)
+      if unit not in requested:
+        continue
+      if unit in result:
+        raise ValueError(f"Duplicate registration metadata for {unit}")
+      result[unit] = item
+    missing = [unit for unit in units if unit not in result]
+    if missing:
+      raise ValueError(f"Missing registration metadata for {missing}")
+    return result
+
+  def _build_pool_reshard_plan(
+      self,
+      *,
+      src_units: typing.Sequence[RaidenId],
+      dst_units: typing.Sequence[RaidenId],
+      src_metadata: typing.Sequence[Any],
+      dst_metadata: typing.Sequence[Any],
+      req_id: str,
+      uuid: int,
+      dst_device_block_ids: typing.Sequence[int],
+      num_tokens: int,
+      transfer_pool_tags: typing.Sequence[str],
+      parallelism: Optional[int],
+  ) -> TransferPlan:
+    """Builds a plan and rolls back any claim if planning fails."""
+    claim_owner = object()
+    try:
+      plan = self._build_byte_span_plan_claimed(
+          src_units=src_units,
+          dst_units=dst_units,
+          src_metadata=src_metadata,
+          dst_metadata=dst_metadata,
+          req_id=req_id,
+          uuid=uuid,
+          dst_device_block_ids=dst_device_block_ids,
+          num_tokens=num_tokens,
+          transfer_pool_tags=transfer_pool_tags,
+          parallelism=parallelism,
+          claim_owner=claim_owner,
+      )
+      plan.request_block_claim_owner = claim_owner
+      return plan
+    except Exception:
+      self._abandon_request_blocks_claim(req_id, uuid, claim_owner)
+      raise
+
+  def _build_byte_span_plan_claimed(
+      self,
+      *,
+      src_units: typing.Sequence[RaidenId],
+      dst_units: typing.Sequence[RaidenId],
+      src_metadata: typing.Sequence[Any],
+      dst_metadata: typing.Sequence[Any],
+      req_id: str,
+      uuid: int,
+      dst_device_block_ids: typing.Sequence[int],
+      num_tokens: int,
+      transfer_pool_tags: typing.Sequence[str],
+      parallelism: Optional[int],
+      claim_owner: Any,
+  ) -> TransferPlan:
+    """Validates, binds, and emits a byte-span reshard plan.
+
+    The single geometry-neutral pipeline: producers declared per-tag byte
+    spans at registration; this method re-validates source bounds, checks
+    exactly-once destination byte coverage over the claimed union (the
+    cross-rank partition check, in bytes), binds ordinals and destination
+    indices to physical ids, and re-keys the spans onto the executor wire.
+    No token or unit arithmetic happens anywhere in this pipeline; the
+    semantic half of the old planners runs producer-side before
+    registration.
+
+    The destination coverage rule is prefix-shaped: every registered
+    destination block except the last must be covered exactly to its live
+    bytes; the last must be covered as a non-empty prefix (the FA tail).
+    The derived per-block extents ride the plan so the receiver-side
+    controller can re-validate the same rule independently.
+    """
+    if not req_id:
+      raise ValueError("req_id must not be empty for pool resharding")
+    if uuid <= 0:
+      raise ValueError("uuid must be positive for pool resharding")
+    if len(dst_units) != 1:
+      raise ValueError("Pool resharding requires exactly one destination unit")
+    if len(set(src_units)) != len(src_units):
+      raise ValueError("src_units must not contain duplicates")
+    if len(set(dst_units)) != len(dst_units):
+      raise ValueError("dst_units must not contain duplicates")
+
+    dst_ids = [int(block_id) for block_id in dst_device_block_ids]
+    if not dst_ids:
+      raise ValueError("dst_device_block_ids must not be empty")
+    if any(block_id < 0 for block_id in dst_ids):
+      raise ValueError("dst_device_block_ids must be non-negative")
+    if len(set(dst_ids)) != len(dst_ids):
+      raise ValueError("dst_device_block_ids must not contain duplicates")
+
+    src_by_unit = self._metadata_by_unit(src_metadata, src_units)
+    dst_by_unit = self._metadata_by_unit(dst_metadata, dst_units)
+    dst_unit = dst_units[0]
+    dst_meta = dst_by_unit[dst_unit]
+
+    all_metadata = [src_by_unit[unit] for unit in src_units] + [dst_meta]
+    for meta in all_metadata:
+      unit = _raiden_id_from_proto(meta.unit)
+      if not meta.layout_fingerprint:
+        raise ValueError(f"Missing layout fingerprint for {unit}")
+      if not meta.pools:
+        raise ValueError(f"Missing explicit pool manifest for {unit}")
+      if not meta.shards:
+        raise ValueError(f"Missing data-plane endpoint for {unit}")
+      if len(meta.shards) != 1:
+        raise ValueError(
+            "Pool reshard planning requires one data-plane endpoint "
+            f"per work unit; {unit} registered {len(meta.shards)}"
+        )
+      if not meta.control_plane_rpc_address:
+        raise ValueError(f"Missing control-plane endpoint for {unit}")
+
+    fingerprints = {meta.layout_fingerprint for meta in all_metadata}
+    if len(fingerprints) != 1:
+      raise ValueError(
+          "Layout fingerprint mismatch between source and destination"
+      )
+
+    dst_identity = tuple(
+        (str(pool.tag), str(pool.dtype_tag)) for pool in dst_meta.pools
+    )
+    if not dst_identity:
+      raise ValueError("Destination pool manifest must not be empty")
+    for src_unit in src_units:
+      src_identity = tuple(
+          (str(pool.tag), str(pool.dtype_tag))
+          for pool in src_by_unit[src_unit].pools
+      )
+      if src_identity != dst_identity:
+        raise ValueError(
+            "Canonical pool manifest mismatch between source and "
+            f"destination for {src_unit}"
+        )
+
+    reference_src = src_by_unit[src_units[0]]
+    reference_geometry = tuple(
+        _pool_geometry_signature(pool) for pool in reference_src.pools
+    )
+    for src_unit in src_units[1:]:
+      geometry = tuple(
+          _pool_geometry_signature(pool) for pool in src_by_unit[src_unit].pools
+      )
+      if geometry != reference_geometry:
+        raise ValueError(
+            f"Source pool geometry differs across ranks at {src_unit}"
+        )
+
+    requested_tags = [str(tag) for tag in transfer_pool_tags]
+    if not requested_tags:
+      raise ValueError("transfer_pool_tags must name at least one pool tag")
+    if len(requested_tags) != 1:
+      raise ValueError(
+          "Byte-span resharding moves exactly one pool tag per transfer; "
+          f"got tags {requested_tags}"
+      )
+    plan_tag = requested_tags[0]
+    available_tags = {str(pool.tag) for pool in dst_meta.pools}
+    if plan_tag not in available_tags:
+      raise ValueError(
+          f"transfer_pool_tags do not match any registered pool: [{plan_tag!r}]"
+      )
+    selected_pool_indices = [
+        index
+        for index, pool in enumerate(dst_meta.pools)
+        if str(pool.tag) == plan_tag
+    ]
+    skipped_pool_counts: dict[str, int] = {}
+    for index, pool in enumerate(dst_meta.pools):
+      if index not in set(selected_pool_indices):
+        tag = str(pool.tag)
+        skipped_pool_counts[tag] = skipped_pool_counts.get(tag, 0) + 1
+
+    src_live_values = set()
+    dst_live_values = set()
+    for pool_idx in selected_pool_indices:
+      src_pool = reference_src.pools[pool_idx]
+      dst_pool = dst_meta.pools[pool_idx]
+      src_live = _pool_live_bytes(src_pool)
+      dst_live = _pool_live_bytes(dst_pool)
+      if src_live != int(src_pool.block_stride_bytes):
+        raise ValueError(
+            "Raw pool transfer requires full-live source pools; "
+            f"pool {pool_idx} has live={src_live}, "
+            f"stride={src_pool.block_stride_bytes}. See {_TP_GATHER_DESIGN}"
+        )
+      if dst_live != int(dst_pool.block_stride_bytes):
+        raise ValueError(
+            "Raw pool transfer rejects TP>1 or padded destinations; "
+            f"pool {pool_idx} has live={dst_live}, "
+            f"stride={dst_pool.block_stride_bytes}. See {_TP_GATHER_DESIGN}"
+        )
+      src_live_values.add(src_live)
+      dst_live_values.add(dst_live)
+    if len(src_live_values) != 1 or len(dst_live_values) != 1:
+      raise ValueError(
+          f"Pools tagged {plan_tag} must share one geometry per side; "
+          f"src={sorted(src_live_values)} dst={sorted(dst_live_values)}"
+      )
+    src_live = next(iter(src_live_values))
+    dst_live = next(iter(dst_live_values))
+
+    admitted_parallelism = {
+        int(src_by_unit[unit].transfer_parallelism) for unit in src_units
+    }
+    if len(admitted_parallelism) != 1 or 0 in admitted_parallelism:
+      raise ValueError(
+          "All source ranks must declare one consistent positive "
+          "transfer_parallelism"
+      )
+    topology_parallelism = next(iter(admitted_parallelism))
+    ranks = {int(src_by_unit[unit].transfer_rank): unit for unit in src_units}
+    if len(ranks) != len(src_units):
+      raise ValueError("Source transfer_rank values must be unique")
+    if sorted(ranks) != list(range(len(src_units))):
+      raise ValueError(
+          "Source transfer_rank values must be contiguous from zero"
+      )
+    requested_parallelism = (
+        topology_parallelism if parallelism is None else int(parallelism)
+    )
+    if requested_parallelism <= 0:
+      raise ValueError("parallelism must be positive")
+    if requested_parallelism > topology_parallelism:
+      raise ValueError(
+          "parallelism exceeds source admission: "
+          f"requested={requested_parallelism}, "
+          f"admitted={topology_parallelism}"
+      )
+
+    registrations = self._lookup_request_blocks(
+        req_id, uuid, src_units, claim_owner=claim_owner
+    )
+
+    declared: list[tuple[RaidenId, PoolSpanRegistration]] = []
+    for unit in src_units:
+      registration = registrations[unit]
+      for entry in registration.pool_spans:
+        if entry.tag != plan_tag:
+          continue
+        if entry.spans:
+          declared.append((unit, entry))
+    if not declared:
+      raise ValueError(
+          f"No byte-span declarations are registered for tag {plan_tag}, "
+          f"req_id={req_id}, uuid={uuid}"
+      )
+
+    for pool_idx in selected_pool_indices:
+      dst_num_blocks = int(dst_meta.pools[pool_idx].num_blocks)
+      for unit, entry in declared:
+        limit = int(src_by_unit[unit].pools[pool_idx].num_blocks)
+        if any(block_id >= limit for block_id in entry.block_ids):
+          raise ValueError(
+              f"Source block id is out of range for pool {pool_idx} at {unit}"
           )
-          mesh = self._registered_mesh_shapes.get(unit)
-          if mesh:
-            reg_req.mesh_shape.extend(mesh)
-          lay = self._registered_layouts.get(unit)
-          if lay:
-            reg_req.layout.extend(lay)
-          glob_shape = self._registered_global_shapes.get(unit)
-          if glob_shape:
-            reg_req.global_shape.extend(glob_shape)
-          protos.append(reg_req)
-    return protos
+      if any(block_id >= dst_num_blocks for block_id in dst_ids):
+        raise ValueError(
+            f"Destination block id is out of range for pool {pool_idx}"
+        )
+
+    # Validate: expand every span's uniform repeats; each repeat must stay
+    # inside its source block and destination block; the union of all
+    # repeats must cover each destination block exactly once as a
+    # prefix-shaped extent (full blocks, then one optional partial tail).
+    coverage: dict[int, list[tuple[int, int]]] = {
+        index: [] for index in range(len(dst_ids))
+    }
+    expanded_repeats = 0
+    declared_total = 0
+    covered_total = 0
+    for unit, entry in declared:
+      declared_total += entry.declared_bytes
+      for span in entry.spans:
+        if span.dst_block_index >= len(dst_ids):
+          raise ValueError(
+              f"Byte span destination index {span.dst_block_index} exceeds "
+              f"the transfer's {len(dst_ids)} destination blocks "
+              f"(declared by {unit})"
+          )
+        src_end = (
+            span.src_offset_bytes
+            + (span.count - 1) * span.src_stride_bytes
+            + span.size_bytes
+        )
+        if src_end > src_live:
+          raise ValueError(
+              "Byte span exceeds its source block live bytes: "
+              f"end={src_end}, live={src_live} (declared by {unit})"
+          )
+        dst_end = (
+            span.dst_offset_bytes
+            + (span.count - 1) * span.dst_stride_bytes
+            + span.size_bytes
+        )
+        if dst_end > dst_live:
+          raise ValueError(
+              "Byte span exceeds its destination block live bytes: "
+              f"end={dst_end}, live={dst_live} (declared by {unit})"
+          )
+        expanded_repeats += span.count
+        if expanded_repeats > 1 << 20:
+          raise ValueError("Byte span plan exceeds the repeat expansion bound")
+        for repeat in range(span.count):
+          start = span.dst_offset_bytes + repeat * span.dst_stride_bytes
+          coverage[span.dst_block_index].append(
+              (start, start + span.size_bytes)
+          )
+          covered_total += span.size_bytes
+    extents: list[int] = []
+    for index in range(len(dst_ids)):
+      intervals = sorted(coverage[index])
+      if not intervals:
+        raise ValueError(
+            f"Destination block index {index} has no declared coverage"
+        )
+      covered_until = 0
+      for start, end in intervals:
+        if start != covered_until:
+          relation = "overlap" if start < covered_until else "gap"
+          raise ValueError(
+              "Declared byte spans have a destination coverage "
+              f"{relation} at byte {min(start, covered_until)} of "
+              f"destination block index {index}"
+          )
+        covered_until = end
+      if index != len(dst_ids) - 1 and covered_until != dst_live:
+        raise ValueError(
+            f"Destination block index {index} is covered to {covered_until} "
+            f"of {dst_live} live bytes; only the final block may be partial"
+        )
+      extents.append(covered_until)
+    if declared_total != covered_total:
+      raise ValueError(
+          "Declared byte totals disagree with coverage: declared="
+          f"{declared_total}, covered={covered_total}"
+      )
+    if covered_total != sum(extents):
+      raise AssertionError("byte coverage accounting failed")
+
+    # Bind ordinals and destination indices to physical ids and emit: a
+    # byte span maps 1:1 onto the executor entry; the plan is a re-keying,
+    # not a computation. One schedule applies to every selected pool of the
+    # tag, exactly as the legacy planners' shared-geometry replay did.
+    dst_peer = str(dst_meta.shards[0])
+    ordered_spans: list[tuple[PoolByteSpan, RaidenId, PoolSpanRegistration]] = (
+        []
+    )
+    for unit, entry in declared:
+      for span in entry.spans:
+        ordered_spans.append((span, unit, entry))
+    ordered_spans.sort(
+        key=lambda item: (item[0].dst_block_index, item[0].dst_offset_bytes)
+    )
+    schedules: dict[RaidenId, dict[int, list[tuple[Any, ...]]]] = {}
+    transfer_pairs_per_sender: dict[RaidenId, set[tuple[str, int, int]]] = {}
+    for span, src_unit, entry in ordered_spans:
+      src_block_id = entry.block_ids[span.src_block_ordinal]
+      dst_block_id = dst_ids[span.dst_block_index]
+      schedule_entry = (
+          dst_peer,
+          0,
+          span.dst_offset_bytes,
+          span.src_offset_bytes,
+          span.size_bytes,
+          src_block_id,
+          dst_block_id,
+          span.src_stride_bytes,
+          span.dst_stride_bytes,
+          span.count,
+      )
+      schedules.setdefault(src_unit, {}).setdefault(0, []).append(
+          schedule_entry
+      )
+      transfer_pairs_per_sender.setdefault(src_unit, set()).add(
+          (dst_peer, src_block_id, dst_block_id)
+      )
+
+    active_src_units = [
+        ranks[rank] for rank in sorted(ranks) if ranks[rank] in schedules
+    ]
+    expected_pushes_per_pool = sum(
+        min(requested_parallelism, len(transfer_pairs_per_sender[unit]))
+        for unit in active_src_units
+    )
+    if expected_pushes_per_pool <= 0:
+      raise ValueError("Pool reshard plan contains no source pushes")
+
+    worker_rpc_addresses = {}
+    for meta in all_metadata:
+      worker_rpc_addresses[_raiden_id_from_proto(meta.unit)] = str(
+          meta.control_plane_rpc_address
+      )
+    worker_data_addresses = {dst_unit: [dst_peer]}
+    src_schedule_keys = {
+        unit: ordinal for ordinal, unit in enumerate(active_src_units)
+    }
+
+    return TransferPlan(
+        src_units=active_src_units,
+        dst_units=[dst_unit],
+        plan={},
+        shard_push_schedules=schedules,
+        worker_rpc_addresses=worker_rpc_addresses,
+        worker_data_addresses=worker_data_addresses,
+        uuid=uuid,
+        dst_mem_type=RaidenMemoryType.HBM,
+        use_block_chunks=True,
+        is_sender=True,
+        expected_block_count=len(dst_ids),
+        req_id=req_id,
+        expected_pushes_per_pool=expected_pushes_per_pool,
+        transfer_pool_indices=selected_pool_indices,
+        pool_dtype_tags=[str(pool.dtype_tag) for pool in dst_meta.pools],
+        src_block_ids={
+            unit: sorted({
+                int(block_id)
+                for decl_unit, entry in declared
+                if decl_unit == unit
+                for block_id in entry.block_ids
+            })
+            for unit in active_src_units
+        },
+        dst_device_block_ids=dst_ids,
+        src_schedule_keys=src_schedule_keys,
+        parallelism=requested_parallelism,
+        num_tokens=max(int(num_tokens or 0), 0),
+        skipped_pool_counts=skipped_pool_counts,
+        dst_expected_extent_bytes=extents,
+    )
 
   async def _execute_slice_broadcast(
       self,
@@ -832,6 +2080,7 @@ class RaidenController:
       dst_mem_type: int,
       expected_block_count: int,
       dst_controller_address: Optional[str],
+      src_controller_address: Optional[str] = None,
   ) -> None:
     """Executes a decentralized, greedy K-ary tree broadcast for a slice of data across destination workers.
 
@@ -910,6 +2159,8 @@ class RaidenController:
           )
 
           sub_schedule = {s: {shard_idx if s == src_unit else 0: [entry]}}
+          hop_uuid = random.randint(1, 2**63 - 1)
+          hop_req_id = f"{req_id}_{hop_uuid}"
           sub_plan = TransferPlan(
               src_units=[s],
               dst_units=[dst_unit],
@@ -917,19 +2168,19 @@ class RaidenController:
               shard_push_schedules=sub_schedule,
               worker_rpc_addresses=dict(final_plan.worker_rpc_addresses),
               worker_data_addresses=dict(final_plan.worker_data_addresses),
-              uuid=uuid,
+              uuid=hop_uuid,
               dst_mem_type=dst_mem_type,
               use_block_chunks=True,
               is_sender=True,
-              expected_block_count=expected_block_count,
-              req_id=req_id,
+              expected_block_count=1,
+              req_id=hop_req_id,
           )
 
           async def _run_single_transfer(s_node, d_node, plan):
             if dst_controller_address:
               dst_facade = RaidenControllerClientFacade(
                   dst_controller_address,
-                  name_resolver=self.worker_rpc_client._name_resolver,
+                  name_resolver=self.worker_rpc_client.name_resolver,
               )
               loop = asyncio.get_running_loop()
               success = await loop.run_in_executor(
@@ -937,11 +2188,11 @@ class RaidenController:
                   dst_facade.register_transfer_schedule,
                   [s_node],
                   [d_node],
-                  req_id,
+                  plan.req_id,
                   True,
                   False,
-                  expected_block_count,
-                  uuid,
+                  plan.expected_block_count,
+                  plan.uuid,
                   dst_controller_address,
                   src_controller_address,
                   plan.shard_push_schedules,
@@ -954,7 +2205,8 @@ class RaidenController:
             else:
               await self.worker_rpc_client.start_transfer(d_node, plan)
 
-            await self.worker_rpc_client.start_transfer(s_node, plan)
+            if s_node in self._registered_shards:
+              await self.worker_rpc_client.start_transfer(s_node, plan)
 
           task = asyncio.create_task(
               _run_single_transfer(s, dst_unit, sub_plan)
@@ -979,6 +2231,13 @@ class RaidenController:
 
         # 3. Promotion step
         for fut in done:
+          if fut.exception():
+            logging.error(
+                "Slice transfer failed in broadcast tree: %s", fut.exception()
+            )
+            for info in transfers_in_progress.values():
+              info[5].cancel()
+            raise fut.exception()
           t = futures_to_targets[fut]
           s, dst_unit, dst_block_id, dst_block_offset, dst_stride, _ = (
               transfers_in_progress.pop(t)
@@ -992,6 +2251,529 @@ class RaidenController:
           )
       elif not scheduled_any:
         break
+
+  def _start_pool_reshard_transfer(
+      self,
+      *,
+      src_units: list[RaidenId],
+      dst_units: list[RaidenId],
+      req_id: Optional[str],
+      src_block_ids: Optional[list[int]],
+      dst_device_block_ids: Optional[list[int]],
+      dst_mem_type: RaidenMemoryType,
+      use_block_chunks: bool,
+      src_controller_address: Optional[str],
+      dst_controller_address: Optional[str],
+      uuid: Optional[int],
+      is_sender: bool,
+      num_tokens: Optional[int],
+      transfer_pool_tags: Optional[typing.Sequence[str]],
+      parallelism: Optional[int],
+  ) -> RaidenFuture:
+    """Coordinates the controller-owned block-granular pool reshard path."""
+    if not src_units:
+      raise ValueError("src_units must not be empty")
+    if not dst_units:
+      raise ValueError("dst_units must not be empty")
+    if not req_id:
+      raise ValueError("req_id must not be empty for pool resharding")
+    if src_block_ids is not None:
+      raise ValueError(
+          "Reshard source block IDs must come from register_request_blocks"
+      )
+    if dst_device_block_ids is None:
+      raise ValueError("dst_device_block_ids are required for pool resharding")
+    # State-class byte-span transfers legitimately carry num_tokens=0 (their
+    # payloads have no token axis); token plans arrive positive.
+    num_tokens = 0 if num_tokens is None else int(num_tokens)
+    if num_tokens < 0:
+      raise ValueError("num_tokens must be non-negative for pool resharding")
+    if not transfer_pool_tags:
+      raise ValueError(
+          "transfer_pool_tags must name the pools to move for pool resharding"
+      )
+    if not use_block_chunks:
+      raise ValueError("Pool resharding requires use_block_chunks=true")
+    if dst_mem_type != RaidenMemoryType.HBM:
+      raise ValueError("Pool resharding requires dst_mem_type=HBM")
+    if uuid is None:
+      uuid = random.randint(1, 2**63 - 1)
+    elif uuid <= 0:
+      raise ValueError("uuid must be positive for pool resharding")
+    if parallelism is not None and parallelism <= 0:
+      raise ValueError("parallelism must be positive")
+
+    with self._lock:
+      session_id = len(self._active_transfers)
+
+    async def _execute_pool_reshard() -> None:
+      if not is_sender:
+        if not src_controller_address:
+          raise ValueError(
+              "src_controller_address is required for destination-coordinated "
+              "pool resharding"
+          )
+        if not dst_controller_address:
+          raise ValueError(
+              "dst_controller_address is required so the source controller "
+              "can arm the receiver"
+          )
+        src_facade = RaidenControllerClientFacade(
+            src_controller_address,
+            name_resolver=self.worker_rpc_client.name_resolver,
+        )
+        loop = asyncio.get_running_loop()
+        success = await loop.run_in_executor(
+            None,
+            lambda: src_facade.coordinate_transfer(
+                src_units=src_units,
+                dst_units=dst_units,
+                req_id=req_id,
+                use_block_chunks=True,
+                is_sender=True,
+                uuid=uuid,
+                dst_controller_address=dst_controller_address,
+                src_controller_address=src_controller_address,
+                dst_mem_type=RaidenMemoryType.HBM,
+                dst_device_block_ids=list(dst_device_block_ids),
+                num_tokens=num_tokens,
+                transfer_pool_tags=list(transfer_pool_tags),
+            ),
+        )
+        if not success:
+          raise RuntimeError(
+              "Source controller rejected the pool reshard request"
+          )
+        return
+
+      controller_start_ns = time.monotonic_ns()
+      plan_build_start_ns = controller_start_ns
+      src_metadata = self._get_local_metadata(src_units)
+      if dst_controller_address:
+        dst_metadata = await self._query_remote_metadata(dst_controller_address)
+      else:
+        dst_metadata = self._get_local_metadata(dst_units)
+      final_plan = self._build_pool_reshard_plan(
+          src_units=src_units,
+          dst_units=dst_units,
+          src_metadata=src_metadata,
+          dst_metadata=dst_metadata,
+          req_id=req_id,
+          uuid=uuid,
+          dst_device_block_ids=dst_device_block_ids,
+          num_tokens=num_tokens,
+          transfer_pool_tags=list(transfer_pool_tags),
+          parallelism=parallelism,
+      )
+      plan_build_end_ns = time.monotonic_ns()
+
+      # Receivers must be armed before any sender can put bytes on the wire.
+      receiver_arm_start_ns = time.monotonic_ns()
+      if dst_controller_address:
+        dst_facade = RaidenControllerClientFacade(
+            dst_controller_address,
+            name_resolver=self.worker_rpc_client.name_resolver,
+        )
+        loop = asyncio.get_running_loop()
+        try:
+          success = await loop.run_in_executor(
+              None,
+              lambda: dst_facade.register_transfer_schedule(
+                  src_units=final_plan.src_units,
+                  dst_units=final_plan.dst_units,
+                  req_id=final_plan.req_id,
+                  use_block_chunks=True,
+                  is_sender=False,
+                  expected_block_count=final_plan.expected_block_count,
+                  uuid=final_plan.uuid,
+                  shard_push_schedules=final_plan.shard_push_schedules,
+                  dst_mem_type=final_plan.dst_mem_type,
+                  expected_pushes_per_pool=(
+                      final_plan.expected_pushes_per_pool
+                  ),
+                  transfer_pool_indices=final_plan.transfer_pool_indices,
+                  pool_dtype_tags=final_plan.pool_dtype_tags,
+                  dst_device_block_ids=final_plan.dst_device_block_ids,
+                  src_schedule_keys=final_plan.src_schedule_keys,
+                  parallelism=final_plan.parallelism,
+                  num_tokens=final_plan.num_tokens,
+                  dst_expected_extent_bytes=(
+                      final_plan.dst_expected_extent_bytes
+                  ),
+              ),
+          )
+        except Exception:
+          self._abandon_request_blocks_claim(
+              req_id, uuid, final_plan.request_block_claim_owner
+          )
+          raise
+        if not success:
+          self._abandon_request_blocks_claim(
+              req_id, uuid, final_plan.request_block_claim_owner
+          )
+          raise RuntimeError("Destination controller failed to arm receivers")
+      else:
+        try:
+          await asyncio.gather(*[
+              self.worker_rpc_client.start_transfer(unit, final_plan)
+              for unit in final_plan.dst_units
+          ])
+        except Exception:
+          self._abandon_request_blocks_claim(
+              req_id, uuid, final_plan.request_block_claim_owner
+          )
+          raise
+      receiver_arm_ack_ns = time.monotonic_ns()
+
+      with self._lock:
+        self._active_transfers[req_id] = final_plan
+      sender_dispatch_ns = time.monotonic_ns()
+      await asyncio.gather(*[
+          self.worker_rpc_client.start_transfer(unit, final_plan)
+          for unit in final_plan.src_units
+      ])
+      sender_dispatch_end_ns = time.monotonic_ns()
+      logging.info(
+          "%s",
+          json.dumps(
+              {
+                  "event": "raiden_pool_reshard_senders_dispatched",
+                  "req_id": final_plan.req_id,
+                  "uuid": final_plan.uuid,
+                  "num_tokens": final_plan.num_tokens,
+                  "receiver_armed_before_sender_dispatch": True,
+                  "receiver_arm_ack_monotonic_ns": receiver_arm_ack_ns,
+                  "sender_dispatch_monotonic_ns": sender_dispatch_ns,
+                  "plan_build_ms": (
+                      (plan_build_end_ns - plan_build_start_ns) / 1_000_000
+                  ),
+                  "receiver_arm_rpc_ms": (
+                      (receiver_arm_ack_ns - receiver_arm_start_ns) / 1_000_000
+                  ),
+                  "sender_dispatch_ms": (
+                      (sender_dispatch_end_ns - sender_dispatch_ns) / 1_000_000
+                  ),
+                  "controller_total_ms": (
+                      (sender_dispatch_end_ns - controller_start_ns) / 1_000_000
+                  ),
+                  "active_source_ranks": len(final_plan.src_units),
+                  "destination_pages": final_plan.expected_block_count,
+                  "expected_pushes_per_pool": (
+                      final_plan.expected_pushes_per_pool
+                  ),
+                  "transferred_pools": len(final_plan.transfer_pool_indices),
+                  "transfer_pool_tags": sorted(set(transfer_pool_tags)),
+                  "skipped_pool_counts": dict(
+                      sorted(final_plan.skipped_pool_counts.items())
+                  ),
+              },
+              sort_keys=True,
+          ),
+      )
+
+    future = RaidenFuture(
+        session_id=session_id, transfer_task=_execute_pool_reshard()
+    )
+    with self._lock:
+      self._active_tasks[req_id] = future
+    return future
+
+  def register_pool_reshard_receiver_plan(
+      self,
+      *,
+      src_units: list[RaidenId],
+      dst_units: list[RaidenId],
+      req_id: str,
+      uuid: int,
+      shard_push_schedules: dict[
+          RaidenId,
+          dict[int, typing.Sequence[tuple[str, int, int, int, int, int, int]]],
+      ],
+      expected_pushes_per_pool: int,
+      transfer_pool_indices: typing.Sequence[int],
+      pool_dtype_tags: typing.Sequence[str],
+      dst_device_block_ids: typing.Sequence[int],
+      src_schedule_keys: dict[RaidenId, int],
+      parallelism: int,
+      num_tokens: int,
+      dst_expected_extent_bytes: typing.Sequence[int] = (),
+  ) -> RaidenFuture:
+    """Independently validates and arms a source-generated receiver plan.
+
+    The destination controller trusts nothing: it re-derives coverage and
+    accounting from its own registration and the received schedules, and only
+    an arm acknowledgement permits the source controller to dispatch senders.
+    Pool selection is validated for consistency (indices resolve against the
+    local manifest), never for policy — no tag value means anything here.
+
+    The plan's declared per-block extents are validated against the local
+    manifest (prefix-shaped: all blocks full except an optional partial
+    tail), then the entries' expanded byte coverage is swept against
+    exactly those extents — no token arithmetic. num_tokens is opaque
+    audit metadata.
+
+    Args:
+      src_units: Sequence of source RaidenIds.
+      dst_units: Sequence of destination RaidenIds.
+      req_id: The request ID.
+      uuid: The request UUID.
+      shard_push_schedules: Decoded source schedules.
+      expected_pushes_per_pool: Expected pushes per pool.
+      transfer_pool_indices: Selected pool indices.
+      pool_dtype_tags: Expected pool dtype tags.
+      dst_device_block_ids: Destination physical block IDs.
+      src_schedule_keys: Contiguous source ordinals.
+      parallelism: Parallelism factor.
+      num_tokens: Opaque audit metadata (never consumed for validation).
+      dst_expected_extent_bytes: Expected destination coverage end per
+        destination block, in dst_device_block_ids order.
+
+    Returns:
+      A RaidenFuture to await execution.
+    """
+    if not req_id:
+      raise ValueError("req_id must not be empty for pool resharding")
+    if uuid <= 0:
+      raise ValueError("uuid must be positive for pool resharding")
+    if len(dst_units) != 1:
+      raise ValueError("Receiver plan requires exactly one destination")
+    if not src_units or not shard_push_schedules:
+      raise ValueError("Receiver plan must contain source schedules")
+    if expected_pushes_per_pool <= 0:
+      raise ValueError("expected_pushes_per_pool must be positive")
+    if parallelism <= 0:
+      raise ValueError("parallelism must be positive")
+    if not dst_expected_extent_bytes:
+      raise ValueError("Receiver plans require dst_expected_extent_bytes")
+    dst_ids = [int(block_id) for block_id in dst_device_block_ids]
+    if not dst_ids or any(block_id < 0 for block_id in dst_ids):
+      raise ValueError(
+          "destination block IDs must be non-empty and non-negative"
+      )
+    if len(set(dst_ids)) != len(dst_ids):
+      raise ValueError("destination block IDs must be unique")
+    if set(src_schedule_keys) != set(src_units):
+      raise ValueError("Every source must have an explicit schedule key")
+    if set(src_schedule_keys.values()) != set(range(len(src_units))):
+      raise ValueError(
+          "Source schedule keys must be contiguous source ordinals"
+      )
+    if set(shard_push_schedules) != set(src_units):
+      raise ValueError("Every source must have one decoded push schedule")
+
+    dst_metadata = self._get_local_metadata(dst_units)
+    dst_meta = self._metadata_by_unit(dst_metadata, dst_units)[dst_units[0]]
+    if not dst_meta.pools:
+      raise ValueError("Receiver requires an explicit pool manifest")
+    expected_dtype_tags = [str(pool.dtype_tag) for pool in dst_meta.pools]
+    if list(pool_dtype_tags) != expected_dtype_tags:
+      raise ValueError("Receiver pool dtype tags do not match registration")
+    selected_indices = [int(index) for index in transfer_pool_indices]
+    if not selected_indices:
+      raise ValueError("Receiver plan must select at least one pool")
+    if len(set(selected_indices)) != len(selected_indices):
+      raise ValueError("Receiver plan pool indices must be unique")
+    if any(
+        index < 0 or index >= len(dst_meta.pools) for index in selected_indices
+    ):
+      raise ValueError("Receiver plan pool index is out of range")
+    page_tokens = int(dst_meta.page_tokens)
+    if page_tokens <= 0:
+      raise ValueError(
+          "Receiver requires explicit positive destination page geometry"
+      )
+    destination_page_bytes = set()
+    for pool_idx in selected_indices:
+      pool = dst_meta.pools[pool_idx]
+      live_bytes = _pool_live_bytes(pool)
+      if live_bytes != int(pool.block_stride_bytes):
+        raise ValueError(
+            "Receiver pool is not full-live; TP>1 destinations are "
+            f"unsupported. See {_TP_GATHER_DESIGN}"
+        )
+      if live_bytes <= 0:
+        raise ValueError(f"Receiver pool {pool_idx} has invalid byte geometry")
+      destination_page_bytes.add(live_bytes)
+      if any(block_id >= int(pool.num_blocks) for block_id in dst_ids):
+        raise ValueError(
+            f"Destination block id is out of range for pool {pool_idx}"
+        )
+    if len(destination_page_bytes) != 1:
+      raise ValueError(
+          "All selected receiver pools must have one byte geometry"
+      )
+    page_bytes = next(iter(destination_page_bytes))
+
+    # The declared extents are validated against the local manifest
+    # before any entry is examined: prefix-shaped coverage (every block
+    # full except an optional partial tail) is the only accepted form.
+    extents = [int(extent) for extent in dst_expected_extent_bytes]
+    if len(extents) != len(dst_ids):
+      raise ValueError(
+          "Byte-span receiver plan extents do not match the destination "
+          f"block count: got {len(extents)}, expected {len(dst_ids)}"
+      )
+    for ordinal, extent in enumerate(extents):
+      if not 0 < extent <= page_bytes:
+        raise ValueError(
+            f"Byte-span extent {extent} for destination block ordinal "
+            f"{ordinal} is outside (0, {page_bytes}]"
+        )
+      if ordinal != len(extents) - 1 and extent != page_bytes:
+        raise ValueError(
+            "Byte-span extents must cover every destination block fully "
+            "except the final one"
+        )
+
+    dst_peers = set(dst_meta.shards)
+    entry_count = 0
+    expanded_repeats = 0
+    calculated_pushes = 0
+    coverage_by_dst_id = {block_id: [] for block_id in dst_ids}
+    dst_page_ordinals = {
+        block_id: ordinal for ordinal, block_id in enumerate(dst_ids)
+    }
+    for src_unit, unit_schedules in shard_push_schedules.items():
+      if set(unit_schedules) != {0}:
+        raise ValueError(
+            f"Sender {src_unit} must use exactly local schedule key 0"
+        )
+      entries = unit_schedules[0]
+      transfer_pairs = set()
+      for entry in entries:
+        entry_count += 1
+        if entry[0] not in dst_peers:
+          raise ValueError(
+              f"Schedule targets an unregistered destination peer {entry[0]}"
+          )
+        dst_shard_idx = int(entry[1])
+        dst_offset_bytes = int(entry[2])
+        src_offset_bytes = int(entry[3])
+        size_bytes = int(entry[4])
+        src_block_id = int(entry[5])
+        dst_block_id = int(entry[6])
+        src_stride_bytes = int(entry[7])
+        dst_stride_bytes = int(entry[8])
+        count = int(entry[9])
+        if dst_block_id not in coverage_by_dst_id:
+          raise ValueError(
+              "Receiver entry targets an unregistered destination block"
+          )
+        if (
+            dst_shard_idx != 0
+            or dst_offset_bytes < 0
+            or src_offset_bytes < 0
+            or size_bytes <= 0
+            or src_block_id < 0
+        ):
+          raise ValueError(
+              "Receiver entries must be positive writes with non-negative "
+              "offsets and block IDs"
+          )
+        if count <= 0 or src_stride_bytes < 0 or dst_stride_bytes < 0:
+          raise ValueError(
+              "Byte-span receiver entries must have positive count and "
+              "non-negative strides"
+          )
+        expanded_repeats += count
+        if expanded_repeats > 1 << 20:
+          raise ValueError(
+              "Byte-span receiver plan exceeds the repeat expansion bound"
+          )
+        dst_page_ordinal = dst_page_ordinals[dst_block_id]
+        expected_bytes = extents[dst_page_ordinal]
+        for repeat in range(count):
+          repeat_start = dst_offset_bytes + repeat * dst_stride_bytes
+          repeat_end = repeat_start + size_bytes
+          if repeat_end > expected_bytes:
+            raise ValueError(
+                "Receiver entry exceeds its destination page or live tail"
+            )
+          coverage_by_dst_id[dst_block_id].append((repeat_start, repeat_end))
+        transfer_pairs.add((entry[0], src_block_id, dst_block_id))
+      calculated_pushes += min(parallelism, len(transfer_pairs))
+    if entry_count == 0:
+      raise ValueError("Receiver plan contains no entries")
+    if calculated_pushes != expected_pushes_per_pool:
+      raise ValueError(
+          "expected_pushes_per_pool does not match the received schedules"
+      )
+    for dst_page_ordinal, dst_block_id in enumerate(dst_ids):
+      expected_bytes = extents[dst_page_ordinal]
+      covered_until = 0
+      for start_bytes, end_bytes in sorted(coverage_by_dst_id[dst_block_id]):
+        if start_bytes != covered_until:
+          relation = "overlap" if start_bytes < covered_until else "gap"
+          raise ValueError(
+              "Receiver schedule has a destination coverage "
+              f"{relation} for block {dst_block_id}"
+          )
+        covered_until = end_bytes
+      if covered_until != expected_bytes:
+        raise ValueError(
+            "Receiver schedule does not cover the exact live bytes for "
+            f"destination block {dst_block_id}"
+        )
+
+    rpc_addresses = self.worker_rpc_client.get_worker_endpoints()
+    for unit in dst_units:
+      if not rpc_addresses.get(unit):
+        raise ValueError(f"Missing control-plane endpoint for {unit}")
+    plan = TransferPlan(
+        src_units=list(src_units),
+        dst_units=list(dst_units),
+        plan={},
+        shard_push_schedules=shard_push_schedules,
+        worker_rpc_addresses=dict(rpc_addresses),
+        worker_data_addresses={dst_units[0]: list(dst_meta.shards)},
+        uuid=uuid,
+        dst_mem_type=RaidenMemoryType.HBM,
+        use_block_chunks=True,
+        is_sender=False,
+        expected_block_count=len(dst_ids),
+        req_id=req_id,
+        expected_pushes_per_pool=expected_pushes_per_pool,
+        transfer_pool_indices=list(transfer_pool_indices),
+        pool_dtype_tags=list(pool_dtype_tags),
+        dst_device_block_ids=dst_ids,
+        src_schedule_keys=dict(src_schedule_keys),
+        parallelism=parallelism,
+        num_tokens=num_tokens,
+        dst_expected_extent_bytes=extents,
+    )
+    with self._lock:
+      session_id = len(self._active_transfers)
+
+    async def _arm_receivers() -> None:
+      receiver_arm_start_ns = time.monotonic_ns()
+      await asyncio.gather(*[
+          self.worker_rpc_client.start_transfer(unit, plan)
+          for unit in dst_units
+      ])
+      receiver_arm_end_ns = time.monotonic_ns()
+      with self._lock:
+        self._active_transfers[req_id] = plan
+      logging.info(
+          "%s",
+          json.dumps(
+              {
+                  "event": "raiden_pool_reshard_receivers_armed",
+                  "req_id": req_id,
+                  "uuid": uuid,
+                  "num_tokens": num_tokens,
+                  "destination_pages": len(dst_ids),
+                  "receiver_arm_rpc_ms": (
+                      (receiver_arm_end_ns - receiver_arm_start_ns) / 1_000_000
+                  ),
+              },
+              sort_keys=True,
+          ),
+      )
+
+    future = RaidenFuture(session_id, _arm_receivers())
+    with self._lock:
+      self._active_tasks[req_id] = future
+    return future
 
   def start_transfer(
       self,
@@ -1008,6 +2790,9 @@ class RaidenController:
       is_sender: bool = True,
       expected_block_count: int = 0,
       shard_push_schedules: Optional[dict] = None,
+      num_tokens: Optional[int] = None,
+      transfer_pool_tags: Optional[typing.Sequence[str]] = None,
+      parallelism: Optional[int] = None,
   ) -> RaidenFuture:
     """For a requested data transfer, generates a transfer plan for the work units to carry out and start it.
 
@@ -1035,6 +2820,36 @@ class RaidenController:
       A Future for the call site to wait for the transfer to complete.
     """
 
+    # The block-granular reshard mode dispatches on exactly the arguments the
+    # legacy body rejects with NotImplementedError below — provably disjoint
+    # argument spaces behind one public entry point.
+    if (
+        num_tokens is not None
+        or dst_device_block_ids is not None
+        or transfer_pool_tags is not None
+    ):
+      if shard_push_schedules:
+        raise ValueError(
+            "Prepared reshard schedules must use "
+            "register_pool_reshard_receiver_plan"
+        )
+      return self._start_pool_reshard_transfer(
+          src_units=src_units,
+          dst_units=dst_units,
+          req_id=req_id,
+          src_block_ids=src_block_ids,
+          dst_device_block_ids=dst_device_block_ids,
+          dst_mem_type=dst_mem_type,
+          use_block_chunks=use_block_chunks,
+          src_controller_address=src_controller_address,
+          dst_controller_address=dst_controller_address,
+          uuid=uuid,
+          is_sender=is_sender,
+          num_tokens=num_tokens,
+          transfer_pool_tags=transfer_pool_tags,
+          parallelism=parallelism,
+      )
+
     if not src_units:
       raise ValueError("src_units must not be empty.")
     if not dst_units:
@@ -1043,6 +2858,15 @@ class RaidenController:
       raise NotImplementedError("src_block_ids are not supported yet.")
     if dst_device_block_ids:
       raise NotImplementedError("dst_device_block_ids are not supported yet.")
+
+    with self._lock:
+      if req_id and req_id in self._active_tasks:
+        logging.info(
+            "start_transfer req_id %s already exists, returning existing"
+            " future.",
+            req_id,
+        )
+        return self._active_tasks[req_id]
 
     # Select only one source unit for now.
     with self._lock:
@@ -1072,29 +2896,33 @@ class RaidenController:
       if not req_id:
         req_id = f"req_{session_id}"
 
-    # Generate default plan (always needed as fallback or for old workflow)
-    num_src = len(self._resolve_shards(selected_src))
-    default_plan_dict = {}
-    src_plan = [[] for _ in range(num_src)]
-    for dst_unit in dst_units:
-      num_dst = len(self._resolve_shards(dst_unit))
-      for i in range(num_src):
-        src_start = i * num_dst
-        src_end = (i + 1) * num_dst
-        for j in range(num_dst):
-          dst_start = j * num_src
-          dst_end = (j + 1) * num_src
-          intersect_start = max(src_start, dst_start)
-          intersect_end = min(src_end, dst_end)
-          if intersect_start < intersect_end:
-            local_start = intersect_start - src_start
-            local_end = intersect_end - src_start
-            nd_slice = [(local_start, local_end)]
-            src_plan[i].append((dst_unit, j, [nd_slice]))
-    default_plan_dict[selected_src] = src_plan
-
     if not use_block_chunks:
       # === OLD WORKFLOW: Fully build and store plan SYNCHRONOUSLY ===
+      # Generate the default plan. Only this synchronous workflow consumes it
+      # (the block-chunks branch stores plan=None and builds its schedules
+      # asynchronously), and only this workflow may resolve destination
+      # shards eagerly: on a source controller the destination units of a
+      # cross-controller transfer are not locally registered.
+      num_src = len(self._resolve_shards(selected_src))
+      default_plan_dict = {}
+      src_plan = [[] for _ in range(num_src)]
+      for dst_unit in dst_units:
+        num_dst = len(self._resolve_shards(dst_unit))
+        for i in range(num_src):
+          src_start = i * num_dst
+          src_end = (i + 1) * num_dst
+          for j in range(num_dst):
+            dst_start = j * num_src
+            dst_end = (j + 1) * num_src
+            intersect_start = max(src_start, dst_start)
+            intersect_end = min(src_end, dst_end)
+            if intersect_start < intersect_end:
+              local_start = intersect_start - src_start
+              local_end = intersect_end - src_start
+              nd_slice = [(local_start, local_end)]
+              src_plan[i].append((dst_unit, j, [nd_slice]))
+      default_plan_dict[selected_src] = src_plan
+
       rpc_addresses = {}
       if hasattr(self.worker_rpc_client, "get_worker_endpoints"):
         rpc_addresses = self.worker_rpc_client.get_worker_endpoints()
@@ -1219,11 +3047,7 @@ class RaidenController:
             logging.info("Using pre-computed shard_push_schedules")
             computed_schedules = shard_push_schedules
             for meta in dst_metadata:
-              unit = RaidenId(
-                  meta.unit.job_name,
-                  meta.unit.job_replica_id,
-                  meta.unit.data_name,
-              )
+              unit = _raiden_id_from_proto(meta.unit)
               for shard in meta.shards:
                 data_address_to_unit[shard] = unit
           else:
@@ -1239,7 +3063,8 @@ class RaidenController:
                 phys_shape, phys_mesh = to_physical(
                     global_shape, mesh_shape, layout
                 )
-                slices = resharding_planner.compute_nd_shard_slices(
+                self._computed_phys_meshes[unit] = phys_mesh
+                slices = nd_slice_math.compute_nd_shard_slices(
                     phys_shape, phys_mesh
                 )
                 computed_slices[unit] = slices
@@ -1247,11 +3072,7 @@ class RaidenController:
 
             # Destination slices
             for meta in dst_metadata:
-              unit = RaidenId(
-                  meta.unit.job_name,
-                  meta.unit.job_replica_id,
-                  meta.unit.data_name,
-              )
+              unit = _raiden_id_from_proto(meta.unit)
               for shard in meta.shards:
                 data_address_to_unit[shard] = unit
               if meta.global_shape and meta.mesh_shape and meta.layout:
@@ -1260,7 +3081,8 @@ class RaidenController:
                     list(meta.mesh_shape),
                     list(meta.layout),
                 )
-                slices = resharding_planner.compute_nd_shard_slices(
+                self._computed_phys_meshes[unit] = phys_mesh
+                slices = nd_slice_math.compute_nd_shard_slices(
                     phys_shape, phys_mesh
                 )
                 computed_slices[unit] = slices
@@ -1283,20 +3105,26 @@ class RaidenController:
               src_shards = self._resolve_shards(src_unit)
               unit_schedules = {}
 
-              if len(src_shards) == 1:
-                try:
-                  src_indices = [(0, int(src_unit.job_replica_id))]
-                except ValueError:
-                  src_indices = [(0, 0)]
-              else:
-                try:
-                  replica_id = int(src_unit.job_replica_id)
-                  src_indices = [
-                      (i, replica_id * len(src_shards) + i)
-                      for i in range(len(src_shards))
-                  ]
-                except ValueError:
-                  src_indices = [(i, i) for i in range(len(src_slices))]
+              with self._lock:
+                src_job_replicas = {
+                    u.job_replica_id
+                    for u in self._registered_shards
+                    if u.job_name == src_unit.job_name
+                }
+              num_src_physical_hosts = max(1, len(src_job_replicas))
+              with self._lock:
+                src_logical_mesh = self._registered_mesh_shapes.get(
+                    src_unit, []
+                )
+                src_layout = self._registered_layouts.get(src_unit, [])
+
+              src_indices = _get_global_indices(
+                  src_unit,
+                  src_shards,
+                  src_logical_mesh,
+                  src_layout,
+                  num_src_physical_hosts,
+              )
 
               for local_src_idx, global_src_idx in src_indices:
                 if global_src_idx >= len(src_slices):
@@ -1317,32 +3145,33 @@ class RaidenController:
                     continue
 
                   dst_shards = []
+                  dst_logical_mesh = []
+                  dst_layout = []
                   for meta in dst_metadata:
-                    meta_unit = RaidenId(
-                        meta.unit.job_name,
-                        meta.unit.job_replica_id,
-                        meta.unit.data_name,
-                    )
+                    meta_unit = _raiden_id_from_proto(meta.unit)
                     if meta_unit == dst_unit:
                       dst_shards = list(meta.shards)
+                      dst_logical_mesh = list(meta.mesh_shape)
+                      dst_layout = list(meta.layout)
                       break
                   if not dst_shards:
                     dst_shards = ["127.0.0.1:8000"]  # fallback
 
-                  if len(dst_shards) == 1:
-                    try:
-                      dst_indices = [(0, int(dst_unit.job_replica_id))]
-                    except ValueError:
-                      dst_indices = [(0, 0)]
-                  else:
-                    try:
-                      replica_id = int(dst_unit.job_replica_id)
-                      dst_indices = [
-                          (j, replica_id * len(dst_shards) + j)
-                          for j in range(len(dst_shards))
-                      ]
-                    except ValueError:
-                      dst_indices = [(j, j) for j in range(len(d_slices))]
+                  dst_job_replicas = {
+                      m.unit.job_replica_id
+                      for m in dst_metadata
+                      if m.unit.job_name == dst_unit.job_name
+                  }
+
+                  num_dst_physical_hosts = max(1, len(dst_job_replicas))
+
+                  dst_indices = _get_global_indices(
+                      dst_unit,
+                      dst_shards,
+                      dst_logical_mesh,
+                      dst_layout,
+                      num_dst_physical_hosts,
+                  )
 
                   for local_dst_idx, global_dst_idx in dst_indices:
                     if global_dst_idx >= len(d_slices):
@@ -1417,21 +3246,13 @@ class RaidenController:
           rpc_addresses = self.worker_rpc_client.get_worker_endpoints()
           # Merge destination rpc addresses from metadata
           for meta in dst_metadata:
-            unit = RaidenId(
-                meta.unit.job_name,
-                meta.unit.job_replica_id,
-                meta.unit.data_name,
-            )
+            unit = _raiden_id_from_proto(meta.unit)
             if meta.control_plane_rpc_address:
               rpc_addresses[unit] = meta.control_plane_rpc_address
 
           data_addresses = {unit: [] for unit in dst_units}
           for meta in dst_metadata:
-            unit = RaidenId(
-                meta.unit.job_name,
-                meta.unit.job_replica_id,
-                meta.unit.data_name,
-            )
+            unit = _raiden_id_from_proto(meta.unit)
             if unit in data_addresses:
               data_addresses[unit] = list(meta.shards)
 
@@ -1538,15 +3359,16 @@ class RaidenController:
                 # TODO(b/12345678): Optimize early stages with topology-aware
                 # branching based on IP/subnet closeness to minimize
                 # inter-switch DCN traffic.
+                slice_uuid = random.randint(1, 2**63 - 1)
                 task = self._execute_slice_broadcast(
                     key=key,
                     targets=targets,
                     final_plan=final_plan,
                     fanout_k=self.broadcast_k,
                     req_id=req_id,
-                    uuid=uuid,
+                    uuid=slice_uuid,
                     dst_mem_type=dst_mem_type,
-                    expected_block_count=expected_block_count,
+                    expected_block_count=1,
                     dst_controller_address=dst_controller_address,
                     src_controller_address=src_controller_address,
                 )
@@ -1582,7 +3404,7 @@ class RaidenController:
               if dst_controller_address:
                 dst_facade = RaidenControllerClientFacade(
                     dst_controller_address,
-                    name_resolver=self.worker_rpc_client._name_resolver,
+                    name_resolver=self.worker_rpc_client.name_resolver,
                 )
                 loop = asyncio.get_running_loop()
                 success = await loop.run_in_executor(
@@ -1626,6 +3448,39 @@ class RaidenController:
                 ])
 
             if tree_broadcast_tasks:
+              if dst_controller_address:
+                logging.info(
+                    "Registering top-level req_id %s on destination"
+                    " controller %s",
+                    req_id,
+                    dst_controller_address,
+                )
+                dst_facade = RaidenControllerClientFacade(
+                    dst_controller_address,
+                    name_resolver=self.worker_rpc_client._name_resolver,
+                )
+                loop = asyncio.get_running_loop()
+                success = await loop.run_in_executor(
+                    None,
+                    dst_facade.register_transfer_schedule,
+                    src_units,
+                    dst_units,
+                    req_id,
+                    True,
+                    False,
+                    0,  # expected_block_count = 0 to complete immediately
+                    uuid,
+                    dst_controller_address,
+                    src_controller_address,
+                    None,
+                    dst_mem_type,
+                )
+                if not success:
+                  logging.warning(
+                      "Failed to register top-level req_id %s on destination"
+                      " controller",
+                      req_id,
+                  )
               await asyncio.gather(*tree_broadcast_tasks)
 
       else:
@@ -1689,8 +3544,17 @@ class RaidenControllerServer:
     self._proto_module = proto_module or controller_service_pb2
     self._raiden_proto_module = raiden_proto_module or raiden_service_pb2
     self._sock = create_server_socket(controller.port)
+    # Port 0 is useful for atomic ephemeral-port selection in tests and local
+    # harnesses. Publish the kernel-selected port before start()/stop() use it.
+    if controller.port == 0:
+      controller.port = int(self._sock.getsockname()[1])
     self._stopped = False
     self._thread = None
+
+  @property
+  def port(self) -> int:
+    """Returns the bound listener port, including for a requested port 0."""
+    return self._controller.port
 
   def start(self) -> int:
     """Spawns background server acceptance thread listening for incoming Controller RPCs.
@@ -1707,7 +3571,10 @@ class RaidenControllerServer:
     self._stopped = True
     for host in ("[::1]", "127.0.0.1"):
       try:
-        connect_socket(f"{host}:{self._controller.port}", timeout=0.5)
+        wake_socket = connect_socket(
+            f"{host}:{self._controller.port}", timeout=0.5
+        )
+        wake_socket.close()
         break
       except Exception:  # pylint: disable=broad-except
         pass
@@ -1722,11 +3589,7 @@ class RaidenControllerServer:
       pass
 
   def _server_loop(self) -> None:
-    """Internal socket server connection acceptance coroutine loop."""
-    loop = asyncio.new_event_loop()
-
-    asyncio.set_event_loop(loop)
-
+    """Accepts connections; every handler owns its asyncio event loop."""
     while not self._stopped:
       try:
         conn, _ = self._sock.accept()
@@ -1734,22 +3597,19 @@ class RaidenControllerServer:
           conn.close()
           break
         threading.Thread(
-            target=self._handle_conn, args=(conn, loop), daemon=True
+            target=self._handle_conn, args=(conn,), daemon=True
         ).start()
       except OSError:
         break
 
-    loop.close()
-
-  def _handle_conn(
-      self, conn: socket.socket, loop: asyncio.AbstractEventLoop
-  ) -> None:
+  def _handle_conn(self, conn: socket.socket) -> None:
     """Internal connection processing handler executing deserialized ControllerRequest Protobuf RPC payloads.
 
     Args:
       conn: Accepted incoming TCP socket client handle.
-      loop: Target asyncio coroutine loop.
     """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
 
       len_bytes = b""
@@ -1783,20 +3643,18 @@ class RaidenControllerServer:
               == self._proto_module.ControllerRequest.COMMAND_COORDINATE_TRANSFER
           ):
             coord_req = req.coordinate_transfer_request
-            srcs = [
-                RaidenId(u.job_name, u.job_replica_id, u.data_name)
-                for u in coord_req.src_units
-            ]
-            dsts = [
-                RaidenId(u.job_name, u.job_replica_id, u.data_name)
-                for u in coord_req.dst_units
-            ]
+            srcs = [_raiden_id_from_proto(u) for u in coord_req.src_units]
+            dsts = [_raiden_id_from_proto(u) for u in coord_req.dst_units]
             dst_mem_type = RaidenMemoryType.DRAM
             if (
                 coord_req.dst_mem_type
                 == self._raiden_proto_module.MEMORY_TYPE_HBM
             ):
               dst_mem_type = RaidenMemoryType.HBM
+
+            num_tokens = None
+            if coord_req.num_tokens > 0 or coord_req.dst_device_block_ids:
+              num_tokens = coord_req.num_tokens
 
             future = self._controller.start_transfer(
                 src_units=srcs,
@@ -1814,8 +3672,22 @@ class RaidenControllerServer:
                 is_sender=coord_req.is_sender,
                 expected_block_count=coord_req.expected_block_count,
                 shard_push_schedules=None,
+                dst_device_block_ids=(
+                    list(coord_req.dst_device_block_ids)
+                    if coord_req.dst_device_block_ids
+                    else None
+                ),
+                num_tokens=num_tokens,
+                transfer_pool_tags=(
+                    list(coord_req.transfer_pool_tags)
+                    if coord_req.transfer_pool_tags
+                    else None
+                ),
             )
-            loop.run_until_complete(future.wait())
+            if future.try_start():
+              loop.run_until_complete(future.wait())
+            else:
+              future.wait_threadsafe()
             resp.success = True
         except Exception as e:
           resp.message = str(e)
@@ -1837,6 +3709,107 @@ class RaidenControllerServer:
           resp.message = str(e)
         resp_bytes = resp.SerializeToString()
         conn.sendall(len(resp_bytes).to_bytes(4, "big") + resp_bytes)
+      elif (
+          req.command
+          == self._proto_module.ControllerRequest.COMMAND_REGISTER_REQUEST_BLOCKS
+          and req.HasField("register_request_blocks_request")
+      ):
+        resp = self._proto_module.ControllerResponse()
+        resp.success = False
+        try:
+          block_req = req.register_request_blocks_request
+          self._controller.register_request_blocks(
+              block_req.req_id,
+              block_req.uuid,
+              _raiden_id_from_proto(block_req.unit),
+              list(block_req.block_ids),
+              pool_spans=[
+                  PoolSpanRegistration(
+                      tag=entry.tag,
+                      block_ids=tuple(entry.block_ids),
+                      spans=tuple(
+                          PoolByteSpan(
+                              src_block_ordinal=span.src_block_ordinal,
+                              src_offset_bytes=span.src_offset_bytes,
+                              dst_block_index=span.dst_block_index,
+                              dst_offset_bytes=span.dst_offset_bytes,
+                              size_bytes=span.size_bytes,
+                              src_stride_bytes=span.src_stride_bytes,
+                              dst_stride_bytes=span.dst_stride_bytes,
+                              count=span.count,
+                          )
+                          for span in entry.spans
+                      ),
+                      declared_bytes=entry.declared_bytes,
+                  )
+                  for entry in block_req.pool_spans
+              ],
+          )
+          resp.success = True
+        except Exception as e:  # pylint: disable=broad-except
+          resp.message = str(e)
+        resp_bytes = resp.SerializeToString()
+        conn.sendall(len(resp_bytes).to_bytes(4, "big") + resp_bytes)
+      elif (
+          req.command
+          == self._proto_module.ControllerRequest.COMMAND_RELEASE_REQUEST_BLOCKS
+          and req.HasField("release_request_blocks_request")
+      ):
+        resp = self._proto_module.ControllerResponse()
+        resp.success = False
+        try:
+          release_req = req.release_request_blocks_request
+          if not release_req.force:
+            raise ValueError(
+                "Legacy rank-local release is unsafe; use the aggregate "
+                "completion-vote RPC"
+            )
+          released = self._controller.release_request_blocks(
+              release_req.req_id,
+              release_req.uuid,
+          )
+          resp.response_data = str(released)
+          resp.success = True
+        except Exception as e:  # pylint: disable=broad-except
+          resp.message = str(e)
+        resp_bytes = resp.SerializeToString()
+        conn.sendall(len(resp_bytes).to_bytes(4, "big") + resp_bytes)
+      elif (
+          req.command
+          == self._proto_module.ControllerRequest.COMMAND_COMPLETE_REQUEST_BLOCKS
+          and req.HasField("complete_request_blocks_request")
+      ):
+        resp = self._proto_module.ControllerResponse()
+        resp.success = False
+        try:
+          complete_req = req.complete_request_blocks_request
+          released = self._controller.complete_request_blocks(
+              complete_req.req_id,
+              complete_req.uuid,
+              _raiden_id_from_proto(complete_req.unit),
+          )
+          resp.response_data = str(released)
+          resp.success = True
+        except Exception as e:  # pylint: disable=broad-except
+          resp.message = str(e)
+        resp_bytes = resp.SerializeToString()
+        conn.sendall(len(resp_bytes).to_bytes(4, "big") + resp_bytes)
+      elif req.command == (
+          self._proto_module.ControllerRequest.COMMAND_CANCEL_REQUEST_BLOCKS_IF_UNCLAIMED
+      ) and req.HasField("cancel_request_blocks_if_unclaimed_request"):
+        resp = self._proto_module.ControllerResponse()
+        resp.success = False
+        try:
+          cancel_req = req.cancel_request_blocks_if_unclaimed_request
+          cancelled = self._controller.cancel_request_blocks_if_unclaimed(
+              cancel_req.req_id, cancel_req.uuid
+          )
+          resp.response_data = "true" if cancelled else "false"
+          resp.success = True
+        except Exception as e:  # pylint: disable=broad-except
+          resp.message = str(e)
+        resp_bytes = resp.SerializeToString()
+        conn.sendall(len(resp_bytes).to_bytes(4, "big") + resp_bytes)
       else:
         raiden_req = self._raiden_proto_module.ControlRequest()
         raiden_req.ParseFromString(req_bytes)
@@ -1848,9 +3821,7 @@ class RaidenControllerServer:
               == self._raiden_proto_module.ControlRequest.COMMAND_REGISTER_WORK_UNIT
           ):
             reg = raiden_req.register_work_unit_request
-            unit = RaidenId(
-                reg.unit.job_name, reg.unit.job_replica_id, reg.unit.data_name
-            )
+            unit = _raiden_id_from_proto(reg.unit)
             shards = list(reg.shards)
             ctrl_addr = (
                 reg.control_plane_rpc_address
@@ -1861,6 +3832,19 @@ class RaidenControllerServer:
             layout = list(reg.layout) if reg.layout else None
             global_shape = list(reg.global_shape) if reg.global_shape else None
             itemsize = reg.itemsize if reg.itemsize > 0 else None
+            pool_manifest = list(reg.pools) if reg.pools else None
+            layout_fingerprint = (
+                reg.layout_fingerprint if reg.layout_fingerprint else None
+            )
+            page_tokens = reg.page_tokens if reg.page_tokens > 0 else None
+            transfer_parallelism = (
+                reg.transfer_parallelism
+                if reg.transfer_parallelism > 0
+                else None
+            )
+            transfer_rank = (
+                reg.transfer_rank if pool_manifest is not None else None
+            )
 
             self._controller.register_work_unit(
                 unit,
@@ -1870,6 +3854,11 @@ class RaidenControllerServer:
                 layout=layout,
                 global_shape=global_shape,
                 itemsize=itemsize,
+                pool_manifest=pool_manifest,
+                layout_fingerprint=layout_fingerprint,
+                page_tokens=page_tokens,
+                transfer_parallelism=transfer_parallelism,
+                transfer_rank=transfer_rank,
             )
             raiden_resp.success = True
           elif (
@@ -1884,14 +3873,8 @@ class RaidenControllerServer:
               == self._raiden_proto_module.ControlRequest.COMMAND_REGISTER_TRANSFER_SCHEDULE
           ):
             start_req = raiden_req.start_transfer_request
-            srcs = [
-                RaidenId(u.job_name, u.job_replica_id, u.data_name)
-                for u in start_req.src_units
-            ]
-            dsts = [
-                RaidenId(u.job_name, u.job_replica_id, u.data_name)
-                for u in start_req.dst_units
-            ]
+            srcs = [_raiden_id_from_proto(u) for u in start_req.src_units]
+            dsts = [_raiden_id_from_proto(u) for u in start_req.dst_units]
             dst_mem_type = RaidenMemoryType.DRAM
             if (
                 start_req.dst_mem_type
@@ -1899,78 +3882,124 @@ class RaidenControllerServer:
             ):
               dst_mem_type = RaidenMemoryType.HBM
 
-            shard_push_schedules = {}
-            if len(srcs) == 1 and len(start_req.shard_push_schedules) > 1:
-              unit_schedules = {}
-              for (
-                  key_idx,
-                  schedule_proto,
-              ) in start_req.shard_push_schedules.items():
-                entries = []
-                for e in schedule_proto.entries:
-                  entries.append((
-                      e.dst_peer,
-                      e.dst_shard_idx,
-                      e.dst_offset_bytes,
-                      e.src_offset_bytes,
-                      e.size_bytes,
-                      e.src_block_id,
-                      e.dst_block_id,
-                      e.src_stride_bytes,
-                      e.dst_stride_bytes,
-                      e.count,
-                  ))
-                if entries:
-                  unit_schedules[key_idx] = entries
-              if unit_schedules:
-                shard_push_schedules[srcs[0]] = unit_schedules
-            else:
-              for src_unit in srcs:
-                src_replica_idx = int(src_unit.job_replica_id)
-                if src_replica_idx in start_req.shard_push_schedules:
-                  schedule_proto = start_req.shard_push_schedules[
-                      src_replica_idx
-                  ]
-                  entries = []
-                  for e in schedule_proto.entries:
-                    entries.append((
-                        e.dst_peer,
-                        e.dst_shard_idx,
-                        e.dst_offset_bytes,
-                        e.src_offset_bytes,
-                        e.size_bytes,
-                        e.src_block_id,
-                        e.dst_block_id,
-                        e.src_stride_bytes,
-                        e.dst_stride_bytes,
-                        e.count,
-                    ))
-                  if entries:
-                    shard_push_schedules[src_unit] = {0: entries}
+            def decode_entries(schedule_proto):
+              return [
+                  (
+                      entry.dst_peer,
+                      entry.dst_shard_idx,
+                      entry.dst_offset_bytes,
+                      entry.src_offset_bytes,
+                      entry.size_bytes,
+                      entry.src_block_id,
+                      entry.dst_block_id,
+                      entry.src_stride_bytes,
+                      entry.dst_stride_bytes,
+                      entry.count,
+                  )
+                  for entry in schedule_proto.entries
+              ]
 
-            future = self._controller.start_transfer(
-                src_units=srcs,
-                dst_units=dsts,
-                req_id=start_req.req_id if start_req.req_id else None,
-                dst_mem_type=dst_mem_type,
-                use_block_chunks=start_req.use_block_chunks,
-                src_controller_address=None,
-                dst_controller_address=None,
-                uuid=start_req.uuid if start_req.uuid > 0 else None,
-                is_sender=start_req.is_sender,
-                expected_block_count=start_req.expected_block_count,
-                shard_push_schedules=shard_push_schedules,
+            is_pool_reshard = bool(
+                start_req.expected_pushes_per_pool
+                or start_req.transfer_pool_indices
             )
-            loop.run_until_complete(future.wait())
+            if is_pool_reshard:
+              if start_req.is_sender:
+                raise ValueError(
+                    "Inter-controller reshard schedule registration must target"
+                    " receivers"
+                )
+              if not start_req.use_block_chunks:
+                raise ValueError(
+                    "Reshard receiver schedule requires use_block_chunks=true"
+                )
+              if dst_mem_type != RaidenMemoryType.HBM:
+                raise ValueError(
+                    "Reshard receiver schedule requires dst_mem_type=HBM"
+                )
+              expected_keys = set(range(len(srcs)))
+              actual_keys = set(start_req.shard_push_schedules)
+              if actual_keys != expected_keys:
+                raise ValueError(
+                    "Reshard schedule map keys must match source list"
+                    f" ordinals: got={sorted(actual_keys)},"
+                    f" expected={sorted(expected_keys)}"
+                )
+              shard_push_schedules = {
+                  src_unit: {
+                      0: decode_entries(start_req.shard_push_schedules[ordinal])
+                  }
+                  for ordinal, src_unit in enumerate(srcs)
+              }
+              future = self._controller.register_pool_reshard_receiver_plan(
+                  src_units=srcs,
+                  dst_units=dsts,
+                  req_id=start_req.req_id,
+                  uuid=start_req.uuid,
+                  shard_push_schedules=shard_push_schedules,
+                  expected_pushes_per_pool=(start_req.expected_pushes_per_pool),
+                  transfer_pool_indices=list(start_req.transfer_pool_indices),
+                  pool_dtype_tags=list(start_req.pool_dtype_tags),
+                  dst_device_block_ids=list(start_req.dst_device_block_ids),
+                  src_schedule_keys={
+                      src_unit: ordinal for ordinal, src_unit in enumerate(srcs)
+                  },
+                  parallelism=start_req.parallelism,
+                  num_tokens=start_req.num_tokens,
+                  dst_expected_extent_bytes=list(
+                      start_req.dst_expected_extent_bytes
+                  ),
+              )
+            else:
+              shard_push_schedules = {}
+              if len(srcs) == 1 and len(start_req.shard_push_schedules) > 1:
+                unit_schedules = {}
+                for (
+                    key_idx,
+                    schedule_proto,
+                ) in start_req.shard_push_schedules.items():
+                  entries = decode_entries(schedule_proto)
+                  if entries:
+                    unit_schedules[key_idx] = entries
+                if unit_schedules:
+                  shard_push_schedules[srcs[0]] = unit_schedules
+              else:
+                # Legacy transfer IDs historically used job_replica_id as a
+                # schedule key. This compatibility branch is intentionally
+                # outside the Stage-3 fail-closed path.
+                for src_unit in srcs:
+                  src_replica_idx = int(src_unit.job_replica_id)
+                  if src_replica_idx in start_req.shard_push_schedules:
+                    entries = decode_entries(
+                        start_req.shard_push_schedules[src_replica_idx]
+                    )
+                    if entries:
+                      shard_push_schedules[src_unit] = {0: entries}
+
+              future = self._controller.start_transfer(
+                  src_units=srcs,
+                  dst_units=dsts,
+                  req_id=start_req.req_id if start_req.req_id else None,
+                  dst_mem_type=dst_mem_type,
+                  use_block_chunks=start_req.use_block_chunks,
+                  src_controller_address=None,
+                  dst_controller_address=None,
+                  uuid=start_req.uuid if start_req.uuid > 0 else None,
+                  is_sender=start_req.is_sender,
+                  expected_block_count=start_req.expected_block_count,
+                  shard_push_schedules=shard_push_schedules,
+              )
+            if future.try_start():
+              loop.run_until_complete(future.wait())
+            else:
+              future.wait_threadsafe()
             raiden_resp.success = True
           elif (
               raiden_req.command
               == self._raiden_proto_module.ControlRequest.COMMAND_SHUTDOWN
           ):
             if hasattr(self._controller.worker_rpc_client, "shutdown_workers"):
-              loop.run_until_complete(
-                  self._controller.worker_rpc_client.shutdown_workers()
-              )
+              asyncio.run(self._controller.worker_rpc_client.shutdown_workers())
             self.stop()
             raiden_resp.success = True
         except Exception as e:
@@ -1981,6 +4010,7 @@ class RaidenControllerServer:
       pass
 
     finally:
+      loop.close()
       conn.close()
 
 
@@ -2008,6 +4038,7 @@ class RaidenControllerClientFacade:
         job_name=unit.job_name,
         job_replica_id=unit.job_replica_id,
         data_name=unit.data_name,
+        data_replica_idx=unit.data_replica_idx,
     )
 
   def _send_protobuf_rpc(self, req: Any) -> Any:
@@ -2045,7 +4076,8 @@ class RaidenControllerClientFacade:
     finally:
       sock.close()
 
-  def _send_raiden_protobuf_rpc(self, req: Any) -> bool:
+  def _send_raiden_protobuf_rpc_response(self, req: Any) -> Any:
+    """Sends a Raiden protobuf RPC response."""
     sock = connect_socket(
         self._address, timeout=300.0, resolver=self._name_resolver
     )
@@ -2075,9 +4107,13 @@ class RaidenControllerClientFacade:
         raise RuntimeError(
             f"Remote Controller Server execution failed: {resp.message}"
         )
-      return True
+      return resp
     finally:
       sock.close()
+
+  def _send_raiden_protobuf_rpc(self, req: Any) -> bool:
+    self._send_raiden_protobuf_rpc_response(req)
+    return True
 
   def register_work_unit(
       self,
@@ -2088,6 +4124,11 @@ class RaidenControllerClientFacade:
       layout: Optional[typing.Sequence[int]] = None,
       global_shape: Optional[typing.Sequence[int]] = None,
       itemsize: Optional[int] = None,
+      pool_manifest: Optional[typing.Sequence[Any]] = None,
+      layout_fingerprint: Optional[str] = None,
+      page_tokens: Optional[int] = None,
+      transfer_parallelism: Optional[int] = None,
+      transfer_rank: Optional[int] = None,
   ) -> None:
     """Sends remote RPC to register a physical worker entity with the central RaidenControllerServer.
 
@@ -2100,6 +4141,11 @@ class RaidenControllerClientFacade:
       layout: Optional minor_to_major mapping layout.
       global_shape: Optional global array shape.
       itemsize: Optional item size in bytes.
+      pool_manifest: Optional manifest of memory pools.
+      layout_fingerprint: Optional layout fingerprint string.
+      page_tokens: Optional page token size.
+      transfer_parallelism: Optional transfer parallelism factor.
+      transfer_rank: Optional transfer rank.
     """
     reg_req = self._raiden_proto_module.RegisterWorkUnitRequest(
         unit=self._raiden_id_to_proto(unit),
@@ -2116,12 +4162,108 @@ class RaidenControllerClientFacade:
       reg_req.global_shape.extend(global_shape)
     if itemsize:
       reg_req.itemsize = itemsize
+    if pool_manifest is not None:
+      for pool in pool_manifest:
+        reg_req.pools.add().CopyFrom(_coerce_pool_spec_proto(pool))
+    if layout_fingerprint is not None:
+      reg_req.layout_fingerprint = layout_fingerprint
+    if page_tokens is not None:
+      reg_req.page_tokens = page_tokens
+    if transfer_parallelism is not None:
+      reg_req.transfer_parallelism = transfer_parallelism
+    if transfer_rank is not None:
+      reg_req.transfer_rank = transfer_rank
 
     req = self._raiden_proto_module.ControlRequest(
         command=self._raiden_proto_module.ControlRequest.COMMAND_REGISTER_WORK_UNIT,
         register_work_unit_request=reg_req,
     )
     self._send_raiden_protobuf_rpc(req)
+
+  def register_request_blocks(
+      self,
+      req_id: str,
+      uuid: int,
+      unit: RaidenId,
+      block_ids: typing.Sequence[int],
+      pool_spans: typing.Sequence[Any] = (),
+  ) -> None:
+    """Registers producer-owned block IDs and declared spans (D5)."""
+    block_req = self._proto_module.RegisterRequestBlocksRequest(
+        req_id=req_id,
+        uuid=uuid,
+        unit=self._raiden_id_to_proto(unit),
+        block_ids=list(block_ids),
+    )
+    for entry in pool_spans:
+      entry_proto = block_req.pool_spans.add(
+          tag=str(entry.tag),
+          block_ids=[int(block_id) for block_id in entry.block_ids],
+          declared_bytes=int(entry.declared_bytes),
+      )
+      for span in entry.spans:
+        entry_proto.spans.add(
+            src_block_ordinal=int(span.src_block_ordinal),
+            src_offset_bytes=int(span.src_offset_bytes),
+            dst_block_index=int(span.dst_block_index),
+            dst_offset_bytes=int(span.dst_offset_bytes),
+            size_bytes=int(span.size_bytes),
+            src_stride_bytes=int(span.src_stride_bytes),
+            dst_stride_bytes=int(span.dst_stride_bytes),
+            count=int(span.count),
+        )
+    req = self._proto_module.ControllerRequest(
+        command=self._proto_module.ControllerRequest.COMMAND_REGISTER_REQUEST_BLOCKS,
+        register_request_blocks_request=block_req,
+    )
+    self._send_protobuf_rpc(req)
+
+  def release_request_blocks(self, req_id: str, uuid: int) -> None:
+    """Explicitly force-releases a complete request lifecycle generation."""
+    release_req = self._proto_module.ReleaseRequestBlocksRequest(
+        req_id=req_id, uuid=uuid, force=True
+    )
+    req = self._proto_module.ControllerRequest(
+        command=self._proto_module.ControllerRequest.COMMAND_RELEASE_REQUEST_BLOCKS,
+        release_request_blocks_request=release_req,
+    )
+    self._send_protobuf_rpc(req)
+
+  def complete_request_blocks(
+      self, req_id: str, uuid: int, unit: RaidenId
+  ) -> None:
+    """Votes one producer rank terminal using the aggregate-safe protocol."""
+    complete_req = self._proto_module.CompleteRequestBlocksRequest(
+        req_id=req_id,
+        uuid=uuid,
+        unit=self._raiden_id_to_proto(unit),
+    )
+    req = self._proto_module.ControllerRequest(
+        command=self._proto_module.ControllerRequest.COMMAND_COMPLETE_REQUEST_BLOCKS,
+        complete_request_blocks_request=complete_req,
+    )
+    self._send_protobuf_rpc(req)
+
+  def cancel_request_blocks_if_unclaimed(self, req_id: str, uuid: int) -> bool:
+    """Cancels D5 state unless a transfer plan has already claimed it."""
+    cancel_req = self._proto_module.CancelRequestBlocksIfUnclaimedRequest(
+        req_id=req_id, uuid=uuid
+    )
+    req = self._proto_module.ControllerRequest(
+        command=(
+            self._proto_module.ControllerRequest.COMMAND_CANCEL_REQUEST_BLOCKS_IF_UNCLAIMED
+        ),
+        cancel_request_blocks_if_unclaimed_request=cancel_req,
+    )
+    response = self._send_protobuf_rpc(req)
+    if response.response_data == "true":
+      return True
+    if response.response_data == "false":
+      return False
+    raise RuntimeError(
+        "Remote Controller Server returned an invalid cancellation result: "
+        f"{response.response_data!r}"
+    )
 
   def coordinate_transfer(
       self,
@@ -2136,6 +4278,9 @@ class RaidenControllerClientFacade:
       src_controller_address: Optional[str] = None,
       shard_push_schedules: Optional[dict] = None,
       dst_mem_type: RaidenMemoryType = RaidenMemoryType.DRAM,
+      dst_device_block_ids: Optional[typing.Sequence[int]] = None,
+      num_tokens: Optional[int] = None,
+      transfer_pool_tags: Optional[typing.Sequence[str]] = None,
   ) -> bool:
     """Sends remote RPC to coordinate global least-loaded transfer and blocks until fully complete."""
     coord_req = self._proto_module.CoordinateTransferRequest(
@@ -2154,6 +4299,12 @@ class RaidenControllerClientFacade:
         else "",
         dst_mem_type=int(dst_mem_type),
     )
+    if dst_device_block_ids is not None:
+      coord_req.dst_device_block_ids.extend(dst_device_block_ids)
+    if num_tokens is not None:
+      coord_req.num_tokens = num_tokens
+    if transfer_pool_tags is not None:
+      coord_req.transfer_pool_tags.extend(transfer_pool_tags)
 
     req = self._proto_module.ControllerRequest(
         command=self._proto_module.ControllerRequest.COMMAND_COORDINATE_TRANSFER,
@@ -2188,6 +4339,14 @@ class RaidenControllerClientFacade:
       src_controller_address: Optional[str] = None,
       shard_push_schedules: Optional[dict] = None,
       dst_mem_type: RaidenMemoryType = RaidenMemoryType.DRAM,
+      expected_pushes_per_pool: int = 0,
+      transfer_pool_indices: Optional[typing.Sequence[int]] = None,
+      pool_dtype_tags: Optional[typing.Sequence[str]] = None,
+      dst_device_block_ids: Optional[typing.Sequence[int]] = None,
+      src_schedule_keys: Optional[dict[RaidenId, int]] = None,
+      parallelism: int = 0,
+      num_tokens: int = 0,
+      dst_expected_extent_bytes: Optional[typing.Sequence[int]] = None,
   ) -> bool:
     """Inter-controller RPC to register computed push schedules and prepare receivers."""
     start_req = self._raiden_proto_module.StartTransferRequest(
@@ -2199,15 +4358,41 @@ class RaidenControllerClientFacade:
         uuid=uuid,
         req_id=req_id if req_id else "",
         dst_mem_type=int(dst_mem_type),
+        expected_pushes_per_pool=expected_pushes_per_pool,
+        parallelism=parallelism,
+        num_tokens=num_tokens,
     )
+    if transfer_pool_indices is not None:
+      start_req.transfer_pool_indices.extend(transfer_pool_indices)
+    if pool_dtype_tags is not None:
+      start_req.pool_dtype_tags.extend(pool_dtype_tags)
+    if dst_device_block_ids is not None:
+      start_req.dst_device_block_ids.extend(dst_device_block_ids)
+    if dst_expected_extent_bytes:
+      start_req.dst_expected_extent_bytes.extend(dst_expected_extent_bytes)
+
+    if src_schedule_keys is not None:
+      if set(src_schedule_keys) != set(src_units):
+        raise ValueError("Every source must have an explicit schedule key")
+      if len(set(src_schedule_keys.values())) != len(src_schedule_keys):
+        raise ValueError("Source schedule keys must be unique")
 
     if shard_push_schedules:
       for src_unit, push_schedules in shard_push_schedules.items():
         num_src_shards = len(push_schedules)
         for shard_idx, schedule in push_schedules.items():
-          key_idx = (
-              int(src_unit.job_replica_id) if num_src_shards == 1 else shard_idx
-          )
+          if src_schedule_keys is not None:
+            if num_src_shards != 1:
+              raise ValueError(
+                  "Explicit source schedule keys require one local shard"
+              )
+            key_idx = src_schedule_keys[src_unit]
+          else:
+            key_idx = (
+                int(src_unit.job_replica_id)
+                if num_src_shards == 1
+                else shard_idx
+            )
           schedule_proto = self._raiden_proto_module.ShardPushScheduleProto()
           for (
               dst_peer,

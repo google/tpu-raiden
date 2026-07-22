@@ -129,13 +129,15 @@ TEST_F(WorkerServiceTest, TransferBuffersH2hSuccess) {
   transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
   transfer->add_src_offsets(10);
   transfer->add_dst_offsets(20);
-  transfer->set_peer("localhost:8080");
+  transfer->add_dst_buffers()->set_remote_address("localhost:8080");
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
   ASSERT_TRUE(status.ok());
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_calls, 0);
   EXPECT_EQ(mock_mgr.h2h_calls, 1);
+  EXPECT_EQ(mock_mgr.h2h_read_calls, 0);
+  EXPECT_EQ(mock_mgr.h2h_write_calls, 1);
   EXPECT_EQ(mock_mgr.last_peer, "localhost:8080");
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(10));
   EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(20));
@@ -154,7 +156,8 @@ TEST_F(WorkerServiceTest, TransferBuffersH2hMissingPeerFails) {
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
   EXPECT_FALSE(status.ok());
-  EXPECT_THAT(status.message(), HasSubstr("Peer address must be provided"));
+  EXPECT_THAT(status.message(),
+              HasSubstr("Peer address must be provided for H2H transfers"));
 }
 
 TEST_F(WorkerServiceTest, TransferBuffersH2hInvalidCopySizeFails) {
@@ -168,7 +171,7 @@ TEST_F(WorkerServiceTest, TransferBuffersH2hInvalidCopySizeFails) {
   transfer->add_src_offsets(10);
   transfer->add_dst_offsets(20);
   transfer->add_copy_sizes(2);
-  transfer->set_peer("localhost:8080");
+  transfer->add_dst_buffers()->set_remote_address("localhost:8080");
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
   EXPECT_FALSE(status.ok());
@@ -186,7 +189,7 @@ TEST_F(WorkerServiceTest, TransferBuffersH2hOverflowFails) {
   transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
   transfer->add_src_offsets(2147483648L);
   transfer->add_dst_offsets(20);
-  transfer->set_peer("localhost:8080");
+  transfer->add_dst_buffers()->set_remote_address("localhost:8080");
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
   EXPECT_FALSE(status.ok());
@@ -268,6 +271,104 @@ TEST_F(WorkerServiceTest, TransferBuffersD2HSuccess) {
   EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1, 2));
 }
 
+TEST_F(WorkerServiceTest, TransferBuffersRemoteD2hWithPeerSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_HBM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->add_src_offsets(100);
+  transfer->add_dst_offsets(200);
+  transfer->add_dst_buffers()->set_remote_address("remote_host:1234");
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.d2h_calls, 0);
+  EXPECT_EQ(mock_mgr.d2h_write_calls, 1);
+  EXPECT_EQ(mock_mgr.h2d_calls, 0);
+  EXPECT_EQ(mock_mgr.last_peer, "remote_host:1234");
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
+  EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
+}
+
+TEST_F(WorkerServiceTest,
+       TransferBuffersRemoteD2hWithDstBufferRemoteAddressSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_HBM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
+
+  auto* src_buf = transfer->add_src_buffers();
+  src_buf->set_index(100);
+  auto* dst_buf = transfer->add_dst_buffers();
+  dst_buf->set_index(200);
+  dst_buf->set_remote_address("remote_host:5678");
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.d2h_calls, 0);
+  EXPECT_EQ(mock_mgr.d2h_write_calls, 1);
+  EXPECT_EQ(mock_mgr.h2d_calls, 0);
+  EXPECT_EQ(mock_mgr.last_peer, "remote_host:5678");
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
+  EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
+}
+
+TEST_F(WorkerServiceTest,
+       TransferBuffersRemoteD2hWithSrcBufferRemoteAddressSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_HBM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
+
+  auto* src_buf = transfer->add_src_buffers();
+  src_buf->set_index(100);
+  src_buf->set_remote_address("remote_host:5678");
+  auto* dst_buf = transfer->add_dst_buffers();
+  dst_buf->set_index(200);
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.d2h_calls, 0);
+  EXPECT_EQ(mock_mgr.d2h_write_calls, 0);
+  EXPECT_EQ(mock_mgr.d2h_read_calls, 1);
+  EXPECT_EQ(mock_mgr.h2d_calls, 0);
+  EXPECT_EQ(mock_mgr.last_peer, "remote_host:5678");
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
+  EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersLocalD2hFallbackSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_HBM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->add_src_offsets(100);
+  transfer->add_dst_offsets(200);
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.d2h_calls, 1);
+  EXPECT_EQ(mock_mgr.d2h_write_calls, 0);
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
+  EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
+}
+
 TEST_F(WorkerServiceTest, TransferBuffersH2DSuccess) {
   MockTransferManager mock_mgr;
   test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
@@ -288,6 +389,189 @@ TEST_F(WorkerServiceTest, TransferBuffersH2DSuccess) {
   EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
 }
 
+TEST_F(WorkerServiceTest, TransferBuffersRemoteH2dWithPeerSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_HBM);
+  transfer->add_src_offsets(100);
+  transfer->add_dst_offsets(200);
+  transfer->add_dst_buffers()->set_remote_address("remote_host:1234");
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.d2h_calls, 0);
+  EXPECT_EQ(mock_mgr.h2d_calls, 0);
+  EXPECT_EQ(mock_mgr.h2d_write_calls, 1);
+  EXPECT_EQ(mock_mgr.last_peer, "remote_host:1234");
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
+  EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
+}
+
+TEST_F(WorkerServiceTest,
+       TransferBuffersRemoteH2dWithDstBufferRemoteAddressSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_HBM);
+
+  auto* src_buf = transfer->add_src_buffers();
+  src_buf->set_index(100);
+  auto* dst_buf = transfer->add_dst_buffers();
+  dst_buf->set_index(200);
+  dst_buf->set_remote_address("remote_host:5678");
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.d2h_calls, 0);
+  EXPECT_EQ(mock_mgr.h2d_calls, 0);
+  EXPECT_EQ(mock_mgr.h2d_write_calls, 1);
+  EXPECT_EQ(mock_mgr.last_peer, "remote_host:5678");
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
+  EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
+}
+
+TEST_F(WorkerServiceTest,
+       TransferBuffersRemoteH2dWithSrcBufferRemoteAddressSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_HBM);
+
+  auto* src_buf = transfer->add_src_buffers();
+  src_buf->set_index(100);
+  src_buf->set_remote_address("remote_host:5678");
+  auto* dst_buf = transfer->add_dst_buffers();
+  dst_buf->set_index(200);
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.d2h_calls, 0);
+  EXPECT_EQ(mock_mgr.h2d_calls, 0);
+  EXPECT_EQ(mock_mgr.h2d_write_calls, 0);
+  EXPECT_EQ(mock_mgr.h2d_read_calls, 1);
+  EXPECT_EQ(mock_mgr.last_peer, "remote_host:5678");
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
+  EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersLocalH2dFallbackSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_HBM);
+  transfer->add_src_offsets(100);
+  transfer->add_dst_offsets(200);
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.d2h_calls, 0);
+  EXPECT_EQ(mock_mgr.h2d_calls, 1);
+  EXPECT_EQ(mock_mgr.h2d_write_calls, 0);
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
+  EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersWithBufferProtosSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_HBM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
+  auto* src_buf = transfer->add_src_buffers();
+  src_buf->set_index(10);
+  auto* dst_buf = transfer->add_dst_buffers();
+  dst_buf->set_index(20);
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.d2h_calls, 1);
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(10));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(20));
+}
+
+TEST_F(WorkerServiceTest,
+       TransferBuffersInfersMemoryTypeAndPeerFromBufferProtos) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  auto* src_buf = transfer->add_src_buffers();
+  src_buf->set_index(10);
+  src_buf->set_memory_type(rpc::MEMORY_TYPE_DRAM);
+  auto* dst_buf = transfer->add_dst_buffers();
+  dst_buf->set_index(20);
+  dst_buf->set_memory_type(rpc::MEMORY_TYPE_DRAM);
+  dst_buf->set_remote_address("localhost:8080");
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.h2h_calls, 1);
+  EXPECT_EQ(mock_mgr.h2h_read_calls, 0);
+  EXPECT_EQ(mock_mgr.h2h_write_calls, 1);
+  EXPECT_EQ(mock_mgr.last_peer, "localhost:8080");
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(10));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(20));
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersH2hReadRemoteSrcSuccess) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  auto* src_buf = transfer->add_src_buffers();
+  src_buf->set_index(10);
+  src_buf->set_memory_type(rpc::MEMORY_TYPE_DRAM);
+  src_buf->set_remote_address("localhost:8080");
+  auto* dst_buf = transfer->add_dst_buffers();
+  dst_buf->set_index(20);
+  dst_buf->set_memory_type(rpc::MEMORY_TYPE_DRAM);
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  ASSERT_TRUE(status.ok());
+  EXPECT_EQ(mock_mgr.h2h_calls, 1);
+  EXPECT_EQ(mock_mgr.h2h_read_calls, 1);
+  EXPECT_EQ(mock_mgr.h2h_write_calls, 0);
+  EXPECT_EQ(mock_mgr.last_peer, "localhost:8080");
+  EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(10));
+  EXPECT_THAT(mock_mgr.last_dst_offsets, testing::IsEmpty());
+}
+
+TEST_F(WorkerServiceTest, TransferBuffersWithInvalidBufferProtoFails) {
+  MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
+
+  proto::TransferBuffersRequest transfer_req;
+  auto* transfer = transfer_req.mutable_transfer();
+  transfer->set_src_mem_type(rpc::MEMORY_TYPE_HBM);
+  transfer->set_dst_mem_type(rpc::MEMORY_TYPE_DRAM);
+  transfer->add_src_buffers();  // index not set
+  transfer->add_dst_buffers();  // index not set
+
+  auto status = test_server_->client->TransferBuffers(transfer_req).Await();
+  EXPECT_FALSE(status.ok());
+  EXPECT_THAT(status.message(), HasSubstr("BufferProto missing valid index"));
+}
 }  // namespace
 }  // namespace controller
 }  // namespace tpu_raiden

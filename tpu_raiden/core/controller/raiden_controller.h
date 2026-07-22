@@ -28,6 +28,7 @@
 #include "absl/types/span.h"
 #include "grpcpp/channel.h"
 #include "xla/tsl/concurrency/future.h"
+#include "tpu_raiden/core/buffer.h"
 #include "tpu_raiden/core/controller/worker_registry.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
@@ -65,8 +66,8 @@ class RaidenController {
   // normally.
   RaidenController(const rpc::RaidenIdProto& unit, int num_blocks,
                    int num_shards, int64_t shard_size_bytes,
-                   int raiden_controller_port = 0,
-                   absl::string_view raiden_orchestrator_address = "");
+                   absl::string_view raiden_orchestrator_address = "",
+                   absl::string_view raiden_controller_address = "");
 
   // Constructs a RaidenController for multiple worker addresses.
   // It will also start the ControllerServer to allow dynamic registrations
@@ -74,8 +75,8 @@ class RaidenController {
   RaidenController(const rpc::RaidenIdProto& unit,
                    absl::Span<const std::string> worker_addresses,
                    int num_blocks, int num_shards, int64_t shard_size_bytes,
-                   int raiden_controller_port = 0,
-                   absl::string_view raiden_orchestrator_address = "");
+                   absl::string_view raiden_orchestrator_address = "",
+                   absl::string_view raiden_controller_address = "");
   // Destructor automatically calls DeleteBuffers to clean up all pre-created
   // buffers on the registered workers.
   ~RaidenController();
@@ -85,6 +86,14 @@ class RaidenController {
   // `BufferProto`s containing sharded physical buffer handles. Use these if you
   // need worker-level raw buffer handles. No RPC is performed.
   absl::StatusOr<std::vector<proto::BufferProto>> Allocate(int num_blocks);
+
+  // Allocates num_blocks logical blocks from the pre-created buffer pool and
+  // returns the corresponding Buffers. No gRPC call is made.
+  absl::StatusOr<std::vector<Buffer>> AllocateBuffers(int num_blocks);
+
+  // Unlocks the specified Buffers in the local logical block manager so
+  // they can be reused. No gRPC call is made.
+  absl::Status DeallocateBuffers(absl::Span<const Buffer> buffers);
 
   // Legacy API (Physical/BufferProto Mode):
   // Deallocates logical blocks associated with the provided `BufferProto`s.
@@ -101,19 +110,22 @@ class RaidenController {
   // No RPC is performed.
   absl::Status DeallocateBlockIds(absl::Span<const int> block_ids);
 
-  tsl::Future<> TransferBuffers(
-      absl::string_view worker_id, rpc::MemoryType src_mem_type,
-      rpc::MemoryType dst_mem_type, absl::Span<const int64_t> src_offsets,
-      absl::Span<const int64_t> dst_offsets,
-      absl::Span<const int64_t> copy_sizes = {}, absl::string_view peer = "");
+  // New API (Logical/Block ID Mode):
+  // Marks the given logical block IDs as allocated and locked in the block
+  // manager, restoring allocator state after an owner restart. No RPC is
+  // performed.
+  absl::Status RestoreAllocatedBlockIds(absl::Span<const int> block_ids);
 
-  // Broadcasts TransferBuffers to all registered workers.
-  tsl::Future<> TransferBuffers(rpc::MemoryType src_mem_type,
-                                rpc::MemoryType dst_mem_type,
-                                absl::Span<const int64_t> src_offsets,
-                                absl::Span<const int64_t> dst_offsets,
-                                absl::Span<const int64_t> copy_sizes = {},
-                                absl::Span<const std::string> peers = {});
+  // Targeted worker transfer
+  tsl::Future<> TransferBuffers(absl::string_view worker_id,
+                                absl::Span<const Buffer> src_buffers,
+                                absl::Span<const Buffer> dst_buffers,
+                                absl::Span<const int64_t> copy_sizes = {});
+
+  // Broadcast transfer to all registered workers
+  tsl::Future<> TransferBuffers(absl::Span<const Buffer> src_buffers,
+                                absl::Span<const Buffer> dst_buffers,
+                                absl::Span<const int64_t> copy_sizes = {});
 
   // Initiates remote read from source controller.
   tsl::Future<> ReadRemote(const kv_cache::RaidenId& src_raiden_id,
@@ -136,29 +148,35 @@ class RaidenController {
 
   int num_shards() const { return num_shards_; }
   int64_t shard_size_bytes() const { return shard_size_bytes_; }
+  std::string controller_address() const { return raiden_controller_address_; }
   const std::vector<proto::BufferProto>& all_sharded_buffers() const {
     return all_sharded_buffers_;
   }
-  int raiden_controller_port() const { return raiden_controller_port_; }
 
  private:
-  void Init(absl::Span<const std::string> worker_addresses,
-            absl::string_view raiden_orchestrator_address);
+  absl::StatusOr<proto::TransferBuffersRequest> BuildTransferBuffersRequest(
+      absl::Span<const Buffer> src_buffers,
+      absl::Span<const Buffer> dst_buffers,
+      absl::Span<const int64_t> copy_sizes);
 
-  absl::Status InitializeWorkerBuffers(core::controller::WorkerRegistration& reg);
+  void Init(absl::Span<const std::string> worker_addresses,
+            absl::string_view raiden_orchestrator_address,
+            absl::string_view raiden_controller_address);
+
+  absl::Status InitializeWorkerBuffers(
+      core::controller::WorkerRegistration& reg);
   rpc::RaidenIdProto unit_;
 
   int num_shards_;
   int64_t shard_size_bytes_;
   int num_total_blocks_;
   std::vector<proto::BufferProto> all_sharded_buffers_;
-  absl::flat_hash_map<uint64_t, int> handle_to_block_id_;
   std::shared_ptr<core::controller::WorkerRegistry> worker_registry_;
   mutable absl::Mutex mutex_;
   std::unique_ptr<kv_cache::LogicalBlockManager> block_manager_
       ABSL_GUARDED_BY(mutex_);
+  std::string raiden_controller_address_;
 
-  int raiden_controller_port_;
   std::unique_ptr<core::controller::ControllerServer>
       private_controller_server_;
   std::unique_ptr<OrchestratorServiceClient> orchestrator_client_;

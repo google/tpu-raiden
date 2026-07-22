@@ -358,11 +358,11 @@ NB_MODULE(_tpu_raiden_torch, m) {
                              remote_block_ids, local_block_ids, parallelism,
                              local_host_block_ids);
             } else if (nb::isinstance<nb::list>(remote_endpoint)) {
-              std::vector<tpu_raiden::EndpointDescriptor> descriptors;
+              std::vector<tpu_raiden::RaidenTransferEndpoint> descriptors;
               nb::list ep_list = nb::cast<nb::list>(remote_endpoint);
               for (size_t i = 0; i < ep_list.size(); ++i) {
                 nb::dict d = nb::cast<nb::dict>(ep_list[i]);
-                tpu_raiden::EndpointDescriptor desc;
+                tpu_raiden::RaidenTransferEndpoint desc;
                 desc.endpoint = nb::cast<std::string>(d["endpoint"]);
                 desc.shards = nb::cast<std::vector<int64_t>>(d["shards"]);
                 descriptors.push_back(std::move(desc));

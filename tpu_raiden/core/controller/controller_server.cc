@@ -18,9 +18,11 @@
 #include <string>
 #include <utility>
 
+#include "absl/base/no_destructor.h"
+#include "absl/memory/memory.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
-#include "absl/memory/memory.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "grpcpp/security/server_credentials.h"
 #include "grpcpp/server_builder.h"
@@ -48,19 +50,12 @@ ControllerServer::~ControllerServer() {
 }
 
 absl::Status ControllerServer::StartServer(
-    std::shared_ptr<WorkerRegistry> worker_registry, int port) {
-  if (port < 0) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("Invalid gRPC port: ", port));
-  }
-
+    std::shared_ptr<WorkerRegistry> worker_registry,
+    absl::string_view server_address) {
   absl::MutexLock lock(mutex_);
   if (started_) {
-    if (port != 0 && port != grpc_port_) {
-      return absl::FailedPreconditionError(
-          absl::StrCat("Server already started on port ", grpc_port_,
-                       ", cannot start on requested port ", port));
-    }
+    // We do not check if the address conflicts if it was already started,
+    // we simply update the registry.
     if (worker_registry && controller_service_) {
       controller_service_->SetWorkerRegistry(std::move(worker_registry));
     }
@@ -70,10 +65,11 @@ absl::Status ControllerServer::StartServer(
   controller_service_ =
       std::make_unique<RaidenControllerServiceImpl>(std::move(worker_registry));
 
-  std::string server_address = absl::StrCat("[::]:", port);
+  std::string target_address =
+      server_address.empty() ? "[::]:0" : std::string(server_address);
   grpc::ServerBuilder builder;
   int selected_port = 0;
-  builder.AddListeningPort(server_address, grpc::InsecureServerCredentials(),
+  builder.AddListeningPort(target_address, grpc::InsecureServerCredentials(),
                            &selected_port);
   builder.RegisterService(controller_service_.get());
   grpc_server_ = builder.BuildAndStart();
@@ -81,9 +77,8 @@ absl::Status ControllerServer::StartServer(
   if (!grpc_server_ || selected_port == 0) {
     grpc_server_.reset();
     controller_service_.reset();
-    return absl::InternalError(
-        absl::StrCat("Failed to start gRPC server on port: ", port, " (",
-                     server_address, ")"));
+    return absl::InternalError(absl::StrCat(
+        "Failed to start gRPC server on address: ", target_address));
   }
 
   grpc_port_ = selected_port;
@@ -116,8 +111,6 @@ int ControllerServer::GetGrpcPort() const {
   absl::MutexLock lock(mutex_);
   return grpc_port_;
 }
-
-
 
 RaidenControllerServiceImpl* ControllerServer::GetControllerService() const {
   absl::MutexLock lock(mutex_);

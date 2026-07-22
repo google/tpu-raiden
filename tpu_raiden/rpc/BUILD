@@ -95,7 +95,7 @@ py_library(
     deps = [
         ":controller_service_py_pb2",
         ":raiden_service_py_pb2",
-        "//tpu_raiden/frameworks/jax:resharding_planner",
+        "//tpu_raiden/kv_cache:nd_slice_math",
     ],
 )
 
@@ -104,6 +104,7 @@ py_test(
     srcs = ["raiden_controller_test.py"],
     deps = [
         ":raiden_controller",
+        ":raiden_service_py_pb2",
         "@com_google_absl_py//absl/testing:absltest",
     ],
 )

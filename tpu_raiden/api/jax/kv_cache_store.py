@@ -147,8 +147,8 @@ class KVCacheStore:
       raiden_id: RaidenId | None = None,
       num_shards: int = 0,
       shard_size_bytes: int = 0,
-      raiden_controller_port: int = 0,
       raiden_orchestrator_address: str = "",
+      raiden_controller_address: str = "",
   ):
     raw_raiden_id = _impl.RaidenId()
     if raiden_id is not None:
@@ -159,8 +159,8 @@ class KVCacheStore:
         raiden_id=raw_raiden_id,
         num_shards=num_shards,
         shard_size_bytes=shard_size_bytes,
-        raiden_controller_port=raiden_controller_port,
         raiden_orchestrator_address=raiden_orchestrator_address,
+        raiden_controller_address=raiden_controller_address,
     )
 
   @property
@@ -169,9 +169,8 @@ class KVCacheStore:
     return RaidenId(impl=self._impl.raiden_id)
 
   @property
-  def raiden_controller_port(self) -> int:
-    """Returns the port that the RaidenController is listening on."""
-    return self._impl.raiden_controller_port
+  def raiden_controller_address(self) -> str:
+    return self._impl.raiden_controller_address
 
   def lookup(
       self,

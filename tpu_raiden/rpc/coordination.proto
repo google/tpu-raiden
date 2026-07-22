@@ -32,13 +32,13 @@ message MetadataRequest {
   string client_id = 1;
 }
 
-message EndpointDescriptor {
+message RaidenTransferEndpoint {
   string endpoint = 1;  // "IP:port"
   repeated int64 shards = 2;
 }
 
 message MetadataResponse {
-  repeated EndpointDescriptor endpoints = 1;
+  repeated RaidenTransferEndpoint endpoints = 1;
   uint64 transfer_uuid = 2;
   string transfer_req_id = 3;
   repeated int32 block_ids = 4;

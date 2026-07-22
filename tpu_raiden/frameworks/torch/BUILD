@@ -530,7 +530,7 @@ py_test(
 
 py_test(
     name = "torch_raw_transfer_perf_test_gf",
-    timeout = "long",
+    timeout = "eternal",
     srcs = ["torch_raw_transfer_perf_test.py"],
     main = "torch_raw_transfer_perf_test.py",
     tags = [

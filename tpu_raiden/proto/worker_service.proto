@@ -49,6 +49,9 @@ message BufferHandleProto {
 // Represents a sharded buffer composed of multiple shard buffer handles.
 message BufferProto {
   repeated BufferHandleProto buffer_handles = 1;
+  optional int32 index = 2;
+  tpu_raiden.rpc.MemoryType memory_type = 3;
+  string remote_address = 4;
 }
 
 // Specification for creating/allocating a sharded buffer in host RAM.
@@ -105,8 +108,11 @@ message TransferBufferSpec {
   tpu_raiden.rpc.MemoryType src_mem_type = 4;
   // Memory type of the destination buffer (e.g., DRAM for D2H, HBM for H2D).
   tpu_raiden.rpc.MemoryType dst_mem_type = 5;
-  // Optional peer address for H2H transfers.
-  string peer = 6;
+  reserved 6;
+  // Source buffers for transfer.
+  repeated BufferProto src_buffers = 7;
+  // Destination buffers for transfer.
+  repeated BufferProto dst_buffers = 8;
 }
 
 // Request to transfer data across memory spaces on a transfer worker.

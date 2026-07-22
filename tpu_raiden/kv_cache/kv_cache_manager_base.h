@@ -27,7 +27,9 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
 #include "xla/future.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
@@ -116,6 +118,22 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<size_t> layer_idx = std::nullopt,
       std::optional<size_t> shard_idx = std::nullopt);
 
+  virtual absl::StatusOr<raiden::PjRtCopyFuture> H2dWrite(
+      absl::string_view peer,
+      const std::vector<int64_t>& src_offsets_major_dim = {},
+      const std::vector<int64_t>& dst_offsets_major_dim = {},
+      const std::vector<int64_t>& copy_sizes_major_dim = {}) {
+    return absl::UnimplementedError("H2dWrite is not implemented");
+  }
+
+  virtual absl::StatusOr<raiden::PjRtCopyFuture> H2dRead(
+      absl::string_view peer,
+      const std::vector<int64_t>& src_offsets_major_dim = {},
+      const std::vector<int64_t>& dst_offsets_major_dim = {},
+      const std::vector<int64_t>& copy_sizes_major_dim = {}) {
+    return absl::UnimplementedError("H2dRead is not implemented");
+  }
+
   // Async on-chip D2H offloads E2E
   virtual absl::StatusOr<raiden::PjRtCopyFuture> D2h(
       const std::vector<int64_t>& src_offsets_major_dim = {},
@@ -124,6 +142,22 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<int64_t> slot_idx = std::nullopt,
       std::optional<size_t> layer_idx = std::nullopt,
       std::optional<size_t> shard_idx = std::nullopt);
+
+  virtual absl::StatusOr<raiden::PjRtCopyFuture> D2hWrite(
+      absl::string_view peer,
+      const std::vector<int64_t>& src_offsets_major_dim = {},
+      const std::vector<int64_t>& dst_offsets_major_dim = {},
+      const std::vector<int64_t>& copy_sizes_major_dim = {}) {
+    return absl::UnimplementedError("D2hWrite is not implemented");
+  }
+
+  virtual absl::StatusOr<raiden::PjRtCopyFuture> D2hRead(
+      absl::string_view peer,
+      const std::vector<int64_t>& src_offsets_major_dim = {},
+      const std::vector<int64_t>& dst_offsets_major_dim = {},
+      const std::vector<int64_t>& copy_sizes_major_dim = {}) {
+    return absl::UnimplementedError("D2hRead is not implemented");
+  }
 
   // Auto-allocating offloads E2E
   virtual absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
@@ -153,6 +187,23 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   // centralized Controller schedules.
   absl::Status PushKVCacheResharded(
       const tpu_raiden::rpc::StartTransferRequest& request);
+
+  // Pool-plan executor hooks used by KVCacheListener. Designed as the
+  // successor of PushKVCacheResharded/RegisterActivePlan for pool-addressed
+  // plans; managers without transfer support fail closed instead of falling
+  // back to the legacy whole-layer reshard path.
+  virtual absl::Status PoolReshardPush(
+      const tpu_raiden::rpc::StartTransferRequest&, absl::Span<const int64_t>,
+      int = 8) {
+    return absl::UnimplementedError(
+        "pool reshard push is not supported by this manager");
+  }
+
+  virtual absl::Status PoolReshardRegisterRecv(
+      const tpu_raiden::rpc::StartTransferRequest&, absl::Span<const int64_t>) {
+    return absl::UnimplementedError(
+        "pool reshard receive is not supported by this manager");
+  }
 
   // Blocks until all pending asynchronous transfers/copies are complete.
   virtual absl::Status WaitForPendingWork() { return absl::OkStatus(); }
@@ -262,6 +313,9 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   bool use_block_chunks(uint64_t uuid) const override;
 
+  absl::StatusOr<std::optional<tpu_raiden::transport::PoolPushProgressSpec>>
+  GetPoolPushProgressSpec(size_t pool_idx, uint64_t uuid) const override;
+
   void SetBlockChunkRegionValidation(
       tpu_raiden::transport::BlockChunkRegionValidationMode mode);
 
@@ -285,13 +339,18 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   }
 
   // Resolves the host memory pointers (BlockChunks) for the given block_ids.
-  // If `src_block_id` is provided (not -1), it is used to filter the active plan
-  // to resolve the correct chunk offset, which is necessary when multiple
-  // source blocks merge into a single destination block (heterogeneous block sizes).
+  // If `src_block_id` is provided (not -1), it is used to filter the active
+  // plan to resolve the correct chunk offset, which is necessary when multiple
+  // source blocks merge into a single destination block (heterogeneous block
+  // sizes). If `dst_block_id` is provided (not -1), sender-side resolution is
+  // restricted to schedule entries targeting that destination block, which is
+  // necessary when one source block fans out to multiple destination blocks
+  // on the same peer.
   std::vector<tpu_raiden::transport::BlockChunk> GetBlockChunks(
       size_t layer_idx, size_t shard_idx, absl::Span<const int64_t> block_ids,
       size_t total_bytes, uint64_t uuid, int64_t sender_node_id = -1,
-      absl::string_view peer = "", int64_t src_block_id = -1) override;
+      absl::string_view peer = "", int64_t src_block_id = -1,
+      int64_t dst_block_id = -1) override;
 
   // With explicit pools the wire index addresses a pool; otherwise the legacy
   // uniform layer addressing applies unchanged.

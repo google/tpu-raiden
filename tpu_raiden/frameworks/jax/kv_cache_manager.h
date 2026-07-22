@@ -118,7 +118,7 @@ class NumaAwareKVCacheManager {
       const std::vector<int64_t>& local_block_ids, int parallelism = 1,
       std::optional<std::vector<int64_t>> local_host_block_ids = std::nullopt);
 
-  std::vector<EndpointDescriptor> get_local_endpoints() const;
+  std::vector<RaidenTransferEndpoint> get_local_endpoints() const;
 
   void SetSubmanagerShardsForTesting(
       const std::vector<std::vector<int64_t>>& assignment) {
@@ -127,7 +127,7 @@ class NumaAwareKVCacheManager {
 
   void StartRead(
       const std::string& req_id, uint64_t uuid,
-      const std::vector<EndpointDescriptor>& remote_descriptors,
+      const std::vector<RaidenTransferEndpoint>& remote_descriptors,
       const std::vector<int64_t>& remote_block_ids,
       const std::vector<int64_t>& local_block_ids, int parallelism = 1,
       std::optional<std::vector<int64_t>> local_host_block_ids = std::nullopt);
@@ -166,7 +166,7 @@ class NumaAwareKVCacheManager {
       int layer_idx = -1);
 
   absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hWrite(
-      const std::vector<EndpointDescriptor>& remote_descriptors,
+      const std::vector<RaidenTransferEndpoint>& remote_descriptors,
       const std::vector<int>& src_block_ids,
       const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
       int layer_idx = -1);
@@ -175,7 +175,7 @@ class NumaAwareKVCacheManager {
       std::string peer, const std::vector<int>& src_block_ids);
 
   absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hRead(
-      const std::vector<EndpointDescriptor>& remote_descriptors,
+      const std::vector<RaidenTransferEndpoint>& remote_descriptors,
       const std::vector<int>& src_block_ids);
 
  private:
@@ -301,7 +301,7 @@ class KVCacheManager {
                              local_host_block_ids);
   }
 
-  std::vector<EndpointDescriptor> get_local_endpoints() const {
+  std::vector<RaidenTransferEndpoint> get_local_endpoints() const {
     return numa_manager_->get_local_endpoints();
   }
 
@@ -312,7 +312,7 @@ class KVCacheManager {
 
   void StartRead(
       const std::string& req_id, uint64_t uuid,
-      const std::vector<EndpointDescriptor>& remote_descriptors,
+      const std::vector<RaidenTransferEndpoint>& remote_descriptors,
       const std::vector<int64_t>& remote_block_ids,
       const std::vector<int64_t>& local_block_ids, int parallelism = 1,
       std::optional<std::vector<int64_t>> local_host_block_ids = std::nullopt) {
@@ -379,7 +379,7 @@ class KVCacheManager {
   }
 
   absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hWrite(
-      const std::vector<EndpointDescriptor>& remote_descriptors,
+      const std::vector<RaidenTransferEndpoint>& remote_descriptors,
       const std::vector<int>& src_block_ids,
       const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
       int layer_idx = -1) {
@@ -393,7 +393,7 @@ class KVCacheManager {
   }
 
   absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hRead(
-      const std::vector<EndpointDescriptor>& remote_descriptors,
+      const std::vector<RaidenTransferEndpoint>& remote_descriptors,
       const std::vector<int>& src_block_ids) {
     return numa_manager_->H2hRead(remote_descriptors, src_block_ids);
   }

@@ -18,9 +18,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <string>
-#include <thread>
+#include <thread>  // NOLINT(build/c++11)
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -40,6 +41,7 @@
 #include "grpcpp/create_channel.h"
 #include "grpcpp/security/credentials.h"
 #include "xla/tsl/concurrency/future.h"
+#include "tpu_raiden/core/buffer.h"
 #include "tpu_raiden/core/controller/raiden_controller.h"
 #include "tpu_raiden/core/numa_thread_pool.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_client.h"
@@ -53,8 +55,9 @@ namespace kv_cache {
 KVCacheStore::KVCacheStore(size_t capacity,
                            absl::string_view global_registry_address,
                            RaidenId raiden_id, int num_shards,
-                           int64_t shard_size_bytes, int raiden_controller_port,
-                           absl::string_view raiden_orchestrator_address)
+                           int64_t shard_size_bytes,
+                           absl::string_view raiden_orchestrator_address,
+                           absl::string_view raiden_controller_address)
     : lru_cache_(capacity),
       raiden_id_(std::move(raiden_id)),
       write_through_pool_(std::make_unique<::tpu_raiden::NumaThreadPool>(4)) {
@@ -74,7 +77,7 @@ KVCacheStore::KVCacheStore(size_t capacity,
     raiden_controller_ =
         std::make_unique<::tpu_raiden::controller::RaidenController>(
             unit_proto, capacity, num_shards, shard_size_bytes,
-            raiden_controller_port, raiden_orchestrator_address);
+            raiden_orchestrator_address, raiden_controller_address);
   }
   if (raiden_controller_) {
     poller_thread_ =
@@ -407,13 +410,23 @@ absl::Status KVCacheStore::Save(const std::vector<std::string>& block_hashes) {
     return host_blocks_or.status();
   }
   const auto& host_block_ids = host_blocks_or.value();
-  std::vector<int64_t> host_block_ids_64(host_block_ids.begin(),
-                                         host_block_ids.end());
+
+  std::vector<Buffer> src_buffers;
+  src_buffers.reserve(src_device_block_ids.size());
+  for (int64_t id : src_device_block_ids) {
+    src_buffers.emplace_back(id, std::vector<BufferShard>{}, std::nullopt,
+                             rpc::MEMORY_TYPE_HBM);
+  }
+  std::vector<Buffer> dst_buffers;
+  dst_buffers.reserve(host_block_ids.size());
+  for (int id : host_block_ids) {
+    dst_buffers.emplace_back(id, std::vector<BufferShard>{}, std::nullopt,
+                             rpc::MEMORY_TYPE_DRAM);
+  }
 
   // Trigger transfer
-  tsl::Future<> future = raiden_controller_->TransferBuffers(
-      rpc::MEMORY_TYPE_HBM, rpc::MEMORY_TYPE_DRAM, src_device_block_ids,
-      host_block_ids_64);
+  tsl::Future<> future =
+      raiden_controller_->TransferBuffers(src_buffers, dst_buffers);
 
   {
     absl::MutexLock lock(mutex_);
@@ -472,13 +485,22 @@ absl::Status KVCacheStore::Load(const std::vector<std::string>& block_hashes,
     }
   }
 
-  std::vector<int64_t> dst_device_block_ids(device_block_ids.begin(),
-                                            device_block_ids.end());
+  std::vector<Buffer> src_buffers;
+  src_buffers.reserve(src_host_block_ids.size());
+  for (int64_t id : src_host_block_ids) {
+    src_buffers.emplace_back(id, std::vector<BufferShard>{}, std::nullopt,
+                             rpc::MEMORY_TYPE_DRAM);
+  }
+  std::vector<Buffer> dst_buffers;
+  dst_buffers.reserve(device_block_ids.size());
+  for (int id : device_block_ids) {
+    dst_buffers.emplace_back(id, std::vector<BufferShard>{}, std::nullopt,
+                             rpc::MEMORY_TYPE_HBM);
+  }
 
   // Trigger transfer
-  tsl::Future<> future = raiden_controller_->TransferBuffers(
-      rpc::MEMORY_TYPE_DRAM, rpc::MEMORY_TYPE_HBM, src_host_block_ids,
-      dst_device_block_ids);
+  tsl::Future<> future =
+      raiden_controller_->TransferBuffers(src_buffers, dst_buffers);
 
   {
     absl::MutexLock lock(mutex_);
@@ -625,6 +647,13 @@ size_t KVCacheStore::capacity() const {
   return lru_cache_.capacity();
 }
 
+std::string KVCacheStore::raiden_controller_address() const {
+  if (raiden_controller_) {
+    return raiden_controller_->controller_address();
+  }
+  return "";
+}
+
 std::tuple<std::vector<std::string>, std::vector<std::string>,
            std::vector<std::string>>
 KVCacheStore::PollSaveStatus() {
@@ -671,6 +700,92 @@ KVCacheStore::PollLoadStatus() {
   }
 
   return {std::move(done), std::move(failed), std::move(pending)};
+}
+
+absl::StatusOr<size_t> KVCacheStore::RecoverFromRegistry() {
+  if (!registry_client_) {
+    return absl::FailedPreconditionError(
+        "RecoverFromRegistry requires a global registry connection");
+  }
+  if (!raiden_controller_) {
+    return absl::FailedPreconditionError(
+        "RecoverFromRegistry requires a raiden controller");
+  }
+
+  auto pulled_or = registry_client_->PullOwned(raiden_id_);
+  if (!pulled_or.ok()) {
+    return pulled_or.status();
+  }
+  std::vector<global_registry::GlobalRegistryClient::PulledEntry> pulled =
+      *std::move(pulled_or);
+  if (pulled.empty()) {
+    return 0;
+  }
+
+  // Sort so that entries closest to expiry come first: they are inserted
+  // first and therefore evicted first. 0 means "never expires" and sorts as
+  // the most recent.
+  auto effective_ttl =
+      [](const global_registry::GlobalRegistryClient::PulledEntry& entry) {
+        return entry.remaining_ttl_seconds == 0
+                   ? std::numeric_limits<int64_t>::max()
+                   : entry.remaining_ttl_seconds;
+      };
+  std::sort(pulled.begin(), pulled.end(),
+            [&effective_ttl](const auto& a, const auto& b) {
+              return effective_ttl(a) < effective_ttl(b);
+            });
+
+  absl::MutexLock lock(mutex_);
+
+  // Skip hashes already present, then keep only the most recently registered
+  // entries that fit in the remaining directory capacity. The skip is
+  // defensive: the directory is normally empty here, but it keeps a re-pull
+  // after a partial recovery (or a call on a live store) from double-inserting.
+  std::vector<const global_registry::GlobalRegistryClient::PulledEntry*>
+      eligible;
+  eligible.reserve(pulled.size());
+  for (const auto& entry : pulled) {
+    if (lru_cache_.PeekIncludingCandidates(entry.prefix_hash) == nullptr) {
+      eligible.push_back(&entry);
+    }
+  }
+  size_t available = lru_cache_.capacity() > lru_cache_.active_size()
+                         ? lru_cache_.capacity() - lru_cache_.active_size()
+                         : 0;
+  if (eligible.size() > available) {
+    LOG(WARNING) << "RecoverFromRegistry: " << eligible.size()
+                 << " recoverable entries exceed remaining capacity "
+                 << available << "; skipping the oldest ones";
+    eligible.erase(eligible.begin(), eligible.end() - available);
+  }
+  if (eligible.empty()) {
+    return 0;
+  }
+
+  std::vector<int> block_ids;
+  block_ids.reserve(eligible.size());
+  for (const auto* entry : eligible) {
+    block_ids.push_back(entry->block_id);
+  }
+  auto restore_status =
+      raiden_controller_->RestoreAllocatedBlockIds(block_ids);
+  if (!restore_status.ok()) {
+    return restore_status;
+  }
+
+  for (const auto* entry : eligible) {
+    auto evicted = lru_cache_.Put(
+        entry->prefix_hash,
+        RaidenBlockID(raiden_id_, entry->block_id, BlockStatus::HOST));
+    if (evicted.has_value()) {
+      // Not expected: inserts are capped to the remaining capacity above.
+      LOG(WARNING) << "RecoverFromRegistry: unexpected eviction of "
+                   << evicted->first;
+      DeallocateBlockIds({evicted->second.host_block_id});
+    }
+  }
+  return eligible.size();
 }
 
 absl::StatusOr<std::vector<int>> KVCacheStore::AllocateBlockIds(int needed) {
@@ -933,13 +1048,6 @@ size_t KVCacheStore::Evict(const std::vector<std::string>& block_hashes) {
   DeallocateBlockIds(host_ids_to_deallocate);
 
   return host_ids_to_deallocate.size();
-}
-
-int KVCacheStore::raiden_controller_port() const {
-  if (raiden_controller_) {
-    return raiden_controller_->raiden_controller_port();
-  }
-  return 0;
 }
 
 std::vector<std::string> KVCacheStore::GetSortedHashes(

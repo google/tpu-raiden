@@ -64,6 +64,20 @@ class GlobalRegistryClient {
   absl::Status Unregister(const std::vector<std::string>& prefix_hashes,
                           const RaidenId& raiden_id);
 
+  // A single active registration returned by PullOwned.
+  struct PulledEntry {
+    std::string prefix_hash;
+    int32_t block_id;
+    // Seconds until the registration expires as reported by the server;
+    // 0 means it never expires.
+    int64_t remaining_ttl_seconds;
+  };
+
+  // Pulls all active registrations owned by `raiden_id`, draining the
+  // server-side stream. Intended for owner restart handling; see the
+  // PullOwned RPC documentation for the consistency contract.
+  absl::StatusOr<std::vector<PulledEntry>> PullOwned(const RaidenId& raiden_id);
+
  private:
   std::unique_ptr<GlobalRegistryService::Stub> stub_;
 };

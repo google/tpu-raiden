@@ -57,8 +57,13 @@ void ToProto(const RaidenId& id, ::tpu_raiden::rpc::RaidenIdProto* proto) {
 }  // namespace
 
 GlobalRegistryServiceImpl::GlobalRegistryServiceImpl(
-    absl::Duration default_ttl, absl::Duration cleanup_interval)
-    : default_ttl_(default_ttl), cleanup_interval_(cleanup_interval) {
+    absl::Duration default_ttl, absl::Duration cleanup_interval,
+    int64_t pull_owned_batch_size)
+    : default_ttl_(default_ttl),
+      cleanup_interval_(cleanup_interval),
+      pull_owned_batch_size_(pull_owned_batch_size > 0
+                                 ? pull_owned_batch_size
+                                 : kDefaultPullOwnedBatchSize) {
   StartCleanupThread();
 }
 
@@ -136,6 +141,10 @@ grpc::Status GlobalRegistryServiceImpl::Register(grpc::ServerContext* context,
     }
     if (!found) {
       entries.push_back({raiden_id, block_id, expire_time});
+      // Updated together with registry_ under the same critical section; both
+      // are in-memory only, so a crash discards them together. For replica
+      // support, treat owner_index_ as derived data.
+      owner_index_[raiden_id].insert(prefix_hash);
     }
   }
 
@@ -217,6 +226,8 @@ grpc::Status GlobalRegistryServiceImpl::Unregister(
     if (entries.size() == orig_size) {
       overall_success = false;
       errors.push_back(absl::StrCat(hash, ": raiden_id mismatch or not found"));
+    } else {
+      EraseFromOwnerIndex(raiden_id, hash);
     }
 
     if (entries.empty()) {
@@ -238,6 +249,87 @@ grpc::Status GlobalRegistryServiceImpl::Unregister(
   return grpc::Status::OK;
 }
 
+grpc::Status GlobalRegistryServiceImpl::PullOwned(
+    grpc::ServerContext* context, const PullOwnedRequest* request,
+    grpc::ServerWriter<PullOwnedResponse>* writer) {
+  if (!request->has_raiden_id() || request->raiden_id().job_name().empty()) {
+    return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                        "raiden_id cannot be empty");
+  }
+  RaidenId raiden_id = FromProto(request->raiden_id());
+
+  // Snapshot the owner's hash set in one short critical section. Every batch
+  // below is re-validated against `registry_`, so entries removed after this
+  // snapshot are simply omitted from the stream.
+  std::vector<std::string> hashes;
+  {
+    absl::MutexLock lock(mutex_);
+    auto it = owner_index_.find(raiden_id);
+    if (it == owner_index_.end()) {
+      return grpc::Status::OK;
+    }
+    hashes.assign(it->second.begin(), it->second.end());
+  }
+
+  const size_t batch_size = static_cast<size_t>(pull_owned_batch_size_);
+  for (size_t start = 0; start < hashes.size(); start += batch_size) {
+    const size_t end = std::min(hashes.size(), start + batch_size);
+    PullOwnedResponse response;
+    {
+      absl::MutexLock lock(mutex_);
+      absl::Time now = absl::Now();
+      for (size_t i = start; i < end; ++i) {
+        auto it = registry_.find(hashes[i]);
+        if (it == registry_.end()) continue;
+        for (const RegistryEntry& entry : it->second) {
+          if (!(entry.raiden_id == raiden_id)) continue;
+          // Only reachable for this owner's entry, and Register keeps at most
+          // one entry per (hash, owner): an expired match means there is
+          // nothing to emit for this hash.
+          if (entry.expire_time <= now) break;
+          PullOwnedEntry* out = response.add_entries();
+          out->set_prefix_hash(hashes[i]);
+          out->set_block_id(entry.block_id);
+          if (entry.expire_time == absl::InfiniteFuture()) {
+            out->set_remaining_ttl_seconds(0);
+          } else {
+            absl::Duration remaining = entry.expire_time - now;
+            int64_t seconds = absl::ToInt64Seconds(remaining);
+            if (absl::Seconds(seconds) < remaining) ++seconds;
+            out->set_remaining_ttl_seconds(std::max<int64_t>(seconds, 1));
+          }
+          break;  // Register keeps at most one entry per (hash, owner).
+        }
+      }
+    }
+    // Write outside the lock: a slow client must not stall the registry.
+    if (response.entries_size() > 0 && !writer->Write(response)) {
+      return grpc::Status(grpc::StatusCode::CANCELLED,
+                          "PullOwned stream closed by client");
+    }
+  }
+  return grpc::Status::OK;
+}
+
+size_t GlobalRegistryServiceImpl::GetOwnerIndexSizeForTest(
+    const RaidenId& raiden_id) const {
+  absl::MutexLock lock(mutex_);
+  auto it = owner_index_.find(raiden_id);
+  return it == owner_index_.end() ? 0 : it->second.size();
+}
+
+void GlobalRegistryServiceImpl::EraseFromOwnerIndex(const RaidenId& raiden_id,
+                                                    const std::string& hash) {
+  auto it = owner_index_.find(raiden_id);
+  if (it == owner_index_.end()) {
+    return;
+  }
+  it->second.erase(hash);
+  if (it->second.empty()) {
+    owner_index_.erase(it);
+  }
+}
+
 void GlobalRegistryServiceImpl::CleanupExpiredEntries() {
   absl::MutexLock lock(mutex_);
   absl::Time now = absl::Now();
@@ -245,6 +337,11 @@ void GlobalRegistryServiceImpl::CleanupExpiredEntries() {
   std::vector<std::string> keys_to_remove;
 
   for (auto& [hash, entries] : registry_) {
+    for (const auto& entry : entries) {
+      if (entry.expire_time <= now) {
+        EraseFromOwnerIndex(entry.raiden_id, hash);
+      }
+    }
     entries.erase(std::remove_if(entries.begin(), entries.end(),
                                  [now](const RegistryEntry& entry) {
                                    return entry.expire_time <= now;

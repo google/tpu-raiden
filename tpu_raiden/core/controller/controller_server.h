@@ -42,12 +42,12 @@ class ControllerServer {
   // port (pass 0 for an ephemeral port).
   // If the server is already started, updates the worker registry (if
   // provided) and returns OkStatus().
-  absl::Status StartServer(int port = 0) {
-    return StartServer(/*worker_registry=*/nullptr, port);
+  absl::Status StartServer(absl::string_view server_address = "") {
+    return StartServer(/*worker_registry=*/nullptr, server_address);
   }
 
   absl::Status StartServer(std::shared_ptr<WorkerRegistry> worker_registry,
-                           int port = 0);
+                           absl::string_view server_address = "");
 
   void SetWorkerRegistry(std::shared_ptr<WorkerRegistry> worker_registry);
 

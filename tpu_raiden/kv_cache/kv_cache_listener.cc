@@ -38,6 +38,19 @@ namespace kv_cache {
 using ::tpu_raiden::rpc::ControlRequest;
 using ::tpu_raiden::rpc::ControlResponse;
 
+namespace {
+
+bool HasPoolReshardFields(
+    const tpu_raiden::rpc::StartTransferRequest& request) {
+  // Treat either field as opting into the pool executor. This intentionally
+  // sends partially populated pool plans to PoolReshardPush/RegisterRecv so
+  // their validation fails closed instead of silently taking the legacy path.
+  return request.expected_pushes_per_pool() != 0 ||
+         !request.transfer_pool_indices().empty();
+}
+
+}  // namespace
+
 KVCacheListener::KVCacheListener(KVCacheManagerBase* engine,
                                  int listener_port)
     : engine_(engine), listener_port_(listener_port) {
@@ -97,8 +110,8 @@ KVCacheListener::~KVCacheListener() {
         std::string payload;
         if (req.SerializeToString(&payload)) {
           uint32_t net_len = htonl(payload.size());
-          write(sock, &net_len, sizeof(net_len));
-          write(sock, payload.data(), payload.size());
+          send(sock, &net_len, sizeof(net_len), MSG_NOSIGNAL);
+          send(sock, payload.data(), payload.size(), MSG_NOSIGNAL);
         }
       }
       close(sock);
@@ -167,8 +180,37 @@ void KVCacheListener::ConnectionWorker(int client_fd) {
   if (req.command() == ControlRequest::COMMAND_START_TRANSFER) {
     if (req.has_start_transfer_request()) {
       const auto& start_req = req.start_transfer_request();
-      if (start_req.is_sender()) {
-        LOG(INFO) << "C++ KVCacheListener received START_TRANSFER (Sender)";
+      const bool is_pool_reshard = HasPoolReshardFields(start_req);
+      if (is_pool_reshard && start_req.is_sender()) {
+        LOG(INFO) << "C++ KVCacheListener received pool START_TRANSFER "
+                     "(Sender)";
+        const std::vector<int64_t> src_block_ids(
+            start_req.src_block_ids().begin(), start_req.src_block_ids().end());
+        absl::Status status = engine_->PoolReshardPush(start_req, src_block_ids,
+                                                       start_req.parallelism());
+        if (!status.ok()) {
+          resp.set_success(false);
+          resp.set_message(std::string(status.message()));
+          LOG(ERROR) << "PoolReshardPush native execution failed: " << status;
+        }
+      } else if (is_pool_reshard) {
+        LOG(INFO) << "C++ KVCacheListener received pool START_TRANSFER "
+                     "(Receiver)";
+        const std::vector<int64_t> chip_block_ids(
+            start_req.dst_device_block_ids().begin(),
+            start_req.dst_device_block_ids().end());
+        absl::Status status =
+            engine_->PoolReshardRegisterRecv(start_req, chip_block_ids);
+        if (!status.ok()) {
+          resp.set_success(false);
+          resp.set_message(std::string(status.message()));
+          LOG(ERROR) << "PoolReshardRegisterRecv native execution failed: "
+                     << status;
+        }
+      } else if (start_req.is_sender()) {
+        // Preserve the pre-pool controller protocol for existing callers.
+        LOG(INFO) << "C++ KVCacheListener received legacy START_TRANSFER "
+                     "(Sender)";
         absl::Status status = engine_->PushKVCacheResharded(start_req);
         if (!status.ok()) {
           resp.set_success(false);
@@ -186,7 +228,8 @@ void KVCacheListener::ConnectionWorker(int client_fd) {
         if (!status.ok()) {
           resp.set_success(false);
           resp.set_message(std::string(status.message()));
-          LOG(ERROR) << "RegisterRecv native execution failed: " << status;
+          LOG(ERROR) << "RegisterActivePlan native execution failed: "
+                     << status;
         }
       }
     } else {
@@ -210,8 +253,11 @@ void KVCacheListener::ConnectionWorker(int client_fd) {
   std::string resp_str;
   if (resp.SerializeToString(&resp_str)) {
     uint32_t resp_net_len = htonl(resp_str.size());
-    write(client_fd, &resp_net_len, sizeof(resp_net_len));
-    write(client_fd, resp_str.data(), resp_str.size());
+    // The peer may intentionally close after sending a one-way shutdown
+    // request. Suppress SIGPIPE so listener teardown cannot terminate the
+    // hosting process while this worker races to send its acknowledgement.
+    send(client_fd, &resp_net_len, sizeof(resp_net_len), MSG_NOSIGNAL);
+    send(client_fd, resp_str.data(), resp_str.size(), MSG_NOSIGNAL);
   }
   close(client_fd);
 }

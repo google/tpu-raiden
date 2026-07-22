@@ -49,6 +49,7 @@ cc_library(
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
@@ -90,6 +91,8 @@ cc_test(
     name = "global_registry_test",
     srcs = ["global_registry_test.cc"],
     deps = [
+        ":global_registry_cc_grpc",
+        ":global_registry_cc_proto",
         ":global_registry_client_cc",
         ":global_registry_server_lib",
         "//tpu_raiden/kv_cache:raiden_id",

@@ -110,6 +110,35 @@ absl::StatusOr<std::vector<int>> LogicalBlockManager::Allocate(
   return allocated_block_ids;
 }
 
+absl::Status LogicalBlockManager::RestoreAllocated(
+    absl::Span<const int> block_ids) {
+  // Validate the entire batch before mutating any state.
+  std::vector<bool> seen(total_blocks_, false);
+  for (int block_id : block_ids) {
+    if (block_id < 0 || block_id >= total_blocks_) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Invalid block ID: ", block_id));
+    }
+    if (blocks_[block_id].is_allocated) {
+      return absl::FailedPreconditionError(
+          absl::StrCat("Cannot restore already allocated block ID: ", block_id));
+    }
+    if (seen[block_id]) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Duplicate block ID: ", block_id));
+    }
+    seen[block_id] = true;
+  }
+
+  ++access_counter_;
+  for (int block_id : block_ids) {
+    blocks_[block_id].is_allocated = true;
+    blocks_[block_id].is_locked = true;
+    blocks_[block_id].last_access_counter = access_counter_;
+  }
+  return absl::OkStatus();
+}
+
 absl::Status LogicalBlockManager::Unlock(absl::Span<const int> block_ids) {
   // First validate all blocks.
   for (int block_id : block_ids) {

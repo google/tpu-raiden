@@ -41,6 +41,7 @@ cc_library(
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
         "//tpu_raiden/core:kv_manager_holder",
         "//tpu_raiden/core:metrics_collector",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/core:tpu_utils",
@@ -540,7 +541,7 @@ py_library(
     srcs = ["resharding_planner.py"],
     visibility = ["//visibility:public"],
     deps = [
-        "//tpu_raiden/rpc:raiden_service_py_pb2",
+        "//tpu_raiden/kv_cache:nd_slice_math",
         "@jax//jax",
     ],
 )
@@ -672,6 +673,7 @@ cc_library(
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
         "//tpu_raiden/core:kv_manager_holder",
         "//tpu_raiden/core:metrics_collector",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/core:tpu_utils",
@@ -703,12 +705,12 @@ cc_test(
     deps = [
         ":kv_cache_manager_core_lib",
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core/controller:controller_service",
         "//tpu_raiden/core/controller:raiden_controller",
         "//tpu_raiden/core/controller:test_util",
         "//tpu_raiden/rpc:raiden_service_cc_proto",
-        "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@xla//xla/tsl/platform:test",

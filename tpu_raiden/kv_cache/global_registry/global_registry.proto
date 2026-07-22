@@ -36,6 +36,22 @@ service GlobalRegistryService {
 
   // Unregisters a KV cache entry (e.g. on eviction).
   rpc Unregister(UnregisterRequest) returns (UnregisterResponse) {  }
+
+  // Pulls all active registrations owned by a single RaidenId, streamed in
+  // batches. Intended for owner restart handling: a restarted owner either
+  // reconstructs its local KV cache metadata from the returned entries, or
+  // bulk-unregisters them if the backing data did not survive the restart.
+  //
+  // Consistency: the stream is not a point-in-time snapshot. Each entry is
+  // individually consistent at the time its batch is read; entries deleted or
+  // expired while the stream is in flight are omitted. In the intended
+  // restart workflow the caller is the owner itself and issues no writes
+  // during the pull, so the result is effectively complete. Callers pulling
+  // a live owner's entries should note that registrations made while the
+  // stream is in flight are not guaranteed to be visible. Entry order is
+  // unspecified. Batching is a server-side configuration; clients should
+  // simply iterate the stream.
+  rpc PullOwned(PullOwnedRequest) returns (stream PullOwnedResponse) {  }
 }
 
 message KVBlockMetadata {
@@ -110,4 +126,27 @@ message UnregisterRequest {
 message UnregisterResponse {
   bool success = 1;
   string error_message = 2;
+}
+
+message PullOwnedRequest {
+  // Owner whose active registrations should be returned.
+  tpu_raiden.rpc.RaidenIdProto raiden_id = 1;
+}
+
+// A single active registration owned by the requested RaidenId.
+message PullOwnedEntry {
+  string prefix_hash = 1;
+  // Identifier for the cache block on the owner's host. See
+  // KVBlockMetadata.block_id.
+  int32 block_id = 2;
+  // Seconds until this registration expires, rounded up to at least 1 for
+  // entries that expire. 0 means the registration does not expire (infinite
+  // TTL). Clients may use this as a coarse recency signal when rebuilding
+  // local metadata, and refresh it via Register after recovery.
+  int64 remaining_ttl_seconds = 3;
+}
+
+message PullOwnedResponse {
+  // One batch of entries. Batch boundaries carry no meaning.
+  repeated PullOwnedEntry entries = 1;
 }

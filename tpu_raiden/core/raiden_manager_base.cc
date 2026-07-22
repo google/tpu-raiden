@@ -165,7 +165,7 @@ void RaidenManagerBase::InitTransportServer() {
   }
 
   server_ = std::make_unique<tpu_raiden::transport::BlockTransport>(
-      this, local_port_cfg_, true, local_ips_, parallelism_);
+      this, local_port_cfg_, local_ips_, parallelism_);
 }
 
 std::optional<int> RaidenManagerBase::local_port() const {

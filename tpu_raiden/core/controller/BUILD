@@ -40,6 +40,7 @@ cc_library(
     deps = [
         "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:kv_manager_holder",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/proto:worker_service_cc_grpc",
         "//tpu_raiden/proto:worker_service_cc_proto",
@@ -98,6 +99,8 @@ cc_library(
         ":orchestrator_service_client",
         ":worker_registry",
         ":worker_service_client",
+        "//tpu_raiden/core:buffer",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/kv_cache:logical_block_manager",
         "//tpu_raiden/kv_cache:raiden_id",
@@ -123,6 +126,7 @@ cc_library(
     hdrs = ["controller_client.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/proto:controller_service_cc_grpc",
         "//tpu_raiden/proto:controller_service_cc_proto",
         "@com_github_grpc_grpc//:grpc++",
@@ -139,6 +143,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":worker_service_client",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/proto:worker_service_cc_proto",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/base:core_headers",
@@ -158,6 +163,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":worker_registry",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/proto:controller_service_cc_grpc",
         "//tpu_raiden/proto:controller_service_cc_proto",
         "//tpu_raiden/rpc:raiden_service_cc_proto",
@@ -237,7 +243,9 @@ cc_test(
         ":raiden_controller",
         ":raiden_orchestrator",
         ":test_util",
+        "//tpu_raiden/core:buffer",
         "//tpu_raiden/core:kv_manager_holder",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/kv_cache:raiden_id",
         "//tpu_raiden/proto:worker_service_cc_proto",
         "//tpu_raiden/rpc:raiden_service_cc_proto",
@@ -259,6 +267,7 @@ cc_test(
         ":controller_client",
         ":controller_service",
         ":test_util",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/status",
         "@com_google_googletest//:gtest_main",
@@ -285,6 +294,7 @@ cc_test(
     srcs = ["worker_registry_test.cc"],
     deps = [
         ":worker_registry",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_matchers",
         "@com_google_googletest//:gtest",
@@ -298,7 +308,7 @@ cc_test(
     deps = [
         ":controller_client",
         ":controller_server",
-        ":worker_registry",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_matchers",
         "@com_google_googletest//:gtest",

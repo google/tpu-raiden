@@ -50,7 +50,10 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
 #include "tpu_raiden/transport/block_transport.h"
@@ -58,11 +61,6 @@
 namespace tpu_raiden {
 
 class MetricsCollector;
-
-struct EndpointDescriptor {
-  std::string endpoint;
-  std::vector<int64_t> shards;
-};
 
 class TransferFuture {
  public:
@@ -215,16 +213,39 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   absl::Status RegisterRecv(uint64_t uuid, const std::string& req_id,
                             int64_t expected_block_count) override;
 
+  // Pool reshard executor. The controller owns topology and entry math; this
+  // boundary validates the declared pool contract before any staging or
+  // network side effect. Both methods are device-only: a manager without
+  // device attachments fails closed.
+  absl::Status PoolReshardPush(const rpc::StartTransferRequest& plan,
+                               absl::Span<const int64_t> src_block_ids,
+                               int parallelism = 8) override;
+
+  absl::Status PoolReshardRegisterRecv(
+      const rpc::StartTransferRequest& plan,
+      absl::Span<const int64_t> chip_block_ids) override;
+
+  // Native accounting of the pool selection: how many pools the plan moved
+  // and, per opaque tag, how many registered pools it skipped. Raiden never
+  // interprets tag values.
+  struct PoolReshardSkipSummary {
+    int transferred_pools = 0;
+    std::map<std::string, int> skipped_pool_counts;
+  };
+
+  absl::StatusOr<PoolReshardSkipSummary> GetPoolReshardSkipSummary(
+      const std::string& req_id);
+
   absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
                                 uint64_t uuid = 0) override;
 
-  virtual std::vector<EndpointDescriptor> get_local_endpoints() const;
+  virtual std::vector<RaidenTransferEndpoint> get_local_endpoints() const;
 
   static bool EncodeIpToIpv6Bytes(const std::string& ip, uint8_t out[16]);
 
   virtual void StartRead(
       const std::string& req_id, uint64_t uuid,
-      const std::vector<EndpointDescriptor>& remote_descriptors,
+      const std::vector<RaidenTransferEndpoint>& remote_descriptors,
       const std::vector<int64_t>& remote_block_ids,
       const std::vector<int64_t>& local_block_ids, int parallelism = 1,
       std::optional<std::vector<int64_t>> local_host_block_ids = std::nullopt);
@@ -327,6 +348,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   void ProcessPullStream(int fd, const ControlRequestHeader& req);
   void AckRemote(const std::string& remote_endpoint, uint64_t uuid);
   absl::Status OnLayerReceived(size_t layer_idx, uint64_t uuid) override;
+  absl::Status OnPoolReceived(size_t pool_idx, uint64_t uuid) override;
   void RegisterBlockReadinessCallback(
       size_t layer_idx, size_t shard_idx, int block_id, uint64_t uuid,
       transport::BlockTransportDelegate::HostBlockReadyCallback cb) override;
@@ -357,17 +379,47 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     int32_t num_completed_layers = 0;
     bool network_completed = false;
     bool h2d_started = false;
+    bool reshard_finalizing = false;
     std::vector<int> accumulated_host_block_ids;
     std::chrono::steady_clock::time_point deadline;
     std::vector<raiden::PjRtCopyFuture> h2d_futures;
+    bool is_pool_reshard = false;
+    std::set<size_t> expected_pool_indices;
+    std::set<size_t> started_pool_indices;
+    std::set<size_t> completed_pool_indices;
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
+
+  struct PoolReshardSendEntry {
+    std::string req_id;
+    uint64_t uuid = 0;
+    int parallelism = 8;
+    int remaining_pool_peer_pushes = 0;
+    bool failed = false;
+    bool finalizing = false;
+    std::chrono::steady_clock::time_point deadline;
+    std::vector<int64_t> source_block_ids;
+    rpc::StartTransferRequest plan;
+    std::vector<raiden::PjRtCopyFuture> d2h_futures;
+  };
+  absl::flat_hash_map<uint64_t, std::shared_ptr<PoolReshardSendEntry>>
+      active_pool_reshard_sends_;
 
   void StartPushInternal(uint64_t uuid,
                          const std::vector<std::string>& remote_data_endpoints,
                          const std::vector<int64_t>& src_block_ids,
                          const std::vector<int64_t>& dst_block_ids);
   void SendNextLayer(uint64_t uuid, size_t l);
+
+  absl::Status ValidatePoolReshardPlan(
+      const rpc::StartTransferRequest& plan,
+      absl::Span<const int64_t> local_block_ids, bool is_sender);
+  PoolReshardSkipSummary BuildPoolReshardSkipSummary(
+      const rpc::StartTransferRequest& plan) const;
+  void StartPoolReshardPush(uint64_t uuid, size_t pool_idx);
+  void FinishPoolReshardSend(uint64_t uuid, const absl::Status& status);
+  void FinishPoolReshardRecvPool(uint64_t uuid, size_t pool_idx,
+                                 const absl::Status& status);
 
   std::chrono::steady_clock::time_point DeadlineFromNow() const;
 
@@ -393,6 +445,8 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   std::set<std::string> done_sending_;
   std::set<std::string> done_recving_;
   std::set<std::string> failed_recving_;
+  absl::flat_hash_map<std::string, PoolReshardSkipSummary>
+      pool_reshard_skip_summaries_;
   // StagingReadinessState is shared because it is captured by value in the
   // async PjRt copy callbacks (e.g. OnReady). A shared_ptr is required here
   // to ensure the state stays alive even if the entry is removed from this
@@ -401,8 +455,8 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   std::map<int64_t, std::shared_ptr<StagingReadinessState>> staging_readiness_;
   std::map<int64_t, std::shared_ptr<StagingReadinessState>>
       active_producer_blocks_;
-  std::mutex mu_;
-  std::condition_variable cv_;
+  absl::Mutex mu_;
+  absl::CondVar cv_;
   int control_fd_ = -1;
   std::atomic<bool> stopping_{false};
   std::thread control_thread_;

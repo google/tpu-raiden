@@ -45,7 +45,7 @@ class CoordinationServicer(coordination_pb2_grpc.CoordinationServiceServicer):
 
   def set_metadata(
       self,
-      endpoints: List[coordination_pb2.EndpointDescriptor],
+      endpoints: List[coordination_pb2.RaidenTransferEndpoint],
       transfer_uuid: int,
       transfer_req_id: str,
       block_ids: List[int],
@@ -128,7 +128,7 @@ class CoordinationServer:
     """Sets the transfer metadata on the servicer."""
     proto_endpoints = []
     for ep in endpoints:
-      proto_ep = coordination_pb2.EndpointDescriptor(
+      proto_ep = coordination_pb2.RaidenTransferEndpoint(
           endpoint=ep['endpoint'],
           shards=ep['shards'],
       )

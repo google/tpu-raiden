@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -37,21 +38,21 @@ namespace tpu_raiden {
 namespace controller {
 namespace {
 
-bool IsD2H(const proto::TransferBufferSpec& transfer) {
-  return transfer.src_mem_type() == rpc::MEMORY_TYPE_HBM &&
-         (transfer.dst_mem_type() == rpc::MEMORY_TYPE_DRAM ||
-          transfer.dst_mem_type() == rpc::MEMORY_TYPE_UNSPECIFIED);
+bool IsD2H(rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type) {
+  return src_mem_type == rpc::MEMORY_TYPE_HBM &&
+         (dst_mem_type == rpc::MEMORY_TYPE_DRAM ||
+          dst_mem_type == rpc::MEMORY_TYPE_UNSPECIFIED);
 }
 
-bool IsH2D(const proto::TransferBufferSpec& transfer) {
-  return (transfer.src_mem_type() == rpc::MEMORY_TYPE_DRAM ||
-          transfer.src_mem_type() == rpc::MEMORY_TYPE_UNSPECIFIED) &&
-         transfer.dst_mem_type() == rpc::MEMORY_TYPE_HBM;
+bool IsH2D(rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type) {
+  return (src_mem_type == rpc::MEMORY_TYPE_DRAM ||
+          src_mem_type == rpc::MEMORY_TYPE_UNSPECIFIED) &&
+         dst_mem_type == rpc::MEMORY_TYPE_HBM;
 }
 
-bool IsH2H(const proto::TransferBufferSpec& transfer) {
-  return transfer.src_mem_type() == rpc::MEMORY_TYPE_DRAM &&
-         transfer.dst_mem_type() == rpc::MEMORY_TYPE_DRAM;
+bool IsH2H(rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type) {
+  return src_mem_type == rpc::MEMORY_TYPE_DRAM &&
+         dst_mem_type == rpc::MEMORY_TYPE_DRAM;
 }
 
 }  // namespace
@@ -125,19 +126,28 @@ grpc::Status WorkerServiceImpl::TransferBuffers(
     proto::TransferBuffersResponse* response) {
   absl::MutexLock lock(mutex_);
   const auto& transfer = request->transfer();
-  bool is_d2h = IsD2H(transfer);
-  bool is_h2d = IsH2D(transfer);
-  bool is_h2h = IsH2H(transfer);
+
+  rpc::MemoryType src_mem_type = transfer.src_mem_type();
+  rpc::MemoryType dst_mem_type = transfer.dst_mem_type();
+
+  if (src_mem_type == rpc::MEMORY_TYPE_UNSPECIFIED &&
+      transfer.src_buffers_size() > 0) {
+    src_mem_type = transfer.src_buffers(0).memory_type();
+  }
+  if (dst_mem_type == rpc::MEMORY_TYPE_UNSPECIFIED &&
+      transfer.dst_buffers_size() > 0) {
+    dst_mem_type = transfer.dst_buffers(0).memory_type();
+  }
+
+  bool is_d2h = IsD2H(src_mem_type, dst_mem_type);
+  bool is_h2d = IsH2D(src_mem_type, dst_mem_type);
+  bool is_h2h = IsH2H(src_mem_type, dst_mem_type);
+
   if (!is_d2h && !is_h2d && !is_h2h) {
     response->set_success(false);
     response->set_message(
         "Only D2H, H2D, and H2H (DRAM to DRAM) transfers are "
         "currently supported");
-    return grpc::Status::OK;
-  }
-  if (is_h2h && transfer.peer().empty()) {
-    response->set_success(false);
-    response->set_message("Peer address must be provided for H2H transfers");
     return grpc::Status::OK;
   }
   if (is_h2h && transfer.copy_sizes_size() > 0) {
@@ -150,15 +160,44 @@ grpc::Status WorkerServiceImpl::TransferBuffers(
       }
     }
   }
-  if (transfer.src_offsets_size() == 0 ||
-      transfer.src_offsets_size() != transfer.dst_offsets_size()) {
+  std::vector<int64_t> src_offsets;
+  std::vector<int64_t> dst_offsets;
+
+  if (transfer.src_offsets_size() > 0) {
+    src_offsets.assign(transfer.src_offsets().begin(),
+                       transfer.src_offsets().end());
+    dst_offsets.assign(transfer.dst_offsets().begin(),
+                       transfer.dst_offsets().end());
+  } else if (transfer.src_buffers_size() > 0 &&
+             transfer.src_buffers_size() == transfer.dst_buffers_size()) {
+    src_offsets.reserve(transfer.src_buffers_size());
+    for (const auto& src_buf : transfer.src_buffers()) {
+      if (!src_buf.has_index() || src_buf.index() < 0) {
+        response->set_success(false);
+        response->set_message("BufferProto missing valid index");
+        return grpc::Status::OK;
+      }
+      src_offsets.push_back(src_buf.index());
+    }
+    dst_offsets.reserve(transfer.dst_buffers_size());
+    for (const auto& dst_buf : transfer.dst_buffers()) {
+      if (!dst_buf.has_index() || dst_buf.index() < 0) {
+        response->set_success(false);
+        response->set_message("BufferProto missing valid index");
+        return grpc::Status::OK;
+      }
+      dst_offsets.push_back(dst_buf.index());
+    }
+  }
+
+  if (src_offsets.empty() || src_offsets.size() != dst_offsets.size()) {
     response->set_success(false);
     response->set_message(
         "Source and destination offsets must have the same non-zero length");
     return grpc::Status::OK;
   }
   if (transfer.copy_sizes_size() > 0 &&
-      transfer.copy_sizes_size() != transfer.src_offsets_size()) {
+      transfer.copy_sizes_size() != src_offsets.size()) {
     response->set_success(false);
     response->set_message(
         "copy_sizes, if provided, must match the length of src_offsets");
@@ -172,10 +211,6 @@ grpc::Status WorkerServiceImpl::TransferBuffers(
     return grpc::Status::OK;
   }
 
-  std::vector<int64_t> src_offsets(transfer.src_offsets().begin(),
-                                   transfer.src_offsets().end());
-  std::vector<int64_t> dst_offsets(transfer.dst_offsets().begin(),
-                                   transfer.dst_offsets().end());
   std::vector<int64_t> copy_sizes;
   if (transfer.copy_sizes_size() > 0) {
     copy_sizes.assign(transfer.copy_sizes().begin(),
@@ -186,12 +221,45 @@ grpc::Status WorkerServiceImpl::TransferBuffers(
 
   absl::StatusOr<raiden::PjRtCopyFuture> future_or;
   if (is_d2h) {
-    future_or = transfer_manager_.D2h(src_offsets, dst_offsets, copy_sizes);
+    if (transfer.src_buffers_size() > 0 &&
+        !transfer.src_buffers(0).remote_address().empty()) {
+      std::string src_peer = transfer.src_buffers(0).remote_address();
+      future_or = transfer_manager_.D2hRead(src_peer, src_offsets, dst_offsets,
+                                            copy_sizes);
+    } else if (transfer.dst_buffers_size() > 0 &&
+               !transfer.dst_buffers(0).remote_address().empty()) {
+      std::string dst_peer = transfer.dst_buffers(0).remote_address();
+      future_or = transfer_manager_.D2hWrite(dst_peer, src_offsets, dst_offsets,
+                                             copy_sizes);
+    } else {
+      future_or = transfer_manager_.D2h(src_offsets, dst_offsets, copy_sizes);
+    }
   } else if (is_h2d) {
-    future_or = transfer_manager_.H2d(src_offsets, dst_offsets, copy_sizes);
+    if (transfer.src_buffers_size() > 0 &&
+        !transfer.src_buffers(0).remote_address().empty()) {
+      std::string src_peer = transfer.src_buffers(0).remote_address();
+      future_or = transfer_manager_.H2dRead(src_peer, src_offsets, dst_offsets,
+                                            copy_sizes);
+    } else if (transfer.dst_buffers_size() > 0 &&
+               !transfer.dst_buffers(0).remote_address().empty()) {
+      std::string dst_peer = transfer.dst_buffers(0).remote_address();
+      future_or = transfer_manager_.H2dWrite(dst_peer, src_offsets, dst_offsets,
+                                             copy_sizes);
+    } else {
+      future_or = transfer_manager_.H2d(src_offsets, dst_offsets, copy_sizes);
+    }
+  } else if (transfer.src_buffers_size() > 0 &&
+             !transfer.src_buffers(0).remote_address().empty()) {
+    future_or = transfer_manager_.H2hRead(
+        transfer.src_buffers(0).remote_address(), src_offsets, dst_offsets);
+  } else if (transfer.dst_buffers_size() > 0 &&
+             !transfer.dst_buffers(0).remote_address().empty()) {
+    future_or = transfer_manager_.H2hWrite(
+        transfer.dst_buffers(0).remote_address(), src_offsets, dst_offsets);
   } else {
-    future_or =
-        transfer_manager_.H2hWrite(transfer.peer(), src_offsets, dst_offsets);
+    response->set_success(false);
+    response->set_message("Peer address must be provided for H2H transfers");
+    return grpc::Status::OK;
   }
   if (!future_or.ok()) {
     response->set_success(false);

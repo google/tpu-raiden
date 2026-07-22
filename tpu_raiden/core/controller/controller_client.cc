@@ -16,8 +16,10 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/strings/string_view.h"
@@ -25,6 +27,7 @@
 #include "grpcpp/create_channel.h"
 #include "grpcpp/security/credentials.h"
 #include "grpcpp/support/status.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/proto/controller_service.grpc.pb.h"
 #include "tpu_raiden/proto/controller_service.pb.h"
 
@@ -44,11 +47,18 @@ RaidenControllerClient::RaidenControllerClient(absl::string_view endpoint)
 
 absl::Status RaidenControllerClient::RegisterWorker(
     absl::string_view worker_id, absl::string_view raiden_worker_endpoint,
-    absl::string_view raiden_transfer_endpoint) {
+    const std::vector<::tpu_raiden::RaidenTransferEndpoint>&
+        raiden_transfer_endpoints) {
   ::tpu_raiden::tpu_raiden::proto::RegisterWorkerRequest request;
   request.set_worker_id(std::string(worker_id));
   request.set_raiden_worker_endpoint(std::string(raiden_worker_endpoint));
-  request.set_raiden_transfer_endpoint(std::string(raiden_transfer_endpoint));
+  for (const auto& ep : raiden_transfer_endpoints) {
+    auto* desc = request.add_raiden_transfer_endpoints();
+    desc->set_endpoint(ep.endpoint);
+    for (int64_t shard : ep.shards) {
+      desc->add_shards(shard);
+    }
+  }
 
   ::tpu_raiden::tpu_raiden::proto::RegisterWorkerResponse response;
   grpc::ClientContext context;

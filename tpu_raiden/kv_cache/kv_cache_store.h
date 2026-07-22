@@ -96,8 +96,8 @@ class KVCacheStore {
                         absl::string_view global_registry_address = "",
                         RaidenId raiden_id = {}, int num_shards = 0,
                         int64_t shard_size_bytes = 0,
-                        int raiden_controller_port = 0,
-                        absl::string_view raiden_orchestrator_address = "");
+                        absl::string_view raiden_orchestrator_address = "",
+                        absl::string_view raiden_controller_address = "");
 
   // Test-only constructor for injecting mock controller
   explicit KVCacheStore(
@@ -196,7 +196,7 @@ class KVCacheStore {
   int GetPinCount(const std::string& hash) const;
 
   size_t capacity() const;
-  int raiden_controller_port() const;
+  std::string raiden_controller_address() const;
 
   const RaidenId& raiden_id() const { return raiden_id_; }
 
@@ -230,6 +230,26 @@ class KVCacheStore {
   std::tuple<std::vector<std::string>, std::vector<std::string>,
              std::vector<std::string>>
   PollRemoteReadStatus();
+
+  // Rebuilds this store's directory from the global registry after an owner
+  // restart. Pulls all entries registered under this store's RaidenId,
+  // restores their host block allocations in the controller, and repopulates
+  // the LRU directory with unpinned HOST entries. Entries closer to expiry
+  // are inserted as least recently used (evicted first); entries that never
+  // expire are the most recent. If the pulled entries exceed the remaining
+  // directory capacity, only the ones with the largest remaining TTL are
+  // recovered. Dropped entries are NOT unregistered here: they stay visible
+  // in the global registry while their host blocks are no longer tracked
+  // locally and may be reallocated, so their registrations become stale
+  // advertisements. Callers recovering into a smaller directory must
+  // unregister every pulled-but-not-recovered entry before serving.
+  //
+  // Must be called on a freshly constructed store before it serves traffic
+  // (in particular before any Save or ReadRemote allocates host blocks).
+  // Hashes already present in the directory are skipped.
+  //
+  // Returns the number of recovered blocks.
+  absl::StatusOr<size_t> RecoverFromRegistry();
 
  private:
   // Evicts host blocks by their logical block hashes.

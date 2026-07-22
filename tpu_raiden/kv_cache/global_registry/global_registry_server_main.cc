@@ -35,6 +35,11 @@ ABSL_FLAG(absl::Duration, default_ttl, absl::InfiniteDuration(),
           "Default TTL for registrations");
 ABSL_FLAG(absl::Duration, cleanup_interval, absl::Seconds(300),
           "Interval for cleanup thread");
+ABSL_FLAG(
+    int64_t, pull_owned_batch_size,
+    tpu_raiden::kv_cache::global_registry::GlobalRegistryServiceImpl::
+        kDefaultPullOwnedBatchSize,
+    "Maximum number of entries per streamed PullOwned response message");
 
 void RunServer() {
   std::string server_address =
@@ -44,7 +49,8 @@ void RunServer() {
   absl::Duration cleanup_interval = absl::GetFlag(FLAGS_cleanup_interval);
 
   tpu_raiden::kv_cache::global_registry::GlobalRegistryServiceImpl service(
-      default_ttl, cleanup_interval);
+      default_ttl, cleanup_interval,
+      absl::GetFlag(FLAGS_pull_owned_batch_size));
 
   grpc::ServerBuilder builder;
   // Listen on the given address without any authentication mechanism.

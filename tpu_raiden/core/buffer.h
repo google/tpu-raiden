@@ -21,7 +21,9 @@
 #include <utility>
 #include <vector>
 
+#include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "tpu_raiden/proto/worker_service.pb.h"
 
 namespace tpu_raiden {
 
@@ -37,11 +39,18 @@ struct BufferShard {
 // to locate the buffer in the worker or controller.
 class Buffer {
  public:
+  Buffer() : index_(-1), memory_type_(rpc::MEMORY_TYPE_UNSPECIFIED) {}
+
   Buffer(int index, std::vector<BufferShard> shards,
-         std::optional<std::string> remote_address = std::nullopt)
+         std::optional<std::string> remote_address = std::nullopt,
+         rpc::MemoryType memory_type = rpc::MEMORY_TYPE_UNSPECIFIED)
       : index_(index),
         shards_(std::move(shards)),
-        remote_address_(std::move(remote_address)) {}
+        remote_address_(std::move(remote_address)),
+        memory_type_(memory_type) {}
+
+  // Returns true if shards are empty and index is negative.
+  bool empty() const { return shards_.empty() && index_ < 0; }
 
   // Returns the index of this buffer. The index carries application-specific
   // semantics, such as a layer index or a block index.
@@ -50,14 +59,62 @@ class Buffer {
   // Returns the shards composing this buffer.
   absl::Span<const BufferShard> shards() const { return shards_; }
 
+  // Returns the memory type of this buffer.
+  rpc::MemoryType memory_type() const { return memory_type_; }
+  void set_memory_type(rpc::MemoryType memory_type) {
+    memory_type_ = memory_type;
+  }
+
   // Returns the remote controller address if the buffer resides on workers
   // attached to a remote controller, otherwise std::nullopt.
-  std::optional<std::string> RemoteAddress() const { return remote_address_; }
+  std::optional<std::string> remote_address() const { return remote_address_; }
+  void set_remote_address(std::optional<std::string> remote_address) {
+    remote_address_ = std::move(remote_address);
+  }
+
+  // Converts this Buffer into a proto::BufferProto.
+  proto::BufferProto ToProto() const {
+    proto::BufferProto proto;
+    if (index_ >= 0) {
+      proto.set_index(index_);
+    }
+    for (const auto& shard : shards_) {
+      proto.add_buffer_handles()->set_handle(shard.handle);
+    }
+    proto.set_memory_type(memory_type_);
+    if (remote_address_.has_value()) {
+      proto.set_remote_address(*remote_address_);
+    }
+    return proto;
+  }
+
+  // Converts a proto::BufferProto to a Buffer.
+  static Buffer FromProto(
+      const proto::BufferProto& proto,
+      std::optional<std::string> remote_address = std::nullopt) {
+    int index = proto.has_index() ? proto.index() : -1;
+    std::vector<BufferShard> shards;
+    shards.reserve(proto.buffer_handles_size());
+    for (const auto& handle_proto : proto.buffer_handles()) {
+      shards.push_back(BufferShard{
+          .handle = handle_proto.handle(),
+          .offset = 0,
+          .size = 0,
+      });
+    }
+    rpc::MemoryType memory_type = proto.memory_type();
+    std::optional<std::string> addr = remote_address;
+    if (!addr.has_value() && !proto.remote_address().empty()) {
+      addr = proto.remote_address();
+    }
+    return Buffer(index, std::move(shards), std::move(addr), memory_type);
+  }
 
  private:
   int index_;
   std::vector<BufferShard> shards_;
   std::optional<std::string> remote_address_;
+  rpc::MemoryType memory_type_ = rpc::MEMORY_TYPE_UNSPECIFIED;
 };
 
 }  // namespace tpu_raiden

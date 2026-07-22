@@ -44,5 +44,5 @@
 
 ## Work Log Tracking Rules
 
-*   ALWAYS create and maintain a `worklog.md` file in the project directory (e.g., `tpu_raiden_worklog.md`) to track all project activities and experiment runs.
+*   ALWAYS create and maintain a `worklog.md` file in the project directory (e.g., `tpu_raiden_worklog.md`) to track all project activities and experiment runs. This file must remain untracked and should NEVER be added to or committed in any CL.
 *   The main agent MUST record an entry in the worklog file every time it invokes a subagent, documenting the activity type, subagent role/id, problem addressed, and status.

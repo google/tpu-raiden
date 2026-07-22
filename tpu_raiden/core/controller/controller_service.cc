@@ -14,6 +14,7 @@
 
 #include "tpu_raiden/core/controller/controller_service.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -27,6 +28,7 @@
 #include "grpcpp/support/status.h"
 #include "xla/tsl/concurrency/future.h"
 #include "tpu_raiden/core/controller/worker_registry.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/proto/controller_service.pb.h"
 
 namespace tpu_raiden {
@@ -42,10 +44,19 @@ grpc::Status RaidenControllerServiceImpl::RegisterWorker(
     grpc::ServerContext* context,
     const ::tpu_raiden::tpu_raiden::proto::RegisterWorkerRequest* request,
     ::tpu_raiden::tpu_raiden::proto::RegisterWorkerResponse* response) {
+  std::vector<::tpu_raiden::RaidenTransferEndpoint> eps;
+  eps.reserve(request->raiden_transfer_endpoints_size());
+  for (const auto& desc_proto : request->raiden_transfer_endpoints()) {
+    ::tpu_raiden::RaidenTransferEndpoint ep;
+    ep.endpoint = desc_proto.endpoint();
+    ep.shards.assign(desc_proto.shards().begin(), desc_proto.shards().end());
+    eps.push_back(std::move(ep));
+  }
+
   WorkerRegistration reg = {
       .worker_id = request->worker_id(),
       .raiden_worker_endpoint = request->raiden_worker_endpoint(),
-      .raiden_transfer_endpoint = request->raiden_transfer_endpoint(),
+      .raiden_transfer_endpoints = std::move(eps),
   };
 
   std::shared_ptr<WorkerRegistry> registry;
@@ -89,19 +100,31 @@ grpc::Status RaidenControllerServiceImpl::ReadRemote(
   }
 
   auto workers = registry->GetRegisteredWorkers();
-  if (workers.size() != request->dest_worker_endpoints_size()) {
+  size_t total_transfers = 0;
+  for (const auto& w : workers) {
+    total_transfers += w.raiden_transfer_endpoints.size();
+  }
+  if (total_transfers != request->dest_raiden_transfer_endpoints_size()) {
     return grpc::Status(
         grpc::StatusCode::INVALID_ARGUMENT,
-        absl::StrCat("Worker count mismatch: local has ", workers.size(),
-                     ", request has ", request->dest_worker_endpoints_size()));
+        absl::StrCat("Transfer count mismatch: local has ", total_transfers,
+                     ", request has ",
+                     request->dest_raiden_transfer_endpoints_size()));
   }
 
   std::vector<int64_t> src_offsets(request->src_host_block_ids().begin(),
                                    request->src_host_block_ids().end());
   std::vector<int64_t> dst_offsets(request->dest_host_block_ids().begin(),
                                    request->dest_host_block_ids().end());
-  std::vector<std::string> peers(request->dest_worker_endpoints().begin(),
-                                 request->dest_worker_endpoints().end());
+
+  std::vector<::tpu_raiden::RaidenTransferEndpoint> peers;
+  peers.reserve(request->dest_raiden_transfer_endpoints_size());
+  for (const auto& desc_proto : request->dest_raiden_transfer_endpoints()) {
+    ::tpu_raiden::RaidenTransferEndpoint ep;
+    ep.endpoint = desc_proto.endpoint();
+    ep.shards.assign(desc_proto.shards().begin(), desc_proto.shards().end());
+    peers.push_back(std::move(ep));
+  }
 
   std::shared_ptr<const TransferBuffersCallback> cb;
   {

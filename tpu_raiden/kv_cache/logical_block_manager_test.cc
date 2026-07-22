@@ -158,6 +158,54 @@ TEST(LogicalBlockManagerTest, InvalidArguments) {
   EXPECT_FALSE(manager.Unlock(invalid_unlock).ok());
 }
 
+TEST(LogicalBlockManagerTest, RestoreAllocatedMarksBlocksAllocatedAndLocked) {
+  LogicalBlockManager manager(5);
+  ASSERT_TRUE(manager.RestoreAllocated({1, 3}).ok());
+  EXPECT_TRUE(manager.IsAllocated(1));
+  EXPECT_TRUE(manager.IsLocked(1));
+  EXPECT_TRUE(manager.IsAllocated(3));
+  EXPECT_TRUE(manager.IsLocked(3));
+  EXPECT_EQ(manager.num_free_blocks(), 3);
+
+  // Restored blocks are never handed out by subsequent allocations.
+  auto blocks_or = manager.Allocate(3, /*lock=*/true);
+  ASSERT_TRUE(blocks_or.ok());
+  EXPECT_THAT(*blocks_or, ElementsAre(0, 2, 4));
+  // Everything is locked now: further allocation must fail.
+  EXPECT_FALSE(manager.Allocate(1).ok());
+}
+
+TEST(LogicalBlockManagerTest, RestoreAllocatedValidatesAtomically) {
+  LogicalBlockManager manager(5);
+  ASSERT_TRUE(manager.Allocate(1).ok());  // Block 0 becomes allocated.
+
+  // Out of range.
+  EXPECT_EQ(manager.RestoreAllocated({1, 5}).code(),
+            absl::StatusCode::kInvalidArgument);
+  // Already allocated (even though unlocked).
+  EXPECT_EQ(manager.RestoreAllocated({1, 0}).code(),
+            absl::StatusCode::kFailedPrecondition);
+  // Duplicate ID within the batch.
+  EXPECT_EQ(manager.RestoreAllocated({2, 2}).code(),
+            absl::StatusCode::kInvalidArgument);
+
+  // Failed calls must not have modified any state.
+  EXPECT_FALSE(manager.IsAllocated(1));
+  EXPECT_FALSE(manager.IsAllocated(2));
+  EXPECT_EQ(manager.num_allocated_blocks(), 1);
+}
+
+TEST(LogicalBlockManagerTest, RestoredBlocksReusableAfterUnlock) {
+  LogicalBlockManager manager(3);
+  ASSERT_TRUE(manager.RestoreAllocated({0, 1, 2}).ok());
+  ASSERT_TRUE(manager.Unlock({1}).ok());
+
+  // The unlocked restored block is evictable and gets reused.
+  auto blocks_or = manager.Allocate(1);
+  ASSERT_TRUE(blocks_or.ok());
+  EXPECT_THAT(*blocks_or, ElementsAre(1));
+}
+
 }  // namespace
 }  // namespace kv_cache
 }  // namespace tpu_raiden

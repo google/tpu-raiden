@@ -27,6 +27,7 @@
 #include "grpcpp/create_channel.h"
 #include "grpcpp/security/credentials.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 
 namespace tpu_raiden {
 namespace core {
@@ -38,9 +39,9 @@ absl::Status WorkerRegistry::RegisterWorker(const WorkerRegistration& reg) {
   }
   if (reg.worker_service_client == nullptr &&
       reg.raiden_worker_endpoint.empty() &&
-      reg.raiden_transfer_endpoint.empty()) {
+      reg.raiden_transfer_endpoints.empty()) {
     return absl::InvalidArgumentError(
-        "at least one of raiden_worker_endpoint or raiden_transfer_endpoint"
+        "at least one of raiden_worker_endpoint or raiden_transfer_endpoints"
         " must be provided, or worker_service_client must be non-null");
   }
 
@@ -65,11 +66,12 @@ absl::Status WorkerRegistry::RegisterWorker(const WorkerRegistration& reg) {
 
 absl::Status WorkerRegistry::RegisterWorker(
     absl::string_view worker_id, absl::string_view raiden_worker_endpoint,
-    absl::string_view raiden_transfer_endpoint) {
+    const std::vector<::tpu_raiden::RaidenTransferEndpoint>&
+        raiden_transfer_endpoints) {
   return RegisterWorker(WorkerRegistration{
       .worker_id = std::string(worker_id),
       .raiden_worker_endpoint = std::string(raiden_worker_endpoint),
-      .raiden_transfer_endpoint = std::string(raiden_transfer_endpoint),
+      .raiden_transfer_endpoints = raiden_transfer_endpoints,
   });
 }
 

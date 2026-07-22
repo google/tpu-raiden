@@ -29,11 +29,12 @@ cc_library(
     ],
     features = ["-use_header_modules"],
     deps = [
-        ":socket_util",
         "//tpu_raiden/core:status_macros",
+        "//tpu_raiden/transport/lib/socket:util",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -52,7 +53,7 @@ cc_test(
     features = ["-use_header_modules"],
     deps = [
         ":raw_buffer_transport",
-        "//tpu_raiden/transport/lib/util",
+        "//tpu_raiden/transport/peregrine/src/util",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
@@ -61,66 +62,5 @@ cc_test(
         "@com_google_absl//absl/types:span",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ],
-)
-
-cc_library(
-    name = "socket_transport",
-    srcs = ["socket_transport.cc"],
-    hdrs = ["socket_transport.h"],
-    copts = [
-        "-fno-strict-aliasing",
-        "-fexceptions",
-    ],
-    features = ["-use_header_modules"],
-    deps = [
-        "//third_party/peregrine/src/api:transport",
-        "//third_party/peregrine/src/api:transport_types",
-        "@com_google_absl//absl/base:core_headers",
-        "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/synchronization",
-        "@com_google_absl//absl/types:span",
-    ],
-)
-
-cc_test(
-    name = "socket_transport_test",
-    srcs = ["socket_transport_test.cc"],
-    copts = [
-        "-fno-strict-aliasing",
-        "-fexceptions",
-    ],
-    features = ["-use_header_modules"],
-    deps = [
-        ":socket_transport",
-        "//third_party/peregrine/src/api:transport",
-        "//third_party/peregrine/src/api:transport_types",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-    ],
-)
-
-cc_library(
-    name = "socket_util",
-    srcs = ["socket_util.cc"],
-    hdrs = ["socket_util.h"],
-    copts = [
-        "-fno-strict-aliasing",
-        "-fexceptions",
-    ],
-    features = ["-use_header_modules"],
-    deps = [
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:string_view",
-        "@com_google_absl//absl/types:span",
     ],
 )

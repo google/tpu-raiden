@@ -102,6 +102,31 @@ absl::StatusOr<std::vector<KVBlockMetadata>> GlobalRegistryClient::Lookup(
   return result;
 }
 
+absl::StatusOr<std::vector<GlobalRegistryClient::PulledEntry>>
+GlobalRegistryClient::PullOwned(const RaidenId& raiden_id) {
+  PullOwnedRequest request;
+  ToProto(raiden_id, request.mutable_raiden_id());
+
+  grpc::ClientContext context;
+  std::unique_ptr<grpc::ClientReader<PullOwnedResponse>> reader =
+      stub_->PullOwned(&context, request);
+
+  std::vector<PulledEntry> entries;
+  PullOwnedResponse response;
+  while (reader->Read(&response)) {
+    for (const auto& entry : response.entries()) {
+      entries.push_back({entry.prefix_hash(), entry.block_id(),
+                         entry.remaining_ttl_seconds()});
+    }
+  }
+
+  grpc::Status status = reader->Finish();
+  if (!status.ok()) {
+    return absl::InternalError(status.error_message());
+  }
+  return entries;
+}
+
 absl::Status GlobalRegistryClient::Unregister(
     const std::vector<std::string>& prefix_hashes, const RaidenId& raiden_id) {
   UnregisterRequest request;

@@ -48,6 +48,13 @@ class LogicalBlockManager {
   absl::StatusOr<std::vector<int>> Allocate(int num_blocks_to_allocate,
                                             bool lock = false);
 
+  // Marks the given block IDs as allocated and locked, restoring allocator
+  // state for blocks whose backing data survived an owner restart (the same
+  // state Allocate(n, /*lock=*/true) would have produced for them). All IDs
+  // must be in range, currently unallocated, and unique; on any violation an
+  // error is returned and no state is modified.
+  absl::Status RestoreAllocated(absl::Span<const int> block_ids);
+
   // Unlocks the specified blocks, making them eligible for LRU eviction if
   // future allocation requests require blocks.
   absl::Status Unlock(absl::Span<const int> block_ids);

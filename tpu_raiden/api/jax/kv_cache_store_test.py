@@ -466,7 +466,6 @@ class KVCacheStoreTest(absltest.TestCase):
         raiden_id=store_id,
         num_shards=len(devices),
         shard_size_bytes=local_bytes_per_block,
-        raiden_controller_port=0,
         raiden_orchestrator_address=f"localhost:{_orchestrator_port}",
     )
 
@@ -478,7 +477,7 @@ class KVCacheStoreTest(absltest.TestCase):
         max_blocks=num_blocks,
         num_slots=2,
         raiden_worker_port=listener_port,
-        raiden_controller_address=f"localhost:{store.raiden_controller_port}",
+        raiden_controller_address=store.raiden_controller_address,
     )
     self.assertTrue(manager.is_listener_active)
 
@@ -574,7 +573,6 @@ class KVCacheStoreTest(absltest.TestCase):
         raiden_id=store_id,
         num_shards=len(devices),
         shard_size_bytes=local_bytes_per_block,
-        raiden_controller_port=0,
         raiden_orchestrator_address=f"localhost:{_orchestrator_port}",
     )
 
@@ -587,7 +585,7 @@ class KVCacheStoreTest(absltest.TestCase):
         max_blocks=num_blocks,
         num_slots=num_slots,
         raiden_worker_port=listener_port,
-        raiden_controller_address=f"localhost:{store.raiden_controller_port}",
+        raiden_controller_address=store.raiden_controller_address,
         host_blocks_to_allocate=num_slots * num_blocks
         + 2,  # Allocate 2 extra blocks for Save
     )

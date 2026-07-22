@@ -1,4 +1,4 @@
-benchmarks{
+benchmarks {
   name: "h2d_d2h_gating"
   description: "Perf gate: 5 stable configs, fail if median Gbps drops >3% vs gating_baselines.json"
   owner: "raiden-dev"
@@ -23,7 +23,7 @@ benchmarks{
 
 }
 
-benchmarks{
+benchmarks {
   name: "h2h_cpp_gate"
   description: "C++ H2H perf+integrity gate: a thin Python driver spawns the C++ h2h_benchmark_runner (NO JAX bindings), fails if the receiver's byte-integrity check fails."
   owner: "raiden-dev"

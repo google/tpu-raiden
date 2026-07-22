@@ -13,9 +13,44 @@
 # limitations under the License.
 
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
-load("@rules_python//python:defs.bzl", "py_library")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
+
+py_library(
+    name = "nd_slice_math",
+    srcs = ["nd_slice_math.py"],
+    visibility = ["//visibility:public"],
+    deps = ["//tpu_raiden/rpc:raiden_service_py_pb2"],
+)
+
+py_test(
+    name = "nd_slice_math_test",
+    srcs = ["nd_slice_math_test.py"],
+    deps = [
+        ":nd_slice_math",
+        "//tpu_raiden/rpc:raiden_controller",
+        "@com_google_absl_py//absl/testing:absltest",
+    ],
+)
+
+cc_test(
+    name = "kv_cache_listener_test",
+    srcs = ["kv_cache_listener_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    deps = [
+        ":kv_cache_listener",
+        ":kv_cache_manager_base",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/types:span",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
 
 cc_library(
     name = "logical_block_manager",
@@ -216,7 +251,9 @@ cc_library(
     deps = [
         ":lru_cache",
         ":raiden_id",
+        "//tpu_raiden/core:buffer",
         "//tpu_raiden/core:numa_thread_pool",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core/controller:raiden_controller",
         "//tpu_raiden/kv_cache/global_registry:global_registry_client_cc",
