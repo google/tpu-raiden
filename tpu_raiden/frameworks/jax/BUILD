@@ -41,6 +41,7 @@ cc_library(
         "//tpu_raiden/core:kv_cache_manager_with_transfer",
         "//tpu_raiden/core:kv_manager_holder",
         "//tpu_raiden/core:metrics_collector",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/core:tpu_utils",
