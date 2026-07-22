@@ -334,13 +334,18 @@ void NumaAwareKVCacheManager::InitSubManagers(
         host_alloc = LocalCreateHostMemoryAllocator(client);
       }
 
+      // Bind sub-managers on CONSECUTIVE data-plane ports so a peer can address
+      // every sub-manager from a single advertised base ("ip:base_port" +
+      // sub_idx). This must hold even for an ephemeral base (local_port ==
+      // nullopt/0): once sub-manager 0 binds a kernel-assigned base P (captured
+      // into bound_base_port below), the rest must bind P+1, P+2, ... explicitly
+      // — otherwise each gets a random ephemeral port and the sender's base+idx
+      // assumption fails with "connection refused" (multi-NUMA read_remote).
       std::optional<int> sub_port = local_port;
-      if (sub_port.has_value()) {
-        if (bound_base_port.has_value()) {
-          sub_port = *bound_base_port + sub_idx;
-        } else if (*sub_port > 0) {
-          sub_port = *sub_port + sub_idx;
-        }
+      if (bound_base_port.has_value()) {
+        sub_port = *bound_base_port + sub_idx;
+      } else if (sub_port.has_value() && *sub_port > 0) {
+        sub_port = *sub_port + sub_idx;
       }
       int64_t sub_ctrl_port = local_control_port > 0
                                   ? local_control_port + sub_idx
