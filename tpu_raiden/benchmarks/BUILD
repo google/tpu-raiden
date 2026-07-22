@@ -33,10 +33,10 @@ py_library(
     name = "perf_core",
     testonly = True,
     srcs = ["perf_core.py"],
+    visibility = ["//visibility:public"],
     deps = [
         "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
         "@jax//jax",
-        "@pypi//libtpu",
         "@pypi//numpy",
     ],
 )
@@ -50,6 +50,7 @@ py_binary(
         ":perf_core",
         "@com_google_absl_py//absl:app",
         "@com_google_absl_py//absl/flags",
+        "@pypi//numpy",
     ],
 )
 
@@ -63,6 +64,7 @@ py_binary(
         ":perf_core",
         "@com_google_absl_py//absl:app",
         "@com_google_absl_py//absl/flags",
+        "@pypi//numpy",
     ],
 )
 
