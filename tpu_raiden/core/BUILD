@@ -67,6 +67,7 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":raiden_transfer_endpoint",
         "//tpu_raiden/proto:worker_service_cc_proto",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
@@ -266,6 +267,7 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":raiden_transfer_endpoint",
         ":raw_transfer_core",
         ":status_macros",
         "@com_google_absl//absl/status",

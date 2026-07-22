@@ -31,6 +31,7 @@
 #include "grpcpp/support/status.h"
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/kv_manager_holder.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
 
@@ -219,6 +220,32 @@ grpc::Status WorkerServiceImpl::TransferBuffers(
     copy_sizes.assign(src_offsets.size(), 1);
   }
 
+  std::vector<RaidenTransferEndpoint> dst_remote_descriptors;
+  if (transfer.dst_buffers_size() > 0 &&
+      transfer.dst_buffers(0).remote_descriptors_size() > 0) {
+    dst_remote_descriptors.reserve(
+        transfer.dst_buffers(0).remote_descriptors_size());
+    for (const auto& ep_proto : transfer.dst_buffers(0).remote_descriptors()) {
+      std::vector<int64_t> shards(ep_proto.shards().begin(),
+                                  ep_proto.shards().end());
+      dst_remote_descriptors.push_back(
+          {ep_proto.endpoint(), std::move(shards)});
+    }
+  }
+
+  std::vector<RaidenTransferEndpoint> src_remote_descriptors;
+  if (transfer.src_buffers_size() > 0 &&
+      transfer.src_buffers(0).remote_descriptors_size() > 0) {
+    src_remote_descriptors.reserve(
+        transfer.src_buffers(0).remote_descriptors_size());
+    for (const auto& ep_proto : transfer.src_buffers(0).remote_descriptors()) {
+      std::vector<int64_t> shards(ep_proto.shards().begin(),
+                                  ep_proto.shards().end());
+      src_remote_descriptors.push_back(
+          {ep_proto.endpoint(), std::move(shards)});
+    }
+  }
+
   absl::StatusOr<raiden::PjRtCopyFuture> future_or;
   if (is_d2h) {
     if (transfer.src_buffers_size() > 0 &&
@@ -248,6 +275,12 @@ grpc::Status WorkerServiceImpl::TransferBuffers(
     } else {
       future_or = transfer_manager_.H2d(src_offsets, dst_offsets, copy_sizes);
     }
+  } else if (!src_remote_descriptors.empty()) {
+    future_or = transfer_manager_.H2hRead(src_remote_descriptors, src_offsets,
+                                          dst_offsets);
+  } else if (!dst_remote_descriptors.empty()) {
+    future_or = transfer_manager_.H2hWrite(dst_remote_descriptors, src_offsets,
+                                           dst_offsets);
   } else if (transfer.src_buffers_size() > 0 &&
              !transfer.src_buffers(0).remote_address().empty()) {
     future_or = transfer_manager_.H2hRead(

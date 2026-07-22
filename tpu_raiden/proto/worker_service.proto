@@ -41,6 +41,12 @@ service WorkerService {
   rpc TransferBuffers(TransferBuffersRequest) returns (TransferBuffersResponse);
 }
 
+// Transfer endpoint descriptor for worker sub-managers.
+message RaidenTransferEndpointProto {
+  string endpoint = 1;
+  repeated int64 shards = 2;
+}
+
 // Uniquely identifies a buffer handle on a worker.
 message BufferHandleProto {
   uint64 handle = 1;
@@ -52,6 +58,7 @@ message BufferProto {
   optional int32 index = 2;
   tpu_raiden.rpc.MemoryType memory_type = 3;
   string remote_address = 4;
+  repeated RaidenTransferEndpointProto remote_descriptors = 9;
 }
 
 // Specification for creating/allocating a sharded buffer in host RAM.

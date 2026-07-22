@@ -16,6 +16,8 @@ syntax = "proto3";
 
 package tpu_raiden.tpu_raiden.proto;
 
+import "tpu_raiden/proto/worker_service.proto";
+
 // Service definition for TPU Raiden Controller.
 service RaidenControllerService {
   // Registers a worker daemon / endpoint with the controller.
@@ -25,18 +27,14 @@ service RaidenControllerService {
   rpc ReadRemote(ReadRemoteRequest) returns (ReadRemoteResponse) {  }
 }
 
-message RaidenTransferEndpointProto {
-  string endpoint = 1;
-  repeated int64 shards = 2;
-}
-
 message RegisterWorkerRequest {
   // Unique identifier for the worker (e.g., job_name/replica_id or uuid).
   string worker_id = 1;
   // Control-plane RPC address of the worker (e.g., "ip:port" or BNS).
   string raiden_worker_endpoint = 2;
   // Data-plane socket addresses/endpoints owned by this worker.
-  repeated RaidenTransferEndpointProto raiden_transfer_endpoints = 3;
+  repeated .tpu_raiden.proto.RaidenTransferEndpointProto
+      raiden_transfer_endpoints = 3;
 }
 
 message RegisterWorkerResponse {
@@ -47,9 +45,8 @@ message RegisterWorkerResponse {
 message ReadRemoteRequest {
   repeated int32 src_host_block_ids = 1;
   repeated int32 dest_host_block_ids = 2;
-  // The transfer endpoints of the destination workers.
-  // This list must be sorted by destination worker_id ascending.
-  repeated RaidenTransferEndpointProto dest_raiden_transfer_endpoints = 3;
+  repeated .tpu_raiden.proto.BufferProto src_buffers = 3;
+  repeated .tpu_raiden.proto.BufferProto dst_buffers = 4;
 }
 
 message ReadRemoteResponse {}

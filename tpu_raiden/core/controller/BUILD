@@ -163,6 +163,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":worker_registry",
+        "//tpu_raiden/core:buffer",
         "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/proto:controller_service_cc_grpc",
         "//tpu_raiden/proto:controller_service_cc_proto",

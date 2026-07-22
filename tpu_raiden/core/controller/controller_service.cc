@@ -27,6 +27,7 @@
 #include "grpcpp/server_context.h"
 #include "grpcpp/support/status.h"
 #include "xla/tsl/concurrency/future.h"
+#include "tpu_raiden/core/buffer.h"
 #include "tpu_raiden/core/controller/worker_registry.h"
 #include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/proto/controller_service.pb.h"
@@ -80,50 +81,16 @@ grpc::Status RaidenControllerServiceImpl::ReadRemote(
     grpc::ServerContext* context,
     const ::tpu_raiden::tpu_raiden::proto::ReadRemoteRequest* request,
     ::tpu_raiden::tpu_raiden::proto::ReadRemoteResponse* response) {
-  if (request->src_host_block_ids_size() !=
-      request->dest_host_block_ids_size()) {
-    return grpc::Status(
-        grpc::StatusCode::INVALID_ARGUMENT,
-        absl::StrCat("Mismatch in block IDs sizes: src size ",
-                     request->src_host_block_ids_size(), " vs dest size ",
-                     request->dest_host_block_ids_size()));
+  std::vector<Buffer> src_buffers;
+  src_buffers.reserve(request->src_buffers_size());
+  for (const auto& buf_proto : request->src_buffers()) {
+    src_buffers.push_back(Buffer::FromProto(buf_proto));
   }
 
-  std::shared_ptr<WorkerRegistry> registry;
-  {
-    absl::MutexLock lock(mutex_);
-    registry = worker_registry_;
-  }
-  if (!registry) {
-    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
-                        "WorkerRegistry is not initialized");
-  }
-
-  auto workers = registry->GetRegisteredWorkers();
-  size_t total_transfers = 0;
-  for (const auto& w : workers) {
-    total_transfers += w.raiden_transfer_endpoints.size();
-  }
-  if (total_transfers != request->dest_raiden_transfer_endpoints_size()) {
-    return grpc::Status(
-        grpc::StatusCode::INVALID_ARGUMENT,
-        absl::StrCat("Transfer count mismatch: local has ", total_transfers,
-                     ", request has ",
-                     request->dest_raiden_transfer_endpoints_size()));
-  }
-
-  std::vector<int64_t> src_offsets(request->src_host_block_ids().begin(),
-                                   request->src_host_block_ids().end());
-  std::vector<int64_t> dst_offsets(request->dest_host_block_ids().begin(),
-                                   request->dest_host_block_ids().end());
-
-  std::vector<::tpu_raiden::RaidenTransferEndpoint> peers;
-  peers.reserve(request->dest_raiden_transfer_endpoints_size());
-  for (const auto& desc_proto : request->dest_raiden_transfer_endpoints()) {
-    ::tpu_raiden::RaidenTransferEndpoint ep;
-    ep.endpoint = desc_proto.endpoint();
-    ep.shards.assign(desc_proto.shards().begin(), desc_proto.shards().end());
-    peers.push_back(std::move(ep));
+  std::vector<Buffer> dst_buffers;
+  dst_buffers.reserve(request->dst_buffers_size());
+  for (const auto& buf_proto : request->dst_buffers()) {
+    dst_buffers.push_back(Buffer::FromProto(buf_proto));
   }
 
   std::shared_ptr<const TransferBuffersCallback> cb;
@@ -131,14 +98,13 @@ grpc::Status RaidenControllerServiceImpl::ReadRemote(
     absl::MutexLock lock(mutex_);
     cb = transfer_buffers_cb_;
   }
+
   if (!cb) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
                         "TransferBuffers callback is not registered");
   }
 
-  tsl::Future<> future = (*cb)(rpc::MemoryType::MEMORY_TYPE_DRAM,
-                               rpc::MemoryType::MEMORY_TYPE_DRAM, src_offsets,
-                               dst_offsets, /*copy_sizes=*/{}, peers);
+  tsl::Future<> future = (*cb)(src_buffers, dst_buffers);
   absl::Status status = future.Await();
   if (!status.ok()) {
     return grpc::Status(grpc::StatusCode::INTERNAL,

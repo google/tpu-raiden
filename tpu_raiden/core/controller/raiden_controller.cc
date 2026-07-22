@@ -162,57 +162,9 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
   }
 
   server_ptr->SetTransferBuffersCallback(
-      [this](rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
-             absl::Span<const int64_t> src_offsets,
-             absl::Span<const int64_t> dst_offsets,
-             absl::Span<const int64_t> copy_sizes,
-             absl::Span<const ::tpu_raiden::RaidenTransferEndpoint> peers) {
-        if (src_offsets.empty() || src_offsets.size() != dst_offsets.size()) {
-          return tsl::Future<>(
-              absl::InvalidArgumentError("Source and destination offsets must "
-                                         "have the same non-zero length"));
-        }
-        if (!copy_sizes.empty() && copy_sizes.size() != src_offsets.size()) {
-          return tsl::Future<>(absl::InvalidArgumentError(
-              "copy_sizes, if provided, must match the length of src_offsets"));
-        }
-        auto workers = worker_registry_->GetRegisteredWorkers();
-        if (workers.empty()) {
-          return tsl::Future<>(absl::FailedPreconditionError(
-              "No registered workers available for TransferBuffers"));
-        }
-        std::sort(workers.begin(), workers.end(),
-                  [](const core::controller::WorkerRegistration& a,
-                     const core::controller::WorkerRegistration& b) {
-                    return CompareWorkerIds(a.worker_id, b.worker_id);
-                  });
-        if (!peers.empty() && workers.size() != peers.size()) {
-          return tsl::Future<>(absl::InvalidArgumentError(
-              absl::StrCat("Peers count mismatch: workers has ", workers.size(),
-                           ", peers has ", peers.size())));
-        }
-        std::vector<tsl::Future<>> worker_futures;
-        worker_futures.reserve(workers.size());
-        for (size_t i = 0; i < workers.size(); ++i) {
-          std::optional<std::string> peer =
-              peers.empty() ? std::nullopt
-                            : std::make_optional(peers[i].endpoint);
-          std::vector<Buffer> src_buffers;
-          src_buffers.reserve(src_offsets.size());
-          for (int64_t offset : src_offsets) {
-            src_buffers.emplace_back(offset, std::vector<BufferShard>{},
-                                     std::nullopt, src_mem_type);
-          }
-          std::vector<Buffer> dst_buffers;
-          dst_buffers.reserve(dst_offsets.size());
-          for (int64_t offset : dst_offsets) {
-            dst_buffers.emplace_back(offset, std::vector<BufferShard>{}, peer,
-                                     dst_mem_type);
-          }
-          worker_futures.push_back(this->TransferBuffers(
-              workers[i].worker_id, src_buffers, dst_buffers, copy_sizes));
-        }
-        return tsl::JoinFutures(absl::MakeSpan(worker_futures));
+      [this](absl::Span<const Buffer> src_buffers,
+             absl::Span<const Buffer> dst_buffers) {
+        return this->TransferBuffers(src_buffers, dst_buffers);
       });
 
   // 3. Register static workers
@@ -494,23 +446,66 @@ tsl::Future<> RaidenController::TransferBuffers(
 tsl::Future<> RaidenController::TransferBuffers(
     absl::Span<const Buffer> src_buffers, absl::Span<const Buffer> dst_buffers,
     absl::Span<const int64_t> copy_sizes) {
-  auto request_or =
-      BuildTransferBuffersRequest(src_buffers, dst_buffers, copy_sizes);
-  if (!request_or.ok()) {
-    return tsl::Future<>(request_or.status());
+  if (src_buffers.empty() || src_buffers.size() != dst_buffers.size()) {
+    return tsl::Future<>(absl::InvalidArgumentError(
+        "Source and destination buffers must have the same non-zero length"));
   }
+  if (!copy_sizes.empty() && copy_sizes.size() != src_buffers.size()) {
+    return tsl::Future<>(absl::InvalidArgumentError(
+        "copy_sizes, if provided, must match the length of src_buffers"));
+  }
+
   auto workers = worker_registry_->GetRegisteredWorkers();
   if (workers.empty()) {
     return tsl::Future<>(absl::FailedPreconditionError(
         "No registered workers available for TransferBuffers"));
   }
 
+  std::sort(workers.begin(), workers.end(),
+            [](const core::controller::WorkerRegistration& a,
+               const core::controller::WorkerRegistration& b) {
+              return CompareWorkerIds(a.worker_id, b.worker_id);
+            });
+
   std::vector<tsl::Future<>> worker_futures;
-  for (const auto& reg : workers) {
-    if (reg.worker_service_client) {
-      worker_futures.push_back(
-          reg.worker_service_client->TransferBuffers(*request_or));
+  worker_futures.reserve(workers.size());
+
+  for (size_t w = 0; w < workers.size(); ++w) {
+    if (!workers[w].worker_service_client) continue;
+
+    std::vector<Buffer> worker_src;
+    std::vector<Buffer> worker_dst;
+    std::vector<int64_t> worker_copy_sizes;
+
+    for (size_t i = 0; i < src_buffers.size(); ++i) {
+      if (workers.size() > 1 && (i % workers.size() != w)) {
+        continue;
+      }
+      worker_src.push_back(src_buffers[i]);
+
+      Buffer dst_buf = dst_buffers[i];
+      if (dst_buf.remote_descriptors().empty() &&
+          !dst_buf.remote_address().has_value() &&
+          !workers[w].raiden_transfer_endpoints.empty()) {
+        dst_buf.set_remote_descriptors(workers[w].raiden_transfer_endpoints);
+      }
+      worker_dst.push_back(std::move(dst_buf));
+
+      if (!copy_sizes.empty()) {
+        worker_copy_sizes.push_back(copy_sizes[i]);
+      }
     }
+
+    if (worker_src.empty()) continue;
+
+    auto req_or =
+        BuildTransferBuffersRequest(worker_src, worker_dst, worker_copy_sizes);
+    if (!req_or.ok()) {
+      return tsl::Future<>(req_or.status());
+    }
+
+    worker_futures.push_back(
+        workers[w].worker_service_client->TransferBuffers(*req_or));
   }
 
   if (worker_futures.empty()) {
@@ -537,6 +532,12 @@ tsl::Future<> RaidenController::ReadRemote(
     const std::vector<int32_t>& dest_host_block_ids) {
   namespace cproto = ::tpu_raiden::tpu_raiden::proto;
 
+  if (src_host_block_ids.size() != dest_host_block_ids.size()) {
+    return tsl::Future<>(absl::InvalidArgumentError(absl::StrCat(
+        "Mismatch in block IDs sizes: src size ", src_host_block_ids.size(),
+        " vs dest size ", dest_host_block_ids.size())));
+  }
+
   auto workers = worker_registry_->GetRegisteredWorkers();
   if (workers.empty()) {
     return tsl::Future<>(absl::FailedPreconditionError(
@@ -549,16 +550,20 @@ tsl::Future<> RaidenController::ReadRemote(
               return CompareWorkerIds(a.worker_id, b.worker_id);
             });
 
-  size_t total_eps = 0;
-  for (const auto& reg : workers) {
-    total_eps += reg.raiden_transfer_endpoints.size();
+  std::vector<Buffer> src_buffers;
+  src_buffers.reserve(src_host_block_ids.size());
+  for (int32_t id : src_host_block_ids) {
+    src_buffers.emplace_back(id, std::vector<BufferShard>{}, std::nullopt,
+                             rpc::MemoryType::MEMORY_TYPE_DRAM);
   }
-  std::vector<::tpu_raiden::RaidenTransferEndpoint> dest_worker_endpoints;
-  dest_worker_endpoints.reserve(total_eps);
-  for (const auto& reg : workers) {
-    for (const auto& ep : reg.raiden_transfer_endpoints) {
-      dest_worker_endpoints.push_back(ep);
-    }
+
+  std::vector<Buffer> dst_buffers;
+  dst_buffers.reserve(dest_host_block_ids.size());
+  for (size_t i = 0; i < dest_host_block_ids.size(); ++i) {
+    size_t worker_idx = (workers.size() == 1) ? 0 : (i % workers.size());
+    dst_buffers.emplace_back(dest_host_block_ids[i], std::vector<BufferShard>{},
+                             std::nullopt, rpc::MemoryType::MEMORY_TYPE_DRAM,
+                             workers[worker_idx].raiden_transfer_endpoints);
   }
 
   std::string controller_address;
@@ -611,12 +616,11 @@ tsl::Future<> RaidenController::ReadRemote(
   for (int32_t id : dest_host_block_ids) {
     request.add_dest_host_block_ids(id);
   }
-  for (const auto& ep : dest_worker_endpoints) {
-    auto* proto_ep = request.add_dest_raiden_transfer_endpoints();
-    proto_ep->set_endpoint(ep.endpoint);
-    for (int64_t shard : ep.shards) {
-      proto_ep->add_shards(shard);
-    }
+  for (const auto& buf : src_buffers) {
+    *request.add_src_buffers() = buf.ToProto();
+  }
+  for (const auto& buf : dst_buffers) {
+    *request.add_dst_buffers() = buf.ToProto();
   }
 
   auto [promise, future] = tsl::MakePromise<>();

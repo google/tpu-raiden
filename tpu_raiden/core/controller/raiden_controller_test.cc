@@ -552,19 +552,22 @@ TEST_F(RaidenControllerTest, ReadRemoteSuccess) {
   std::vector<int64_t> callback_dst_offsets;
 
   src_controller_server->service->SetTransferBuffersCallback(
-      [&](rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
-          absl::Span<const int64_t> src_offsets,
-          absl::Span<const int64_t> dst_offsets,
-          absl::Span<const int64_t> copy_sizes,
-          absl::Span<const ::tpu_raiden::RaidenTransferEndpoint> peers) {
+      [&](absl::Span<const Buffer> src_buffers,
+          absl::Span<const Buffer> dst_buffers) {
         callback_triggered = true;
-        EXPECT_EQ(src_mem_type, rpc::MemoryType::MEMORY_TYPE_DRAM);
-        EXPECT_EQ(dst_mem_type, rpc::MemoryType::MEMORY_TYPE_DRAM);
-        callback_src_offsets.assign(src_offsets.begin(), src_offsets.end());
-        callback_dst_offsets.assign(dst_offsets.begin(), dst_offsets.end());
+        callback_src_offsets.clear();
+        for (const auto& buf : src_buffers) {
+          EXPECT_EQ(buf.memory_type(), rpc::MemoryType::MEMORY_TYPE_DRAM);
+          callback_src_offsets.push_back(buf.index());
+        }
+        callback_dst_offsets.clear();
         callback_peers.clear();
-        for (const auto& peer : peers) {
-          callback_peers.push_back(peer.endpoint);
+        for (const auto& buf : dst_buffers) {
+          EXPECT_EQ(buf.memory_type(), rpc::MemoryType::MEMORY_TYPE_DRAM);
+          callback_dst_offsets.push_back(buf.index());
+          for (const auto& desc : buf.remote_descriptors()) {
+            callback_peers.push_back(desc.endpoint);
+          }
         }
         return tsl::Future<>(absl::OkStatus());
       });

@@ -991,13 +991,13 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, SaveMultiWorkerSuccess) {
 
   EXPECT_EQ(mock_mgr_0.d2h_calls, 1);
   EXPECT_EQ(mock_mgr_0.h2d_calls, 0);
-  EXPECT_THAT(mock_mgr_0.last_src_offsets, ElementsAre(0, 1));
-  EXPECT_THAT(mock_mgr_0.last_dst_offsets, ElementsAre(0, 1));
+  EXPECT_THAT(mock_mgr_0.last_src_offsets, ElementsAre(0));
+  EXPECT_THAT(mock_mgr_0.last_dst_offsets, ElementsAre(0));
 
   EXPECT_EQ(mock_mgr_1.d2h_calls, 1);
   EXPECT_EQ(mock_mgr_1.h2d_calls, 0);
-  EXPECT_THAT(mock_mgr_1.last_src_offsets, ElementsAre(0, 1));
-  EXPECT_THAT(mock_mgr_1.last_dst_offsets, ElementsAre(0, 1));
+  EXPECT_THAT(mock_mgr_1.last_src_offsets, ElementsAre(1));
+  EXPECT_THAT(mock_mgr_1.last_dst_offsets, ElementsAre(1));
 
   auto lookup_res = store.Lookup(hashes);
   ASSERT_TRUE(lookup_res.ok());
@@ -1061,13 +1061,13 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, LoadMultiWorkerSuccess) {
 
   EXPECT_EQ(mock_mgr_0.d2h_calls, 0);
   EXPECT_EQ(mock_mgr_0.h2d_calls, 1);
-  EXPECT_THAT(mock_mgr_0.last_src_offsets, ElementsAre(0, 1));
-  EXPECT_THAT(mock_mgr_0.last_dst_offsets, ElementsAre(2, 3));
+  EXPECT_THAT(mock_mgr_0.last_src_offsets, ElementsAre(0));
+  EXPECT_THAT(mock_mgr_0.last_dst_offsets, ElementsAre(2));
 
   EXPECT_EQ(mock_mgr_1.d2h_calls, 0);
   EXPECT_EQ(mock_mgr_1.h2d_calls, 1);
-  EXPECT_THAT(mock_mgr_1.last_src_offsets, ElementsAre(0, 1));
-  EXPECT_THAT(mock_mgr_1.last_dst_offsets, ElementsAre(2, 3));
+  EXPECT_THAT(mock_mgr_1.last_src_offsets, ElementsAre(1));
+  EXPECT_THAT(mock_mgr_1.last_dst_offsets, ElementsAre(3));
 
   auto lookup_res = store.Lookup(hashes);
   ASSERT_TRUE(lookup_res.ok());
@@ -1618,19 +1618,27 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteSuccess) {
   // Setup src controller's transfer callback to simulate successful H2H
   std::atomic<bool> callback_triggered = false;
   src_controller_server->service->SetTransferBuffersCallback(
-      [&](rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
-          absl::Span<const int64_t> src_offsets,
-          absl::Span<const int64_t> dst_offsets,
-          absl::Span<const int64_t> copy_sizes,
-          absl::Span<const ::tpu_raiden::RaidenTransferEndpoint> peers) {
+      [&](absl::Span<const Buffer> src_buffers,
+          absl::Span<const Buffer> dst_buffers) {
         callback_triggered = true;
-        EXPECT_EQ(src_mem_type, rpc::MemoryType::MEMORY_TYPE_DRAM);
-        EXPECT_EQ(dst_mem_type, rpc::MemoryType::MEMORY_TYPE_DRAM);
+        std::vector<int64_t> src_offsets;
+        for (const auto& buf : src_buffers) {
+          EXPECT_EQ(buf.memory_type(), rpc::MemoryType::MEMORY_TYPE_DRAM);
+          src_offsets.push_back(buf.index());
+        }
         EXPECT_THAT(src_offsets, ::testing::ElementsAre(42));
+
+        std::vector<int64_t> dst_offsets;
+        std::vector<std::string> peer_addrs;
+        for (const auto& buf : dst_buffers) {
+          EXPECT_EQ(buf.memory_type(), rpc::MemoryType::MEMORY_TYPE_DRAM);
+          dst_offsets.push_back(buf.index());
+          for (const auto& p : buf.remote_descriptors()) {
+            peer_addrs.push_back(p.endpoint);
+          }
+        }
         EXPECT_THAT(dst_offsets, ::testing::ElementsAre(
                                      0));  // allocated local host_block_id
-        std::vector<std::string> peer_addrs;
-        for (const auto& p : peers) peer_addrs.push_back(p.endpoint);
         EXPECT_THAT(peer_addrs,
                     ::testing::ElementsAre(test_server_->server_address));
         return tsl::Future<>(absl::OkStatus());
@@ -1747,11 +1755,8 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteFailure) {
 
   // Setup src controller to fail
   src_controller_server->service->SetTransferBuffersCallback(
-      [&](rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
-          absl::Span<const int64_t> src_offsets,
-          absl::Span<const int64_t> dst_offsets,
-          absl::Span<const int64_t> copy_sizes,
-          absl::Span<const ::tpu_raiden::RaidenTransferEndpoint> peers) {
+      [&](absl::Span<const Buffer> src_buffers,
+          absl::Span<const Buffer> dst_buffers) {
         return tsl::Future<>(absl::InternalError("H2H Transfer Failed"));
       });
 
@@ -1861,12 +1866,8 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteDuplicateFails) {
   auto promise_and_future = tsl::MakePromise();
   auto& promise = promise_and_future.first;
   src_controller_server->service->SetTransferBuffersCallback(
-      [f = promise_and_future.second](
-          rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
-          absl::Span<const int64_t> src_offsets,
-          absl::Span<const int64_t> dst_offsets,
-          absl::Span<const int64_t> copy_sizes,
-          absl::Span<const ::tpu_raiden::RaidenTransferEndpoint> peers) {
+      [f = promise_and_future.second](absl::Span<const Buffer> src_buffers,
+                                      absl::Span<const Buffer> dst_buffers) {
         return f;
       });
 
@@ -2033,12 +2034,13 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteMultipleSources) {
   auto& promise1 = promise_and_future_1.first;
   src_controller_server_1->service->SetTransferBuffersCallback(
       [f = promise_and_future_1.second, &callback_1_triggered](
-          rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
-          absl::Span<const int64_t> src_offsets,
-          absl::Span<const int64_t> dst_offsets,
-          absl::Span<const int64_t> copy_sizes,
-          absl::Span<const ::tpu_raiden::RaidenTransferEndpoint> peers) {
+          absl::Span<const Buffer> src_buffers,
+          absl::Span<const Buffer> dst_buffers) {
         callback_1_triggered = true;
+        std::vector<int64_t> src_offsets;
+        for (const auto& buf : src_buffers) {
+          src_offsets.push_back(buf.index());
+        }
         EXPECT_THAT(src_offsets, ::testing::ElementsAre(10));
         return f;
       });
@@ -2048,12 +2050,13 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteMultipleSources) {
   auto& promise2 = promise_and_future_2.first;
   src_controller_server_2->service->SetTransferBuffersCallback(
       [f = promise_and_future_2.second, &callback_2_triggered](
-          rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
-          absl::Span<const int64_t> src_offsets,
-          absl::Span<const int64_t> dst_offsets,
-          absl::Span<const int64_t> copy_sizes,
-          absl::Span<const ::tpu_raiden::RaidenTransferEndpoint> peers) {
+          absl::Span<const Buffer> src_buffers,
+          absl::Span<const Buffer> dst_buffers) {
         callback_2_triggered = true;
+        std::vector<int64_t> src_offsets;
+        for (const auto& buf : src_buffers) {
+          src_offsets.push_back(buf.index());
+        }
         EXPECT_THAT(src_offsets, ::testing::ElementsAre(20));
         return f;
       });

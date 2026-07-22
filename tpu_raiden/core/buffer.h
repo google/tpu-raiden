@@ -23,6 +23,7 @@
 
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
 
 namespace tpu_raiden {
@@ -43,11 +44,13 @@ class Buffer {
 
   Buffer(int index, std::vector<BufferShard> shards,
          std::optional<std::string> remote_address = std::nullopt,
-         rpc::MemoryType memory_type = rpc::MEMORY_TYPE_UNSPECIFIED)
+         rpc::MemoryType memory_type = rpc::MEMORY_TYPE_UNSPECIFIED,
+         std::vector<RaidenTransferEndpoint> remote_descriptors = {})
       : index_(index),
         shards_(std::move(shards)),
         remote_address_(std::move(remote_address)),
-        memory_type_(memory_type) {}
+        memory_type_(memory_type),
+        remote_descriptors_(std::move(remote_descriptors)) {}
 
   // Returns true if shards are empty and index is negative.
   bool empty() const { return shards_.empty() && index_ < 0; }
@@ -72,6 +75,18 @@ class Buffer {
     remote_address_ = std::move(remote_address);
   }
 
+  // Returns the remote transfer endpoints associated with this buffer.
+  absl::Span<const RaidenTransferEndpoint> remote_descriptors() const {
+    return remote_descriptors_;
+  }
+  const std::vector<RaidenTransferEndpoint>& remote_descriptors_vec() const {
+    return remote_descriptors_;
+  }
+  void set_remote_descriptors(
+      std::vector<RaidenTransferEndpoint> remote_descriptors) {
+    remote_descriptors_ = std::move(remote_descriptors);
+  }
+
   // Converts this Buffer into a proto::BufferProto.
   proto::BufferProto ToProto() const {
     proto::BufferProto proto;
@@ -84,6 +99,13 @@ class Buffer {
     proto.set_memory_type(memory_type_);
     if (remote_address_.has_value()) {
       proto.set_remote_address(*remote_address_);
+    }
+    for (const auto& ep : remote_descriptors_) {
+      auto* proto_ep = proto.add_remote_descriptors();
+      proto_ep->set_endpoint(ep.endpoint);
+      for (int64_t shard : ep.shards) {
+        proto_ep->add_shards(shard);
+      }
     }
     return proto;
   }
@@ -107,7 +129,15 @@ class Buffer {
     if (!addr.has_value() && !proto.remote_address().empty()) {
       addr = proto.remote_address();
     }
-    return Buffer(index, std::move(shards), std::move(addr), memory_type);
+    std::vector<RaidenTransferEndpoint> remote_descriptors;
+    remote_descriptors.reserve(proto.remote_descriptors_size());
+    for (const auto& ep_proto : proto.remote_descriptors()) {
+      std::vector<int64_t> shards(ep_proto.shards().begin(),
+                                  ep_proto.shards().end());
+      remote_descriptors.push_back({ep_proto.endpoint(), std::move(shards)});
+    }
+    return Buffer(index, std::move(shards), std::move(addr), memory_type,
+                  std::move(remote_descriptors));
   }
 
  private:
@@ -115,6 +145,7 @@ class Buffer {
   std::vector<BufferShard> shards_;
   std::optional<std::string> remote_address_;
   rpc::MemoryType memory_type_ = rpc::MEMORY_TYPE_UNSPECIFIED;
+  std::vector<RaidenTransferEndpoint> remote_descriptors_;
 };
 
 }  // namespace tpu_raiden

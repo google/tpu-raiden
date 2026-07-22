@@ -56,6 +56,7 @@ py_grpc_library(
 proto_library(
     name = "controller_service_proto",
     srcs = ["controller_service.proto"],
+    deps = [":worker_service_proto"],
 )
 
 cc_proto_library(
