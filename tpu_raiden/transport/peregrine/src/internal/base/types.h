@@ -19,7 +19,7 @@
 
 #include <cstdint>
 
-#include "tpu_raiden/transport/peregrine/src/internal/base/strong_int.h"
+#include "gloop/util/intops/strong_int.h"
 
 namespace peregrine::internal {
 

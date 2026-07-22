@@ -79,6 +79,7 @@ use_repo(
 )
 
 bazel_dep(name = "abseil-cpp", version = "20260107.1", repo_name = "com_google_absl")
+bazel_dep(name = "gloop", version = "20260708.rc1", repo_name = "com_google_gloop")
 
 # OSS crypto for global_registry_client.cc SHA256.
 bazel_dep(name = "boringssl", version = "0.20240913.0")
