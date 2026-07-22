@@ -75,7 +75,18 @@ If you are a Googler, you can install the pre-built `tpu_raiden` wheel directly 
      pip install tpu-raiden-jax --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/
      ```
    * **For PyTorch version:**
-     Torch specific wheel will be published soon.
+     ```bash
+     pip install tpu-raiden-torch --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/
+     ```
+     > [!IMPORTANT]
+     > Unlike the JAX wheel, the torch wheel does **not** pull `torch` or `torch_tpu`
+     > (they are not on a public index). Install a matching `torch_tpu` and its exact
+     > `torch` pin (e.g. `torch==2.11.0`) **first** — the raiden torch extension is
+     > ABI-locked to the `torch`/`torch_tpu` build it was compiled against.
+
+     > [!NOTE]
+     > The torch wheel's release process is not yet gated on end-to-end
+     > performance tests (the torch path is still maturing).
 
 ### Option 2: Building from source
 

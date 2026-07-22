@@ -94,16 +94,38 @@ ln -sf /usr/bin/clang++-18 /usr/bin/clang++
 clang --version | head -1
 
 if [[ "${WITH_TORCH}" == "1" ]]; then
-  TORCH_VERSION=""
-  if [[ -f /torch_tpu/pyproject.toml ]]; then
-    TORCH_VERSION=$(sed -n -E 's/.*["'\''`]torch[[:space:]]*([>=<~=]+[0-9.a-zA-Z+-]+)["'\''`].*/\1/p' /torch_tpu/pyproject.toml 2>/dev/null | head -1 || true)
+  # raiden is built on top of torch_tpu: raiden's _tpu_raiden_torch.so and
+  # torch_tpu's libpywrap_torch_tpu_common.so must resolve the SAME libtorch
+  # symbols at runtime. So raiden MUST compile against the EXACT torch that
+  # torch_tpu was built against — never a floating `torch>=X` specifier, which
+  # drifts to the latest release and breaks ABI (e.g. torch 2.13.x drops
+  # `torch::autograd::deleteNode`, which torch_tpu's libpywrap needs → dlopen
+  # `undefined symbol` at import). torch_tpu's source of truth is its per-Python
+  # requirements lock, which pins an exact `torch==VERSION+cpu`.
+  PYTAG="$(python3 -c 'import sys;print(f"{sys.version_info.major}_{sys.version_info.minor}")')"
+  TORCH_REQ_FILE="/torch_tpu/requirements/requirements_${PYTAG}.txt"
+  TORCH_PIN=""
+  if [[ -f "${TORCH_REQ_FILE}" ]]; then
+    # e.g. line `torch==2.11.0+cpu \` -> `torch==2.11.0+cpu`
+    TORCH_PIN=$(sed -n -E 's/^(torch==[0-9][0-9A-Za-z.+_-]*).*/\1/p' "${TORCH_REQ_FILE}" | head -1 || true)
   fi
-  if [[ -z "${TORCH_VERSION}" ]]; then
-    echo "WARNING: Could not parse torch version from /torch_tpu/pyproject.toml (or file missing). Installing latest." >&2
-    pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+  if [[ -n "${TORCH_PIN}" ]]; then
+    echo "Installing torch pinned by torch_tpu (${TORCH_REQ_FILE}): ${TORCH_PIN}"
+    pip install -q "${TORCH_PIN}" --index-url https://download.pytorch.org/whl/cpu
   else
-    echo "Installing torch version: torch${TORCH_VERSION}"
-    pip install -q "torch${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cpu
+    # Fallback: the (looser) specifier from torch_tpu's pyproject.toml. This can
+    # float to the latest release and may NOT match torch_tpu's ABI, so warn.
+    TORCH_VERSION=""
+    if [[ -f /torch_tpu/pyproject.toml ]]; then
+      TORCH_VERSION=$(sed -n -E 's/.*["'\''`]torch[[:space:]]*([>=<~=]+[0-9.a-zA-Z+-]+)["'\''`].*/\1/p' /torch_tpu/pyproject.toml 2>/dev/null | head -1 || true)
+    fi
+    if [[ -z "${TORCH_VERSION}" ]]; then
+      echo "WARNING: could not determine torch pin from ${TORCH_REQ_FILE} or /torch_tpu/pyproject.toml. Installing latest torch — this may NOT match torch_tpu's ABI." >&2
+      pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+    else
+      echo "WARNING: no exact pin in ${TORCH_REQ_FILE}; falling back to torch_tpu pyproject specifier 'torch${TORCH_VERSION}', which may float to a torch that does not match torch_tpu's ABI." >&2
+      pip install -q "torch${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cpu
+    fi
   fi
   TORCH_SOURCE="$(python3 -c 'import torch,pathlib;print(pathlib.Path(torch.__file__).resolve().parent.parent)')"
   export TORCH_SOURCE
@@ -118,11 +140,18 @@ export BAZEL_OUTPUT_BASE=/cache/output_base
 # tpu_raiden_jax. Pick by WITH_TORCH.
 if [[ "${WITH_TORCH}" == "1" ]]; then
   WHEEL_TARGET="//ci/wheel:raiden_torch_wheel"
-  WHEEL_GLOB="tpu_raiden_torch-*.whl"
+  WHEEL_DIST="tpu_raiden_torch"
 else
   WHEEL_TARGET="//ci/wheel:raiden_jax_wheel"
-  WHEEL_GLOB="tpu_raiden_jax-*.whl"
+  WHEEL_DIST="tpu_raiden_jax"
 fi
+# Match ONLY the wheel this build just produced. cache/output_base is shared
+# across builds, so its bin/ci/wheel/ dir accumulates wheels from earlier runs,
+# each with a distinct .dev<timestamp>. A broad "${WHEEL_DIST}-*.whl" glob would
+# also match those stale wheels and hand multiple paths to the single-wheel
+# patchelf step below (which then fails). WHEEL_VERSION_EXTRAS (.dev<timestamp>)
+# is unique per build and appears verbatim in the filename, so scope to it.
+WHEEL_GLOB="${WHEEL_DIST}-*${WHEEL_VERSION_EXTRAS}-*.whl"
 
 cd /workspace
 ./build.sh "${BUILD_MODE}" "${WHEEL_TARGET}" \
@@ -139,7 +168,7 @@ cp /cache/output_base/execroot/_main/bazel-out/k8-opt/bin/ci/wheel/${WHEEL_GLOB}
 # into the wheel here and repack (which regenerates RECORD with valid hashes).
 if [[ "${WITH_TORCH}" == "1" ]]; then
   pip install -q wheel
-  WHL="$(ls /workspace/dist/${WHEEL_GLOB})"
+  WHL="$(ls /workspace/dist/${WHEEL_GLOB} | head -1)"
   UNPACK_DIR="$(mktemp -d)"
   wheel unpack "${WHL}" -d "${UNPACK_DIR}"
   PKG_DIR="$(ls -d "${UNPACK_DIR}"/*/)"
@@ -161,14 +190,16 @@ docker run --rm \
   "${CONTAINER_IMAGE}" \
   bash -c "${INNER}"
 
-if [[ -n "$(ls -A "${REPO_ROOT}"/dist/*.whl 2>/dev/null)" ]]; then
-  cp "${REPO_ROOT}"/dist/*.whl "${WHEEL_DIR}/"
-  echo "===> Wheel(s) built:"; ls -lh "${WHEEL_DIR}"
+# Scope to THIS build's wheel(s) (.dev<timestamp>); REPO_ROOT/dist and WHEEL_DIR
+# are persistent and may hold wheels from earlier runs.
+if [[ -n "$(ls -A "${REPO_ROOT}"/dist/*"${WHEEL_VERSION_EXTRAS}"-*.whl 2>/dev/null)" ]]; then
+  cp "${REPO_ROOT}"/dist/*"${WHEEL_VERSION_EXTRAS}"-*.whl "${WHEEL_DIR}/"
+  echo "===> Wheel(s) built:"; ls -lh "${WHEEL_DIR}"/*"${WHEEL_VERSION_EXTRAS}"-*.whl
 else
-  echo "ERROR: wheel build produced no .whl in dist/" >&2; exit 1
+  echo "ERROR: wheel build produced no .whl for ${WHEEL_VERSION_EXTRAS} in dist/" >&2; exit 1
 fi
 
 echo "===> twine check..."
 docker run --rm -v "${WHEEL_DIR}:/dist" "${CONTAINER_IMAGE}" \
-  bash -c "uv run --isolated --with twine twine check /dist/*.whl"
+  bash -c "uv run --isolated --with twine twine check /dist/*${WHEEL_VERSION_EXTRAS}-*.whl"
 echo "===> raiden wheel build successful!"
