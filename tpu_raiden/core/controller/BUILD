@@ -163,6 +163,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":worker_registry",
+        "//tpu_raiden/core:buffer",
         "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/proto:controller_service_cc_grpc",
         "//tpu_raiden/proto:controller_service_cc_proto",
@@ -208,6 +209,7 @@ cc_library(
         ":controller_service",
         ":worker_service_client",
         ":worker_service_impl",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/core:raw_transfer_core",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/status:statusor",

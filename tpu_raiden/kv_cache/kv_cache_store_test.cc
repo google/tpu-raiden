@@ -38,6 +38,7 @@
 #include "grpcpp/server.h"
 #include "grpcpp/server_builder.h"
 #include "xla/tsl/concurrency/future.h"
+#include "tpu_raiden/core/buffer.h"
 #include "tpu_raiden/core/controller/controller_client.h"
 #include "tpu_raiden/core/controller/orchestrator_service_client.h"
 #include "tpu_raiden/core/controller/raiden_controller.h"
@@ -66,7 +67,7 @@ class KVCacheStoreTest {
     return store.Evict(block_hashes);
   }
 
-  static ::tpu_raiden::controller::RaidenController* GetController(
+  static tpu_raiden::controller::RaidenController* GetController(
       const KVCacheStore& store) {
     return store.raiden_controller_.get();
   }
@@ -167,7 +168,7 @@ TEST(KVCacheStoreTest, PinAndRelease) {
 
   // 101 is candidate.
   EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(controller),
-              ::testing::ElementsAre("101"));
+              testing::ElementsAre("101"));
 
   // Lookup {"101", "102"} will miss 101 (since candidates are invisible to
   // Peek). It will break early and return empty.
@@ -224,7 +225,7 @@ TEST(KVCacheStoreTest, EvictionTracking) {
 
   // 3. Verify that 101 is in candidates.
   EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(controller),
-              ::testing::ElementsAre("101"));
+              testing::ElementsAre("101"));
 
   // 4. Verify that lookup for 101 misses (since lookup uses Peek and ignores
   // candidates).
@@ -233,7 +234,7 @@ TEST(KVCacheStoreTest, EvictionTracking) {
   EXPECT_EQ(lookup_res->size(), 0);
   // 101 should still be in candidates.
   EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(controller),
-              ::testing::ElementsAre("101"));
+              testing::ElementsAre("101"));
 
   EXPECT_EQ(controller.Lookup({"102"})->size(), 1);
   EXPECT_EQ(controller.Lookup({"103"})->size(), 1);
@@ -670,7 +671,7 @@ TEST(KVCacheStoreTest, ReleaseAndDelete) {
   EXPECT_EQ(res_partial, 1);
   // Candidates list should now contain local_2, local_1.
   EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
-              ::testing::ElementsAre("local_2", "local_1"));
+              testing::ElementsAre("local_2", "local_1"));
 }
 
 TEST(KVCacheStoreTest, RollbackRescue) {
@@ -695,7 +696,7 @@ TEST(KVCacheStoreTest, RollbackRescue) {
 
   // Candidates list should contain "local_1"
   EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
-              ::testing::ElementsAre("local_1"));
+              testing::ElementsAre("local_1"));
 
   // 3. Delete local_4 to free up a slot (so cache has local_2, local_3)
   store.Delete(local_hash_4, local_slice_4);
@@ -715,7 +716,7 @@ TEST(KVCacheStoreTest, RollbackRescue) {
 
   // Verify eviction count was 1 (so candidates should be local_1, local_3)
   EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
-              ::testing::ElementsAre("local_1", "local_3"));
+              testing::ElementsAre("local_1", "local_3"));
 
   // 5. ReleaseAndDelete: should only restore 1 block (local_3) and not restore
   // local_1
@@ -735,7 +736,7 @@ TEST(KVCacheStoreTest, RollbackRescue) {
   EXPECT_EQ(lookup_local_1->size(), 0);
 
   EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
-              ::testing::ElementsAre("local_1"));
+              testing::ElementsAre("local_1"));
 }
 
 TEST(KVCacheStoreTest, EvictRaceCondition) {
@@ -762,18 +763,17 @@ TEST(KVCacheStoreTest, EvictRaceCondition) {
   EXPECT_EQ(lookup_res->size(), 1);
 }
 
-using ::testing::ElementsAre;
+using testing::ElementsAre;
 
-class KVCacheStoreEmbeddedControllerTest : public ::testing::Test {
+class KVCacheStoreEmbeddedControllerTest : public testing::Test {
  protected:
   void SetUp() override {
-    test_server_ = ::tpu_raiden::controller::CreateTestWorkerServer();
+    test_server_ = tpu_raiden::controller::CreateTestWorkerServer();
     unit_.set_job_name("test_job");
     unit_.set_job_replica_id("0");
     unit_.set_data_name("test_data");
 
-    orchestrator_service_ =
-        std::make_unique<::tpu_raiden::RaidenOrchestrator>();
+    orchestrator_service_ = std::make_unique<RaidenOrchestrator>();
     grpc::ServerBuilder builder;
     int bound_port = 0;
     builder.AddListeningPort("0.0.0.0:0", grpc::InsecureServerCredentials(),
@@ -791,33 +791,30 @@ class KVCacheStoreEmbeddedControllerTest : public ::testing::Test {
   }
 
   void RegisterAndInitWorker(
-      ::tpu_raiden::controller::RaidenController& controller,
+      tpu_raiden::controller::RaidenController& controller,
       const std::string& worker_id, const std::string& worker_address) {
     auto resolve_or = controller.ResolvePeerController(unit_);
     ASSERT_TRUE(resolve_or.ok());
     std::string server_address = *resolve_or;
-    ::tpu_raiden::core::controller::RaidenControllerClient client(
-        server_address);
+    core::controller::RaidenControllerClient client(server_address);
     auto status = client.RegisterWorker(worker_id, worker_address,
                                         {{worker_address, {}}});
     ASSERT_TRUE(status.ok()) << status.message();
   }
 
   rpc::RaidenIdProto unit_;
-  std::unique_ptr<::tpu_raiden::controller::TestWorkerServer> test_server_;
-  std::unique_ptr<::tpu_raiden::RaidenOrchestrator> orchestrator_service_;
+  std::unique_ptr<tpu_raiden::controller::TestWorkerServer> test_server_;
+  std::unique_ptr<RaidenOrchestrator> orchestrator_service_;
   std::unique_ptr<grpc::Server> orchestrator_server_;
   std::string orchestrator_address_;
 };
 
 TEST_F(KVCacheStoreEmbeddedControllerTest, SaveSuccess) {
-  ::tpu_raiden::controller::MockTransferManager mock_mgr;
-  test_server_->service->SetTransferManager(
-      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+  tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
 
-  auto controller =
-      std::make_unique<::tpu_raiden::controller::RaidenController>(
-          unit_, 10, 1, 512, orchestrator_address_, "");
+  auto controller = std::make_unique<tpu_raiden::controller::RaidenController>(
+      unit_, 10, 1, 512, orchestrator_address_, "");
   RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
 
   RaidenId rid{"test_job", "0", "test_cache", 0};
@@ -846,8 +843,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, SaveSuccess) {
       FAIL() << "Async Save failed during polling";
     }
     if (!save_done.empty()) {
-      EXPECT_THAT(save_done,
-                  ::testing::UnorderedElementsAre("hash_1", "hash_2"));
+      EXPECT_THAT(save_done, testing::UnorderedElementsAre("hash_1", "hash_2"));
       done = true;
     }
     if (!done) {
@@ -875,13 +871,11 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, SaveSuccess) {
 }
 
 TEST_F(KVCacheStoreEmbeddedControllerTest, LoadSuccess) {
-  ::tpu_raiden::controller::MockTransferManager mock_mgr;
-  test_server_->service->SetTransferManager(
-      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+  tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
 
-  auto controller =
-      std::make_unique<::tpu_raiden::controller::RaidenController>(
-          unit_, 10, 1, 512, orchestrator_address_, "");
+  auto controller = std::make_unique<tpu_raiden::controller::RaidenController>(
+      unit_, 10, 1, 512, orchestrator_address_, "");
   RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
 
   RaidenId rid{"test_job", "0", "test_cache", 0};
@@ -910,8 +904,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, LoadSuccess) {
       FAIL() << "Async Load failed during polling";
     }
     if (!load_done.empty()) {
-      EXPECT_THAT(load_done,
-                  ::testing::UnorderedElementsAre("hash_1", "hash_2"));
+      EXPECT_THAT(load_done, testing::UnorderedElementsAre("hash_1", "hash_2"));
       done = true;
     }
     if (!done) {
@@ -938,20 +931,17 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, LoadSuccess) {
 }
 
 TEST_F(KVCacheStoreEmbeddedControllerTest, SaveMultiWorkerSuccess) {
-  auto test_server_0 = ::tpu_raiden::controller::CreateTestWorkerServer();
-  auto test_server_1 = ::tpu_raiden::controller::CreateTestWorkerServer();
+  auto test_server_0 = tpu_raiden::controller::CreateTestWorkerServer();
+  auto test_server_1 = tpu_raiden::controller::CreateTestWorkerServer();
 
-  ::tpu_raiden::controller::MockTransferManager mock_mgr_0;
-  ::tpu_raiden::controller::MockTransferManager mock_mgr_1;
+  tpu_raiden::controller::MockTransferManager mock_mgr_0;
+  tpu_raiden::controller::MockTransferManager mock_mgr_1;
 
-  test_server_0->service->SetTransferManager(
-      ::tpu_raiden::KVManagerHolder(&mock_mgr_0));
-  test_server_1->service->SetTransferManager(
-      ::tpu_raiden::KVManagerHolder(&mock_mgr_1));
+  test_server_0->service->SetTransferManager(KVManagerHolder(&mock_mgr_0));
+  test_server_1->service->SetTransferManager(KVManagerHolder(&mock_mgr_1));
 
-  auto controller =
-      std::make_unique<::tpu_raiden::controller::RaidenController>(
-          unit_, 10, 1, 512, orchestrator_address_, "");
+  auto controller = std::make_unique<tpu_raiden::controller::RaidenController>(
+      unit_, 10, 1, 512, orchestrator_address_, "");
 
   RegisterAndInitWorker(*controller, "worker_0", test_server_0->server_address);
   RegisterAndInitWorker(*controller, "worker_1", test_server_1->server_address);
@@ -980,8 +970,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, SaveMultiWorkerSuccess) {
       FAIL() << "Async Save failed during polling";
     }
     if (!save_done.empty()) {
-      EXPECT_THAT(save_done,
-                  ::testing::UnorderedElementsAre("hash_1", "hash_2"));
+      EXPECT_THAT(save_done, testing::UnorderedElementsAre("hash_1", "hash_2"));
       done = true;
     }
     if (!done) {
@@ -1008,20 +997,17 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, SaveMultiWorkerSuccess) {
 }
 
 TEST_F(KVCacheStoreEmbeddedControllerTest, LoadMultiWorkerSuccess) {
-  auto test_server_0 = ::tpu_raiden::controller::CreateTestWorkerServer();
-  auto test_server_1 = ::tpu_raiden::controller::CreateTestWorkerServer();
+  auto test_server_0 = tpu_raiden::controller::CreateTestWorkerServer();
+  auto test_server_1 = tpu_raiden::controller::CreateTestWorkerServer();
 
-  ::tpu_raiden::controller::MockTransferManager mock_mgr_0;
-  ::tpu_raiden::controller::MockTransferManager mock_mgr_1;
+  tpu_raiden::controller::MockTransferManager mock_mgr_0;
+  tpu_raiden::controller::MockTransferManager mock_mgr_1;
 
-  test_server_0->service->SetTransferManager(
-      ::tpu_raiden::KVManagerHolder(&mock_mgr_0));
-  test_server_1->service->SetTransferManager(
-      ::tpu_raiden::KVManagerHolder(&mock_mgr_1));
+  test_server_0->service->SetTransferManager(KVManagerHolder(&mock_mgr_0));
+  test_server_1->service->SetTransferManager(KVManagerHolder(&mock_mgr_1));
 
-  auto controller =
-      std::make_unique<::tpu_raiden::controller::RaidenController>(
-          unit_, 10, 1, 512, orchestrator_address_, "");
+  auto controller = std::make_unique<tpu_raiden::controller::RaidenController>(
+      unit_, 10, 1, 512, orchestrator_address_, "");
 
   RegisterAndInitWorker(*controller, "worker_0", test_server_0->server_address);
   RegisterAndInitWorker(*controller, "worker_1", test_server_1->server_address);
@@ -1050,8 +1036,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, LoadMultiWorkerSuccess) {
       FAIL() << "Async Load failed during polling";
     }
     if (!load_done.empty()) {
-      EXPECT_THAT(load_done,
-                  ::testing::UnorderedElementsAre("hash_1", "hash_2"));
+      EXPECT_THAT(load_done, testing::UnorderedElementsAre("hash_1", "hash_2"));
       done = true;
     }
     if (!done) {
@@ -1089,13 +1074,11 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, SaveWriteThrough) {
   std::string server_address = "localhost:" + std::to_string(port);
 
   // 2. Setup mock transfer manager & controller
-  ::tpu_raiden::controller::MockTransferManager mock_mgr;
-  test_server_->service->SetTransferManager(
-      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+  tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
 
-  auto controller =
-      std::make_unique<::tpu_raiden::controller::RaidenController>(
-          unit_, 10, 1, 512, orchestrator_address_, "");
+  auto controller = std::make_unique<tpu_raiden::controller::RaidenController>(
+      unit_, 10, 1, 512, orchestrator_address_, "");
   RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
 
   // 3. Initialize KVCacheStore with the registry server address & controller
@@ -1123,8 +1106,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, SaveWriteThrough) {
       FAIL() << "Async Save failed during polling";
     }
     if (!save_done.empty()) {
-      EXPECT_THAT(save_done,
-                  ::testing::UnorderedElementsAre("hash_1", "hash_2"));
+      EXPECT_THAT(save_done, testing::UnorderedElementsAre("hash_1", "hash_2"));
       done = true;
     }
     if (!done) {
@@ -1187,13 +1169,11 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, EvictByHashesHostAndHbmToErased) {
   std::string server_address = "localhost:" + std::to_string(port);
 
   // 2. Setup mock transfer manager & controller
-  ::tpu_raiden::controller::MockTransferManager mock_mgr;
-  test_server_->service->SetTransferManager(
-      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+  tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
 
-  auto controller =
-      std::make_unique<::tpu_raiden::controller::RaidenController>(
-          unit_, 10, 1, 512, orchestrator_address_, "");
+  auto controller = std::make_unique<tpu_raiden::controller::RaidenController>(
+      unit_, 10, 1, 512, orchestrator_address_, "");
   RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
 
   // Allocate 2 block IDs from controller so we have host_block_ids
@@ -1284,13 +1264,11 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, EvictByHashesHostToErased) {
   auto server = builder.BuildAndStart();
   std::string server_address = "localhost:" + std::to_string(port);
 
-  ::tpu_raiden::controller::MockTransferManager mock_mgr;
-  test_server_->service->SetTransferManager(
-      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+  tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
 
-  auto controller =
-      std::make_unique<::tpu_raiden::controller::RaidenController>(
-          unit_, 10, 1, 512, orchestrator_address_, "");
+  auto controller = std::make_unique<tpu_raiden::controller::RaidenController>(
+      unit_, 10, 1, 512, orchestrator_address_, "");
   RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
 
   auto alloc_or = controller->AllocateBlockIds(2);
@@ -1358,13 +1336,11 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, EvictOnSave) {
   auto server = builder.BuildAndStart();
   std::string server_address = "localhost:" + std::to_string(port);
 
-  ::tpu_raiden::controller::MockTransferManager mock_mgr;
-  test_server_->service->SetTransferManager(
-      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+  tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
 
-  auto controller =
-      std::make_unique<::tpu_raiden::controller::RaidenController>(
-          unit_, 2, 1, 512, orchestrator_address_, "");
+  auto controller = std::make_unique<tpu_raiden::controller::RaidenController>(
+      unit_, 2, 1, 512, orchestrator_address_, "");
   auto* controller_ptr = controller.get();
   RegisterAndInitWorker(*controller_ptr, "worker_0",
                         test_server_->server_address);
@@ -1410,7 +1386,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, EvictOnSave) {
       FAIL() << "Async Save failed during polling";
     }
     if (!save_done.empty()) {
-      EXPECT_THAT(save_done, ::testing::ElementsAre("block_C"));
+      EXPECT_THAT(save_done, testing::ElementsAre("block_C"));
       done = true;
     }
     if (!done) {
@@ -1442,14 +1418,12 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, EvictOnSave) {
 }
 
 TEST_F(KVCacheStoreEmbeddedControllerTest, ProactiveEvictionWithCandidates) {
-  ::tpu_raiden::controller::MockTransferManager mock_mgr;
-  test_server_->service->SetTransferManager(
-      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+  tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
 
   // Capacity is 2
-  auto controller =
-      std::make_unique<::tpu_raiden::controller::RaidenController>(
-          unit_, 2, 1, 512, orchestrator_address_, "");
+  auto controller = std::make_unique<tpu_raiden::controller::RaidenController>(
+      unit_, 2, 1, 512, orchestrator_address_, "");
   RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
 
   RaidenId rid{"test_job", "0", "test_cache", 0};
@@ -1499,7 +1473,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ProactiveEvictionWithCandidates) {
 
   // B should now be in candidates.
   EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
-              ::testing::ElementsAre("hash_B"));
+              testing::ElementsAre("hash_B"));
 
   // 4. Access B (using Lookup). This should miss because B is candidate and
   // lookup uses Peek.
@@ -1511,7 +1485,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ProactiveEvictionWithCandidates) {
 
   // B is still in candidates.
   EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
-              ::testing::ElementsAre("hash_B"));
+              testing::ElementsAre("hash_B"));
 
   // Active LRU: C, A (C is MRU, A is LRU).
   // 5. Insert D (HBM block). This exceeds capacity and evicts A (since A is
@@ -1523,7 +1497,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ProactiveEvictionWithCandidates) {
 
   // Candidates list should now contain B, then A.
   EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
-              ::testing::ElementsAre("hash_B", "hash_A"));
+              testing::ElementsAre("hash_B", "hash_A"));
 
   // 6. Save D. Requires 1 host block.
   // Controller free host blocks: 0 (used by A and B).
@@ -1568,7 +1542,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ProactiveEvictionWithCandidates) {
     EXPECT_NE((*lookup_res)[0].second.host_block_id, -1);
   }
   EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
-              ::testing::ElementsAre("hash_A"));
+              testing::ElementsAre("hash_A"));
 }
 
 TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteSuccess) {
@@ -1598,7 +1572,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteSuccess) {
   src_raiden_id.data_replica_idx = 0;
 
   // Register src controller with orchestrator
-  ::tpu_raiden::controller::OrchestratorServiceClient orchestrator_client(
+  tpu_raiden::controller::OrchestratorServiceClient orchestrator_client(
       grpc::CreateChannel(orchestrator_address_,
                           grpc::InsecureChannelCredentials()));
   auto register_status = orchestrator_client.RegisterController(
@@ -1618,27 +1592,40 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteSuccess) {
   // Setup src controller's transfer callback to simulate successful H2H
   std::atomic<bool> callback_triggered = false;
   src_controller_server->service->SetTransferBuffersCallback(
-      [&](rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
-          absl::Span<const int64_t> src_offsets,
-          absl::Span<const int64_t> dst_offsets,
-          absl::Span<const int64_t> copy_sizes,
-          absl::Span<const ::tpu_raiden::RaidenTransferEndpoint> peers) {
+      [&](absl::Span<const Buffer> src_buffers,
+          absl::Span<const Buffer> dst_buffers,
+          absl::Span<const int64_t> copy_sizes) {
         callback_triggered = true;
-        EXPECT_EQ(src_mem_type, rpc::MemoryType::MEMORY_TYPE_DRAM);
-        EXPECT_EQ(dst_mem_type, rpc::MemoryType::MEMORY_TYPE_DRAM);
-        EXPECT_THAT(src_offsets, ::testing::ElementsAre(42));
-        EXPECT_THAT(dst_offsets, ::testing::ElementsAre(
-                                     0));  // allocated local host_block_id
+        std::vector<int64_t> src_offsets;
+        for (const auto& buf : src_buffers) {
+          EXPECT_EQ(buf.memory_type(), rpc::MemoryType::MEMORY_TYPE_DRAM);
+          src_offsets.push_back(buf.index());
+        }
+        std::vector<int64_t> dst_offsets;
         std::vector<std::string> peer_addrs;
-        for (const auto& p : peers) peer_addrs.push_back(p.endpoint);
+        for (const auto& buf : dst_buffers) {
+          EXPECT_EQ(buf.memory_type(), rpc::MemoryType::MEMORY_TYPE_DRAM);
+          dst_offsets.push_back(buf.index());
+          if (buf.remote_address().has_value()) {
+            ::tpu_raiden::proto::RaidenWorkerTransferEndpointsProto eps_proto;
+            if (eps_proto.ParseFromString(*buf.remote_address())) {
+              for (const auto& ep : eps_proto.endpoints()) {
+                peer_addrs.push_back(ep.endpoint());
+              }
+            }
+          }
+        }
+        EXPECT_THAT(src_offsets, testing::ElementsAre(42));
+        EXPECT_THAT(dst_offsets,
+                    testing::ElementsAre(0));  // allocated local host_block_id
         EXPECT_THAT(peer_addrs,
-                    ::testing::ElementsAre(test_server_->server_address));
+                    testing::ElementsAre(test_server_->server_address));
         return tsl::Future<>(absl::OkStatus());
       });
 
   // Setup dest controller and KVCacheStore
   auto dest_controller =
-      std::make_unique<::tpu_raiden::controller::RaidenController>(
+      std::make_unique<tpu_raiden::controller::RaidenController>(
           unit_, 10, 1, 512, orchestrator_address_, "");
   RegisterAndInitWorker(*dest_controller, "worker_0",
                         test_server_->server_address);
@@ -1663,7 +1650,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteSuccess) {
         store.PollRemoteReadStatus();
     ASSERT_TRUE(failed_hashes.empty());
     if (!done_hashes.empty()) {
-      EXPECT_THAT(done_hashes, ::testing::ElementsAre("hash_0"));
+      EXPECT_THAT(done_hashes, testing::ElementsAre("hash_0"));
       done = true;
       break;
     }
@@ -1729,7 +1716,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteFailure) {
   src_raiden_id.data_name = "src_data";
   src_raiden_id.data_replica_idx = 0;
 
-  ::tpu_raiden::controller::OrchestratorServiceClient orchestrator_client(
+  tpu_raiden::controller::OrchestratorServiceClient orchestrator_client(
       grpc::CreateChannel(orchestrator_address_,
                           grpc::InsecureChannelCredentials()));
   auto register_status = orchestrator_client.RegisterController(
@@ -1747,16 +1734,14 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteFailure) {
 
   // Setup src controller to fail
   src_controller_server->service->SetTransferBuffersCallback(
-      [&](rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
-          absl::Span<const int64_t> src_offsets,
-          absl::Span<const int64_t> dst_offsets,
-          absl::Span<const int64_t> copy_sizes,
-          absl::Span<const ::tpu_raiden::RaidenTransferEndpoint> peers) {
+      [&](absl::Span<const Buffer> src_buffers,
+          absl::Span<const Buffer> dst_buffers,
+          absl::Span<const int64_t> copy_sizes) {
         return tsl::Future<>(absl::InternalError("H2H Transfer Failed"));
       });
 
   auto dest_controller =
-      std::make_unique<::tpu_raiden::controller::RaidenController>(
+      std::make_unique<tpu_raiden::controller::RaidenController>(
           unit_, 10, 1, 512, orchestrator_address_, "");
   RegisterAndInitWorker(*dest_controller, "worker_0",
                         test_server_->server_address);
@@ -1791,7 +1776,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteFailure) {
         store.PollRemoteReadStatus();
     ASSERT_TRUE(done_hashes.empty());
     if (!failed_hashes.empty()) {
-      EXPECT_THAT(failed_hashes, ::testing::ElementsAre("hash_0"));
+      EXPECT_THAT(failed_hashes, testing::ElementsAre("hash_0"));
       failed = true;
       break;
     }
@@ -1841,7 +1826,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteDuplicateFails) {
   src_raiden_id.data_name = "src_data";
   src_raiden_id.data_replica_idx = 0;
 
-  ::tpu_raiden::controller::OrchestratorServiceClient orchestrator_client(
+  tpu_raiden::controller::OrchestratorServiceClient orchestrator_client(
       grpc::CreateChannel(orchestrator_address_,
                           grpc::InsecureChannelCredentials()));
   auto register_status = orchestrator_client.RegisterController(
@@ -1861,17 +1846,14 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteDuplicateFails) {
   auto promise_and_future = tsl::MakePromise();
   auto& promise = promise_and_future.first;
   src_controller_server->service->SetTransferBuffersCallback(
-      [f = promise_and_future.second](
-          rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
-          absl::Span<const int64_t> src_offsets,
-          absl::Span<const int64_t> dst_offsets,
-          absl::Span<const int64_t> copy_sizes,
-          absl::Span<const ::tpu_raiden::RaidenTransferEndpoint> peers) {
+      [f = promise_and_future.second](absl::Span<const Buffer> src_buffers,
+                                      absl::Span<const Buffer> dst_buffers,
+                                      absl::Span<const int64_t> copy_sizes) {
         return f;
       });
 
   auto dest_controller =
-      std::make_unique<::tpu_raiden::controller::RaidenController>(
+      std::make_unique<tpu_raiden::controller::RaidenController>(
           unit_, 10, 1, 512, orchestrator_address_, "");
   RegisterAndInitWorker(*dest_controller, "worker_0",
                         test_server_->server_address);
@@ -1892,7 +1874,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteDuplicateFails) {
   absl::Status status2 = store.ReadRemote(hashes);
   EXPECT_FALSE(status2.ok());
   EXPECT_EQ(status2.code(), absl::StatusCode::kFailedPrecondition);
-  EXPECT_THAT(status2.message(), ::testing::HasSubstr("already reading"));
+  EXPECT_THAT(status2.message(), testing::HasSubstr("already reading"));
 
   // Fulfill promise to clean up
   promise.Set(absl::OkStatus());
@@ -1909,12 +1891,11 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteAllocationFailureAborts) {
   auto registry_server = registry_builder.BuildAndStart();
   std::string registry_address = "localhost:" + std::to_string(registry_port);
 
-  ::tpu_raiden::controller::MockTransferManager mock_mgr;
-  test_server_->service->SetTransferManager(
-      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+  tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_mgr));
 
   auto dest_controller =
-      std::make_unique<::tpu_raiden::controller::RaidenController>(
+      std::make_unique<tpu_raiden::controller::RaidenController>(
           unit_, 1, 1, 512, orchestrator_address_, "");
   RegisterAndInitWorker(*dest_controller, "worker_0",
                         test_server_->server_address);
@@ -2005,7 +1986,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteMultipleSources) {
   src_raiden_id_2.data_name = "src_data_2";
   src_raiden_id_2.data_replica_idx = 0;
 
-  ::tpu_raiden::controller::OrchestratorServiceClient orchestrator_client(
+  tpu_raiden::controller::OrchestratorServiceClient orchestrator_client(
       grpc::CreateChannel(orchestrator_address_,
                           grpc::InsecureChannelCredentials()));
   ASSERT_TRUE(orchestrator_client
@@ -2033,13 +2014,13 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteMultipleSources) {
   auto& promise1 = promise_and_future_1.first;
   src_controller_server_1->service->SetTransferBuffersCallback(
       [f = promise_and_future_1.second, &callback_1_triggered](
-          rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
-          absl::Span<const int64_t> src_offsets,
-          absl::Span<const int64_t> dst_offsets,
-          absl::Span<const int64_t> copy_sizes,
-          absl::Span<const ::tpu_raiden::RaidenTransferEndpoint> peers) {
+          absl::Span<const Buffer> src_buffers,
+          absl::Span<const Buffer> dst_buffers,
+          absl::Span<const int64_t> copy_sizes) {
         callback_1_triggered = true;
-        EXPECT_THAT(src_offsets, ::testing::ElementsAre(10));
+        std::vector<int64_t> src_offsets;
+        for (const auto& buf : src_buffers) src_offsets.push_back(buf.index());
+        EXPECT_THAT(src_offsets, testing::ElementsAre(10));
         return f;
       });
 
@@ -2048,18 +2029,18 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteMultipleSources) {
   auto& promise2 = promise_and_future_2.first;
   src_controller_server_2->service->SetTransferBuffersCallback(
       [f = promise_and_future_2.second, &callback_2_triggered](
-          rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
-          absl::Span<const int64_t> src_offsets,
-          absl::Span<const int64_t> dst_offsets,
-          absl::Span<const int64_t> copy_sizes,
-          absl::Span<const ::tpu_raiden::RaidenTransferEndpoint> peers) {
+          absl::Span<const Buffer> src_buffers,
+          absl::Span<const Buffer> dst_buffers,
+          absl::Span<const int64_t> copy_sizes) {
         callback_2_triggered = true;
-        EXPECT_THAT(src_offsets, ::testing::ElementsAre(20));
+        std::vector<int64_t> src_offsets;
+        for (const auto& buf : src_buffers) src_offsets.push_back(buf.index());
+        EXPECT_THAT(src_offsets, testing::ElementsAre(20));
         return f;
       });
 
   auto dest_controller =
-      std::make_unique<::tpu_raiden::controller::RaidenController>(
+      std::make_unique<tpu_raiden::controller::RaidenController>(
           unit_, 10, 1, 512, orchestrator_address_, "");
   RegisterAndInitWorker(*dest_controller, "worker_0",
                         test_server_->server_address);
@@ -2099,7 +2080,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteMultipleSources) {
   EXPECT_TRUE(done_hashes1.empty());
   EXPECT_TRUE(failed_hashes1.empty());
   EXPECT_THAT(pending_hashes1,
-              ::testing::UnorderedElementsAre("hash_0", "hash_1"));
+              testing::UnorderedElementsAre("hash_0", "hash_1"));
 
   // Fulfill second promise
   promise2.Set(absl::OkStatus());
@@ -2112,7 +2093,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteMultipleSources) {
     ASSERT_TRUE(failed_hashes.empty());
     if (!done_hashes.empty()) {
       EXPECT_THAT(done_hashes,
-                  ::testing::UnorderedElementsAre("hash_0", "hash_1"));
+                  testing::UnorderedElementsAre("hash_0", "hash_1"));
       done = true;
       break;
     }
@@ -2154,14 +2135,14 @@ struct RecoveryRegistrySetup {
 
 // Worker-less controller: sufficient for recovery, which only touches the
 // logical block manager.
-std::unique_ptr<::tpu_raiden::controller::RaidenController>
+std::unique_ptr<tpu_raiden::controller::RaidenController>
 MakeRecoveryController(const RaidenId& rid, int num_blocks) {
   rpc::RaidenIdProto unit;
   unit.set_job_name(rid.job_name);
   unit.set_job_replica_id(rid.job_replica_id);
   unit.set_data_name(rid.data_name);
   unit.set_data_replica_idx(rid.data_replica_idx);
-  return std::make_unique<::tpu_raiden::controller::RaidenController>(
+  return std::make_unique<tpu_raiden::controller::RaidenController>(
       unit, num_blocks, /*num_shards=*/1, /*shard_size_bytes=*/512,
       /*raiden_orchestrator_address=*/"", /*raiden_controller_address=*/"");
 }

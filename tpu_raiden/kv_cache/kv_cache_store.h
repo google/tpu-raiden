@@ -316,7 +316,7 @@ class KVCacheStore {
   absl::flat_hash_set<std::string> reading_hashes_ ABSL_GUARDED_BY(mutex_);
 
   std::unique_ptr<std::thread> poller_thread_;
-  std::unique_ptr<tpu_raiden::NumaThreadPool> write_through_pool_;
+  std::unique_ptr<NumaThreadPool> write_through_pool_;
   std::atomic<bool> stop_poller_{false};
 
   absl::StatusOr<std::vector<int>> AllocateBlockIds(int needed);

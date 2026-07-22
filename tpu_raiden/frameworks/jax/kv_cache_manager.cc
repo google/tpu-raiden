@@ -343,7 +343,7 @@ void NumaAwareKVCacheManager::InitSubManagers(
       // explicitly — otherwise each gets a random ephemeral port and the
       // sender's base+idx assumption fails with "connection refused"
       // (multi-NUMA read_remote).
-      // TOOD(jcgu): we will remove the sender's assumption soon.
+      // TODO(jcgu): we will remove the sender's assumption soon.
       std::optional<int> sub_port = local_port;
       if (bound_base_port.has_value()) {
         sub_port = *bound_base_port + sub_idx;

@@ -37,10 +37,10 @@ namespace controller {
 struct WorkerRegistration {
   std::string worker_id;
   std::string raiden_worker_endpoint;
-  std::vector<::tpu_raiden::RaidenTransferEndpoint> raiden_transfer_endpoints;
-  std::shared_ptr<::tpu_raiden::controller::WorkerServiceClient>
+  std::vector<RaidenTransferEndpoint> raiden_transfer_endpoints;
+  std::shared_ptr<tpu_raiden::controller::WorkerServiceClient>
       worker_service_client;
-  std::vector<::tpu_raiden::proto::BufferProto> buffers;
+  std::vector<proto::BufferProto> buffers;
 };
 
 // Thread-safe registry for worker node registrations in the controller plane.
@@ -64,8 +64,7 @@ class WorkerRegistry {
   absl::Status RegisterWorker(const WorkerRegistration& reg);
   absl::Status RegisterWorker(
       absl::string_view worker_id, absl::string_view raiden_worker_endpoint,
-      const std::vector<::tpu_raiden::RaidenTransferEndpoint>&
-          raiden_transfer_endpoints);
+      const std::vector<RaidenTransferEndpoint>& raiden_transfer_endpoints);
 
   // Retrieves all registered workers.
   std::vector<WorkerRegistration> GetRegisteredWorkers() const;

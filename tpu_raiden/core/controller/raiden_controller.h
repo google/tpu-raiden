@@ -127,6 +127,22 @@ class RaidenController {
                                 absl::Span<const Buffer> dst_buffers,
                                 absl::Span<const int64_t> copy_sizes = {});
 
+  // Legacy targeted worker transfer using raw block offsets
+  tsl::Future<> TransferBuffers(
+      absl::string_view worker_id, rpc::MemoryType src_mem_type,
+      rpc::MemoryType dst_mem_type, absl::Span<const int64_t> src_offsets,
+      absl::Span<const int64_t> dst_offsets,
+      absl::Span<const int64_t> copy_sizes = {},
+      const std::vector<RaidenTransferEndpoint>& peers = {});
+
+  // Legacy broadcast transfer using raw block offsets
+  tsl::Future<> TransferBuffers(
+      rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
+      absl::Span<const int64_t> src_offsets,
+      absl::Span<const int64_t> dst_offsets,
+      absl::Span<const int64_t> copy_sizes = {},
+      const std::vector<std::vector<RaidenTransferEndpoint>>& peers = {});
+
   // Initiates remote read from source controller.
   tsl::Future<> ReadRemote(const kv_cache::RaidenId& src_raiden_id,
                            const std::vector<int32_t>& src_host_block_ids,
@@ -159,6 +175,13 @@ class RaidenController {
       absl::Span<const Buffer> dst_buffers,
       absl::Span<const int64_t> copy_sizes);
 
+  absl::StatusOr<proto::TransferBuffersRequest> BuildRawTransferBuffersRequest(
+      rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
+      absl::Span<const int64_t> src_offsets,
+      absl::Span<const int64_t> dst_offsets,
+      absl::Span<const int64_t> copy_sizes,
+      const std::vector<RaidenTransferEndpoint>& peers);
+
   void Init(absl::Span<const std::string> worker_addresses,
             absl::string_view raiden_orchestrator_address,
             absl::string_view raiden_controller_address);
@@ -184,8 +207,7 @@ class RaidenController {
       resolved_controllers_ ABSL_GUARDED_BY(mutex_);
   absl::flat_hash_map<
       std::string,
-      std::shared_ptr<
-          ::tpu_raiden::tpu_raiden::proto::RaidenControllerService::Stub>>
+      std::shared_ptr<tpu_raiden::proto::RaidenControllerService::Stub>>
       stubs_ ABSL_GUARDED_BY(mutex_);
 };
 

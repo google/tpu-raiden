@@ -38,7 +38,7 @@ namespace kv_cache {
 namespace global_registry {
 namespace {
 
-RaidenId FromProto(const ::tpu_raiden::rpc::RaidenIdProto& proto) {
+RaidenId FromProto(const tpu_raiden::rpc::RaidenIdProto& proto) {
   return RaidenId{
       .job_name = proto.job_name(),
       .job_replica_id = proto.job_replica_id(),
@@ -47,7 +47,7 @@ RaidenId FromProto(const ::tpu_raiden::rpc::RaidenIdProto& proto) {
   };
 }
 
-void ToProto(const RaidenId& id, ::tpu_raiden::rpc::RaidenIdProto* proto) {
+void ToProto(const RaidenId& id, tpu_raiden::rpc::RaidenIdProto* proto) {
   proto->set_job_name(id.job_name);
   proto->set_job_replica_id(id.job_replica_id);
   proto->set_data_name(id.data_name);

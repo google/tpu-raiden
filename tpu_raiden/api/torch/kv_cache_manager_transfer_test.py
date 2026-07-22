@@ -21,6 +21,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
 import torch
+import torch_tpu
 
 from tpu_raiden.api.torch.kv_cache_manager import KVCacheManager
 

@@ -132,6 +132,7 @@ cc_library(
         "//tpu_raiden/core:host_memory_allocator",
         "//tpu_raiden/core:numa_thread_pool",
         "//tpu_raiden/core:raiden_manager_base",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/core:tpu_utils",
@@ -235,7 +236,10 @@ cc_library(
     name = "raiden_id",
     hdrs = ["raiden_id.h"],
     visibility = ["//visibility:public"],
-    deps = ["@com_google_absl//absl/hash"],
+    deps = [
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_google_absl//absl/hash",
+    ],
 )
 
 cc_library(
@@ -285,6 +289,7 @@ cc_test(
     deps = [
         ":kv_cache_store",
         ":lru_cache",
+        "//tpu_raiden/core:buffer",
         "//tpu_raiden/core:kv_manager_holder",
         "//tpu_raiden/core/controller:controller_client",
         "//tpu_raiden/core/controller:orchestrator_service_client",

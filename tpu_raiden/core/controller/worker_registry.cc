@@ -51,7 +51,7 @@ absl::Status WorkerRegistry::RegisterWorker(const WorkerRegistration& reg) {
     auto channel = grpc::CreateChannel(entry.raiden_worker_endpoint,
                                        grpc::InsecureChannelCredentials());
     entry.worker_service_client =
-        std::make_shared<::tpu_raiden::controller::WorkerServiceClient>(
+        std::make_shared<tpu_raiden::controller::WorkerServiceClient>(
             std::move(channel));
   }
 
@@ -66,8 +66,7 @@ absl::Status WorkerRegistry::RegisterWorker(const WorkerRegistration& reg) {
 
 absl::Status WorkerRegistry::RegisterWorker(
     absl::string_view worker_id, absl::string_view raiden_worker_endpoint,
-    const std::vector<::tpu_raiden::RaidenTransferEndpoint>&
-        raiden_transfer_endpoints) {
+    const std::vector<RaidenTransferEndpoint>& raiden_transfer_endpoints) {
   return RegisterWorker(WorkerRegistration{
       .worker_id = std::string(worker_id),
       .raiden_worker_endpoint = std::string(raiden_worker_endpoint),

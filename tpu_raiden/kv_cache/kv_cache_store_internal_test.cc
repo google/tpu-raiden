@@ -31,7 +31,7 @@ namespace tpu_raiden {
 namespace kv_cache {
 namespace {
 
-using ::absl_testing::IsOk;
+using absl_testing::IsOk;
 
 TEST(KVCacheStoreInternalTest, LocalInsertAndLookup) {
   TF_ASSERT_OK_AND_ASSIGN(TpuPjrtManager * pjrt_manager,

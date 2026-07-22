@@ -26,9 +26,9 @@ namespace tpu_raiden {
 namespace kv_cache {
 namespace {
 
-using ::testing::ElementsAre;
-using ::testing::Eq;
-using ::testing::Optional;
+using testing::ElementsAre;
+using testing::Eq;
+using testing::Optional;
 
 TEST(LogicalBlockManagerTest, InitialState) {
   LogicalBlockManager manager(5);

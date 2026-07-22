@@ -14,7 +14,7 @@
 
 syntax = "proto3";
 
-package tpu_raiden.tpu_raiden.proto;
+package tpu_raiden.proto;
 
 // Service definition for TPU Raiden Controller.
 service RaidenControllerService {
@@ -28,6 +28,10 @@ service RaidenControllerService {
 message RaidenTransferEndpointProto {
   string endpoint = 1;
   repeated int64 shards = 2;
+}
+
+message RaidenWorkerTransferEndpointsProto {
+  repeated RaidenTransferEndpointProto endpoints = 1;
 }
 
 message RegisterWorkerRequest {
@@ -49,7 +53,7 @@ message ReadRemoteRequest {
   repeated int32 dest_host_block_ids = 2;
   // The transfer endpoints of the destination workers.
   // This list must be sorted by destination worker_id ascending.
-  repeated RaidenTransferEndpointProto dest_raiden_transfer_endpoints = 3;
+  repeated RaidenWorkerTransferEndpointsProto dest_worker_endpoints = 4;
 }
 
 message ReadRemoteResponse {}

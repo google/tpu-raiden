@@ -29,12 +29,13 @@
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/transport/block_transport.h"
 
 namespace tpu_raiden {
 
-class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
+class RaidenManagerBase : public transport::BlockTransportDelegate {
  public:
   RaidenManagerBase(size_t num_layers, size_t num_shards,
                     size_t slice_byte_size,
@@ -57,10 +58,31 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
       const std::vector<int>& dst_block_ids, uint64_t uuid, int layer_idx,
       std::function<void(absl::StatusOr<std::vector<int>>)> on_complete);
 
+  void H2hWriteDirectAsync(
+      const std::vector<RaidenTransferEndpoint>& peers,
+      const std::vector<int>& src_block_ids,
+      const std::vector<int>& dst_block_ids, uint64_t uuid, int layer_idx,
+      std::function<void(absl::StatusOr<std::vector<int>>)> on_complete) {
+    std::vector<std::string> peer_ss;
+    peer_ss.reserve(peers.size());
+    for (const auto& p : peers) peer_ss.push_back(p.endpoint);
+    H2hWriteDirectAsync(peer_ss, src_block_ids, dst_block_ids, uuid, layer_idx,
+                        std::move(on_complete));
+  }
+
   // Direct C++ H2H network read (Pull)
   absl::StatusOr<std::vector<int>> H2hReadDirect(
       const std::vector<std::string>& peers,
       const std::vector<int>& src_block_ids);
+
+  absl::StatusOr<std::vector<int>> H2hReadDirect(
+      const std::vector<RaidenTransferEndpoint>& peers,
+      const std::vector<int>& src_block_ids) {
+    std::vector<std::string> peer_ss;
+    peer_ss.reserve(peers.size());
+    for (const auto& p : peers) peer_ss.push_back(p.endpoint);
+    return H2hReadDirect(peer_ss, src_block_ids);
+  }
 
   // Backward-compatible overloads
   absl::StatusOr<std::vector<int>> H2hWriteDirect(
@@ -134,7 +156,7 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
       const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers);
 
   mutable absl::Mutex server_init_mu_;
-  std::unique_ptr<tpu_raiden::transport::BlockTransport> server_
+  std::unique_ptr<transport::BlockTransport> server_
       ABSL_GUARDED_BY(server_init_mu_);
 
   std::vector<LayerInfoBase> layers_;

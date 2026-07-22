@@ -40,8 +40,8 @@ namespace tpu_raiden {
 namespace kv_cache {
 namespace {
 
-using ::testing::HasSubstr;
-using ::testing::status::StatusIs;
+using testing::HasSubstr;
+using testing::status::StatusIs;
 
 RegionSpec ValidRegion() {
   return RegionSpec{

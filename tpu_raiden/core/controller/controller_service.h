@@ -30,6 +30,7 @@
 #include "grpcpp/server_context.h"
 #include "grpcpp/support/status.h"
 #include "xla/tsl/concurrency/future.h"
+#include "tpu_raiden/core/buffer.h"
 #include "tpu_raiden/core/controller/worker_registry.h"
 #include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/proto/controller_service.grpc.pb.h"
@@ -41,7 +42,7 @@ namespace core {
 namespace controller {
 
 class RaidenControllerServiceImpl final
-    : public ::tpu_raiden::tpu_raiden::proto::RaidenControllerService::Service {
+    : public ::tpu_raiden::proto::RaidenControllerService::Service {
  public:
   explicit RaidenControllerServiceImpl(
       std::shared_ptr<WorkerRegistry> worker_registry = nullptr);
@@ -54,21 +55,18 @@ class RaidenControllerServiceImpl final
 
   grpc::Status RegisterWorker(
       grpc::ServerContext* context,
-      const ::tpu_raiden::tpu_raiden::proto::RegisterWorkerRequest* request,
-      ::tpu_raiden::tpu_raiden::proto::RegisterWorkerResponse* response)
-      override;
+      const ::tpu_raiden::proto::RegisterWorkerRequest* request,
+      ::tpu_raiden::proto::RegisterWorkerResponse* response) override;
 
   grpc::Status ReadRemote(
       grpc::ServerContext* context,
-      const ::tpu_raiden::tpu_raiden::proto::ReadRemoteRequest* request,
-      ::tpu_raiden::tpu_raiden::proto::ReadRemoteResponse* response) override;
+      const ::tpu_raiden::proto::ReadRemoteRequest* request,
+      ::tpu_raiden::proto::ReadRemoteResponse* response) override;
 
   using TransferBuffersCallback = absl::AnyInvocable<tsl::Future<>(
-      rpc::MemoryType src_mem_type, rpc::MemoryType dst_mem_type,
-      absl::Span<const int64_t> src_offsets,
-      absl::Span<const int64_t> dst_offsets,
-      absl::Span<const int64_t> copy_sizes,
-      absl::Span<const ::tpu_raiden::RaidenTransferEndpoint> peers) const>;
+      absl::Span<const Buffer> src_buffers,
+      absl::Span<const Buffer> dst_buffers,
+      absl::Span<const int64_t> copy_sizes) const>;
 
   void SetTransferBuffersCallback(TransferBuffersCallback cb) {
     absl::MutexLock lock(mutex_);

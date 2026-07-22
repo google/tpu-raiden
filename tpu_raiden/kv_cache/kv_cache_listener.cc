@@ -35,8 +35,8 @@
 namespace tpu_raiden {
 namespace kv_cache {
 
-using ::tpu_raiden::rpc::ControlRequest;
-using ::tpu_raiden::rpc::ControlResponse;
+using tpu_raiden::rpc::ControlRequest;
+using tpu_raiden::rpc::ControlResponse;
 
 namespace {
 

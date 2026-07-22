@@ -88,6 +88,7 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":raiden_transfer_endpoint",
         ":tpu_utils",
         ":xla_raw_transfer_headers",
         "//tpu_raiden/transport:block_transport",
@@ -266,6 +267,7 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":raiden_transfer_endpoint",
         ":raw_transfer_core",
         ":status_macros",
         "@com_google_absl//absl/status",

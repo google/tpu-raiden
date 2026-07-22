@@ -39,6 +39,7 @@
 #include "tpu_raiden/core/host_memory_allocator.h"
 #include "tpu_raiden/core/numa_thread_pool.h"
 #include "tpu_raiden/core/raiden_manager_base.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
 #include "tpu_raiden/kv_cache/pool_layout.h"
@@ -78,7 +79,7 @@ struct KVCacheHostSpan {
 using ::tpu_raiden::HostBufferAllocation;
 using ::tpu_raiden::HostBufferAllocator;
 
-class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
+class KVCacheManagerBase : public ::tpu_raiden::RaidenManagerBase {
  public:
   // Core C++ Constructor wrapping raw PJRT buffers directly (used by JAX and
   // PyTorch E2E)
@@ -171,6 +172,17 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
            const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
            int layer_idx = -1);
 
+  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hWrite(
+      const std::vector<::tpu_raiden::RaidenTransferEndpoint>& peers,
+      const std::vector<int>& src_block_ids,
+      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
+      int layer_idx = -1) {
+    std::vector<std::string> str_peers;
+    str_peers.reserve(peers.size());
+    for (const auto& p : peers) str_peers.push_back(p.endpoint);
+    return H2hWrite(str_peers, src_block_ids, dst_block_ids, uuid, layer_idx);
+  }
+
   virtual absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
   H2hWrite(std::string peer, const std::vector<int>& src_block_ids,
            const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
@@ -180,27 +192,37 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   H2hRead(const std::vector<std::string>& peers,
           const std::vector<int>& src_block_ids);
 
+  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hRead(
+      const std::vector<::tpu_raiden::RaidenTransferEndpoint>& peers,
+      const std::vector<int>& src_block_ids) {
+    std::vector<std::string> str_peers;
+    str_peers.reserve(peers.size());
+    for (const auto& p : peers) str_peers.push_back(p.endpoint);
+    return H2hRead(str_peers, src_block_ids);
+  }
+
   virtual absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
   H2hRead(std::string peer, const std::vector<int>& src_block_ids);
 
   // Executes a distributed resharding push transfer based on precise
   // centralized Controller schedules.
   absl::Status PushKVCacheResharded(
-      const tpu_raiden::rpc::StartTransferRequest& request);
+      const ::tpu_raiden::rpc::StartTransferRequest& request);
 
   // Pool-plan executor hooks used by KVCacheListener. Designed as the
   // successor of PushKVCacheResharded/RegisterActivePlan for pool-addressed
   // plans; managers without transfer support fail closed instead of falling
   // back to the legacy whole-layer reshard path.
   virtual absl::Status PoolReshardPush(
-      const tpu_raiden::rpc::StartTransferRequest&, absl::Span<const int64_t>,
+      const ::tpu_raiden::rpc::StartTransferRequest&, absl::Span<const int64_t>,
       int = 8) {
     return absl::UnimplementedError(
         "pool reshard push is not supported by this manager");
   }
 
   virtual absl::Status PoolReshardRegisterRecv(
-      const tpu_raiden::rpc::StartTransferRequest&, absl::Span<const int64_t>) {
+      const ::tpu_raiden::rpc::StartTransferRequest&,
+      absl::Span<const int64_t>) {
     return absl::UnimplementedError(
         "pool reshard receive is not supported by this manager");
   }
@@ -212,9 +234,9 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::string peer, const std::vector<int>& src_block_ids,
       const std::vector<int>& local_block_ids,
       const std::vector<uint8_t*>& explicit_dst_ptrs, int parallelism = 1,
-      tpu_raiden::transport::MajorOrder major_order =
-          tpu_raiden::transport::MajorOrder::kLayerMajor,
-      tpu_raiden::transport::BlockReceivedCallback on_block_received = {});
+      ::tpu_raiden::transport::MajorOrder major_order =
+          ::tpu_raiden::transport::MajorOrder::kLayerMajor,
+      ::tpu_raiden::transport::BlockReceivedCallback on_block_received = {});
 
   // Pure StreamExecutor H2D copy using raw C++ device pointers
   absl::Status H2dDirect(stream_executor::Stream* stream,
@@ -313,21 +335,21 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   bool use_block_chunks(uint64_t uuid) const override;
 
-  absl::StatusOr<std::optional<tpu_raiden::transport::PoolPushProgressSpec>>
+  absl::StatusOr<std::optional<::tpu_raiden::transport::PoolPushProgressSpec>>
   GetPoolPushProgressSpec(size_t pool_idx, uint64_t uuid) const override;
 
   void SetBlockChunkRegionValidation(
-      tpu_raiden::transport::BlockChunkRegionValidationMode mode);
+      ::tpu_raiden::transport::BlockChunkRegionValidationMode mode);
 
-  tpu_raiden::transport::BlockChunkRegionValidationMode
+  ::tpu_raiden::transport::BlockChunkRegionValidationMode
   block_chunk_region_validation_mode() const override;
 
   absl::Status ValidateBlockChunksInRegions(
       size_t layer_idx, size_t shard_idx,
-      const std::vector<tpu_raiden::transport::BlockChunk>& chunks) override;
+      const std::vector<::tpu_raiden::transport::BlockChunk>& chunks) override;
 
   virtual absl::Status RegisterActivePlan(
-      uint64_t uuid, const tpu_raiden::rpc::StartTransferRequest& request,
+      uint64_t uuid, const ::tpu_raiden::rpc::StartTransferRequest& request,
       bool is_sender);
 
   virtual absl::Status UnregisterActivePlan(uint64_t uuid);
@@ -346,7 +368,7 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   // restricted to schedule entries targeting that destination block, which is
   // necessary when one source block fans out to multiple destination blocks
   // on the same peer.
-  std::vector<tpu_raiden::transport::BlockChunk> GetBlockChunks(
+  std::vector<::tpu_raiden::transport::BlockChunk> GetBlockChunks(
       size_t layer_idx, size_t shard_idx, absl::Span<const int64_t> block_ids,
       size_t total_bytes, uint64_t uuid, int64_t sender_node_id = -1,
       absl::string_view peer = "", int64_t src_block_id = -1,
@@ -387,9 +409,9 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   mutable absl::Mutex pools_mu_;
   mutable std::vector<PoolSpec> pools_;
   bool explicit_pools_ = false;
-  tpu_raiden::transport::BlockChunkRegionValidationMode
+  ::tpu_raiden::transport::BlockChunkRegionValidationMode
       block_chunk_region_validation_mode_ =
-          tpu_raiden::transport::BlockChunkRegionValidationMode::kDisabled;
+          ::tpu_raiden::transport::BlockChunkRegionValidationMode::kDisabled;
 
   // Returns the per-block byte size for a given layer.  Uses the layer's
   // actual physical_size when available (device-backed path); falls back
@@ -463,7 +485,7 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   mutable absl::Mutex plans_mu_;
   struct RegisteredPlan {
-    tpu_raiden::rpc::StartTransferRequest request;
+    ::tpu_raiden::rpc::StartTransferRequest request;
     bool is_sender = false;
   };
   absl::flat_hash_map<uint64_t, RegisteredPlan> active_plans_

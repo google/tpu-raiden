@@ -50,9 +50,9 @@ namespace tpu_raiden {
 namespace kv_cache {
 namespace {
 
-using ::tpu_raiden::rpc::ControlRequest;
-using ::tpu_raiden::rpc::ControlResponse;
-using ::tpu_raiden::rpc::StartTransferRequest;
+using tpu_raiden::rpc::ControlRequest;
+using tpu_raiden::rpc::ControlResponse;
+using tpu_raiden::rpc::StartTransferRequest;
 
 enum class Route {
   kNone,

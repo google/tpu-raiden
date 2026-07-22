@@ -103,13 +103,13 @@ struct PoolBlockCopyExtent {
 absl::StatusOr<std::vector<PoolBlockCopyExtent>> ComputePoolBlockCopyExtents(
     const PoolSpec& pool, absl::Span<const int64_t> block_ids);
 
-tpu_raiden::rpc::RegionSpecProto ToProto(const RegionSpec& region);
+::tpu_raiden::rpc::RegionSpecProto ToProto(const RegionSpec& region);
 absl::StatusOr<RegionSpec> RegionSpecFromProto(
-    const tpu_raiden::rpc::RegionSpecProto& proto);
+    const ::tpu_raiden::rpc::RegionSpecProto& proto);
 
-tpu_raiden::rpc::PoolSpecProto ToProto(const PoolSpec& pool);
+::tpu_raiden::rpc::PoolSpecProto ToProto(const PoolSpec& pool);
 absl::StatusOr<PoolSpec> PoolSpecFromProto(
-    const tpu_raiden::rpc::PoolSpecProto& proto);
+    const ::tpu_raiden::rpc::PoolSpecProto& proto);
 
 }  // namespace kv_cache
 }  // namespace tpu_raiden

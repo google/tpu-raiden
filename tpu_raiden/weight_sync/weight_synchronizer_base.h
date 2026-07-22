@@ -40,7 +40,7 @@ namespace weight_sync {
 
 class WeightSynchronizerListener;
 
-class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
+class WeightSynchronizerBase : public ::tpu_raiden::RaidenManagerBase {
  public:
   // Symmetrical core constructor wrapping raw PJRT buffers directly E2E
   WeightSynchronizerBase(
@@ -85,7 +85,7 @@ class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
    * delivery to all remote peers.
    */
   absl::Status PushWeightsResharded(
-      const tpu_raiden::rpc::StartTransferRequest& request);
+      const ::tpu_raiden::rpc::StartTransferRequest& request);
 
   const uint8_t* GetHostBufferPtr(size_t layer_idx, size_t shard_idx) const {
     if (layer_idx >= num_layers_ || shard_idx >= num_shards_) {
