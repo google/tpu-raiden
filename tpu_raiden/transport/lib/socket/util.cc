@@ -15,6 +15,7 @@
 #include "tpu_raiden/transport/lib/socket/util.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -30,6 +31,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -41,17 +43,24 @@
 
 namespace tpu_raiden::transport::lib {
 
+namespace {
+inline bool IsValidSocket(int fd) { return fcntl(fd, F_GETFD) >= 0; }
+}  // namespace
+
 absl::Status WriteExact(int fd, const void* buffer, size_t length) {
+  DCHECK(IsValidSocket(fd));
   struct iovec iov = {.iov_base = const_cast<void*>(buffer), .iov_len = length};
   return WriteVExact(fd, {&iov, 1});
 }
 
 absl::Status ReadExact(int fd, void* buffer, size_t length) {
+  DCHECK(IsValidSocket(fd));
   struct iovec iov = {.iov_base = buffer, .iov_len = length};
   return ReadVExact(fd, {&iov, 1});
 }
 
 absl::Status WriteVExact(int fd, absl::Span<const struct iovec> iov) {
+  DCHECK(IsValidSocket(fd));
   std::vector<struct iovec> local_iov(iov.begin(), iov.end());
   size_t iov_idx = 0;
   while (iov_idx < local_iov.size()) {
@@ -105,6 +114,7 @@ absl::Status WriteVExact(int fd, absl::Span<const struct iovec> iov) {
 }
 
 absl::Status ReadVExact(int fd, absl::Span<const struct iovec> iov) {
+  DCHECK(IsValidSocket(fd));
   std::vector<struct iovec> local_iov(iov.begin(), iov.end());
   size_t iov_idx = 0;
   while (iov_idx < local_iov.size()) {

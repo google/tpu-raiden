@@ -104,14 +104,19 @@ class RawBufferTransport {
 
   RawBufferTransportDelegate* raw_delegate_;
   int local_port_;
-  int server_fd_ = -1;
+  int server_fd_ = -1;  // owned by listener_thread_
   std::string bound_ip_ = "127.0.0.1";
   std::vector<std::string> local_ips_;
   std::atomic<bool> stopping_{false};
 
+  // The active_client_fds do not own the sockets it contains. It is only used
+  // to shutdown the sockets, thus unblocking worker_threads_. Each worker
+  // thread owns the client_fd passed to it.
   absl::Mutex mu_;
   absl::flat_hash_set<int> active_client_fds_ ABSL_GUARDED_BY(mu_);
 
+  // The conn_pool_ owns the sockets that connect to peers. in comparison, the
+  // active_client_fds above are those sockets accepted from peers.
   absl::Mutex pool_mu_;
   absl::flat_hash_map<std::string, std::vector<int>> conn_pool_
       ABSL_GUARDED_BY(pool_mu_);

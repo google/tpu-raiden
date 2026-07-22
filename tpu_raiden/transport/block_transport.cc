@@ -505,7 +505,6 @@ void BlockTransport::TriggerNextSendStep(
                      << " for uuid " << state->uuid
                      << ", status: " << status.ToString();
           shutdown(state->client_fd, SHUT_RDWR);
-          close(state->client_fd);
           absl::MutexLock lock(active_sends_mu_);
           active_sends_.erase(state->uuid);
           return;
@@ -520,7 +519,6 @@ void BlockTransport::TriggerNextSendStep(
             LOG(ERROR) << "No transfer chunks found for block " << block_id
                        << " and uuid " << state->uuid;
             shutdown(state->client_fd, SHUT_RDWR);
-            close(state->client_fd);
             absl::MutexLock lock(active_sends_mu_);
             active_sends_.erase(state->uuid);
             return;
@@ -529,7 +527,6 @@ void BlockTransport::TriggerNextSendStep(
           if (!s.ok()) {
             LOG(ERROR) << "Chunks validation failed: " << s.ToString();
             shutdown(state->client_fd, SHUT_RDWR);
-            close(state->client_fd);
             absl::MutexLock lock(active_sends_mu_);
             active_sends_.erase(state->uuid);
             return;
@@ -540,7 +537,6 @@ void BlockTransport::TriggerNextSendStep(
           if (!s.ok()) {
             LOG(ERROR) << "Write size failed: " << s.ToString();
             shutdown(state->client_fd, SHUT_RDWR);
-            close(state->client_fd);
             absl::MutexLock lock(active_sends_mu_);
             active_sends_.erase(state->uuid);
             return;
@@ -549,7 +545,6 @@ void BlockTransport::TriggerNextSendStep(
           if (!s.ok()) {
             LOG(ERROR) << "Write payload failed: " << s.ToString();
             shutdown(state->client_fd, SHUT_RDWR);
-            close(state->client_fd);
             absl::MutexLock lock(active_sends_mu_);
             active_sends_.erase(state->uuid);
             return;

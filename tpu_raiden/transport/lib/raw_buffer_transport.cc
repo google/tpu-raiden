@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "absl/cleanup/cleanup.h"
+#include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
@@ -122,19 +123,19 @@ RawBufferTransport::RawBufferTransport(
 
 RawBufferTransport::~RawBufferTransport() {
   stopping_ = true;
-  ClosePooledConnections();
+
+  // 1. Listener side:
+  // 1.1 Shutdown on all active sockets to unblock the threads.
   if (server_fd_ >= 0) {
     shutdown(server_fd_, SHUT_RDWR);
-    close(server_fd_);
   }
   {
-    absl::MutexLock _( mu_ );
+    absl::MutexLock _(mu_);
     for (int fd : active_client_fds_) {
       shutdown(fd, SHUT_RDWR);
-      close(fd);
     }
-    active_client_fds_.clear();
   }
+  // 1.2 Join all threads.
   if (listener_thread_.joinable()) {
     listener_thread_.join();
   }
@@ -143,6 +144,15 @@ RawBufferTransport::~RawBufferTransport() {
       t.join();
     }
   }
+  {
+    // Each worker thread should have closed its own client_fd.
+    absl::MutexLock _(mu_);
+    DCHECK(active_client_fds_.empty());
+  }
+
+  // 2. Connector side:
+  // Close all pooled file descriptors _after_ all the threads are joined.
+  ClosePooledConnections();
 }
 
 static std::string GetPoolKey(absl::string_view peer,
@@ -257,6 +267,7 @@ absl::Status RawBufferTransport::HandleCustomRequest(
 }
 
 void RawBufferTransport::ConnectionWorker(int client_fd) {
+  DCHECK_GE(client_fd, 0);
   while (!stopping_) {
     struct pollfd pfd;
     pfd.fd = client_fd;
@@ -275,15 +286,18 @@ void RawBufferTransport::ConnectionWorker(int client_fd) {
       break;
     }
   }
-  close(client_fd);
+
+  DCHECK_GE(client_fd, 0);
   {
     absl::MutexLock _( mu_ );
     active_client_fds_.erase(client_fd);
   }
+  close(client_fd);
 }
 
 void RawBufferTransport::ListenerLoop() {
   while (!stopping_) {
+    DCHECK_GE(server_fd_, 0);
     struct pollfd pfd;
     pfd.fd = server_fd_;
     pfd.events = POLLIN;
@@ -309,14 +323,18 @@ void RawBufferTransport::ListenerLoop() {
     setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &buf_opt, sizeof(buf_opt));
     setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &buf_opt, sizeof(buf_opt));
 
+    DCHECK_GE(client_fd, 0);
     {
       absl::MutexLock _( mu_ );
       active_client_fds_.insert(client_fd);
     }
-
     worker_threads_.push_back(
         std::thread([this, client_fd]() { ConnectionWorker(client_fd); }));
   }
+
+  DCHECK_GE(server_fd_, 0);
+  close(server_fd_);
+  server_fd_ = -1;
 }
 
 absl::Status RawBufferTransport::PullBuffer(
