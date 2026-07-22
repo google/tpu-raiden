@@ -122,10 +122,10 @@ TEST_P(SocketUtilTest, ReadWrite) {
 
     if (read_iovec_) {
       std::vector<struct iovec> iovs;
-      const size_t partial = kSize / 3;
-      iovs.push_back({recv_buf.data(), partial});
-      iovs.push_back({recv_buf.data() + partial, partial});
-      iovs.push_back({recv_buf.data() + partial * 2, kSize - partial * 2});
+      constexpr size_t kPartial = kSize / 3;
+      iovs.push_back({recv_buf.data(), kPartial});
+      iovs.push_back({recv_buf.data() + kPartial, kPartial});
+      iovs.push_back({recv_buf.data() + kPartial * 2, kSize - kPartial * 2});
       CHECK_OK(ReadVExact(new_socket->fd().value(), iovs));
     } else {
       CHECK_OK(ReadExact(new_socket->fd().value(), recv_buf.data(), kSize));
@@ -141,9 +141,9 @@ TEST_P(SocketUtilTest, ReadWrite) {
 
     if (write_iovec_) {
       std::vector<struct iovec> iovs;
-      const size_t partial = kSize / 2;
-      iovs.push_back({send_buf.data(), partial});
-      iovs.push_back({send_buf.data() + partial, kSize - partial});
+      constexpr size_t kPartial = kSize / 2;
+      iovs.push_back({send_buf.data(), kPartial});
+      iovs.push_back({send_buf.data() + kPartial, kSize - kPartial});
       CHECK_OK(WriteVExact(connector_->fd().value(), iovs));
     } else {
       CHECK_OK(WriteExact(connector_->fd().value(), send_buf.data(), kSize));

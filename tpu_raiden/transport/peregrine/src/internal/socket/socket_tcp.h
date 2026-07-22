@@ -27,6 +27,7 @@
 
 #include "absl/base/attributes.h"
 #include "absl/log/check.h"
+#include "absl/types/span.h"
 #include "tpu_raiden/transport/peregrine/src/internal/base/endpoint.h"
 #include "tpu_raiden/transport/peregrine/src/internal/base/types.h"
 #include "tpu_raiden/transport/peregrine/src/internal/socket/socket_base.h"
@@ -81,6 +82,16 @@ class TcpSocket final : public SocketBase {
   // Returns OK if all the bytes are received successfully, error otherwise.
   ABSL_DEPRECATED("temporarily for tpu raiden")
   static absl::Status Recv(fd_t fd, Byte* buf, size_t len);
+
+  // Sends on the socket `fd` exactly all the data from the `iovecs` buffers.
+  // Returns OK if all the bytes are sent successfully, error otherwise.
+  ABSL_DEPRECATED("temporarily for tpu raiden")
+  static absl::Status SendV(fd_t fd, absl::Span<const IoVec> iovecs);
+
+  // Receives on the socket `fd` exactly all the data into the `iovecs` buffers.
+  // Returns OK if all the bytes are received successfully, error otherwise.
+  ABSL_DEPRECATED("temporarily for tpu raiden")
+  static absl::Status RecvV(fd_t fd, absl::Span<const IoVec> iovecs);
 
   // Returns a self/peer address pair string of the socket.
   std::string ToString() const;

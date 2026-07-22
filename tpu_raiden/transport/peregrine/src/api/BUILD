@@ -25,14 +25,16 @@ cc_library(
 
 cc_library(
     name = "socket_util",
-    srcs = ["socket_util.cc"],
     hdrs = ["socket_util.h"],
     deps = [
         ":transport_types",
         "//tpu_raiden/transport/peregrine/src/internal/base:types",
         "//tpu_raiden/transport/peregrine/src/internal/socket:socket_tcp",
+        "//tpu_raiden/transport/peregrine/src/internal/socket:socket_util",
+        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/log:check",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
     ],
 )

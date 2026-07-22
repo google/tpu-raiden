@@ -122,6 +122,7 @@ cc_library(
         ":socket_util",
         "//tpu_raiden/transport/peregrine/src/internal/base:endpoint",
         "//tpu_raiden/transport/peregrine/src/internal/base:types",
+        "//tpu_raiden/transport/peregrine/src/internal/util",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/log:check",
@@ -129,6 +130,7 @@ cc_library(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/types:span",
     ],
 )
 

@@ -120,6 +120,12 @@ TEST_F(TcpIPv6SocketTest, BigData) {
     DCHECK(new_socket->IsConnected());
     CHECK_EQ(new_socket->Recv(recv_buf.data(), kDataSize), kDataSize);
     CHECK_OK(TcpSocket::Recv(new_socket->fd(), recv_buf.data(), kDataSize));
+    const size_t kPartial = kDataSize / 2;
+    std::vector<IoVec> iovecs = {
+        {IoVec(recv_buf.data(), kPartial)},
+        {IoVec(recv_buf.data() + kPartial, kDataSize - kPartial)},
+    };
+    CHECK_OK(TcpSocket::RecvV(new_socket->fd(), iovecs));
   });
 
   // Second, create a client thread.
@@ -130,6 +136,13 @@ TEST_F(TcpIPv6SocketTest, BigData) {
     DCHECK(connector_->IsConnected());
     CHECK_EQ(connector_->Send(send_buf.data(), kDataSize), kDataSize);
     CHECK_OK(TcpSocket::Send(connector_->fd(), send_buf.data(), kDataSize));
+    const size_t kPartial = kDataSize / 3;
+    std::vector<IoVec> iovecs = {
+        {IoVec(send_buf.data(), kPartial)},
+        {IoVec(send_buf.data() + kPartial, kPartial)},
+        {IoVec(send_buf.data() + kPartial * 2, kDataSize - kPartial * 2)},
+    };
+    CHECK_OK(TcpSocket::SendV(connector_->fd(), iovecs));
   });
 
   // Wait for both threads to finish.
