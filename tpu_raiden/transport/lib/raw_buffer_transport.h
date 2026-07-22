@@ -29,6 +29,7 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 
@@ -72,32 +73,37 @@ class RawBufferTransport {
                      const std::vector<std::string>& local_ips = {});
   virtual ~RawBufferTransport();
 
-  // Directly pushes an arbitrary continuous byte array into a specific offset
-  // of a remote peer's buffer.
-  absl::Status PushBuffer(absl::string_view peer, size_t buffer_id,
-                          size_t dst_shard_idx, size_t dst_offset_bytes,
-                          const uint8_t* data_ptr, size_t size_bytes);
-
-  // Synchronously requests an arbitrary continuous byte slice from a remote
+  // Synchronously pulls an arbitrary continuous byte slice from a remote
   // peer's staging memory.
   absl::Status PullBuffer(absl::string_view peer, size_t buffer_id,
                           size_t src_shard_idx, size_t src_offset_bytes,
                           size_t dst_shard_idx, size_t dst_offset_bytes,
                           size_t size_bytes);
 
+  // Synchronously pushes an arbitrary continuous byte array into a specific
+  // offset of a remote peer's buffer.
+  absl::Status PushBuffer(absl::string_view peer, size_t buffer_id,
+                          size_t dst_shard_idx, size_t dst_offset_bytes,
+                          const uint8_t* data_ptr, size_t size_bytes);
+
   int local_port() const { return local_port_; }
   const std::string& bound_ip() const { return bound_ip_; }
+
+ private:
+  absl::Status ProcessPeerRequest(int client_fd);
+
+  virtual absl::Status HandleCustomRequest(int client_fd,
+                                           const PacketHeader& header) {
+    return absl::UnimplementedError(
+        absl::StrCat("Unsupported raw transport op code: ", header.op));
+  }
 
  protected:
   virtual absl::StatusOr<int> BorrowConnection(absl::string_view peer,
                                                absl::string_view local_ip = "");
-  virtual void ReturnConnection(bool ok, int fd, absl::string_view peer,
-                                absl::string_view local_ip = "");
+  void ReturnConnection(bool ok, int fd, absl::string_view peer,
+                        absl::string_view local_ip = "");
   void ClosePooledConnections();
-
-  virtual absl::Status ProcessSingleRequest(int client_fd);
-  virtual absl::Status HandleCustomRequest(int client_fd,
-                                           const PacketHeader& header);
 
   void ConnectionWorker(int client_fd);
   void ListenerLoop();

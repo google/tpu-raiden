@@ -222,52 +222,48 @@ void RawBufferTransport::ClosePooledConnections() {
   conn_pool_.clear();
 }
 
-absl::Status RawBufferTransport::ProcessSingleRequest(int client_fd) {
+absl::Status RawBufferTransport::ProcessPeerRequest(int client_fd) {
   PacketHeader header = {};
   RETURN_IF_ERROR(ReadExact(client_fd, &header, sizeof(header)));
 
-  if (header.op == 5) {
-    uint32_t dst_offset = header.remote_id;
-    uint32_t dst_shard_idx = header.local_id;
-    uint32_t size_bytes = header.count_or_size;
-    uint16_t buf_id = header.buffer_id;
+  if (header.op == 5) {  // peer push request
+    const uint32_t dst_offset = header.remote_id;
+    const uint32_t dst_shard_idx = header.local_id;
+    const uint32_t size_bytes = header.count_or_size;
+    const uint16_t buf_id = header.buffer_id;
 
-    uint8_t* base_host_ptr =
+    uint8_t* const base_host_ptr =
         raw_delegate_->GetHostPointer(buf_id, dst_shard_idx);
-    size_t host_size = raw_delegate_->GetHostSize(buf_id, dst_shard_idx);
+    const size_t host_size = raw_delegate_->GetHostSize(buf_id, dst_shard_idx);
     if (base_host_ptr == nullptr || dst_offset + size_bytes > host_size) {
       return absl::InvalidArgumentError("Destination out of bounds");
     }
-    uint8_t* dest_ptr = base_host_ptr + dst_offset;
+    uint8_t* const dest_ptr = base_host_ptr + dst_offset;
     RETURN_IF_ERROR(ReadExact(client_fd, dest_ptr, size_bytes));
 
     uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
-  } else if (header.op == 3) {
-    uint32_t src_offset = header.remote_id;
-    uint32_t src_shard_idx = header.local_id;
-    uint32_t size_bytes = header.count_or_size;
-    uint16_t buf_id = header.buffer_id;
+    return absl::OkStatus();
 
-    uint8_t* base_host_ptr =
+  } else if (header.op == 3) {  // peer pull request
+    const uint32_t src_offset = header.remote_id;
+    const uint32_t src_shard_idx = header.local_id;
+    const uint32_t size_bytes = header.count_or_size;
+    const uint16_t buf_id = header.buffer_id;
+
+    uint8_t* const base_host_ptr =
         raw_delegate_->GetHostPointer(buf_id, src_shard_idx);
-    size_t host_size = raw_delegate_->GetHostSize(buf_id, src_shard_idx);
+    const size_t host_size = raw_delegate_->GetHostSize(buf_id, src_shard_idx);
     if (base_host_ptr == nullptr || src_offset + size_bytes > host_size) {
       return absl::InvalidArgumentError("Source out of bounds");
     }
-    uint8_t* src_ptr = base_host_ptr + src_offset;
+    uint8_t* const src_ptr = base_host_ptr + src_offset;
     RETURN_IF_ERROR(WriteExact(client_fd, src_ptr, size_bytes));
+    return absl::OkStatus();
 
   } else {
     return HandleCustomRequest(client_fd, header);
   }
-  return absl::OkStatus();
-}
-
-absl::Status RawBufferTransport::HandleCustomRequest(
-    int client_fd, const PacketHeader& header) {
-  return absl::UnimplementedError(
-      absl::StrCat("Unsupported raw transport op code: ", header.op));
 }
 
 void RawBufferTransport::ConnectionWorker(int client_fd) {
@@ -286,7 +282,7 @@ void RawBufferTransport::ConnectionWorker(int client_fd) {
     }
     if (ret == 0) continue;
 
-    if (!ProcessSingleRequest(client_fd).ok()) {
+    if (!ProcessPeerRequest(client_fd).ok()) {
       break;
     }
   }
@@ -349,7 +345,7 @@ absl::Status RawBufferTransport::PullBuffer(
     return absl::InvalidArgumentError("Source peer address cannot be empty");
   }
 
-  size_t host_size = raw_delegate_->GetHostSize(buffer_id, dst_shard_idx);
+  const size_t host_size = raw_delegate_->GetHostSize(buffer_id, dst_shard_idx);
   if (dst_offset_bytes + size_bytes > host_size) {
     return absl::InvalidArgumentError(absl::StrCat(
         "Destination offset out of bounds. Offset: ", dst_offset_bytes,
@@ -361,13 +357,13 @@ absl::Status RawBufferTransport::PullBuffer(
   auto fd_cleaner =
       absl::MakeCleanup([&] { ReturnConnection(ok_to_pool, fd, peer); });
 
-  PacketHeader header = {};
-  header.op = 3;
-  header.buffer_id = static_cast<uint16_t>(buffer_id);
-  header.remote_id = static_cast<uint32_t>(src_offset_bytes);
-  header.local_id = static_cast<uint32_t>(src_shard_idx);
-  header.count_or_size = static_cast<uint32_t>(size_bytes);
-
+  const PacketHeader header = {
+      .op = 3,
+      .buffer_id = static_cast<uint16_t>(buffer_id),
+      .remote_id = static_cast<uint32_t>(src_offset_bytes),
+      .local_id = static_cast<uint32_t>(src_shard_idx),
+      .count_or_size = static_cast<uint32_t>(size_bytes),
+  };
   RETURN_IF_ERROR(WriteExact(fd, &header, sizeof(header)));
 
   uint8_t* dest_ptr = raw_delegate_->GetHostPointer(buffer_id, dst_shard_idx) +
@@ -391,13 +387,13 @@ absl::Status RawBufferTransport::PushBuffer(
   auto fd_cleaner =
       absl::MakeCleanup([&] { ReturnConnection(ok_to_pool, fd, peer); });
 
-  PacketHeader header = {};
-  header.op = 5;
-  header.buffer_id = static_cast<uint16_t>(buffer_id);
-  header.remote_id = static_cast<uint32_t>(dst_offset_bytes);
-  header.local_id = static_cast<uint32_t>(dst_shard_idx);
-  header.count_or_size = static_cast<uint32_t>(size_bytes);
-
+  const PacketHeader header = {
+      .op = 5,
+      .buffer_id = static_cast<uint16_t>(buffer_id),
+      .remote_id = static_cast<uint32_t>(dst_offset_bytes),
+      .local_id = static_cast<uint32_t>(dst_shard_idx),
+      .count_or_size = static_cast<uint32_t>(size_bytes),
+  };
   RETURN_IF_ERROR(WriteExact(fd, &header, sizeof(header)));
   RETURN_IF_ERROR(WriteExact(fd, data_ptr, size_bytes));
 
