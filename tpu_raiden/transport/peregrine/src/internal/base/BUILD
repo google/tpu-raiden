@@ -27,6 +27,16 @@ cc_library(
     ],
 )
 
+cc_test(
+    name = "strong_int_test",
+    srcs = ["strong_int_test.cc"],
+    deps = [
+        ":strong_int",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "types",
     hdrs = ["types.h"],

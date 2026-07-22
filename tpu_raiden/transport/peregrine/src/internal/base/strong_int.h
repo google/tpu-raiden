@@ -154,7 +154,6 @@
 #include <utility>
 
 #include "absl/base/attributes.h"
-#include "absl/base/port.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
@@ -698,15 +697,13 @@ StrongIntRange<IntType> MakeStrongIntRange(IntType begin, IntType end) {
                                    ##__VA_ARGS__>                           \
       type_name;
 
+// Numeric_limits override for strong int.
+namespace std {
+
 // Allow StrongInt to be used as a key to hashable containers.
-HASH_NAMESPACE_DECLARATION_START
 template <typename Tag, typename Value, typename Validator>
 struct hash<util_intops::StrongInt<Tag, Value, Validator>>
     : ::util_intops::StrongInt<Tag, Value, Validator>::Hasher {};
-HASH_NAMESPACE_DECLARATION_END
-
-// Numeric_limits override for strong int.
-namespace std {
 
 template <typename TagType, typename NativeType, typename ValidatorType>
 struct numeric_limits<
