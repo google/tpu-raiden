@@ -115,7 +115,7 @@ TEST_P(SocketUtilTest, ReadWrite) {
     DCHECK(listener_->IsBlocking());
     const internal::fd_t new_fd = listener_->Accept();
 
-    CHECK_GE(new_fd.value(), 0);
+    CHECK_GE(new_fd, 0);
     auto new_socket = TcpSocket::Create(new_fd, family_);
     DCHECK(new_socket->IsBlocking());
     DCHECK(new_socket->IsConnected());
@@ -126,9 +126,9 @@ TEST_P(SocketUtilTest, ReadWrite) {
       iovs.push_back({recv_buf.data(), kPartial});
       iovs.push_back({recv_buf.data() + kPartial, kPartial});
       iovs.push_back({recv_buf.data() + kPartial * 2, kSize - kPartial * 2});
-      CHECK_OK(ReadVExact(new_socket->fd().value(), iovs));
+      CHECK_OK(ReadVExact(new_socket->fd(), iovs));
     } else {
-      CHECK_OK(ReadExact(new_socket->fd().value(), recv_buf.data(), kSize));
+      CHECK_OK(ReadExact(new_socket->fd(), recv_buf.data(), kSize));
     }
   });
 
@@ -144,9 +144,9 @@ TEST_P(SocketUtilTest, ReadWrite) {
       constexpr size_t kPartial = kSize / 2;
       iovs.push_back({send_buf.data(), kPartial});
       iovs.push_back({send_buf.data() + kPartial, kSize - kPartial});
-      CHECK_OK(WriteVExact(connector_->fd().value(), iovs));
+      CHECK_OK(WriteVExact(connector_->fd(), iovs));
     } else {
-      CHECK_OK(WriteExact(connector_->fd().value(), send_buf.data(), kSize));
+      CHECK_OK(WriteExact(connector_->fd(), send_buf.data(), kSize));
     }
   });
 

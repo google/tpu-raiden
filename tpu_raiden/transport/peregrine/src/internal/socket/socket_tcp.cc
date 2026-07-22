@@ -46,7 +46,7 @@ namespace peregrine::internal {
 
 std::unique_ptr<TcpSocket> TcpSocket::Create(int family) {
   const fd_t fd = CreateSocket(family, SOCK_STREAM, /*blocking=*/true);
-  if ABSL_PREDICT_FALSE (fd.value() < 0) {
+  if ABSL_PREDICT_FALSE (fd < 0) {
     return nullptr;
   } else {
     LOG(INFO) << okMsg("created", fd);
@@ -64,14 +64,14 @@ TcpSocket::~TcpSocket() {
   DCHECK(!connected_);
   LOG(INFO) << okMsg("closing");
   DCHECK(invariant());
-  ::close(fd_.value());
+  ::close(fd_);
   fd_ = fd_t(-1);
 }
 
 void TcpSocket::Shutdown() {
   DCHECK(invariant());
   LOG(INFO) << okMsg("shutdown");
-  ::shutdown(fd_.value(), SHUT_RDWR);
+  ::shutdown(fd_, SHUT_RDWR);
   connected_ = false;
   DCHECK(invariant());
 }
@@ -89,7 +89,7 @@ bool TcpSocket::Listen(const Endpoint& local) const {
     const auto last_errno = errno;
     LOG(WARNING) << errMsg("bind", last_errno);
     return false;
-  } else if (ABSL_PREDICT_FALSE(::listen(fd_.value(), SOMAXCONN) < 0)) {
+  } else if (ABSL_PREDICT_FALSE(::listen(fd_, SOMAXCONN) < 0)) {
     const auto last_errno = errno;
     LOG(WARNING) << errMsg("listen", last_errno);
     return false;
@@ -104,12 +104,12 @@ int AcceptConn(const int family, const fd_t fd) {
   if (family == AF_INET) {
     struct sockaddr_in sa;
     socklen_t len = sizeof(sa);
-    return ::accept4(fd.value(), (struct sockaddr*)&sa, &len, SOCK_CLOEXEC);
+    return ::accept4(fd, (struct sockaddr*)&sa, &len, SOCK_CLOEXEC);
   } else {
     DCHECK_EQ(family, AF_INET6);
     struct sockaddr_in6 sa;
     socklen_t len = sizeof(sa);
-    return ::accept4(fd.value(), (struct sockaddr*)&sa, &len, SOCK_CLOEXEC);
+    return ::accept4(fd, (struct sockaddr*)&sa, &len, SOCK_CLOEXEC);
   }
 }
 }  // namespace
@@ -131,7 +131,7 @@ fd_t TcpSocket::Accept() const {
     }
   } else {
     const fd_t new_fd(ret);
-    DCHECK_GE(new_fd.value(), 0);
+    DCHECK_GE(new_fd, 0);
     LOG(INFO) << okMsg("accepted", new_fd);
     return new_fd;
   }
@@ -162,7 +162,7 @@ ssize_t TcpSocket::Send(const Byte* const buf, const size_t len) const {
   size_t sent = 0;
   ssize_t left = len;
   while (left > 0) {
-    const ssize_t bytes = ::send(fd_.value(), ptr, left, /*flags=*/0);
+    const ssize_t bytes = ::send(fd_, ptr, left, /*flags=*/0);
     if ABSL_PREDICT_TRUE (bytes > 0) {
       DCHECK_LE(bytes, left);
       ptr += bytes;
@@ -199,7 +199,7 @@ ssize_t TcpSocket::Recv(Byte* const buf, const size_t len) const {
   size_t rcvd = 0;
   ssize_t left = len;
   while (left > 0) {
-    const ssize_t bytes = ::recv(fd_.value(), ptr, left, /*flags=*/0);
+    const ssize_t bytes = ::recv(fd_, ptr, left, /*flags=*/0);
     if ABSL_PREDICT_TRUE (bytes > 0) {
       DCHECK_LE(bytes, left);
       ptr += bytes;
@@ -226,7 +226,7 @@ ssize_t TcpSocket::Recv(Byte* const buf, const size_t len) const {
 namespace {
 inline std::string ErrMsg(std::string_view what, fd_t fd, int last_errno) {
   return absl::StrFormat("tcp socket %s failed: fd=%d %s errno=%d (%s)", what,
-                         fd.value(), AddrPortPair(fd), last_errno,
+                         fd, AddrPortPair(fd), last_errno,
                          std::strerror(last_errno));
 }
 }  // namespace
@@ -243,7 +243,7 @@ inline std::string ErrMsg(std::string_view what, fd_t fd, int last_errno) {
   size_t sent = 0;
   ssize_t left = len;
   while (left > 0) {
-    const ssize_t bytes = ::send(fd.value(), ptr, left, /*flags=*/0);
+    const ssize_t bytes = ::send(fd, ptr, left, /*flags=*/0);
     if ABSL_PREDICT_TRUE (bytes > 0) {
       DCHECK_LE(bytes, left);
       ptr += bytes;
@@ -279,7 +279,7 @@ inline std::string ErrMsg(std::string_view what, fd_t fd, int last_errno) {
   size_t rcvd = 0;
   ssize_t left = len;
   while (left > 0) {
-    const ssize_t bytes = ::recv(fd.value(), ptr, left, /*flags=*/0);
+    const ssize_t bytes = ::recv(fd, ptr, left, /*flags=*/0);
     if ABSL_PREDICT_TRUE (bytes > 0) {
       DCHECK_LE(bytes, left);
       ptr += bytes;
@@ -315,7 +315,7 @@ inline std::string ErrMsg(std::string_view what, fd_t fd, int last_errno) {
   size_t sent = 0;
   int i = 0;
   while (i < n) {
-    const ssize_t bytes = ::writev(fd.value(), &vecs[i], n - i);
+    const ssize_t bytes = ::writev(fd, &vecs[i], n - i);
     if ABSL_PREDICT_TRUE (bytes > 0) {
       sent += bytes;
       size_t b = static_cast<size_t>(bytes);
@@ -360,7 +360,7 @@ inline std::string ErrMsg(std::string_view what, fd_t fd, int last_errno) {
   size_t rcvd = 0;
   int i = 0;
   while (i < n) {
-    const ssize_t bytes = ::readv(fd.value(), &vecs[i], n - i);
+    const ssize_t bytes = ::readv(fd, &vecs[i], n - i);
     if ABSL_PREDICT_TRUE (bytes > 0) {
       rcvd += bytes;
       size_t b = static_cast<size_t>(bytes);

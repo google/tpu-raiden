@@ -42,7 +42,7 @@ namespace peregrine::internal {
 
 std::unique_ptr<UdpSocket> UdpSocket::Create(int family) {
   const fd_t fd = CreateSocket(family, SOCK_DGRAM, /*blocking=*/true);
-  if ABSL_PREDICT_FALSE (fd.value() < 0) {
+  if ABSL_PREDICT_FALSE (fd < 0) {
     return nullptr;
   } else {
     LOG(INFO) << okMsg("created", fd);
@@ -56,14 +56,14 @@ UdpSocket::~UdpSocket() {
   DCHECK(!connected_);
   LOG(INFO) << okMsg("closing");
   DCHECK(invariant());
-  ::close(fd_.value());
+  ::close(fd_);
   fd_ = fd_t(-1);
 }
 
 void UdpSocket::Shutdown() {
   DCHECK(invariant());
   LOG(INFO) << okMsg("shutdown");
-  ::shutdown(fd_.value(), SHUT_RDWR);
+  ::shutdown(fd_, SHUT_RDWR);
   connected_ = false;
   DCHECK(invariant());
 }
@@ -99,7 +99,7 @@ ssize_t UdpSocket::Send(const Byte* const buf, const size_t len) const {
   DCHECK_LE(len, std::numeric_limits<ssize_t>::max());
   DCHECK(IsBlocking());
 
-  const ssize_t bytes = ::send(fd_.value(), buf, len, /*flags=*/0);
+  const ssize_t bytes = ::send(fd_, buf, len, /*flags=*/0);
   DCHECK(bytes == len || bytes < 0);
   if ABSL_PREDICT_TRUE (bytes == len) {
     VLOG(1) << ioMsg("send", bytes);
@@ -118,7 +118,7 @@ ssize_t UdpSocket::Recv(Byte* const buf, const size_t len) const {
   DCHECK_LE(len, std::numeric_limits<ssize_t>::max());
   DCHECK(IsBlocking());
 
-  const ssize_t bytes = ::recv(fd_.value(), buf, len, /*flags=*/0);
+  const ssize_t bytes = ::recv(fd_, buf, len, /*flags=*/0);
   DCHECK_LE(bytes, len);
   if ABSL_PREDICT_TRUE (bytes > 0) {
     VLOG(1) << ioMsg("recv", bytes);
@@ -144,7 +144,7 @@ ssize_t UdpSocket::SendV(const IoVec* const iov, const int n,
   DCHECK_EQ(TotalLength(iov, n), len);
   DCHECK(IsBlocking());
 
-  const ssize_t bytes = ::writev(fd_.value(), iov, n);
+  const ssize_t bytes = ::writev(fd_, iov, n);
   DCHECK(bytes == len || bytes < 0);
   if ABSL_PREDICT_TRUE (bytes == len) {
     VLOG(1) << ioMsg("writev", bytes);
@@ -165,7 +165,7 @@ ssize_t UdpSocket::RecvV(const IoVec* const iov, const int n,
   DCHECK_EQ(TotalLength(iov, n), len);
   DCHECK(IsBlocking());
 
-  const ssize_t bytes = ::readv(fd_.value(), iov, n);
+  const ssize_t bytes = ::readv(fd_, iov, n);
   DCHECK_LE(bytes, len);
   if ABSL_PREDICT_TRUE (bytes > 0) {
     VLOG(1) << ioMsg("readv", bytes);

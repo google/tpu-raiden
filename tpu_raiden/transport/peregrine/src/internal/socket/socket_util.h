@@ -35,11 +35,11 @@ fd_t CreateSocket(int family, int type, bool blocking);
 
 // Sets socket option. Returns true if successful, false otherwise.
 inline bool SetOption(fd_t fd, int opt, const void* val, socklen_t len) {
-  return ::setsockopt(fd.value(), SOL_SOCKET, opt, val, len) >= 0;
+  return ::setsockopt(fd, SOL_SOCKET, opt, val, len) >= 0;
 }
 
 // Returns true iff the socket `fd` is valid (not closed).
-inline bool IsValidSocket(fd_t fd) { return ::fcntl(fd.value(), F_GETFD) >= 0; }
+inline bool IsValidSocket(fd_t fd) { return ::fcntl(fd, F_GETFD) >= 0; }
 
 // Returns true iff the socket `fd` is in blocking mode.
 bool IsBlockingMode(fd_t fd);
@@ -95,22 +95,22 @@ std::string ToIpAddrPortString(const struct sockaddr_storage& ss);
 // Returns a success message for the last socket operation.
 inline std::string SuccessMsg(std::string_view who, std::string_view what,
                               fd_t fd) {
-  return absl::StrCat(who, " socket ", what, ", fd=", fd.value(), " ",
+  return absl::StrCat(who, " socket ", what, ", fd=", fd, " ",
                       AddrPortPair(fd));
 }
 
 // Returns a success message for the last socket send/recv call.
 inline std::string SuccessMsg(std::string_view who, std::string_view what,
                               fd_t fd, size_t bytes) {
-  return absl::StrCat(who, " socket ", what, ", fd=", fd.value(), " ",
-                      AddrPortPair(fd), " #bytes=", bytes);
+  return absl::StrCat(who, " socket ", what, ", fd=", fd, " ", AddrPortPair(fd),
+                      " #bytes=", bytes);
 }
 
 // Returns an error message for the last socket operation.
 inline std::string ErrorMsg(std::string_view who, std::string_view what,
                             fd_t fd, int last_errno) {
   return absl::StrFormat("%s socket %s failed: fd=%d %s errno=%d (%s)", who,
-                         what, fd.value(), AddrPortPair(fd), last_errno,
+                         what, fd, AddrPortPair(fd), last_errno,
                          std::strerror(last_errno));
 }
 

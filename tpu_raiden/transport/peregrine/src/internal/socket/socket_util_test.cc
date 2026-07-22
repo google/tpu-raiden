@@ -39,7 +39,7 @@ TEST(SocketUtilTest, Basic) {
       const std::string proto = type == SOCK_STREAM ? "tcp" : "udp";
       for (bool blocking : {true, false}) {
         const fd_t fd = CreateSocket(family, type, blocking);
-        ASSERT_GE(fd.value(), 0);
+        ASSERT_GE(fd, 0);
         ASSERT_TRUE(IsValidSocket(fd));
         LOG(INFO) << SuccessMsg(proto, "created", fd);
 
@@ -66,7 +66,7 @@ TEST(SocketUtilTest, Basic) {
         LOG(INFO) << SuccessMsg(proto, "close", fd);
 
         ASSERT_TRUE(IsValidSocket(fd));
-        ASSERT_EQ(::close(fd.value()), 0);
+        ASSERT_EQ(::close(fd), 0);
       }
     }
   }
