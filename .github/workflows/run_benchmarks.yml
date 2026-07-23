@@ -19,7 +19,7 @@ on:
 
   push:
     branches:
-      - haochengd-google-patch-5
+      - main
 
   pull_request:
   schedule:
@@ -29,7 +29,7 @@ permissions:
   contents: read
   pull-requests: write
 
-jobs: 
+jobs:
   run_benchmarks:
     name: Run TPU Raiden H2D D2H Benchmarks
     uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@affd28b492f67c242afa8b119e590b25816b7b88
@@ -40,3 +40,27 @@ jobs:
       publish_metrics: false
       pub_sub_gcp_project_id: "ml-oss-benchmarking-production"
       pub_sub_gcp_topic_id: "public-results-prod"
+      # Perf-floor opt-out. Resolved here (not in the benchmark) because the
+      # gate runs under `bazel run`, where cwd is the runfiles tree and, on
+      # pull_request, HEAD is GitHub's synthetic merge commit -- neither can
+      # see the CL description. Only the boolean is interpolated, never the
+      # PR body itself, to avoid script injection.
+      custom_env_vars: |
+        TPU_RAIDEN_PERF_GATE_OPT_OUT=${{ github.event_name == 'pull_request' && (contains(github.event.pull_request.body, '[skip-perf-gate]') || contains(github.event.pull_request.body, '[skip-h2d-d2h-gating]')) }}
+
+  # Stable-named check for Copybara to gate presubmit on. The reusable workflow
+  # emits per-matrix checks whose names change with the registry, and they are
+  # not created at all if matrix generation fails -- Copybara would wait forever.
+  # This job always runs and always reports.
+  benchmark_presubmit:
+    name: TPU Raiden benchmark presubmit
+    needs: run_benchmarks
+    if: ${{ always() }}
+    runs-on: linux-x86-n2-32
+    steps:
+      - name: Check benchmark result
+        env:
+          RESULT: ${{ needs.run_benchmarks.result }}
+        run: |
+          echo "result=${RESULT}"
+          test "${RESULT}" = "success"
