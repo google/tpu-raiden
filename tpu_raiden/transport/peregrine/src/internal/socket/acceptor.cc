@@ -61,10 +61,10 @@ void TcpAcceptor::Start(AcceptCallback accept) {
   while (!stop_.load(std::memory_order_relaxed)) {
     DCHECK(listener_->IsBlocking());
     const fd_t fd = listener_->Accept();
-    if ABSL_PREDICT_FALSE (fd < 0) {
-      if (IsShutdown(fd)) return;
+    if ABSL_PREDICT_FALSE (fd.value() < 0) {
+      if (IsShutdown(fd.value())) return;
       // TODO(yongx): Handle errors.
-      DCHECK_EQ(fd, -1);
+      DCHECK_EQ(fd.value(), -1);
       continue;
     }
     std::unique_ptr<TcpSocket> socket = TcpSocket::Create(fd, family);

@@ -73,7 +73,7 @@ TEST_F(TcpIPv4SocketTest, SmallMessage) {
     DCHECK(listener_->IsBlocking());
     const fd_t new_fd = listener_->Accept();
 
-    CHECK_GE(new_fd, 0);
+    CHECK_GE(new_fd.value(), 0);
     auto new_socket = TcpSocket::Create(new_fd, AF_INET);
     DCHECK(new_socket->IsBlocking());
     DCHECK(new_socket->IsConnected());
@@ -114,7 +114,7 @@ TEST_F(TcpIPv6SocketTest, BigData) {
     DCHECK(listener_->IsBlocking());
     const fd_t new_fd = listener_->Accept();
 
-    CHECK_GE(new_fd, 0);
+    CHECK_GE(new_fd.value(), 0);
     auto new_socket = TcpSocket::Create(new_fd, AF_INET6);
     DCHECK(new_socket->IsBlocking());
     DCHECK(new_socket->IsConnected());

@@ -19,6 +19,9 @@ package(default_visibility = ["//visibility:public"])
 cc_library(
     name = "types",
     hdrs = ["types.h"],
+    deps = [
+        "//tpu_raiden/transport/peregrine/src/internal/lib:strong_int",
+    ],
 )
 
 cc_library(

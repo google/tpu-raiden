@@ -49,7 +49,7 @@ fd_t CreateSocket(int family, int type, bool blocking) {
     return fd;
   }
   if (!SetNonBlockingMode(fd)) {
-    ::close(fd);  // release the socket resource.
+    ::close(fd.value());  // release the socket resource.
     return fd_t(-1);
   }
   DCHECK(IsNonBlockingMode(fd));
@@ -57,26 +57,26 @@ fd_t CreateSocket(int family, int type, bool blocking) {
 }
 
 bool IsBlockingMode(fd_t fd) {
-  const int flags = ::fcntl(fd, F_GETFL);
+  const int flags = ::fcntl(fd.value(), F_GETFL);
   return flags >= 0 && !(flags & O_NONBLOCK);
 }
 
 bool IsNonBlockingMode(fd_t fd) {
-  const int flags = ::fcntl(fd, F_GETFL);
+  const int flags = ::fcntl(fd.value(), F_GETFL);
   return flags >= 0 && (flags & O_NONBLOCK);
 }
 
 bool __set_blocking_mode(fd_t fd, bool blocking) {
-  const int flags = ::fcntl(fd, F_GETFL);
+  const int flags = ::fcntl(fd.value(), F_GETFL);
   if ABSL_PREDICT_FALSE (flags < 0) return false;
   const int cmd = blocking ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK);
-  return ::fcntl(fd, F_SETFL, cmd) >= 0;
+  return ::fcntl(fd.value(), F_SETFL, cmd) >= 0;
 }
 
 std::string SelfAddrPort(const fd_t fd) {
   struct sockaddr_storage ss;
   socklen_t len = sizeof(ss);
-  if (::getsockname(fd, (struct sockaddr*)&ss, &len) == 0) {
+  if (::getsockname(fd.value(), (struct sockaddr*)&ss, &len) == 0) {
     return ToIpAddrPortString(ss);
   } else {
     const auto last_errno = errno;
@@ -88,7 +88,7 @@ std::string SelfAddrPort(const fd_t fd) {
 std::string PeerAddrPort(const fd_t fd) {
   struct sockaddr_storage ss;
   socklen_t len = sizeof(ss);
-  if (::getpeername(fd, (struct sockaddr*)&ss, &len) == 0) {
+  if (::getpeername(fd.value(), (struct sockaddr*)&ss, &len) == 0) {
     return ToIpAddrPortString(ss);
   } else if (errno == ENOTCONN) {
     return "*";

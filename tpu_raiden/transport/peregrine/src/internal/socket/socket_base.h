@@ -81,11 +81,11 @@ class SocketBase {
   }
 
   // Destructor.
-  ~SocketBase() { DCHECK_LT(fd_, 0); }
+  ~SocketBase() { DCHECK_LT(fd_.value(), 0); }
 
   // Returns true iff the invariant holds.
   bool invariant() const {
-    return fd_ >= 0 && (family_ == AF_INET || family_ == AF_INET6) &&
+    return fd_.value() >= 0 && (family_ == AF_INET || family_ == AF_INET6) &&
            IsValidSocket(fd_);
   }
 

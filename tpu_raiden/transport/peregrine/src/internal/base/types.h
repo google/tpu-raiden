@@ -19,6 +19,8 @@
 
 #include <cstdint>
 
+#include "tpu_raiden/transport/peregrine/src/internal/lib/strong_int.h"
+
 namespace peregrine::internal {
 
 // `Byte` is an 8-bit unit of data.
@@ -34,7 +36,7 @@ using HashValue = uint64_t;
 using IoVec = ::iovec;
 
 // Socket file descriptor.
-using fd_t = int;
+DEFINE_STRONG_INT_TYPE(fd_t, int);
 
 }  // namespace peregrine::internal
 
