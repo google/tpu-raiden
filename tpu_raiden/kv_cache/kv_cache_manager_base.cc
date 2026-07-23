@@ -1826,16 +1826,6 @@ absl::Status KVCacheManagerBase::UnregisterActivePlan(uint64_t uuid) {
   return absl::OkStatus();
 }
 
-bool KVCacheManagerBase::IsDramDestination(uint64_t uuid) const {
-  absl::MutexLock l(plans_mu_);
-  auto it = active_plans_.find(uuid);
-  if (it != active_plans_.end()) {
-    return it->second.request.dst_mem_type() ==
-           tpu_raiden::rpc::MEMORY_TYPE_DRAM;
-  }
-  return false;
-}
-
 std::vector<tpu_raiden::transport::BlockChunk>
 KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
                                    absl::Span<const int64_t> block_ids,

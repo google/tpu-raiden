@@ -741,39 +741,6 @@ absl::Status KVCacheManagerWithTransfer::RegisterRecv(
   return absl::OkStatus();
 }
 
-KVCacheManagerWithTransfer::PoolReshardSkipSummary
-KVCacheManagerWithTransfer::BuildPoolReshardSkipSummary(
-    const rpc::StartTransferRequest& plan) const {
-  PoolReshardSkipSummary summary;
-  absl::flat_hash_set<size_t> transferred;
-  for (int32_t pool_idx : plan.transfer_pool_indices()) {
-    if (pool_idx < 0) continue;
-    if (pool(static_cast<size_t>(pool_idx)) != nullptr) {
-      transferred.insert(static_cast<size_t>(pool_idx));
-    }
-  }
-  summary.transferred_pools = static_cast<int>(transferred.size());
-  for (size_t pool_idx = 0; pool_idx < num_pools(); ++pool_idx) {
-    if (transferred.contains(pool_idx)) continue;
-    const kv_cache::PoolSpec* spec = pool(pool_idx);
-    if (spec == nullptr) continue;
-    ++summary.skipped_pool_counts[spec->tag];
-  }
-  return summary;
-}
-
-absl::StatusOr<KVCacheManagerWithTransfer::PoolReshardSkipSummary>
-KVCacheManagerWithTransfer::GetPoolReshardSkipSummary(
-    const std::string& req_id) {
-  absl::MutexLock lock(mu_);
-  auto it = pool_reshard_skip_summaries_.find(req_id);
-  if (it == pool_reshard_skip_summaries_.end()) {
-    return absl::NotFoundError(
-        absl::StrCat("No pool reshard summary for request ", req_id));
-  }
-  return it->second;
-}
-
 absl::Status KVCacheManagerWithTransfer::ValidatePoolReshardPlan(
     const rpc::StartTransferRequest& plan,
     absl::Span<const int64_t> local_block_ids, bool is_sender) {
@@ -988,8 +955,6 @@ absl::Status KVCacheManagerWithTransfer::PoolReshardPush(
           absl::StrCat("pool reshard send UUID already active: ", plan.uuid()));
     }
     active_pool_reshard_sends_[plan.uuid()] = state;
-    pool_reshard_skip_summaries_[plan.req_id()] =
-        BuildPoolReshardSkipSummary(plan);
   }
 
   for (int32_t encoded_pool_idx : plan.transfer_pool_indices()) {
@@ -1146,8 +1111,6 @@ absl::Status KVCacheManagerWithTransfer::PoolReshardRegisterRecv(
   {
     absl::MutexLock lock(mu_);
     active_recv_entries_[plan.uuid()] = std::move(recv_entry);
-    pool_reshard_skip_summaries_[plan.req_id()] =
-        BuildPoolReshardSkipSummary(plan);
   }
   return absl::OkStatus();
 }

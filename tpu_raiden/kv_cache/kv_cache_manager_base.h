@@ -357,8 +357,6 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   uint8_t* GetBlockHostPointer(size_t layer_idx, size_t shard_idx,
                                int block_id) override;
 
-  bool IsDramDestination(uint64_t uuid) const;
-
  protected:
   const PJRT_Api* c_api_ = nullptr;
   const PJRT_RawBuffer_Extension* extension_ = nullptr;

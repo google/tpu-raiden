@@ -67,17 +67,3 @@ cc_test(
     ],
 )
 
-cc_binary(
-    name = "h2h_strided_bench",
-    srcs = ["h2h_strided_bench.cc"],
-    copts = [
-        "-fno-strict-aliasing",
-        "-fexceptions",
-    ],
-    features = ["-use_header_modules"],
-    deps = [
-        "//tpu_raiden/transport/peregrine/src/api:socket_util",
-        "@com_google_absl//absl/status",
-        "@com_google_absl//absl/types:span",
-    ],
-)

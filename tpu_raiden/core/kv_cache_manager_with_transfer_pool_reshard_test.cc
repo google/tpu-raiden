@@ -61,7 +61,6 @@ class TestManager : public KVCacheManagerWithTransfer {
             /*local_control_port=*/-1, /*max_blocks=*/0, /*num_slots=*/0,
             timeout_s) {}
 
-  using KVCacheManagerWithTransfer::BuildPoolReshardSkipSummary;
   using KVCacheManagerWithTransfer::ValidatePoolReshardPlan;
 };
 
@@ -180,10 +179,6 @@ TEST(PoolReshardValidationTest, DeviceOnlyRejectionAtPublicEntryPoints) {
       manager.PoolReshardPush(plan, std::vector<int64_t>{0});
   EXPECT_EQ(push_status.code(), absl::StatusCode::kFailedPrecondition)
       << push_status.ToString();
-
-  // A refused arm publishes no native accounting.
-  EXPECT_EQ(manager.GetPoolReshardSkipSummary(plan.req_id()).status().code(),
-            absl::StatusCode::kNotFound);
 }
 
 TEST(PoolReshardValidationTest, RejectsMissingIdentityAndPoolFields) {
@@ -346,23 +341,6 @@ TEST(PoolReshardValidationTest, RejectsBlockIdsOutsideDeclaredPool) {
   ExpectInvalid(manager.ValidatePoolReshardPlan(plan, std::vector<int64_t>{},
                                                 /*is_sender=*/false),
                 "must not be empty");
-}
-
-TEST(PoolReshardSkipSummaryTest, CountsUnselectedPoolsByOpaqueTag) {
-  TestManager manager;
-  ASSERT_TRUE(manager
-                  .RegisterPools({DensePool("fa"), DensePool("fa"),
-                                  DensePool("gdn.conv"), DensePool("gdn.ssm")})
-                  .ok());
-  rpc::StartTransferRequest plan =
-      ValidPlan(/*uuid=*/1018, /*dtype_tags=*/{"bf16", "bf16", "bf16", "bf16"},
-                /*transferred_pools=*/{0, 1});
-
-  const auto summary = manager.BuildPoolReshardSkipSummary(plan);
-  EXPECT_EQ(summary.transferred_pools, 2);
-  ASSERT_EQ(summary.skipped_pool_counts.size(), 2u);
-  EXPECT_EQ(summary.skipped_pool_counts.at("gdn.conv"), 1);
-  EXPECT_EQ(summary.skipped_pool_counts.at("gdn.ssm"), 1);
 }
 
 }  // namespace
