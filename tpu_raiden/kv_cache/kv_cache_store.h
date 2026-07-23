@@ -198,6 +198,18 @@ class KVCacheStore {
 
   int GetPinCount(const std::string& hash) const;
 
+  // Source-side ReadRemote step 6a: verifies ALL block_hashes exist in the LRU
+  // with status HOST/HOST_AND_HBM and pins them (all-or-nothing: any miss rolls
+  // back and aborts). On success returns the authoritative source host_block_ids
+  // (re-derived from the LRU). NotFound => a hash is absent
+  // (BLOCK_HASH_NOT_FOUND); FailedPrecondition => present but not host-resident.
+  // Registered as a hook on the RaidenController so a peer's ReadRemote RPC can
+  // reach this store's LRU. Public for testability.
+  absl::StatusOr<std::vector<int32_t>> ValidateAndPinHostBlocks(
+      absl::Span<const std::string> block_hashes);
+  // Releases the pins taken by ValidateAndPinHostBlocks.
+  void UnpinHostBlocks(absl::Span<const std::string> block_hashes);
+
   size_t capacity() const;
   std::string raiden_controller_address() const;
 
@@ -255,6 +267,10 @@ class KVCacheStore {
   absl::StatusOr<size_t> RecoverFromRegistry();
 
  private:
+  // Registers ValidateAndPinHostBlocks/UnpinHostBlocks as ReadRemote step-6a
+  // hooks on raiden_controller_ (no-op if there is no controller).
+  void RegisterReadRemoteHooks();
+
   // Evicts host blocks by their logical block hashes.
   //
   // Checks if the blocks exist in the cache and are in HOST or HOST_AND_HBM

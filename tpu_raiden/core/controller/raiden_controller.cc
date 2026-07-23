@@ -161,6 +161,8 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
     raiden_controller_address_ = absl::StrCat(host, ":", actual_port);
   }
 
+  active_server_ = server_ptr;
+
   server_ptr->SetTransferBuffersCallback(
       [this](absl::Span<const Buffer> src_buffers,
              absl::Span<const Buffer> dst_buffers) {
@@ -547,10 +549,21 @@ absl::StatusOr<std::string> RaidenController::ResolvePeerController(
   return orchestrator_client_->ResolveController(peer_id);
 }
 
+void RaidenController::SetReadRemoteHooks(
+    core::controller::RaidenControllerServiceImpl::ValidateAndPinCallback
+        validate_and_pin,
+    core::controller::RaidenControllerServiceImpl::UnpinCallback unpin) {
+  if (active_server_ != nullptr) {
+    active_server_->SetReadRemoteHooks(std::move(validate_and_pin),
+                                       std::move(unpin));
+  }
+}
+
 tsl::Future<> RaidenController::ReadRemote(
     const kv_cache::RaidenId& src_raiden_id,
     const std::vector<int32_t>& src_host_block_ids,
-    const std::vector<int32_t>& dest_host_block_ids) {
+    const std::vector<int32_t>& dest_host_block_ids,
+    const std::vector<std::string>& block_hashes) {
   namespace cproto = ::tpu_raiden::tpu_raiden::proto;
 
   if (src_host_block_ids.size() != dest_host_block_ids.size()) {
@@ -648,6 +661,9 @@ tsl::Future<> RaidenController::ReadRemote(
   }
   for (int32_t id : dest_host_block_ids) {
     request.add_dest_host_block_ids(id);
+  }
+  for (const auto& hash : block_hashes) {
+    request.add_block_hashes(hash);
   }
   for (const auto& buf : src_buffers) {
     *request.add_src_buffers() = buf.ToProto();

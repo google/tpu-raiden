@@ -661,6 +661,106 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         expect_read_success=False,
     )
 
+  def test_remote_read_e2e_source_missing_block_fails(self):
+    # ReadRemote step 6a: the destination requests a block hash the SOURCE does
+    # not hold in host DRAM. The source controller's verify hook returns
+    # BLOCK_HASH_NOT_FOUND, the read fails, and the destination frees the local
+    # host block it allocated.
+    if len(self.devices) < 1:
+      self.skipTest("Requires at least 1 device")
+    os.environ["ENABLE_MULTI_NUMA"] = "0"
+
+    sharding = self.setup_sharding_for_devices(self.devices)
+    num_blocks = 2
+    shape = (num_blocks, 128, 8, 8, 128)
+    tpu_cache_a = jax.device_put(
+        jnp.array(np.zeros(shape, dtype=np.float32)), sharding
+    )
+    tpu_cache_b = jax.device_put(
+        jnp.array(np.zeros(shape, dtype=np.float32)), sharding
+    )
+    jax.block_until_ready(tpu_cache_a)
+    jax.block_until_ready(tpu_cache_b)
+
+    num_shards = len(self.devices)
+    shard_size_bytes = (128 * 8 * 8 * 128 * 4) // num_shards
+    controller_port_a = find_free_port()
+    controller_port_b = find_free_port()
+
+    # Source (Job A): running + registered, but never saves any block, so its
+    # LRU has no HOST-resident blocks.
+    rid_a = kv_cache_store.RaidenId("miss_job_a", "0", "cache_a", 0)
+    store_a = kv_cache_store.KVCacheStore(
+        capacity=4,
+        global_registry_address=f"localhost:{_registry_port}",
+        raiden_id=rid_a,
+        num_shards=num_shards,
+        shard_size_bytes=shard_size_bytes,
+        raiden_orchestrator_address=f"localhost:{_orchestrator_port}",
+        raiden_controller_address=f"localhost:{controller_port_a}",
+    )
+    manager_a = kv_cache_manager.KVCacheManager(
+        kv_caches=[tpu_cache_a],
+        local_control_port=0,
+        max_blocks=num_blocks,
+        num_slots=2,
+        unsafe_skip_buffer_lock=self.skip_lock,
+        raiden_worker_port=find_free_port(),
+        raiden_controller_address=f"localhost:{controller_port_a}",
+        worker_id="worker_a",
+    )
+
+    # Destination (Job B).
+    rid_b = kv_cache_store.RaidenId("miss_job_b", "0", "cache_b", 0)
+    store_b = kv_cache_store.KVCacheStore(
+        capacity=4,
+        global_registry_address=f"localhost:{_registry_port}",
+        raiden_id=rid_b,
+        num_shards=num_shards,
+        shard_size_bytes=shard_size_bytes,
+        raiden_orchestrator_address=f"localhost:{_orchestrator_port}",
+        raiden_controller_address=f"localhost:{controller_port_b}",
+    )
+    manager_b = kv_cache_manager.KVCacheManager(
+        kv_caches=[tpu_cache_b],
+        local_control_port=0,
+        max_blocks=num_blocks,
+        num_slots=2,
+        unsafe_skip_buffer_lock=self.skip_lock,
+        raiden_worker_port=find_free_port(),
+        raiden_controller_address=f"localhost:{controller_port_b}",
+        worker_id="worker_b",
+        host_blocks_to_allocate=4,
+    )
+    time.sleep(1)
+
+    # Job B manually records a REMOTE block pointing at Job A for a hash Job A
+    # never saved, then tries to read it.
+    ghost = [b"ghost_hash"]
+    slices = [
+        kv_cache_store.RaidenBlockID(
+            rid_a,
+            host_block_id=0,
+            device_block_id=-1,
+            status=kv_cache_store.BlockStatus.REMOTE,
+        )
+    ]
+    self.assertTrue(store_b.insert_and_lock(ghost, slices, on_host=True))
+
+    self.assertTrue(store_b.read_remote(ghost))
+
+    failed = False
+    for _ in range(500):
+      _, read_failed, _ = store_b.poll_remote_read_status()
+      if read_failed:
+        failed = True
+        break
+      time.sleep(0.01)
+    self.assertTrue(
+        failed, "expected ReadRemote to fail (source is missing the block)"
+    )
+    del manager_a, manager_b, store_a, store_b
+
 
 if __name__ == "__main__":
   absltest.main()

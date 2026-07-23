@@ -395,6 +395,71 @@ TEST(KVCacheStoreTest, GlobalLookupRegistryDown) {
   EXPECT_EQ((*lookup_res)[0].second.raiden_id.job_name, "local_job");
 }
 
+// --- ReadRemote step 6a: source-side ValidateAndPinHostBlocks ---
+
+TEST(KVCacheStoreTest, ValidateAndPinHostBlocksSuccessReDerivesIdsAndPins) {
+  KVCacheStore store(4);
+  RaidenId rid{"src_job", "0", "src_cache", 0};
+  std::vector<std::string> hashes = {"h0", "h1"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, /*host_block_id=*/5, /*device_block_id=*/-1,
+                    BlockStatus::HOST),
+      RaidenBlockID(rid, /*host_block_id=*/7, /*device_block_id=*/-1,
+                    BlockStatus::HOST_AND_HBM)};
+  ASSERT_TRUE(store.Insert(hashes, slices, /*on_host=*/true).first);
+
+  auto ids_or = store.ValidateAndPinHostBlocks(hashes);
+  ASSERT_TRUE(ids_or.ok()) << ids_or.status().message();
+  // Source ids are re-derived from the LRU (not from the request).
+  EXPECT_THAT(*ids_or, ::testing::ElementsAre(5, 7));
+  EXPECT_EQ(store.GetPinCount("h0"), 1);
+  EXPECT_EQ(store.GetPinCount("h1"), 1);
+
+  store.UnpinHostBlocks(hashes);
+  EXPECT_EQ(store.GetPinCount("h0"), 0);
+  EXPECT_EQ(store.GetPinCount("h1"), 0);
+}
+
+TEST(KVCacheStoreTest, ValidateAndPinHostBlocksMissingReturnsNotFound) {
+  KVCacheStore store(4);
+  auto ids_or =
+      store.ValidateAndPinHostBlocks(std::vector<std::string>{"missing"});
+  EXPECT_TRUE(absl::IsNotFound(ids_or.status())) << ids_or.status();
+}
+
+TEST(KVCacheStoreTest, ValidateAndPinHostBlocksWrongStatusFailedPrecondition) {
+  KVCacheStore store(4);
+  RaidenId rid{"src_job", "0", "src_cache", 0};
+  std::vector<std::string> hashes = {"remote_h"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, /*host_block_id=*/-1, /*device_block_id=*/-1,
+                    BlockStatus::REMOTE)};
+  ASSERT_TRUE(store.Insert(hashes, slices, /*on_host=*/false).first);
+
+  auto ids_or = store.ValidateAndPinHostBlocks(hashes);
+  EXPECT_TRUE(absl::IsFailedPrecondition(ids_or.status())) << ids_or.status();
+  EXPECT_EQ(store.GetPinCount("remote_h"), 0);
+}
+
+TEST(KVCacheStoreTest, ValidateAndPinHostBlocksAtomicRollbackOnPartialMiss) {
+  KVCacheStore store(4);
+  RaidenId rid{"src_job", "0", "src_cache", 0};
+  // "ok" is HOST, "bad" is REMOTE -> the whole batch must abort and "ok" must
+  // NOT remain pinned (all-or-nothing).
+  std::vector<std::string> hashes = {"ok", "bad"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, /*host_block_id=*/3, /*device_block_id=*/-1,
+                    BlockStatus::HOST),
+      RaidenBlockID(rid, /*host_block_id=*/-1, /*device_block_id=*/-1,
+                    BlockStatus::REMOTE)};
+  ASSERT_TRUE(store.Insert(hashes, slices, /*on_host=*/false).first);
+
+  auto ids_or = store.ValidateAndPinHostBlocks(hashes);
+  EXPECT_FALSE(ids_or.ok());
+  EXPECT_EQ(store.GetPinCount("ok"), 0);
+  EXPECT_EQ(store.GetPinCount("bad"), 0);
+}
+
 TEST(KVCacheStoreTest, LookupCapLimit) {
   KVCacheStore store(2);
 

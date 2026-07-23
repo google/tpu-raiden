@@ -54,6 +54,12 @@ class ControllerServer {
   void SetTransferBuffersCallback(
       RaidenControllerServiceImpl::TransferBuffersCallback cb);
 
+  // Registers the ReadRemote step-6a verify/pin and unpin hooks on the hosted
+  // service.
+  void SetReadRemoteHooks(
+      RaidenControllerServiceImpl::ValidateAndPinCallback validate_and_pin,
+      RaidenControllerServiceImpl::UnpinCallback unpin);
+
   std::shared_ptr<WorkerRegistry> GetWorkerRegistry() const;
 
   // Returns the port the gRPC server is listening on. Returns 0 if the server
