@@ -28,7 +28,13 @@ mkdir -p "${WORK_DIR}"
 mkdir -p "${BAZEL_OUTPUT_BASE}"
 
 echo "=== 0. Bootstrapping system packages ==="
-apt-get update && apt-get install -y python3-venv python3-pip curl git ca-certificates
+if ! command -v git &> /dev/null || ! command -v curl &> /dev/null || ! command -v python3 &> /dev/null; then
+  echo "Installing required system packages via apt-get..."
+  apt-get update
+  apt-get install -y --no-install-recommends python3 python3-venv python3-dev python3-pip curl git ca-certificates gnupg build-essential
+else
+  echo "Required system packages already installed. Skipping apt-get..."
+fi
 git config --global http.sslVerify false
 
 echo "=== 1. Navigating to checked-out repository ==="
@@ -36,30 +42,37 @@ echo "=== 1. Navigating to checked-out repository ==="
 export REPO_ROOT="${KOKORO_ARTIFACTS_DIR}/github/tpu-raiden"
 cd "${REPO_ROOT}"
 
-echo "=== 2. Setting up standalone Bazel environment ==="
+echo "=== 2. Setting up standalone Bazel environment and build configuration ==="
 # Read target Bazel version from metadata
 export BAZEL_VERSION="$(tr -d '\r\n ' < ".bazelversion")"
 echo "Target Bazel version: ${BAZEL_VERSION}"
 
 BAZEL_BIN="${WORK_DIR}/bazel-${BAZEL_VERSION}"
-echo "Downloading standalone Bazel ${BAZEL_VERSION}..."
-curl -Lo "${BAZEL_BIN}" "https://storage.googleapis.com/bazel/${BAZEL_VERSION}/release/bazel-${BAZEL_VERSION}-linux-x86_64"
-chmod +x "${BAZEL_BIN}"
+if [[ -x "${BAZEL_BIN}" ]] && "${BAZEL_BIN}" --version 2>&1 | grep -qF "${BAZEL_VERSION}"; then
+  echo "Found existing Bazel binary at ${BAZEL_BIN} matching version ${BAZEL_VERSION}."
+elif command -v bazel &> /dev/null && bazel --version 2>&1 | grep -qF "${BAZEL_VERSION}"; then
+  BAZEL_BIN="$(command -v bazel)"
+  echo "Found system Bazel at ${BAZEL_BIN} matching version ${BAZEL_VERSION}."
+elif which bazel &> /dev/null && "$(which bazel)" --version 2>&1 | grep -qF "${BAZEL_VERSION}"; then
+  BAZEL_BIN="$(which bazel)"
+  echo "Found system Bazel at ${BAZEL_BIN} matching version ${BAZEL_VERSION}."
+else
+  echo "Downloading standalone Bazel ${BAZEL_VERSION}..."
+  curl -Lo "${BAZEL_BIN}" "https://storage.googleapis.com/bazel/${BAZEL_VERSION}/release/bazel-${BAZEL_VERSION}-linux-x86_64"
+  chmod +x "${BAZEL_BIN}"
+fi
 
 "${BAZEL_BIN}" --version
+export BAZEL_BIN
 
-echo "=== 3. Setting up Python Virtual Environment ==="
-python3 -m venv "${WORK_DIR}/venv"
-source "${WORK_DIR}/venv/bin/activate"
-pip install --upgrade pip
-
-echo "=== 4. E2E Validation Build with Bazel Remote Cache ==="
 CACHE_BUCKET="tpu-raiden-bazel-cache"
 
 # Set up a dummy torch_tpu module to satisfy Bazel module resolution for JAX-only CI
 DUMMY_TORCH_TPU_MODULE="${WORK_DIR}/dummy_torch_tpu_module"
 mkdir -p "${DUMMY_TORCH_TPU_MODULE}"
 echo 'module(name = "torch_tpu", version = "0.1.1")' > "${DUMMY_TORCH_TPU_MODULE}/MODULE.bazel"
+mkdir -p "${DUMMY_TORCH_TPU_MODULE}/shims/torch"
+touch "${DUMMY_TORCH_TPU_MODULE}/shims/torch/BUILD"
 
 BAZEL_STARTUP_FLAGS=(
   "--output_base=${BAZEL_OUTPUT_BASE}"
@@ -83,8 +96,11 @@ else
 fi
 
 BAZEL_COMMAND_FLAGS=(
+  "--cxxopt=-std=c++20"
+  "--host_cxxopt=-std=c++20"
   "--remote_cache=https://storage.googleapis.com/${CACHE_BUCKET}"
   "--google_default_credentials"
+  "--remote_download_minimal"
   "--spawn_strategy=standalone"
   "--strategy=standalone"
   "--jobs=${BAZEL_JOBS}"
@@ -98,8 +114,49 @@ BAZEL_COMMAND_FLAGS=(
   "--experimental_repo_remote_exec"
 )
 
+echo "=== 3. Setting up Python Virtual Environment ==="
+if [[ ! -f "${WORK_DIR}/venv/bin/activate" ]] || ! "${WORK_DIR}/venv/bin/python3" --version 2>&1 | grep -q "Python 3.12"; then
+  echo "Creating Python 3.12 virtual environment at ${WORK_DIR}/venv..."
+  rm -rf "${WORK_DIR}/venv"
+
+  echo "Fetching hermetic Python 3.12 toolchain via Bazel..."
+  "${BAZEL_BIN}" "${BAZEL_STARTUP_FLAGS[@]}" fetch --repo_env=HERMETIC_PYTHON_VERSION="${HERMETIC_PYTHON_VERSION:-3.12}" "${BAZEL_COMMAND_FLAGS[@]}" "@rules_python//python:current_py_toolchain" //tpu_raiden/kv_cache:logical_block_manager_test || true
+
+  # 1. Primary deterministic lookup via Bazel cquery for current_py_toolchain
+  HERMETIC_PYTHON_BIN=$("${BAZEL_BIN}" "${BAZEL_STARTUP_FLAGS[@]}" cquery --repo_env=HERMETIC_PYTHON_VERSION="${HERMETIC_PYTHON_VERSION:-3.12}" "${BAZEL_COMMAND_FLAGS[@]}" --output=files "@rules_python//python:current_py_toolchain" 2>/dev/null | grep -E "/bin/python3$" | head -n 1 || true)
+  if [[ -n "${HERMETIC_PYTHON_BIN}" && ! "${HERMETIC_PYTHON_BIN}" =~ ^/ ]]; then
+    if [[ -x "${BAZEL_OUTPUT_BASE}/${HERMETIC_PYTHON_BIN}" ]]; then
+      HERMETIC_PYTHON_BIN="${BAZEL_OUTPUT_BASE}/${HERMETIC_PYTHON_BIN}"
+    else
+      HERMETIC_PYTHON_BIN="$(pwd)/${HERMETIC_PYTHON_BIN}"
+    fi
+  fi
+
+  # 2. Fallback lookup via find in BAZEL_OUTPUT_BASE (removing -type f to allow symlinks and adding || true for set -e -o pipefail)
+  if [[ -z "${HERMETIC_PYTHON_BIN}" ]] || [[ ! -x "${HERMETIC_PYTHON_BIN}" ]]; then
+    HERMETIC_PYTHON_BIN=$(find "${BAZEL_OUTPUT_BASE}/external" -path "*/bin/python3" -executable 2>/dev/null | grep -E "python_3_12|rules_python" | head -n 1 || true)
+  fi
+  if [[ -n "${HERMETIC_PYTHON_BIN}" ]] && "${HERMETIC_PYTHON_BIN}" --version &>/dev/null; then
+    echo "Found hermetic Python binary at: ${HERMETIC_PYTHON_BIN}"
+    "${HERMETIC_PYTHON_BIN}" -m venv "${WORK_DIR}/venv"
+  else
+    echo "WARNING: Hermetic Python binary not found or failed to execute (${HERMETIC_PYTHON_BIN:-none}). Falling back to system python3..."
+    python3 -m venv "${WORK_DIR}/venv"
+  fi
+else
+  echo "Reusing existing Python 3.12 virtual environment at ${WORK_DIR}/venv..."
+fi
+source "${WORK_DIR}/venv/bin/activate"
+
+if command -v pip &> /dev/null && pip --version &> /dev/null; then
+  echo "pip is already present and operational. Skipping upgrade."
+else
+  echo "Installing/upgrading pip..."
+  python3 -m pip install --upgrade pip
+fi
+
+echo "=== 4. E2E Validation Build with Bazel Remote Cache ==="
 echo "Running build.sh..."
-export BAZEL_BIN
 ./build.sh jax "${BAZEL_COMMAND_FLAGS[@]}"
 
 echo "=== 5. Running CPU-bound standard unit tests ==="
@@ -107,19 +164,13 @@ echo "=== 5. Running CPU-bound standard unit tests ==="
   "${BAZEL_COMMAND_FLAGS[@]}" \
   //tpu_raiden/kv_cache:logical_block_manager_test
 
-# Find Bazel's hermetic Python 3.12 interpreter to avoid ABI mismatches with host Python 3.10
-HERMETIC_PYTHON_BIN=$(find "${BAZEL_OUTPUT_BASE}/external" -path "*python_3_12*/bin/python3" | head -n 1)
-if [[ -z "${HERMETIC_PYTHON_BIN}" ]]; then
-  echo "Error: Could not find hermetic Python 3.12 interpreter under ${BAZEL_OUTPUT_BASE}/external" >&2
-  exit 1
-fi
-echo "Using hermetic Python interpreter: ${HERMETIC_PYTHON_BIN}"
-
 echo "=== 6. Verifying dynamic module binding linkage ==="
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/bazel-bin:${REPO_ROOT}/tpu_raiden/api/jax:${REPO_ROOT}/tpu_raiden/frameworks/jax:${PYTHONPATH}"
 
+echo "Using Python interpreter: $(which python3) ($(python3 --version))"
+
 echo "Verifying import of all modules in a single process (with JAX mocked)..."
-"${HERMETIC_PYTHON_BIN}" -c "
+python3 -c "
 import sys
 from unittest.mock import MagicMock
 sys.modules['jax'] = MagicMock()
