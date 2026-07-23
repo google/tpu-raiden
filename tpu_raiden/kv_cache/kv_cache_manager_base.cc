@@ -1007,12 +1007,13 @@ size_t KVCacheManagerBase::GetBlockArrayHostSize(size_t block_array_idx,
   const PoolSpec& pool = pools_[block_array_idx];
   const size_t storage_size = GetHostSize(pool.storage_index, shard_idx);
   const size_t base_offset = static_cast<size_t>(pool.base_offset_bytes);
-  const size_t array_bytes =
-      static_cast<size_t>(pool.num_blocks * pool.block_stride_bytes);
-  if (base_offset > storage_size || array_bytes > storage_size - base_offset) {
+  const int64_t storage_end = pool.storage_extent_end_bytes();
+  if (storage_end < pool.base_offset_bytes ||
+      static_cast<uint64_t>(storage_end) > storage_size ||
+      base_offset > storage_size) {
     return 0;
   }
-  return array_bytes;
+  return static_cast<size_t>(storage_end - pool.base_offset_bytes);
 }
 
 int64_t KVCacheManagerBase::LayerBlockByteSize(size_t layer_idx) const {
@@ -1170,12 +1171,11 @@ absl::Status KVCacheManagerBase::RegisterPools(std::vector<PoolSpec> pools) {
     // Host staging is sized at the uniform layer-0 slice by the
     // constructors, which can under-cover heterogeneous device storages;
     // grow this storage's mirror so pool refs and D2H/H2D can address the
-    // whole block array at storage offsets. Host-only managers keep their
-    // caller-sized buffers (the host buffer IS the storage there).
+    // last declared live region at storage offsets. Host-only managers keep
+    // their caller-sized buffers (the host buffer IS the storage there).
     if (device_backed) {
-      const int64_t array_end =
-          pool.base_offset_bytes + pool.num_blocks * pool.block_stride_bytes;
-      status = EnsureHostMirrorCovers(pool.storage_index, array_end);
+      status = EnsureHostMirrorCovers(pool.storage_index,
+                                      pool.storage_extent_end_bytes());
       if (!status.ok()) {
         return status;
       }
@@ -1217,9 +1217,13 @@ absl::StatusOr<PoolBlockRef> KVCacheManagerBase::GetPoolBlockRef(
   }
   const int64_t offset =
       pool.base_offset_bytes + block_id * pool.block_stride_bytes;
-  if (offset + pool.block_stride_bytes >
-      static_cast<int64_t>(shard_info.host_size)) {
-    return absl::OutOfRangeError("block range exceeds host buffer");
+  int64_t block_live_end = 0;
+  for (const RegionSpec& region : pool.regions) {
+    block_live_end = std::max(block_live_end, region.extent_end_bytes());
+  }
+  if (offset > static_cast<int64_t>(shard_info.host_size) ||
+      block_live_end > static_cast<int64_t>(shard_info.host_size) - offset) {
+    return absl::OutOfRangeError("block live regions exceed host buffer");
   }
   return PoolBlockRef{
       .ptr = const_cast<uint8_t*>(base) + offset,
@@ -1371,10 +1375,13 @@ absl::Status KVCacheManagerBase::ValidateBlockChunksInRegions(
   }
   const uintptr_t pool_base_addr = reinterpret_cast<uintptr_t>(base) +
                                    static_cast<size_t>(pool.base_offset_bytes);
-  const size_t pool_bytes = static_cast<size_t>(pool.num_blocks) * block_stride;
-  if (static_cast<size_t>(pool.base_offset_bytes) + pool_bytes > host_size) {
-    return absl::OutOfRangeError("pool exceeds host buffer");
+  const int64_t storage_end = pool.storage_extent_end_bytes();
+  if (storage_end < pool.base_offset_bytes ||
+      static_cast<uint64_t>(storage_end) > host_size) {
+    return absl::OutOfRangeError("pool live regions exceed host buffer");
   }
+  const size_t pool_bytes =
+      static_cast<size_t>(storage_end - pool.base_offset_bytes);
   for (const auto& chunk : chunks) {
     if (chunk.size == 0) continue;
     const uintptr_t chunk_addr = reinterpret_cast<uintptr_t>(chunk.ptr);
@@ -1875,6 +1882,26 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
   if (!has_plan || uuid == 0) {
     std::vector<tpu_raiden::transport::BlockChunk> chunks;
     size_t accumulated_bytes = 0;
+    if (explicit_pools_) {
+      const PoolSpec& pool = pools_[layer_idx];
+      for (int64_t block_id : block_ids) {
+        if (accumulated_bytes >= total_bytes) break;
+        auto extents_or = ComputePoolBlockCopyExtents(
+            pool, absl::MakeConstSpan(&block_id, 1));
+        if (!extents_or.ok()) return {};
+        uint8_t* storage_base = GetHostPointer(pool.storage_index, shard_idx);
+        if (storage_base == nullptr) return {};
+        for (const PoolBlockCopyExtent& extent : *extents_or) {
+          if (accumulated_bytes >= total_bytes) break;
+          const size_t size = std::min(static_cast<size_t>(extent.size_bytes),
+                                       total_bytes - accumulated_bytes);
+          chunks.push_back(
+              {.ptr = storage_base + extent.offset_bytes, .size = size});
+          accumulated_bytes += size;
+        }
+      }
+      return chunks;
+    }
     for (int64_t block_id : block_ids) {
       if (accumulated_bytes >= total_bytes) break;
       size_t size = std::min(block_size_bytes, total_bytes - accumulated_bytes);

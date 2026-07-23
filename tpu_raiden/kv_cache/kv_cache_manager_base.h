@@ -298,10 +298,10 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   std::vector<size_t> PoolIndicesWithTag(absl::string_view tag) const;
 
-  // Partial D2H of whole pool blocks: copies each block's
-  // [base_offset + id*stride, +stride) byte range from the pool's device
-  // storage to the same offsets in the host mirror. All shards unless
-  // shard_idx is given.
+  // Partial D2H of pool blocks: copies only the regions declared live inside
+  // each block from device storage to the same offsets in the host mirror.
+  // Padding and live regions belonging only to aliased sibling pools are
+  // preserved. All shards unless shard_idx is given.
   absl::StatusOr<raiden::PjRtCopyFuture> D2hPoolBlocks(
       size_t pool_idx, absl::Span<const int64_t> block_ids,
       std::optional<size_t> shard_idx = std::nullopt);
@@ -444,8 +444,8 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   void EnsureImplicitPools() const;
 
   // Grows a storage's host mirror so pool D2H/H2D and block refs can address
-  // the whole block array at storage offsets. Host staging is sized at the
-  // uniform layer-0 slice by the constructors, which can under-cover
+  // the last declared live byte at storage offsets. Host staging is sized at
+  // the uniform layer-0 slice by the constructors, which can under-cover
   // heterogeneous storages.
   absl::Status EnsureHostMirrorCovers(size_t storage_idx, int64_t needed_bytes);
 

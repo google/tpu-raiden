@@ -757,27 +757,74 @@ class RaidenControllerTest(absltest.TestCase):
     self.assertEmpty(client.calls)
     self.assertIsNone(controller.get_plan("request"))
 
-  def test_stage3_rejects_padded_decode_pool_with_gather_reference(self):
-    controller, client, src_units, dst_unit, dst_ids = self._stage3_fixture(
-        dst_padding=256
+  def test_stage3_accepts_padded_decode_pool(self):
+    _, _, _, _, _, plan = self._build_stage3_plan(dst_padding=256)
+    self.assertLen(plan.dst_expected_extent_bytes, 64)
+    self.assertTrue(
+        all(extent == 1024**2 for extent in plan.dst_expected_extent_bytes)
     )
-    future = controller.start_transfer(
+
+  def test_stage3_translates_compact_spans_across_decode_live_region_gaps(self):
+    controller, client, src_units, dst_unit, dst_ids = self._stage3_fixture()
+    # Strict aliased decode geometry: one 2,162,688-byte raw slot contains
+    # four 262,144-byte FA subpages separated by kernel padding.
+    for pool in controller._registered_pool_manifests[dst_unit]:
+      pool.block_stride_bytes = 2_162_688
+      del pool.regions[:]
+      for head_group in range(4):
+        pool.regions.add(
+            name=f"fa.{head_group}",
+            offset_bytes=head_group * 540_672,
+            stride_bytes=1_024,
+            unit_bytes=512,
+            num_units=256,
+            units_per_stride=2,
+        )
+
+    plan = controller._build_pool_reshard_plan(
         src_units=src_units,
         dst_units=[dst_unit],
+        src_metadata=controller._get_local_metadata(src_units),
+        dst_metadata=controller._get_local_metadata([dst_unit]),
         req_id="request",
-        dst_device_block_ids=dst_ids,
-        dst_mem_type=raiden_controller.RaidenMemoryType.HBM,
-        use_block_chunks=True,
         uuid=123,
-        num_tokens=65536,
+        dst_device_block_ids=dst_ids,
+        num_tokens=65_536,
         transfer_pool_tags=["fa"],
+        parallelism=8,
     )
-    with self.assertRaisesRegex(
-        ValueError, "RESHARD_STAGE3_P0_2_FP8_HEAD_GATHER.md"
-    ):
-      asyncio.run(future.wait())
-    self.assertEmpty(client.calls)
-    self.assertIsNone(controller.get_plan("request"))
+    entries = [
+        entry
+        for unit_schedules in plan.shard_push_schedules.values()
+        for entry in unit_schedules[0]
+    ]
+    self.assertLen(entries, 256)
+    self.assertEqual(
+        {entry[2] for entry in entries},
+        {0, 540_672, 1_081_344, 1_622_016},
+    )
+    self.assertTrue(all(entry[4] == 262_144 for entry in entries))
+    self.assertTrue(all(entry[7:] == (0, 0, 1) for entry in entries))
+
+    # The destination controller independently converts the physical
+    # schedules back to compact-live coverage and accepts the exact union.
+    receiver_future = controller.register_pool_reshard_receiver_plan(
+        src_units=plan.src_units,
+        dst_units=plan.dst_units,
+        req_id=plan.req_id,
+        uuid=plan.uuid,
+        shard_push_schedules=plan.shard_push_schedules,
+        expected_pushes_per_pool=plan.expected_pushes_per_pool,
+        transfer_pool_indices=plan.transfer_pool_indices,
+        pool_dtype_tags=plan.pool_dtype_tags,
+        dst_device_block_ids=plan.dst_device_block_ids,
+        src_schedule_keys=plan.src_schedule_keys,
+        parallelism=plan.parallelism,
+        num_tokens=plan.num_tokens,
+        dst_expected_extent_bytes=plan.dst_expected_extent_bytes,
+    )
+    asyncio.run(receiver_future.wait())
+    self.assertLen(client.calls, 1)
 
   def test_stage3_fa_filter_and_gdn_skip_accounting(self):
     _, _, _, _, _, plan = self._build_stage3_plan(include_gdn=True)

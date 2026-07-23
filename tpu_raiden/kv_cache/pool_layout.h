@@ -72,12 +72,18 @@ struct PoolSpec {
   std::vector<RegionSpec> regions;
   std::string dtype_tag;
 
+  // Absolute end of the last declared live byte in the backing storage.
+  // Inter-block and trailing padding are not part of the pool's addressable
+  // storage extent.
+  int64_t storage_extent_end_bytes() const;
+
   // Validates internal consistency and, when storage_bytes >= 0, that the
-  // whole block array fits inside the storage.
+  // live regions of every block fit inside the storage.
   absl::Status Validate(int64_t storage_bytes) const;
 };
 
-// Host-side reference to one block of one pool.
+// Host-side reference to one block of one pool. Only pool->regions are
+// addressable; the final block's trailing stride padding need not be backed.
 struct PoolBlockRef {
   uint8_t* ptr = nullptr;
   int64_t block_stride_bytes = 0;
@@ -98,8 +104,9 @@ struct PoolBlockCopyExtent {
   int64_t size_bytes = 0;
 };
 
-// Whole-block copy extents for the given block ids of one pool, with runs of
-// consecutive ids coalesced into single extents. Rejects out-of-range ids.
+// Declared-live copy extents for the given block ids of one pool. Adjacent or
+// overlapping regions are coalesced; padding is never returned. Rejects
+// out-of-range ids and overflowing byte geometry.
 absl::StatusOr<std::vector<PoolBlockCopyExtent>> ComputePoolBlockCopyExtents(
     const PoolSpec& pool, absl::Span<const int64_t> block_ids);
 

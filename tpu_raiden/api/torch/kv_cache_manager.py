@@ -289,7 +289,7 @@ class KVCacheManager:
   def get_block_ref(
       self, pool_idx: int, block_id: int, shard_idx: int = 0
   ) -> Dict[str, Any]:
-    """Returns a reference descriptor for one host-side pool block."""
+    """Returns a host block reference; only its declared regions are live."""
     return dict(
         self._impl.get_pool_block_ref_native(
             pool_idx=pool_idx, shard_idx=shard_idx, block_id=block_id
@@ -317,7 +317,7 @@ class KVCacheManager:
       block_ids: Sequence[int],
       shard_idx: Optional[int] = None,
   ) -> Any:
-    """Partial D2H of whole pool blocks into the host mirror."""
+    """Copies the selected blocks' declared-live regions to the host mirror."""
     return self._impl.d2h_pool_blocks(pool_idx, list(block_ids), shard_idx)
 
   def h2d_pool_blocks(
@@ -326,7 +326,7 @@ class KVCacheManager:
       block_ids: Sequence[int],
       shard_idx: Optional[int] = None,
   ) -> Any:
-    """Partial H2D of whole pool blocks from the host mirror."""
+    """Copies the selected blocks' declared-live regions to device storage."""
     return self._impl.h2d_pool_blocks(pool_idx, list(block_ids), shard_idx)
 
   def admission_summary(self) -> Dict[str, Any]:

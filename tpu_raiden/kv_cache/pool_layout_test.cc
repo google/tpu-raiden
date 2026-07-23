@@ -28,11 +28,13 @@
 
 #include "tpu_raiden/kv_cache/pool_layout.h"
 
+#include <cstdint>
 #include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
 
@@ -40,8 +42,8 @@ namespace tpu_raiden {
 namespace kv_cache {
 namespace {
 
+using ::absl_testing::StatusIs;
 using ::testing::HasSubstr;
-using ::testing::status::StatusIs;
 
 RegionSpec ValidRegion() {
   return RegionSpec{
@@ -78,7 +80,7 @@ TEST(RegionSpecTest, ExtentEndBytes) {
 
 TEST(RegionSpecTest, ValidateOk) {
   RegionSpec region = ValidRegion();
-  EXPECT_OK(region.Validate(1000));
+  ABSL_EXPECT_OK(region.Validate(1000));
 }
 
 TEST(RegionSpecTest, ValidateExceedsSlot) {
@@ -96,22 +98,48 @@ TEST(RegionSpecTest, ValidateNegativeOffset) {
 
 TEST(PoolSpecTest, ValidateOk) {
   PoolSpec pool = ValidPool();
-  EXPECT_OK(pool.Validate(10000));
+  ABSL_EXPECT_OK(pool.Validate(10000));
 }
 
 TEST(PoolSpecTest, ValidateExceedsStorage) {
   PoolSpec pool = ValidPool();
-  // 10 blocks * 1000 stride = 10000.  If storage is 9999, it fails.
-  EXPECT_THAT(pool.Validate(9999),
+  // The final live region ends at 9 * 1000 + 420. Trailing padding is not
+  // addressable and need not exist in the backing allocation.
+  EXPECT_EQ(pool.storage_extent_end_bytes(), 9420);
+  ABSL_EXPECT_OK(pool.Validate(9420));
+  EXPECT_THAT(pool.Validate(9419),
               StatusIs(absl::StatusCode::kInvalidArgument,
                        HasSubstr("exceeds storage bytes")));
+}
+
+TEST(PoolSpecTest, AdmitsGdnSsmWhenLastLiveByteFitsSharedRawStorage) {
+  // The logical trailing stride ends at 67,174,400, but the final 2 MiB live
+  // payload ends at 65,077,248 and fits in the shared 64 MiB raw allocation.
+  PoolSpec pool{
+      .tag = "gdn.ssm.g0",
+      .storage_index = 0,
+      .base_offset_bytes = 65536,
+      .block_stride_bytes = 4194304,
+      .num_blocks = 16,
+      .regions = {RegionSpec{
+          .name = "ssm",
+          .offset_bytes = 0,
+          .stride_bytes = 2097152,
+          .unit_bytes = 2097152,
+          .num_units = 1,
+          .units_per_stride = 1,
+      }},
+  };
+
+  EXPECT_EQ(pool.storage_extent_end_bytes(), 65077248);
+  ABSL_EXPECT_OK(pool.Validate(/*storage_bytes=*/67108864));
 }
 
 TEST(PoolSpecTest, ProtoRoundTrip) {
   PoolSpec pool = ValidPool();
   tpu_raiden::rpc::PoolSpecProto proto = ToProto(pool);
   auto roundtrip = PoolSpecFromProto(proto);
-  ASSERT_OK(roundtrip);
+  ABSL_ASSERT_OK(roundtrip);
   EXPECT_EQ(roundtrip->tag, pool.tag);
   EXPECT_EQ(roundtrip->storage_index, pool.storage_index);
   EXPECT_EQ(roundtrip->base_offset_bytes, pool.base_offset_bytes);
@@ -148,14 +176,81 @@ TEST(RegionsCoverRangeTest, Basic) {
 
 TEST(ComputePoolBlockCopyExtentsTest, Basic) {
   PoolSpec pool = ValidPool();
+  pool.regions = {RegionSpec{
+      .name = "payload",
+      .offset_bytes = 0,
+      .stride_bytes = 1000,
+      .unit_bytes = 1000,
+      .num_units = 1,
+      .units_per_stride = 1,
+  }};
   auto extents_or = ComputePoolBlockCopyExtents(pool, {0, 1, 3, 4, 5});
-  ASSERT_OK(extents_or);
+  ABSL_ASSERT_OK(extents_or);
   const auto& extents = *extents_or;
   ASSERT_EQ(extents.size(), 2);
   EXPECT_EQ(extents[0].offset_bytes, 0);
   EXPECT_EQ(extents[0].size_bytes, 2000);  // block 0 and 1 coalesced
   EXPECT_EQ(extents[1].offset_bytes, 3000);
   EXPECT_EQ(extents[1].size_bytes, 3000);  // block 3, 4, 5 coalesced
+}
+
+TEST(ComputePoolBlockCopyExtentsTest, OmitsInterRegionAndTrailingPadding) {
+  PoolSpec pool = ValidPool();
+  pool.base_offset_bytes = 8;
+  pool.block_stride_bytes = 128;
+  pool.num_blocks = 2;
+  pool.regions = {RegionSpec{
+      .name = "payload",
+      .offset_bytes = 0,
+      .stride_bytes = 32,
+      .unit_bytes = 16,
+      .num_units = 2,
+      .units_per_stride = 1,
+  }};
+
+  ABSL_ASSERT_OK(pool.Validate(/*storage_bytes=*/184));
+  auto extents_or = ComputePoolBlockCopyExtents(pool, {0, 1});
+  ABSL_ASSERT_OK(extents_or);
+  ASSERT_EQ(extents_or->size(), 4);
+  EXPECT_EQ((*extents_or)[0].offset_bytes, 8);
+  EXPECT_EQ((*extents_or)[0].size_bytes, 16);
+  EXPECT_EQ((*extents_or)[1].offset_bytes, 40);
+  EXPECT_EQ((*extents_or)[1].size_bytes, 16);
+  EXPECT_EQ((*extents_or)[2].offset_bytes, 136);
+  EXPECT_EQ((*extents_or)[2].size_bytes, 16);
+  EXPECT_EQ((*extents_or)[3].offset_bytes, 168);
+  EXPECT_EQ((*extents_or)[3].size_bytes, 16);
+}
+
+TEST(ComputePoolBlockCopyExtentsTest,
+     CoalescesTokenStridesButPreservesAliasedFaRegionGaps) {
+  PoolSpec pool{
+      .tag = "fa",
+      .storage_index = 0,
+      .base_offset_bytes = 0,
+      .block_stride_bytes = 2162688,
+      .num_blocks = 1,
+      .regions = {},
+  };
+  for (int64_t head_group = 0; head_group < 4; ++head_group) {
+    pool.regions.push_back(RegionSpec{
+        .name = "fa",
+        .offset_bytes = head_group * 540672,
+        .stride_bytes = 1024,
+        .unit_bytes = 512,
+        .num_units = 256,
+        .units_per_stride = 2,
+    });
+  }
+
+  ABSL_ASSERT_OK(pool.Validate(/*storage_bytes=*/1884160));
+  auto extents_or = ComputePoolBlockCopyExtents(pool, {0});
+  ABSL_ASSERT_OK(extents_or);
+  ASSERT_EQ(extents_or->size(), 4);
+  for (int64_t head_group = 0; head_group < 4; ++head_group) {
+    EXPECT_EQ((*extents_or)[head_group].offset_bytes, head_group * 540672);
+    EXPECT_EQ((*extents_or)[head_group].size_bytes, 262144);
+  }
 }
 
 }  // namespace

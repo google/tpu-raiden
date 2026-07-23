@@ -57,6 +57,7 @@ COMMON_REQUIRES = [
     "tpu-info==0.7.1",
     "numpy",
     "absl-py",
+    "protobuf>=6.33.5",
     "requests",
 ]
 
@@ -74,6 +75,7 @@ TORCH_REQUIRES = COMMON_REQUIRES + TORCH_REQ
 #
 COMMON_DEPS = [
     "//tpu_raiden/rpc:coordination_helper",
+    "//tpu_raiden/rpc:raiden_controller",
 ]
 
 # JAX native extensions + wrappers + public API. (TransferEngine was merged into

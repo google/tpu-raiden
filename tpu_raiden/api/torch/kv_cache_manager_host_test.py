@@ -36,6 +36,39 @@ from tpu_raiden.api.torch import pool_layout
 
 class KVCacheManagerHostTest(unittest.TestCase):
 
+  def test_aliased_pool_admits_last_live_region_without_trailing_padding(self):
+    manager = kv_cache_manager.KVCacheManager.create_host_only_for_testing(
+        num_layers=1,
+        num_shards=1,
+        slice_byte_size=128,
+        node_id=7,
+        host_blocks=2,
+        parallelism=1,
+    )
+    pool = pool_layout.PoolSpec(
+        tag="aliased",
+        storage_index=0,
+        base_offset_bytes=32,
+        block_stride_bytes=128,
+        num_blocks=2,
+        regions=(
+            pool_layout.RegionSpec(
+                name="payload",
+                offset_bytes=0,
+                stride_bytes=64,
+                unit_bytes=32,
+                num_units=2,
+            ),
+        ),
+    )
+
+    self.assertEqual(pool.storage_extent_end_bytes, 256)
+    pool.validate(storage_bytes=256)
+    self.assertTrue(manager.register_pools((pool,))["admitted"])
+    first = manager.get_block_ref(pool_idx=0, block_id=0)
+    last = manager.get_block_ref(pool_idx=0, block_id=1)
+    self.assertEqual(last["ptr"], first["ptr"] + 128)
+
   def test_register_refs_tags_and_admission_summary(self):
     manager = kv_cache_manager.KVCacheManager.create_host_only_for_testing(
         num_layers=1,

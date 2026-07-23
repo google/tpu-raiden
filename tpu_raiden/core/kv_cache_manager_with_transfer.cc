@@ -135,6 +135,22 @@ bool StridedSpanFitsBlock(int64_t offset, int64_t stride, int64_t size,
   return stride <= remaining / (count - 1);
 }
 
+bool StridedSpanFitsRegions(int64_t offset, int64_t stride, int64_t size,
+                            int64_t count, int64_t block_size,
+                            const std::vector<kv_cache::RegionSpec>& regions) {
+  if (!StridedSpanFitsBlock(offset, stride, size, count, block_size)) {
+    return false;
+  }
+  for (int64_t repeat = 0; repeat < count; ++repeat) {
+    const int64_t start = offset + repeat * stride;
+    if (!kv_cache::RegionsCoverRange(regions, static_cast<size_t>(start),
+                                     static_cast<size_t>(start + size))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 template <typename T>
 T ValueOrThrow(const std::string& context, absl::StatusOr<T> value_or) {
   if (!value_or.ok()) {
@@ -857,7 +873,7 @@ absl::Status KVCacheManagerWithTransfer::ValidatePoolReshardPlan(
           entry.dst_shard_idx() < 0 || entry.src_offset_bytes() < 0 ||
           entry.dst_offset_bytes() < 0 || entry.size_bytes() <= 0 ||
           entry.src_stride_bytes() < 0 || entry.dst_stride_bytes() < 0 ||
-          entry.count() <= 0) {
+          entry.count() <= 0 || entry.count() > (1 << 20)) {
         return absl::InvalidArgumentError(
             "reshard entry contains invalid ids, offsets, sizes, or strides");
       }
@@ -888,15 +904,15 @@ absl::Status KVCacheManagerWithTransfer::ValidatePoolReshardPlan(
       }
       for (size_t pool_idx : declared_pools) {
         const kv_cache::PoolSpec* spec = pool(pool_idx);
-        if (!StridedSpanFitsBlock(local_offset, local_stride,
-                                  entry.size_bytes(), entry.count(),
-                                  spec->block_stride_bytes)) {
+        if (!StridedSpanFitsRegions(local_offset, local_stride,
+                                    entry.size_bytes(), entry.count(),
+                                    spec->block_stride_bytes, spec->regions)) {
           return absl::InvalidArgumentError(absl::StrCat(
               is_sender ? "source" : "destination",
-              " span exceeds declared pool ", pool_idx, " block ", local_id,
-              ": offset=", local_offset, " stride=", local_stride,
-              " size=", entry.size_bytes(), " count=", entry.count(),
-              " block_stride_bytes=", spec->block_stride_bytes));
+              " span exceeds declared pool ", pool_idx,
+              " live regions in block ", local_id, ": offset=", local_offset,
+              " stride=", local_stride, " size=", entry.size_bytes(), " count=",
+              entry.count(), " block_stride_bytes=", spec->block_stride_bytes));
         }
       }
     }

@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -224,19 +225,42 @@ absl::Status PoolSpec::Validate(int64_t storage_bytes) const {
     }
   }
   if (storage_bytes >= 0) {
-    auto array_bytes = CheckedMul(num_blocks, block_stride_bytes,
-                                  absl::StrCat("pool ", tag, " array bytes"));
-    if (!array_bytes.ok()) return array_bytes.status();
-    auto array_end = CheckedAdd(base_offset_bytes, *array_bytes,
-                                absl::StrCat("pool ", tag, " array end"));
-    if (!array_end.ok()) return array_end.status();
-    if (*array_end > storage_bytes) {
+    const int64_t live_end = storage_extent_end_bytes();
+    if (live_end == std::numeric_limits<int64_t>::max()) {
       return absl::InvalidArgumentError(
-          absl::StrCat("pool ", tag, " exceeds storage bytes: end=", *array_end,
-                       " storage=", storage_bytes));
+          absl::StrCat("pool ", tag, " live storage extent overflows int64"));
+    }
+    if (live_end > storage_bytes) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "pool ", tag, " exceeds storage bytes (live regions): end=", live_end,
+          " storage=", storage_bytes));
     }
   }
   return absl::OkStatus();
+}
+
+int64_t PoolSpec::storage_extent_end_bytes() const {
+  if (base_offset_bytes < 0 || block_stride_bytes < 0 || num_blocks <= 0) {
+    return std::numeric_limits<int64_t>::max();
+  }
+  int64_t block_offset = 0;
+  if (MulWillOverflow(num_blocks - 1, block_stride_bytes)) {
+    return std::numeric_limits<int64_t>::max();
+  }
+  block_offset = (num_blocks - 1) * block_stride_bytes;
+  int64_t block_live_end = 0;
+  for (const RegionSpec& region : regions) {
+    block_live_end = std::max(block_live_end, region.extent_end_bytes());
+  }
+  if (base_offset_bytes > std::numeric_limits<int64_t>::max() - block_offset) {
+    return std::numeric_limits<int64_t>::max();
+  }
+  const int64_t last_block = base_offset_bytes + block_offset;
+  if (block_live_end < 0 ||
+      last_block > std::numeric_limits<int64_t>::max() - block_live_end) {
+    return std::numeric_limits<int64_t>::max();
+  }
+  return last_block + block_live_end;
 }
 
 bool RegionsCoverRange(const std::vector<RegionSpec>& regions, size_t start,
@@ -261,26 +285,103 @@ bool RegionsCoverRange(const std::vector<RegionSpec>& regions, size_t start,
 absl::StatusOr<std::vector<PoolBlockCopyExtent>> ComputePoolBlockCopyExtents(
     const PoolSpec& pool, absl::Span<const int64_t> block_ids) {
   std::vector<PoolBlockCopyExtent> extents;
-  extents.reserve(block_ids.size());
   for (int64_t block_id : block_ids) {
     if (block_id < 0 || block_id >= pool.num_blocks) {
       return absl::OutOfRangeError(absl::StrCat("pool ", pool.tag, " block_id ",
                                                 block_id, " out of range [0, ",
                                                 pool.num_blocks, ")"));
     }
-    const int64_t offset =
-        pool.base_offset_bytes + block_id * pool.block_stride_bytes;
-    if (!extents.empty() &&
-        extents.back().offset_bytes + extents.back().size_bytes == offset) {
-      extents.back().size_bytes += pool.block_stride_bytes;
-    } else {
-      extents.push_back(PoolBlockCopyExtent{
-          .offset_bytes = offset,
-          .size_bytes = pool.block_stride_bytes,
-      });
+    auto block_delta_or =
+        CheckedMul(block_id, pool.block_stride_bytes,
+                   absl::StrCat("pool ", pool.tag, " block offset"));
+    if (!block_delta_or.ok()) return block_delta_or.status();
+    const int64_t block_delta = *block_delta_or;
+    auto block_base_or =
+        CheckedAdd(pool.base_offset_bytes, block_delta,
+                   absl::StrCat("pool ", pool.tag, " block base"));
+    if (!block_base_or.ok()) return block_base_or.status();
+    const int64_t block_base = *block_base_or;
+    for (const RegionSpec& region : pool.regions) {
+      auto packed_bytes_or =
+          CheckedMul(region.unit_bytes, region.units_per_stride,
+                     absl::StrCat("pool ", pool.tag, " region ", region.name,
+                                  " packed bytes"));
+      if (!packed_bytes_or.ok()) return packed_bytes_or.status();
+      const int64_t packed_bytes = *packed_bytes_or;
+      if (region.num_units == 0 || packed_bytes == 0) continue;
+
+      // A tightly packed strided region is one contiguous DMA extent. Sparse
+      // regions retain one extent per unit so padding is never staged.
+      if (region.stride_bytes == packed_bytes) {
+        auto region_bytes_or =
+            CheckedMul(region.num_units, packed_bytes,
+                       absl::StrCat("pool ", pool.tag, " region ", region.name,
+                                    " live bytes"));
+        if (!region_bytes_or.ok()) return region_bytes_or.status();
+        const int64_t region_bytes = *region_bytes_or;
+        auto offset_or = CheckedAdd(block_base, region.offset_bytes,
+                                    absl::StrCat("pool ", pool.tag, " region ",
+                                                 region.name, " offset"));
+        if (!offset_or.ok()) return offset_or.status();
+        const int64_t offset = *offset_or;
+        extents.push_back({.offset_bytes = offset, .size_bytes = region_bytes});
+        continue;
+      }
+      for (int64_t unit = 0; unit < region.num_units; ++unit) {
+        auto unit_delta_or =
+            CheckedMul(unit, region.stride_bytes,
+                       absl::StrCat("pool ", pool.tag, " region ", region.name,
+                                    " unit offset"));
+        if (!unit_delta_or.ok()) return unit_delta_or.status();
+        const int64_t unit_delta = *unit_delta_or;
+        auto region_base_or = CheckedAdd(
+            block_base, region.offset_bytes,
+            absl::StrCat("pool ", pool.tag, " region ", region.name, " base"));
+        if (!region_base_or.ok()) return region_base_or.status();
+        const int64_t region_base = *region_base_or;
+        auto offset_or = CheckedAdd(region_base, unit_delta,
+                                    absl::StrCat("pool ", pool.tag, " region ",
+                                                 region.name, " unit address"));
+        if (!offset_or.ok()) return offset_or.status();
+        const int64_t offset = *offset_or;
+        extents.push_back({.offset_bytes = offset, .size_bytes = packed_bytes});
+      }
     }
   }
-  return extents;
+
+  std::sort(extents.begin(), extents.end(),
+            [](const PoolBlockCopyExtent& lhs, const PoolBlockCopyExtent& rhs) {
+              if (lhs.offset_bytes != rhs.offset_bytes) {
+                return lhs.offset_bytes < rhs.offset_bytes;
+              }
+              return lhs.size_bytes < rhs.size_bytes;
+            });
+  std::vector<PoolBlockCopyExtent> merged;
+  merged.reserve(extents.size());
+  for (const PoolBlockCopyExtent& extent : extents) {
+    auto extent_end_or =
+        CheckedAdd(extent.offset_bytes, extent.size_bytes,
+                   absl::StrCat("pool ", pool.tag, " copy extent end"));
+    if (!extent_end_or.ok()) return extent_end_or.status();
+    const int64_t extent_end = *extent_end_or;
+    if (merged.empty()) {
+      merged.push_back(extent);
+      continue;
+    }
+    PoolBlockCopyExtent& previous = merged.back();
+    auto previous_end_or = CheckedAdd(
+        previous.offset_bytes, previous.size_bytes,
+        absl::StrCat("pool ", pool.tag, " previous copy extent end"));
+    if (!previous_end_or.ok()) return previous_end_or.status();
+    const int64_t previous_end = *previous_end_or;
+    if (extent.offset_bytes > previous_end) {
+      merged.push_back(extent);
+      continue;
+    }
+    previous.size_bytes =
+        std::max(previous_end, extent_end) - previous.offset_bytes;
+  }
+  return merged;
 }
 
 tpu_raiden::rpc::RegionSpecProto ToProto(const RegionSpec& region) {

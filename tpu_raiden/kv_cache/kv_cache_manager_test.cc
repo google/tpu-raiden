@@ -431,6 +431,51 @@ TEST(KVCacheManagerTest,
                           [](uint8_t value) { return value == 0; }));
 }
 
+TEST(KVCacheManagerTest,
+     AliasedPoolTransportCopiesOnlyLiveRegionsAndPreservesPadding) {
+  TestKVCacheManager sender(/*num_layers=*/1, /*num_shards=*/1,
+                            /*slice_byte_size=*/128, /*host_blocks=*/2);
+  TestKVCacheManager receiver(/*num_layers=*/1, /*num_shards=*/1,
+                              /*slice_byte_size=*/128, /*host_blocks=*/2);
+  const std::vector<PoolSpec> pools = {
+      StridedPool("aliased", /*storage_index=*/0, /*base_offset=*/32,
+                  /*stride=*/128, /*num_blocks=*/2),
+  };
+  ASSERT_TRUE(sender.RegisterPools(pools).ok());
+  ASSERT_TRUE(receiver.RegisterPools(pools).ok());
+
+  uint8_t* src = sender.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
+  uint8_t* dst = receiver.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
+  ASSERT_NE(src, nullptr);
+  ASSERT_NE(dst, nullptr);
+  std::memset(src, 0xA5, 256);
+  std::memset(dst, 0xEE, 256);
+  std::memset(src + 32, 0x11, 32);
+  std::memset(src + 96, 0x22, 32);
+
+  // The logical two-stride array would end at byte 288. Its last live byte is
+  // exactly byte 256, so admission and the last block reference are valid.
+  auto last_ref = sender.GetPoolBlockRef(/*pool_idx=*/0, /*shard_idx=*/0,
+                                         /*block_id=*/1);
+  ASSERT_TRUE(last_ref.ok()) << last_ref.status().ToString();
+  EXPECT_EQ(last_ref->ptr, src + 160);
+  EXPECT_EQ(sender.GetBlockArrayHostSize(/*pool_idx=*/0, /*shard_idx=*/0), 224);
+
+  const std::optional<int> receiver_port = receiver.local_port();
+  ASSERT_TRUE(receiver_port.has_value());
+  auto pushed = sender.H2hWriteDirect(
+      absl::StrCat(receiver.local_ip(), ":", *receiver_port),
+      /*src_block_ids=*/{0}, /*dst_block_ids=*/{1}, /*uuid=*/0,
+      /*layer_idx=*/0);
+  ASSERT_TRUE(pushed.ok()) << pushed.status().ToString();
+  EXPECT_TRUE(std::all_of(dst + 160, dst + 192,
+                          [](uint8_t value) { return value == 0x11; }));
+  EXPECT_TRUE(std::all_of(dst + 192, dst + 224,
+                          [](uint8_t value) { return value == 0xEE; }));
+  EXPECT_TRUE(std::all_of(dst + 224, dst + 256,
+                          [](uint8_t value) { return value == 0x22; }));
+}
+
 TEST(KVCacheManagerTest, ExplicitPoolTransportEnumeratesAllPools) {
   TestKVCacheManager sender(/*num_layers=*/1, /*num_shards=*/1,
                             /*slice_byte_size=*/64, /*host_blocks=*/8);

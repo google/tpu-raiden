@@ -321,13 +321,6 @@ class RequestBlockCompletions:
   expires_at: float
 
 
-# Head-split (TP>1) destinations are fenced by the live==stride admission
-# check; this archived design is the recorded fallback for that day.
-_TP_GATHER_DESIGN = (
-    "archive/stage3-pre-controller/RESHARD_STAGE3_P0_2_FP8_HEAD_GATHER.md"
-)
-
-
 def _coerce_pool_spec_proto(pool: Any) -> Any:
   """Returns an owned PoolSpecProto from a proto, mapping, or dataclass."""
   result = raiden_service_pb2.PoolSpecProto()
@@ -363,12 +356,146 @@ def _coerce_pool_spec_proto(pool: Any) -> Any:
   return result
 
 
+_MAX_LIVE_SEGMENTS = 1 << 20
+
+
+def _pool_live_segments(pool: Any) -> tuple[tuple[int, int, int], ...]:
+  """Maps compact-live offsets to non-overlapping physical block segments.
+
+  Each result is ``(logical_offset, physical_offset, size)``. Logical offsets
+  concatenate regions in physical-address order. Adjacent physical regions
+  are coalesced; overlaps are rejected because they would make compact-live
+  byte declarations ambiguous.
+  """
+  block_stride = int(pool.block_stride_bytes)
+  if block_stride <= 0:
+    raise ValueError(f"Pool {pool.tag} has non-positive block stride")
+  intervals: list[tuple[int, int]] = []
+  for region in pool.regions:
+    offset = int(region.offset_bytes)
+    stride = int(region.stride_bytes)
+    unit_bytes = int(region.unit_bytes)
+    num_units = int(region.num_units)
+    units_per_stride = int(region.units_per_stride)
+    if min(offset, stride, unit_bytes, num_units) < 0:
+      raise ValueError(f"Pool {pool.tag} has negative region geometry")
+    if units_per_stride <= 0:
+      raise ValueError(f"Pool {pool.tag} has non-positive units_per_stride")
+    packed_bytes = unit_bytes * units_per_stride
+    if num_units and packed_bytes <= 0:
+      raise ValueError(f"Pool {pool.tag} has an empty live region")
+    if num_units > 1 and stride <= 0:
+      raise ValueError(f"Pool {pool.tag} has a non-positive region stride")
+    if num_units and stride < packed_bytes:
+      raise ValueError(
+          f"Pool {pool.tag} has overlapping units within one region"
+      )
+    if len(intervals) + num_units > _MAX_LIVE_SEGMENTS:
+      raise ValueError(
+          f"Pool {pool.tag} exceeds the live-region expansion bound"
+      )
+    if num_units and stride == packed_bytes:
+      end = offset + num_units * packed_bytes
+      if end > block_stride:
+        raise ValueError(
+            f"Pool {pool.tag} live region exceeds its block stride: "
+            f"end={end}, stride={block_stride}"
+        )
+      intervals.append((offset, end))
+      continue
+    for unit in range(num_units):
+      start = offset + unit * stride
+      end = start + packed_bytes
+      if end > block_stride:
+        raise ValueError(
+            f"Pool {pool.tag} live region exceeds its block stride: "
+            f"end={end}, stride={block_stride}"
+        )
+      intervals.append((start, end))
+
+  intervals.sort()
+  physical: list[list[int]] = []
+  for start, end in intervals:
+    if physical and start < physical[-1][1]:
+      raise ValueError(
+          f"Pool {pool.tag} has overlapping live regions at byte {start}"
+      )
+    if physical and start == physical[-1][1]:
+      physical[-1][1] = end
+    else:
+      physical.append([start, end])
+
+  logical_offset = 0
+  result = []
+  for start, end in physical:
+    size = end - start
+    result.append((logical_offset, start, size))
+    logical_offset += size
+  return tuple(result)
+
+
 def _pool_live_bytes(pool: Any) -> int:
-  return sum(
-      int(region.unit_bytes)
-      * int(region.num_units)
-      * int(region.units_per_stride)
-      for region in pool.regions
+  return sum(size for _, _, size in _pool_live_segments(pool))
+
+
+def _translate_live_copy(
+    src_segments: typing.Sequence[tuple[int, int, int]],
+    dst_segments: typing.Sequence[tuple[int, int, int]],
+    src_offset: int,
+    dst_offset: int,
+    size: int,
+) -> list[tuple[int, int, int]]:
+  """Splits one compact-live copy at source or destination physical gaps."""
+  if src_offset < 0 or dst_offset < 0 or size <= 0:
+    raise ValueError("Compact-live copy offsets/size are invalid")
+
+  def locate(
+      segments: typing.Sequence[tuple[int, int, int]], logical: int
+  ) -> tuple[int, int, int]:
+    for index, (logical_start, physical_start, segment_size) in enumerate(
+        segments
+    ):
+      if logical_start <= logical < logical_start + segment_size:
+        return (
+            index,
+            physical_start + logical - logical_start,
+            (logical_start + segment_size - logical),
+        )
+    raise ValueError(f"Compact-live offset {logical} is out of range")
+
+  chunks = []
+  remaining = size
+  src_cursor = src_offset
+  dst_cursor = dst_offset
+  while remaining:
+    _, src_physical, src_available = locate(src_segments, src_cursor)
+    _, dst_physical, dst_available = locate(dst_segments, dst_cursor)
+    chunk_size = min(remaining, src_available, dst_available)
+    chunks.append((src_physical, dst_physical, chunk_size))
+    if len(chunks) > _MAX_LIVE_SEGMENTS:
+      raise ValueError("Compact-live copy exceeds the segment expansion bound")
+    src_cursor += chunk_size
+    dst_cursor += chunk_size
+    remaining -= chunk_size
+  return chunks
+
+
+def _physical_live_range_to_logical(
+    segments: typing.Sequence[tuple[int, int, int]],
+    physical_offset: int,
+    size: int,
+) -> tuple[int, int]:
+  """Returns a compact-live interval for one gap-free physical range."""
+  if physical_offset < 0 or size <= 0:
+    raise ValueError("Physical live range offset/size is invalid")
+  physical_end = physical_offset + size
+  for logical_start, physical_start, segment_size in segments:
+    segment_end = physical_start + segment_size
+    if physical_start <= physical_offset and physical_end <= segment_end:
+      logical = logical_start + physical_offset - physical_start
+      return logical, logical + size
+  raise ValueError(
+      "Physical range crosses padding or lies outside declared live regions"
   )
 
 
@@ -1813,32 +1940,34 @@ class RaidenController:
 
     src_live_values = set()
     dst_live_values = set()
+    src_live_segment_maps = set()
+    dst_live_segment_maps = set()
     for pool_idx in selected_pool_indices:
       src_pool = reference_src.pools[pool_idx]
       dst_pool = dst_meta.pools[pool_idx]
-      src_live = _pool_live_bytes(src_pool)
-      dst_live = _pool_live_bytes(dst_pool)
-      if src_live != int(src_pool.block_stride_bytes):
-        raise ValueError(
-            "Raw pool transfer requires full-live source pools; "
-            f"pool {pool_idx} has live={src_live}, "
-            f"stride={src_pool.block_stride_bytes}. See {_TP_GATHER_DESIGN}"
-        )
-      if dst_live != int(dst_pool.block_stride_bytes):
-        raise ValueError(
-            "Raw pool transfer rejects TP>1 or padded destinations; "
-            f"pool {pool_idx} has live={dst_live}, "
-            f"stride={dst_pool.block_stride_bytes}. See {_TP_GATHER_DESIGN}"
-        )
+      src_segments = _pool_live_segments(src_pool)
+      dst_segments = _pool_live_segments(dst_pool)
+      src_live = sum(size for _, _, size in src_segments)
+      dst_live = sum(size for _, _, size in dst_segments)
+      if src_live <= 0 or dst_live <= 0:
+        raise ValueError(f"Pool {pool_idx} has no declared live bytes")
       src_live_values.add(src_live)
       dst_live_values.add(dst_live)
+      src_live_segment_maps.add(src_segments)
+      dst_live_segment_maps.add(dst_segments)
     if len(src_live_values) != 1 or len(dst_live_values) != 1:
       raise ValueError(
           f"Pools tagged {plan_tag} must share one geometry per side; "
           f"src={sorted(src_live_values)} dst={sorted(dst_live_values)}"
       )
+    if len(src_live_segment_maps) != 1 or len(dst_live_segment_maps) != 1:
+      raise ValueError(
+          f"Pools tagged {plan_tag} must share one live-region map per side"
+      )
     src_live = next(iter(src_live_values))
     dst_live = next(iter(dst_live_values))
+    src_live_segments = next(iter(src_live_segment_maps))
+    dst_live_segments = next(iter(dst_live_segment_maps))
 
     admitted_parallelism = {
         int(src_by_unit[unit].transfer_parallelism) for unit in src_units
@@ -1994,24 +2123,41 @@ class RaidenController:
     )
     schedules: dict[RaidenId, dict[int, list[tuple[Any, ...]]]] = {}
     transfer_pairs_per_sender: dict[RaidenId, set[tuple[str, int, int]]] = {}
+    emitted_chunks = 0
     for span, src_unit, entry in ordered_spans:
       src_block_id = entry.block_ids[span.src_block_ordinal]
       dst_block_id = dst_ids[span.dst_block_index]
-      schedule_entry = (
-          dst_peer,
-          0,
-          span.dst_offset_bytes,
-          span.src_offset_bytes,
-          span.size_bytes,
-          src_block_id,
-          dst_block_id,
-          span.src_stride_bytes,
-          span.dst_stride_bytes,
-          span.count,
-      )
-      schedules.setdefault(src_unit, {}).setdefault(0, []).append(
-          schedule_entry
-      )
+      for repeat in range(span.count):
+        src_offset = span.src_offset_bytes + repeat * span.src_stride_bytes
+        dst_offset = span.dst_offset_bytes + repeat * span.dst_stride_bytes
+        translated = _translate_live_copy(
+            src_live_segments,
+            dst_live_segments,
+            src_offset,
+            dst_offset,
+            span.size_bytes,
+        )
+        emitted_chunks += len(translated)
+        if emitted_chunks > _MAX_LIVE_SEGMENTS:
+          raise ValueError(
+              "Byte-span plan exceeds the live-region expansion bound"
+          )
+        for src_physical, dst_physical, chunk_size in translated:
+          schedule_entry = (
+              dst_peer,
+              0,
+              dst_physical,
+              src_physical,
+              chunk_size,
+              src_block_id,
+              dst_block_id,
+              0,
+              0,
+              1,
+          )
+          schedules.setdefault(src_unit, {}).setdefault(0, []).append(
+              schedule_entry
+          )
       transfer_pairs_per_sender.setdefault(src_unit, set()).add(
           (dst_peer, src_block_id, dst_block_id)
       )
@@ -2586,17 +2732,15 @@ class RaidenController:
           "Receiver requires explicit positive destination page geometry"
       )
     destination_page_bytes = set()
+    destination_live_segment_maps = set()
     for pool_idx in selected_indices:
       pool = dst_meta.pools[pool_idx]
-      live_bytes = _pool_live_bytes(pool)
-      if live_bytes != int(pool.block_stride_bytes):
-        raise ValueError(
-            "Receiver pool is not full-live; TP>1 destinations are "
-            f"unsupported. See {_TP_GATHER_DESIGN}"
-        )
+      live_segments = _pool_live_segments(pool)
+      live_bytes = sum(size for _, _, size in live_segments)
       if live_bytes <= 0:
         raise ValueError(f"Receiver pool {pool_idx} has invalid byte geometry")
       destination_page_bytes.add(live_bytes)
+      destination_live_segment_maps.add(live_segments)
       if any(block_id >= int(pool.num_blocks) for block_id in dst_ids):
         raise ValueError(
             f"Destination block id is out of range for pool {pool_idx}"
@@ -2605,7 +2749,12 @@ class RaidenController:
       raise ValueError(
           "All selected receiver pools must have one byte geometry"
       )
+    if len(destination_live_segment_maps) != 1:
+      raise ValueError(
+          "All selected receiver pools must have one live-region map"
+      )
     page_bytes = next(iter(destination_page_bytes))
+    destination_live_segments = next(iter(destination_live_segment_maps))
 
     # The declared extents are validated against the local manifest
     # before any entry is examined: prefix-shaped coverage (every block
@@ -2686,8 +2835,16 @@ class RaidenController:
         dst_page_ordinal = dst_page_ordinals[dst_block_id]
         expected_bytes = extents[dst_page_ordinal]
         for repeat in range(count):
-          repeat_start = dst_offset_bytes + repeat * dst_stride_bytes
-          repeat_end = repeat_start + size_bytes
+          physical_start = dst_offset_bytes + repeat * dst_stride_bytes
+          try:
+            repeat_start, repeat_end = _physical_live_range_to_logical(
+                destination_live_segments, physical_start, size_bytes
+            )
+          except ValueError as exc:
+            raise ValueError(
+                "Receiver entry exceeds its destination page or crosses "
+                "padding/live bounds"
+            ) from exc
           if repeat_end > expected_bytes:
             raise ValueError(
                 "Receiver entry exceeds its destination page or live tail"

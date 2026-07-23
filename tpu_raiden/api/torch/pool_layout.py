@@ -121,6 +121,18 @@ class PoolSpec:
   regions: tuple[RegionSpec, ...]
   dtype_tag: str = ""
 
+  @property
+  def storage_extent_end_bytes(self) -> int:
+    """Absolute end of the last declared live byte in the storage."""
+    block_live_end = max(
+        (region.extent_end_bytes for region in self.regions), default=0
+    )
+    return (
+        self.base_offset_bytes
+        + (self.num_blocks - 1) * self.block_stride_bytes
+        + block_live_end
+    )
+
   def validate(self, storage_bytes: int | None = None) -> None:
     if not self.tag:
       raise ValueError("pool tag must be non-empty")
@@ -137,10 +149,10 @@ class PoolSpec:
     for region in self.regions:
       region.validate(self.block_stride_bytes)
     if storage_bytes is not None:
-      end = self.base_offset_bytes + self.num_blocks * self.block_stride_bytes
+      end = self.storage_extent_end_bytes
       if end > storage_bytes:
         raise ValueError(
-            f"pool {self.tag} exceeds storage bytes: "
+            f"pool {self.tag} exceeds storage bytes (live regions): "
             f"end={end} storage={storage_bytes}"
         )
 

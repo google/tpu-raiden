@@ -294,6 +294,43 @@ TEST(PoolReshardValidationTest, RejectsOverflowingSenderSpan) {
                 "source span exceeds declared pool 0");
 }
 
+TEST(PoolReshardValidationTest,
+     RejectsSenderSpanBetweenPackedTokenRegionsInAliasedStorage) {
+  TestManager manager;
+  kv_cache::PoolSpec pool = DensePool("fa");
+  pool.regions = {
+      kv_cache::RegionSpec{
+          .name = "head_group_0",
+          .offset_bytes = 0,
+          .stride_bytes = 8,
+          .unit_bytes = 4,
+          .num_units = 4,
+          .units_per_stride = 2,
+      },
+      kv_cache::RegionSpec{
+          .name = "head_group_1",
+          .offset_bytes = 64,
+          .stride_bytes = 8,
+          .unit_bytes = 4,
+          .num_units = 4,
+          .units_per_stride = 2,
+      },
+  };
+  ASSERT_TRUE(manager.RegisterPools({pool}).ok());
+  rpc::StartTransferRequest plan = ValidPlan(/*uuid=*/1019);
+  EXPECT_TRUE(manager
+                  .ValidatePoolReshardPlan(plan, std::vector<int64_t>{0},
+                                           /*is_sender=*/true)
+                  .ok());
+  auto* entry = plan.mutable_shard_push_schedules()->at(0).mutable_entries(0);
+  entry->set_src_offset_bytes(32);
+  entry->set_size_bytes(16);
+
+  ExpectInvalid(manager.ValidatePoolReshardPlan(plan, std::vector<int64_t>{0},
+                                                /*is_sender=*/true),
+                "source span exceeds declared pool 0 live regions");
+}
+
 TEST(PoolReshardValidationTest, RejectsBlockIdsOutsideDeclaredPool) {
   TestManager manager;
   ASSERT_TRUE(manager.RegisterPools({DensePool("fa")}).ok());
