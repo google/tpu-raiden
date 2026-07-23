@@ -124,6 +124,25 @@ TorchKVCacheManager::TorchKVCacheManager(
       // buffers; they pin the materialized device buffers for our lifetime.
       buffer_refs_(std::move(unpacked.refs)) {}
 
+absl::Status TorchKVCacheManager::RefreshDeviceBuffers(
+    const std::vector<at::Tensor>& kv_caches) {
+  const std::vector<at::Tensor>& source =
+      kv_caches.empty() ? kv_caches_ : kv_caches;
+  if (source.empty()) {
+    return absl::FailedPreconditionError(
+        "no kv cache tensors to refresh from (offload-path manager and no "
+        "explicit tensors supplied)");
+  }
+  UnpackedLayers unpacked = UnpackLayers(SingleShardLayers(source));
+  RETURN_IF_ERROR(RefreshDeviceBufferHolds(unpacked.buffers));
+  if (!kv_caches.empty()) {
+    kv_caches_ = kv_caches;
+  }
+  // Old refs release their pins only after the new holds are in place.
+  buffer_refs_ = std::move(unpacked.refs);
+  return absl::OkStatus();
+}
+
 TorchKVCacheManager::TorchKVCacheManager(
     const std::vector<at::Tensor>& kv_caches, int64_t node_id,
     int64_t local_control_port, int64_t max_blocks, int64_t num_slots,

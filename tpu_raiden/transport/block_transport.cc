@@ -24,7 +24,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <future>  // NOLINT
 #include <limits>
@@ -76,6 +78,49 @@ std::vector<struct iovec> ToIovec(const std::vector<BlockChunk>& chunks) {
     iov.push_back({.iov_base = chunk.ptr, .iov_len = chunk.size});
   }
   return iov;
+}
+
+// Debug-only: absl log output does not reach the serving logs in this stack,
+// so the chunk-wire trace appends straight to the file named by
+// RAIDEN_CHUNKWIRE_LOG (absent/empty = disabled).
+bool ChunkWireLogEnabled() {
+  static const bool enabled = []() {
+    const char* v = getenv("RAIDEN_CHUNKWIRE_LOG");
+    return v != nullptr && v[0] != '\0';
+  }();
+  return enabled;
+}
+
+void ChunkWireLog(const std::string& line) {
+  static absl::Mutex* mu = new absl::Mutex;
+  const char* path = getenv("RAIDEN_CHUNKWIRE_LOG");
+  if (path == nullptr || path[0] == '\0') return;
+  absl::MutexLock l(mu);
+  std::ofstream f(path, std::ios::app);
+  f << "t=" << absl::ToUnixMicros(absl::Now()) << " " << line << "\n";
+}
+
+// Debug-only (RAIDEN_LOG_CHUNK_WRITES=1): renders each chunk's offset
+// relative to the pool's host mirror base plus a full-content FNV-1a hash,
+// so sender and receiver lines can be diffed to localize wire corruption.
+std::string DescribeChunks(BlockTransportDelegate* delegate, size_t l,
+                           size_t sh, const std::vector<BlockChunk>& chunks) {
+  uint8_t* base = delegate->GetBlockArrayHostPointer(l, sh);
+  const uintptr_t base_addr = reinterpret_cast<uintptr_t>(base);
+  std::string out;
+  for (const auto& chunk : chunks) {
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(chunk.ptr);
+    uint64_t h = 1469598103934665603ull;
+    const uint8_t* p = static_cast<const uint8_t*>(chunk.ptr);
+    for (size_t i = 0; i < chunk.size; ++i) {
+      h ^= p[i];
+      h *= 1099511628211ull;
+    }
+    absl::StrAppend(&out, " [off=",
+                    base != nullptr ? (addr - base_addr) : addr,
+                    " size=", chunk.size, " fnv=", absl::Hex(h), "]");
+  }
+  return out;
 }
 
 absl::Status ValidateChunks(BlockTransportDelegate* delegate, size_t l,
@@ -353,6 +398,14 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
         }
 
         RETURN_IF_ERROR(ReadVExact(client_fd, ToIovec(chunks)));
+        if (ChunkWireLogEnabled()) {
+          ChunkWireLog(absl::StrCat(
+              "CHUNKWIRE recv pid=", getpid(),
+              " node=", block_delegate_->node_id(), " uuid=", header.uuid,
+              " pool=", l, " sh=", sh, " src=", src_bid, " dst=", dst_id,
+              " total=", sender_size,
+              DescribeChunks(block_delegate_, l, sh, chunks)));
+        }
         return absl::OkStatus();
       }));
 
@@ -892,6 +945,14 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
           total_size += chunk.size;
         }
 
+        if (ChunkWireLogEnabled()) {
+          ChunkWireLog(absl::StrCat(
+              "CHUNKWIRE send pid=", getpid(),
+              " node=", block_delegate_->node_id(), " uuid=", uuid,
+              " pool=", l, " sh=", sh, " src=", src_id, " dst=", dst_id_val,
+              " total=", total_size,
+              DescribeChunks(block_delegate_, l, sh, chunks)));
+        }
         RETURN_IF_ERROR(WriteExact(fd, &total_size, sizeof(total_size)));
         return WriteVExact(fd, ToIovec(chunks));
       });

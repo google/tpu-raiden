@@ -305,6 +305,16 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       size_t pool_idx, absl::Span<const int64_t> block_ids,
       std::optional<size_t> shard_idx = std::nullopt);
 
+  // Re-acquire the device buffer holds from `layer_buffers`, replacing the
+  // holds captured at construction. Required after the framework swaps a
+  // storage tensor's physical buffer (functionalized copy_ writeback):
+  // without this every D2H/H2D keeps addressing the orphaned pre-swap
+  // buffer. Host mirrors are untouched. Shapes/sizes must match the
+  // originals. Callers must ensure no transfer is concurrently reading the
+  // holds being replaced.
+  absl::Status RefreshDeviceBufferHolds(
+      const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers);
+
   bool use_block_chunks(uint64_t uuid) const override;
 
   absl::StatusOr<std::optional<tpu_raiden::transport::PoolPushProgressSpec>>
@@ -356,6 +366,9 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
     size_t physical_size = 0;
   };
   std::vector<LayerDeviceInfo> buffer_holds_;
+  // Retained from the device-backed constructor so device buffer holds can
+  // be re-acquired with the same locking mode after a physical-buffer swap.
+  bool unsafe_skip_buffer_lock_ = false;
   // Pool table. Explicit after RegisterPools; otherwise lazily materialized
   // implicit pools (one per storage, tag "opaque"). pools_mu_ guards the lazy
   // build and replacement; hot transfer paths read the table without the lock

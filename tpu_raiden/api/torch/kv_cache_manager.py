@@ -282,6 +282,20 @@ class KVCacheManager:
     """Returns one pool's descriptor as a dict."""
     return dict(self._impl.pool_spec_native(pool_idx))
 
+  def refresh_device_buffers(
+      self, kv_caches: Optional[Sequence[Any]] = None) -> None:
+    """Re-acquires device buffer holds for the wrapped kv caches.
+
+    The framework's functionalized ``copy_`` writeback can swap (or rebind)
+    a kv-cache tensor's physical buffer; the holds captured at construction
+    then address orphaned memory. Pass the runner's CURRENT tensor list —
+    rebinding replaces the tensor objects, so the handles retained at
+    construction can be stale too. Call before staging device bytes for a
+    transfer so D2H/H2D operate on the live buffers.
+    """
+    self._impl.refresh_device_buffers(
+        list(kv_caches) if kv_caches else [])
+
   def d2h_pool_blocks(
       self,
       pool_idx: int,

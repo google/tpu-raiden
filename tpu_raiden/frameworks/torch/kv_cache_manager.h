@@ -76,6 +76,17 @@ class TorchKVCacheManager : public KVCacheManagerWithTransfer {
 
   const std::vector<at::Tensor>& kv_caches() const { return kv_caches_; }
 
+  // Re-derive the device buffers and replace the holds captured at
+  // construction. The framework's functionalized copy_ writeback can swap
+  // (or rebind) a kv-cache tensor's physical buffer, after which the
+  // original holds address orphaned memory. When `kv_caches` is non-empty
+  // it supplies the CURRENT tensor handles (callers should pass the
+  // runner's live list — rebinding replaces the tensor objects themselves,
+  // so the handles retained at construction can be stale too) and replaces
+  // the retained list; when empty the retained handles are re-unpacked.
+  absl::Status RefreshDeviceBuffers(
+      const std::vector<at::Tensor>& kv_caches = {});
+
   std::optional<int> listener_port() const;
   bool is_listener_active() const;
 
@@ -159,6 +170,11 @@ class KVCacheManager {
 
   const std::vector<at::Tensor>& kv_caches() const {
     return torch_manager_->kv_caches();
+  }
+
+  absl::Status RefreshDeviceBuffers(
+      const std::vector<at::Tensor>& kv_caches = {}) {
+    return torch_manager_->RefreshDeviceBuffers(kv_caches);
   }
 
   std::optional<int> listener_port() const {

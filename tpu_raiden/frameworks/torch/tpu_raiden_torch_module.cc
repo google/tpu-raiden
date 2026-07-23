@@ -155,6 +155,18 @@ NB_MODULE(_tpu_raiden_torch, m) {
       .def("node_id", &KVCacheManager::node_id)
       .def("get_raiden_worker_port", &KVCacheManager::GetRaidenWorkerPort)
       .def(
+          "refresh_device_buffers",
+          [](KVCacheManager& self, std::vector<at::Tensor> kv_caches) {
+            absl::Status status = self.RefreshDeviceBuffers(kv_caches);
+            if (!status.ok()) {
+              throw std::runtime_error(
+                  absl::StrCat("KVCacheManager refresh_device_buffers "
+                               "failed: ",
+                               status.message()));
+            }
+          },
+          nb::arg("kv_caches") = std::vector<at::Tensor>{})
+      .def(
           "register_active_plan",
           [](KVCacheManager& self, uint64_t uuid,
              const nb::bytes& request_bytes, bool is_sender) {

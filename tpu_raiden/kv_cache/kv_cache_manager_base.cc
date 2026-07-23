@@ -243,6 +243,7 @@ KVCacheManagerBase::KVCacheManagerBase(
     layers_.push_back(std::move(layer_info));
     buffer_holds_.push_back(std::move(device_info));
   }
+  unsafe_skip_buffer_lock_ = unsafe_skip_buffer_lock;
 
   constexpr size_t kPoolSize = 4;
   dma_pool_ = std::make_unique<NumaThreadPool>(kPoolSize);
@@ -1308,6 +1309,45 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::CopyPoolBlocks(
     }
   }
   return raiden::JoinPjRtCopyFutures(absl::MakeSpan(shard_futures));
+}
+
+absl::Status KVCacheManagerBase::RefreshDeviceBufferHolds(
+    const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers) {
+  if (layer_buffers.size() != buffer_holds_.size()) {
+    return absl::InvalidArgumentError(absl::StrCat(
+        "refresh layer count mismatch: got ", layer_buffers.size(),
+        ", have ", buffer_holds_.size()));
+  }
+  for (size_t layer_idx = 0; layer_idx < layer_buffers.size(); ++layer_idx) {
+    const auto& dst_buffers = layer_buffers[layer_idx];
+    auto& device_info = buffer_holds_[layer_idx];
+    if (dst_buffers.size() != device_info.holds.size()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("refresh shard count mismatch at layer ", layer_idx));
+    }
+    for (size_t sh = 0; sh < dst_buffers.size(); ++sh) {
+      xla::PjRtBuffer* dst_buffer = dst_buffers[sh];
+      if (dst_buffer == nullptr) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("refresh received a null buffer at layer ",
+                         layer_idx, " shard ", sh));
+      }
+      const size_t device_size =
+          dst_buffer->GetOnDeviceSizeInBytes().value_or(0);
+      if (device_size != layers_[layer_idx].shards[sh].device_size) {
+        return absl::FailedPreconditionError(absl::StrCat(
+            "refresh buffer size mismatch at layer ", layer_idx, " shard ",
+            sh, ": got ", device_size, ", have ",
+            layers_[layer_idx].shards[sh].device_size));
+      }
+      ASSIGN_OR_RETURN(raiden::BufferHoldAndAlias hold,
+                       raiden::BufferHoldAndAlias::Acquire(
+                           dst_buffer, c_api_, extension_,
+                           unsafe_skip_buffer_lock_));
+      device_info.holds[sh] = std::move(hold);
+    }
+  }
+  return absl::OkStatus();
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hPoolBlocks(

@@ -48,6 +48,7 @@
 #include <cstring>
 #include <deque>
 #include <exception>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -91,6 +92,18 @@
 
 namespace tpu_raiden {
 namespace {
+
+// Debug-only mirror of block_transport's chunk-wire trace (same env, same
+// file): stamps D2H staging issue/completion so wire reads can be ordered
+// against staging in one timeline.
+void ChunkWireTraceLog(const std::string& line) {
+  static absl::Mutex* mu = new absl::Mutex;
+  const char* path = getenv("RAIDEN_CHUNKWIRE_LOG");
+  if (path == nullptr || path[0] == '\0') return;
+  absl::MutexLock l(mu);
+  std::ofstream f(path, std::ios::app);
+  f << "t=" << absl::ToUnixMicros(absl::Now()) << " " << line << "\n";
+}
 
 bool EncodeIp(const std::string& ip_str, uint8_t* dst) {
   if (inet_pton(AF_INET6, ip_str.c_str(), dst) > 0) {
@@ -942,6 +955,9 @@ absl::Status KVCacheManagerWithTransfer::PoolReshardPush(
 
   for (int32_t encoded_pool_idx : plan.transfer_pool_indices()) {
     const size_t pool_idx = static_cast<size_t>(encoded_pool_idx);
+    ChunkWireTraceLog(absl::StrCat("D2H_ISSUE pid=", getpid(),
+                                   " uuid=", plan.uuid(),
+                                   " pool=", pool_idx));
     auto future_or = D2hPoolBlocks(pool_idx, src_block_ids);
     if (!future_or.ok()) {
       FinishPoolReshardSend(plan.uuid(), future_or.status());
@@ -951,6 +967,9 @@ absl::Status KVCacheManagerWithTransfer::PoolReshardPush(
     state->d2h_futures.push_back(future);
     future.OnReady([this, uuid = static_cast<uint64_t>(plan.uuid()),
                     pool_idx](auto status_or) {
+      ChunkWireTraceLog(absl::StrCat("D2H_DONE pid=", getpid(),
+                                     " uuid=", uuid, " pool=", pool_idx,
+                                     " ok=", status_or.ok() ? 1 : 0));
       if (!status_or.ok()) {
         FinishPoolReshardSend(uuid, status_or.status());
         return;
