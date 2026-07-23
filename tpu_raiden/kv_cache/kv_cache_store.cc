@@ -537,7 +537,7 @@ absl::StatusOr<std::vector<int32_t>> KVCacheStore::ValidateAndPinHostBlocks(
   std::vector<int32_t> src_host_block_ids;
   src_host_block_ids.reserve(block_hashes.size());
 
-  auto rollback = [&]() {
+  auto rollback = [&]() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
     for (const auto& hash : pinned_so_far) {
       lru_cache_.Unpin(hash);
     }

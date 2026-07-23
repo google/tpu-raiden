@@ -460,6 +460,33 @@ TEST(KVCacheStoreTest, ValidateAndPinHostBlocksAtomicRollbackOnPartialMiss) {
   EXPECT_EQ(store.GetPinCount("bad"), 0);
 }
 
+TEST(KVCacheStoreTest, ValidateAndPinHostBlocksEmptyInputIsOk) {
+  KVCacheStore store(4);
+  auto ids_or = store.ValidateAndPinHostBlocks(std::vector<std::string>{});
+  ASSERT_TRUE(ids_or.ok());
+  EXPECT_TRUE(ids_or->empty());
+}
+
+TEST(KVCacheStoreTest, ValidateAndPinHostBlocksIncrementsAndReleasesExistingPin) {
+  KVCacheStore store(4);
+  RaidenId rid{"src_job", "0", "src_cache", 0};
+  std::vector<std::string> hashes = {"h0"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, /*host_block_id=*/9, /*device_block_id=*/-1,
+                    BlockStatus::HOST)};
+  // insert_and_lock pins once.
+  ASSERT_TRUE(store.InsertAndLock(hashes, slices, /*on_host=*/true));
+  EXPECT_EQ(store.GetPinCount("h0"), 1);
+
+  auto ids_or = store.ValidateAndPinHostBlocks(hashes);
+  ASSERT_TRUE(ids_or.ok());
+  EXPECT_THAT(*ids_or, ::testing::ElementsAre(9));
+  EXPECT_EQ(store.GetPinCount("h0"), 2);  // verify added a second pin.
+
+  store.UnpinHostBlocks(hashes);
+  EXPECT_EQ(store.GetPinCount("h0"), 1);  // back to the caller's pin.
+}
+
 TEST(KVCacheStoreTest, LookupCapLimit) {
   KVCacheStore store(2);
 
@@ -1899,6 +1926,150 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteFailure) {
   }
 
   registry_server->Shutdown();
+}
+
+// ReadRemote step 6a end-to-end at the store level: the source controller's
+// verify hook rejects the requested hash -> the destination read fails and its
+// pre-allocated host block is reverted (via PollRemoteReadsInternal).
+TEST_F(KVCacheStoreEmbeddedControllerTest,
+       ReadRemoteSourceVerifyMissingRevertsDestination) {
+  auto src_controller_server = core::controller::CreateTestControllerServer();
+  rpc::RaidenIdProto src_unit;
+  src_unit.set_job_name("src_job");
+  src_unit.set_job_replica_id("0");
+  src_unit.set_data_name("src_data");
+  src_unit.set_data_replica_idx(0);
+  kv_cache::RaidenId src_raiden_id{"src_job", "0", "src_data", 0};
+  ::tpu_raiden::controller::OrchestratorServiceClient orchestrator_client(
+      grpc::CreateChannel(orchestrator_address_,
+                          grpc::InsecureChannelCredentials()));
+  ASSERT_TRUE(orchestrator_client
+                  .RegisterController(src_unit,
+                                      src_controller_server->server_address)
+                  .ok());
+
+  std::vector<std::string> validated;
+  bool transfer_ran = false;
+  src_controller_server->service->SetReadRemoteHooks(
+      [&](absl::Span<const std::string> h)
+          -> absl::StatusOr<std::vector<int32_t>> {
+        validated.assign(h.begin(), h.end());
+        return absl::NotFoundError("BLOCK_HASH_NOT_FOUND: h");
+      },
+      [&](absl::Span<const std::string> /*h*/) {});
+  src_controller_server->service->SetTransferBuffersCallback(
+      [&](absl::Span<const Buffer> /*s*/, absl::Span<const Buffer> /*d*/) {
+        transfer_ran = true;
+        return tsl::Future<>(absl::OkStatus());
+      });
+
+  auto dest_controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(
+          unit_, 10, 1, 512, orchestrator_address_, "");
+  RegisterAndInitWorker(*dest_controller, "worker_0",
+                        test_server_->server_address);
+  RaidenId rid{"dest_job", "0", "dest_cache", 0};
+  KVCacheStore store(2, std::move(dest_controller), "", rid);
+
+  std::vector<std::string> hashes = {"hash_0"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(src_raiden_id, 42, BlockStatus::REMOTE)};
+  ASSERT_TRUE(store.InsertAndLock(hashes, slices, true));
+
+  ASSERT_TRUE(store.ReadRemote(hashes).ok());
+
+  bool failed = false;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    auto [done_hashes, failed_hashes, pending_hashes] =
+        store.PollRemoteReadStatus();
+    ASSERT_TRUE(done_hashes.empty());
+    if (!failed_hashes.empty()) {
+      EXPECT_THAT(failed_hashes, ::testing::ElementsAre("hash_0"));
+      failed = true;
+      break;
+    }
+    absl::SleepFor(absl::Milliseconds(10));
+  }
+  ASSERT_TRUE(failed);
+  // The block_hash flowed to the source and the transfer was never dispatched.
+  EXPECT_THAT(validated, ::testing::ElementsAre("hash_0"));
+  EXPECT_FALSE(transfer_ran);
+  // The block is still REMOTE on the destination (not promoted to HOST).
+  auto lookup_res = store.Lookup(hashes);
+  ASSERT_TRUE(lookup_res.ok());
+  ASSERT_EQ(lookup_res->size(), 1);
+  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::REMOTE);
+}
+
+// The source verify hook accepts the hash -> the transfer runs and the
+// destination block is promoted to HOST. Confirms the block_hashes reach the
+// source verify path on the success flow.
+TEST_F(KVCacheStoreEmbeddedControllerTest,
+       ReadRemoteSourceVerifySuccessTransfers) {
+  auto src_controller_server = core::controller::CreateTestControllerServer();
+  rpc::RaidenIdProto src_unit;
+  src_unit.set_job_name("src_job");
+  src_unit.set_job_replica_id("0");
+  src_unit.set_data_name("src_data");
+  src_unit.set_data_replica_idx(0);
+  kv_cache::RaidenId src_raiden_id{"src_job", "0", "src_data", 0};
+  ::tpu_raiden::controller::OrchestratorServiceClient orchestrator_client(
+      grpc::CreateChannel(orchestrator_address_,
+                          grpc::InsecureChannelCredentials()));
+  ASSERT_TRUE(orchestrator_client
+                  .RegisterController(src_unit,
+                                      src_controller_server->server_address)
+                  .ok());
+
+  std::vector<std::string> validated, unpinned;
+  src_controller_server->service->SetReadRemoteHooks(
+      [&](absl::Span<const std::string> h)
+          -> absl::StatusOr<std::vector<int32_t>> {
+        validated.assign(h.begin(), h.end());
+        return std::vector<int32_t>{42};  // authoritative source id
+      },
+      [&](absl::Span<const std::string> h) {
+        unpinned.assign(h.begin(), h.end());
+      });
+  src_controller_server->service->SetTransferBuffersCallback(
+      [&](absl::Span<const Buffer> /*s*/, absl::Span<const Buffer> /*d*/) {
+        return tsl::Future<>(absl::OkStatus());
+      });
+
+  auto dest_controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(
+          unit_, 10, 1, 512, orchestrator_address_, "");
+  RegisterAndInitWorker(*dest_controller, "worker_0",
+                        test_server_->server_address);
+  RaidenId rid{"dest_job", "0", "dest_cache", 0};
+  KVCacheStore store(2, std::move(dest_controller), "", rid);
+
+  std::vector<std::string> hashes = {"hash_0"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(src_raiden_id, 42, BlockStatus::REMOTE)};
+  ASSERT_TRUE(store.InsertAndLock(hashes, slices, true));
+
+  ASSERT_TRUE(store.ReadRemote(hashes).ok());
+
+  bool done = false;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    auto [done_hashes, failed_hashes, pending_hashes] =
+        store.PollRemoteReadStatus();
+    ASSERT_TRUE(failed_hashes.empty());
+    if (!done_hashes.empty()) {
+      EXPECT_THAT(done_hashes, ::testing::ElementsAre("hash_0"));
+      done = true;
+      break;
+    }
+    absl::SleepFor(absl::Milliseconds(10));
+  }
+  ASSERT_TRUE(done);
+  EXPECT_THAT(validated, ::testing::ElementsAre("hash_0"));
+  EXPECT_THAT(unpinned, ::testing::ElementsAre("hash_0"));
+  auto lookup_res = store.Lookup(hashes);
+  ASSERT_TRUE(lookup_res.ok());
+  ASSERT_EQ(lookup_res->size(), 1);
+  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::HOST);
 }
 
 TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteDuplicateFails) {

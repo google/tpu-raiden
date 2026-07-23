@@ -698,7 +698,78 @@ TEST_F(RaidenControllerTest, ReadRemoteVerifyMissingReturnsErrorWithoutTransfer)
 
   auto st = dest.ReadRemote(MakeSrcRaidenId(), {10}, {20}, {"h0"}).Await();
   EXPECT_FALSE(st.ok());
+  EXPECT_TRUE(absl::IsNotFound(st)) << st;  // distinct code preserved e2e
   EXPECT_FALSE(transfer_ran);  // aborted before dispatching the transfer
+}
+
+TEST_F(RaidenControllerTest,
+       ReadRemoteVerifyWrongStatusReturnsFailedPrecondition) {
+  auto src = core::controller::CreateTestControllerServer();
+  rpc::RaidenIdProto src_unit;
+  src_unit.set_job_name("src_job");
+  src_unit.set_job_replica_id("0");
+  src_unit.set_data_name("src_data");
+  src_unit.set_data_replica_idx(0);
+  OrchestratorServiceClient orch(grpc::CreateChannel(
+      orchestrator_address_, grpc::InsecureChannelCredentials()));
+  ASSERT_TRUE(orch.RegisterController(src_unit, src->server_address).ok());
+
+  rpc::RaidenIdProto dest_unit;
+  dest_unit.set_job_name("dest_job");
+  RaidenController dest(dest_unit, /*num_blocks=*/5, /*num_shards=*/2,
+                        /*shard_size_bytes=*/512, orchestrator_address_, "");
+  RegisterAndInitWorker(dest, "worker_0", test_server_->server_address);
+
+  bool transfer_ran = false;
+  src->service->SetReadRemoteHooks(
+      [&](absl::Span<const std::string> /*h*/)
+          -> absl::StatusOr<std::vector<int32_t>> {
+        return absl::FailedPreconditionError("block not resident in host DRAM");
+      },
+      [&](absl::Span<const std::string> /*h*/) {});
+  src->service->SetTransferBuffersCallback(
+      [&](absl::Span<const Buffer> /*s*/, absl::Span<const Buffer> /*d*/) {
+        transfer_ran = true;
+        return tsl::Future<>(absl::OkStatus());
+      });
+
+  auto st = dest.ReadRemote(MakeSrcRaidenId(), {10}, {20}, {"h0"}).Await();
+  EXPECT_FALSE(st.ok());
+  // Distinct from the missing-hash NOT_FOUND case.
+  EXPECT_TRUE(absl::IsFailedPrecondition(st)) << st;
+  EXPECT_FALSE(transfer_ran);
+}
+
+TEST_F(RaidenControllerTest, ReadRemoteNoVerifyHookRunsTransfer) {
+  // Backward-compat: a source controller with no verify hook registered runs
+  // the transfer directly (legacy behavior), even with block_hashes present.
+  auto src = core::controller::CreateTestControllerServer();
+  rpc::RaidenIdProto src_unit;
+  src_unit.set_job_name("src_job");
+  src_unit.set_job_replica_id("0");
+  src_unit.set_data_name("src_data");
+  src_unit.set_data_replica_idx(0);
+  OrchestratorServiceClient orch(grpc::CreateChannel(
+      orchestrator_address_, grpc::InsecureChannelCredentials()));
+  ASSERT_TRUE(orch.RegisterController(src_unit, src->server_address).ok());
+
+  rpc::RaidenIdProto dest_unit;
+  dest_unit.set_job_name("dest_job");
+  RaidenController dest(dest_unit, /*num_blocks=*/5, /*num_shards=*/2,
+                        /*shard_size_bytes=*/512, orchestrator_address_, "");
+  RegisterAndInitWorker(dest, "worker_0", test_server_->server_address);
+
+  bool transfer_ran = false;
+  // Deliberately do NOT call SetReadRemoteHooks.
+  src->service->SetTransferBuffersCallback(
+      [&](absl::Span<const Buffer> /*s*/, absl::Span<const Buffer> /*d*/) {
+        transfer_ran = true;
+        return tsl::Future<>(absl::OkStatus());
+      });
+
+  auto st = dest.ReadRemote(MakeSrcRaidenId(), {10}, {20}, {"h0"}).Await();
+  ASSERT_TRUE(st.ok()) << st.message();
+  EXPECT_TRUE(transfer_ran);
 }
 
 TEST_F(RaidenControllerTest, ReadRemoteTransferFailureStillUnpins) {

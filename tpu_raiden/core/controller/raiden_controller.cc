@@ -681,7 +681,12 @@ tsl::Future<> RaidenController::ReadRemote(
       [context, response, stub,
        promise = std::move(promise).ToShared()](grpc::Status status) {
         if (!status.ok()) {
-          promise->Set(absl::InternalError(
+          // Preserve the gRPC status code (grpc and absl codes share the same
+          // canonical integers), so ReadRemote step-6a errors stay
+          // distinguishable end-to-end: NOT_FOUND (BLOCK_HASH_NOT_FOUND) vs
+          // FAILED_PRECONDITION (present but not host-resident) vs INTERNAL.
+          promise->Set(absl::Status(
+              static_cast<absl::StatusCode>(status.error_code()),
               absl::StrCat("ReadRemote RPC failed: ", status.error_message())));
         } else {
           promise->Set(absl::OkStatus());

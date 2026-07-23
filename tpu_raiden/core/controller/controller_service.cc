@@ -130,12 +130,13 @@ grpc::Status RaidenControllerServiceImpl::ReadRemote(
   if (validate_cb && !block_hashes.empty()) {
     absl::StatusOr<std::vector<int32_t>> ids_or = (*validate_cb)(block_hashes);
     if (!ids_or.ok()) {
-      // Distinct codes: NOT_FOUND (BLOCK_HASH_NOT_FOUND) vs FAILED_PRECONDITION
-      // (present but not resident in host DRAM).
-      grpc::StatusCode code = absl::IsNotFound(ids_or.status())
-                                  ? grpc::StatusCode::NOT_FOUND
-                                  : grpc::StatusCode::FAILED_PRECONDITION;
-      return grpc::Status(code, std::string(ids_or.status().message()));
+      // Forward the verify hook's status code (absl and grpc codes share the
+      // same canonical integers), so distinct 6a errors are preserved:
+      // NOT_FOUND (BLOCK_HASH_NOT_FOUND) vs FAILED_PRECONDITION (present but not
+      // resident in host DRAM).
+      return grpc::Status(
+          static_cast<grpc::StatusCode>(ids_or.status().code()),
+          std::string(ids_or.status().message()));
     }
     pinned = true;  // store pinned all hashes; unpin_guard will release them.
     const std::vector<int32_t>& src_ids = *ids_or;

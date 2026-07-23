@@ -761,6 +761,120 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     )
     del manager_a, manager_b, store_a, store_b
 
+  def test_remote_read_e2e_source_wrong_status_fails(self):
+    # ReadRemote step 6a: the source HOLDS the block but only in HBM (never
+    # saved to host DRAM). The source verify hook returns FAILED_PRECONDITION and
+    # the destination read fails.
+    if len(self.devices) < 1:
+      self.skipTest("Requires at least 1 device")
+    os.environ["ENABLE_MULTI_NUMA"] = "0"
+
+    sharding = self.setup_sharding_for_devices(self.devices)
+    num_blocks = 2
+    shape = (num_blocks, 128, 8, 8, 128)
+    tpu_cache_a = jax.device_put(
+        jnp.array(np.zeros(shape, dtype=np.float32)), sharding
+    )
+    tpu_cache_b = jax.device_put(
+        jnp.array(np.zeros(shape, dtype=np.float32)), sharding
+    )
+    jax.block_until_ready(tpu_cache_a)
+    jax.block_until_ready(tpu_cache_b)
+
+    num_shards = len(self.devices)
+    shard_size_bytes = (128 * 8 * 8 * 128 * 4) // num_shards
+    controller_port_a = find_free_port()
+    controller_port_b = find_free_port()
+
+    rid_a = kv_cache_store.RaidenId("ws_job_a", "0", "cache_a", 0)
+    store_a = kv_cache_store.KVCacheStore(
+        capacity=4,
+        global_registry_address=f"localhost:{_registry_port}",
+        raiden_id=rid_a,
+        num_shards=num_shards,
+        shard_size_bytes=shard_size_bytes,
+        raiden_orchestrator_address=f"localhost:{_orchestrator_port}",
+        raiden_controller_address=f"localhost:{controller_port_a}",
+    )
+    manager_a = kv_cache_manager.KVCacheManager(
+        kv_caches=[tpu_cache_a],
+        local_control_port=0,
+        max_blocks=num_blocks,
+        num_slots=2,
+        unsafe_skip_buffer_lock=self.skip_lock,
+        raiden_worker_port=find_free_port(),
+        raiden_controller_address=f"localhost:{controller_port_a}",
+        worker_id="worker_a",
+    )
+    # Source records the block in HBM only (no Save -> not host-resident).
+    hashes = [b"hbm_only"]
+    self.assertTrue(
+        store_a.insert(
+            hashes,
+            [
+                kv_cache_store.RaidenBlockID(
+                    rid_a,
+                    host_block_id=-1,
+                    device_block_id=0,
+                    status=kv_cache_store.BlockStatus.HBM,
+                )
+            ],
+            on_host=False,
+        )[0]
+    )
+
+    rid_b = kv_cache_store.RaidenId("ws_job_b", "0", "cache_b", 0)
+    store_b = kv_cache_store.KVCacheStore(
+        capacity=4,
+        global_registry_address=f"localhost:{_registry_port}",
+        raiden_id=rid_b,
+        num_shards=num_shards,
+        shard_size_bytes=shard_size_bytes,
+        raiden_orchestrator_address=f"localhost:{_orchestrator_port}",
+        raiden_controller_address=f"localhost:{controller_port_b}",
+    )
+    manager_b = kv_cache_manager.KVCacheManager(
+        kv_caches=[tpu_cache_b],
+        local_control_port=0,
+        max_blocks=num_blocks,
+        num_slots=2,
+        unsafe_skip_buffer_lock=self.skip_lock,
+        raiden_worker_port=find_free_port(),
+        raiden_controller_address=f"localhost:{controller_port_b}",
+        worker_id="worker_b",
+        host_blocks_to_allocate=4,
+    )
+    time.sleep(1)
+
+    # Destination records a REMOTE reference to the source's HBM-only block.
+    self.assertTrue(
+        store_b.insert_and_lock(
+            hashes,
+            [
+                kv_cache_store.RaidenBlockID(
+                    rid_a,
+                    host_block_id=0,
+                    device_block_id=-1,
+                    status=kv_cache_store.BlockStatus.REMOTE,
+                )
+            ],
+            on_host=True,
+        )
+    )
+    self.assertTrue(store_b.read_remote(hashes))
+
+    failed = False
+    for _ in range(500):
+      _, read_failed, _ = store_b.poll_remote_read_status()
+      if read_failed:
+        failed = True
+        break
+      time.sleep(0.01)
+    self.assertTrue(
+        failed, "expected ReadRemote to fail (source block not host-resident)"
+    )
+    del manager_a, manager_b, store_a, store_b
+
 
 if __name__ == "__main__":
   absltest.main()
