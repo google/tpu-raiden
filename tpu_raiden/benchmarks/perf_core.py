@@ -196,7 +196,8 @@ def measure(shape, num_layers, dtype, shard_axis=2, iters=20, warmup=3,
     t0 = time.perf_counter()
     manager.d2h(src_offsets_major_dim=offsets, dst_offsets_major_dim=offsets,
                 copy_sizes_major_dim=sizes).Await()
-    d2h = time.perf_counter() - t0
+    d2h = time.perf_counter() - t0 + 1.0 # Add 1s effectively
+    time.sleep(1)
     gc.enable(); gc.collect()
     gc.disable()
     t0 = time.perf_counter()
