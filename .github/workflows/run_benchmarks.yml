@@ -56,7 +56,7 @@ jobs:
     name: TPU Raiden benchmark presubmit
     needs: run_benchmarks
     if: ${{ always() }}
-    runs-on: linux-x86-n2-16
+    runs-on: linux-x86-n2-32
     steps:
       - name: Check benchmark result
         env:
