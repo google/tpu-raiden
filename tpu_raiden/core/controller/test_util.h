@@ -34,6 +34,7 @@
 #include "tpu_raiden/core/controller/controller_service.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
 #include "tpu_raiden/core/controller/worker_service_impl.h"
+#include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 
 namespace tpu_raiden {
@@ -144,6 +145,46 @@ struct MockTransferManager {
     last_peer = peer;
     last_src_offsets.assign(src_block_ids.begin(), src_block_ids.end());
     last_dst_offsets.assign(dst_block_ids.begin(), dst_block_ids.end());
+    return std::make_pair(std::vector<int>{}, raiden::PjRtCopyFuture());
+  }
+};
+
+// Like MockTransferManager but ALSO implements the vector
+// (RaidenTransferEndpoint) H2hRead/H2hWrite overloads. Because it exposes these,
+// KVManagerHolder's has_vector_h2h_*_v trait is true, so the holder dispatches
+// remote reads/writes to the SHARD-MATCHING (vector) path instead of the
+// single-endpoint string fallback. Records the full shard-tagged descriptor list
+// the worker received, so a test can assert that path was actually triggered
+// with the shards intact.
+struct ShardAwareMockTransferManager : MockTransferManager {
+  // Keep the base string overloads visible (the vector declarations below would
+  // otherwise hide them, and KVManagerHolder still references the string form).
+  using MockTransferManager::H2hRead;
+  using MockTransferManager::H2hWrite;
+
+  int vector_h2h_read_calls = 0;
+  int vector_h2h_write_calls = 0;
+  std::vector<::tpu_raiden::RaidenTransferEndpoint> last_read_descriptors;
+  std::vector<::tpu_raiden::RaidenTransferEndpoint> last_write_descriptors;
+
+  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hWrite(
+      const std::vector<::tpu_raiden::RaidenTransferEndpoint>& remote_descriptors,
+      const std::vector<int>& src_block_ids,
+      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
+      int layer_idx = -1) {
+    vector_h2h_write_calls++;
+    last_write_descriptors = remote_descriptors;
+    last_src_offsets.assign(src_block_ids.begin(), src_block_ids.end());
+    last_dst_offsets.assign(dst_block_ids.begin(), dst_block_ids.end());
+    return std::make_pair(std::vector<int>{}, raiden::PjRtCopyFuture());
+  }
+
+  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hRead(
+      const std::vector<::tpu_raiden::RaidenTransferEndpoint>& remote_descriptors,
+      const std::vector<int>& src_block_ids) {
+    vector_h2h_read_calls++;
+    last_read_descriptors = remote_descriptors;
+    last_src_offsets.assign(src_block_ids.begin(), src_block_ids.end());
     return std::make_pair(std::vector<int>{}, raiden::PjRtCopyFuture());
   }
 };

@@ -476,17 +476,31 @@ tsl::Future<> RaidenController::TransferBuffers(
     std::vector<Buffer> worker_src;
     std::vector<Buffer> worker_dst;
     std::vector<int64_t> worker_copy_sizes;
+    worker_src.reserve(src_buffers.size());
+    worker_dst.reserve(dst_buffers.size());
 
+    // Every buffer/block is transferred by every worker (each worker owns a
+    // shard of every block), so there is no per-block partitioning here.
     for (size_t i = 0; i < src_buffers.size(); ++i) {
-      if (workers.size() > 1 && (i % workers.size() != w)) {
-        continue;
-      }
       worker_src.push_back(src_buffers[i]);
 
       Buffer dst_buf = dst_buffers[i];
-      if (dst_buf.remote_descriptors().empty() &&
-          !dst_buf.remote_address().has_value() &&
-          !workers[w].raiden_transfer_endpoints.empty()) {
+      const auto& peer_worker_groups = dst_buf.remote_worker_endpoints();
+      if (!peer_worker_groups.empty()) {
+        // Remote read: match this source worker to its exact destination peer
+        // worker by sorted worker index, and forward ONLY that peer worker's
+        // endpoints. Requires a symmetric worker count on both sides.
+        if (w >= peer_worker_groups.size()) {
+          return tsl::Future<>(absl::InvalidArgumentError(absl::StrCat(
+              "ReadRemote peer-worker mismatch: source has ", workers.size(),
+              " workers but destination provided ", peer_worker_groups.size(),
+              " worker endpoint groups")));
+        }
+        dst_buf.set_remote_descriptors(peer_worker_groups[w]);
+        dst_buf.set_remote_worker_endpoints({});
+      } else if (dst_buf.remote_descriptors().empty() &&
+                 !dst_buf.remote_address().has_value() &&
+                 !workers[w].raiden_transfer_endpoints.empty()) {
         dst_buf.set_remote_descriptors(workers[w].raiden_transfer_endpoints);
       }
       worker_dst.push_back(std::move(dst_buf));
@@ -557,13 +571,24 @@ tsl::Future<> RaidenController::ReadRemote(
                              rpc::MemoryType::MEMORY_TYPE_DRAM);
   }
 
+  // A KV block is sharded across every (destination) worker, so every block is
+  // transferred by every worker. Attach the full ordered list of destination
+  // workers' endpoint groups (sorted by worker index) to each dst buffer so the
+  // remote source controller can match each of its workers to the exact
+  // destination peer worker. `workers` is already sorted above.
+  std::vector<std::vector<RaidenTransferEndpoint>> dest_worker_endpoints;
+  dest_worker_endpoints.reserve(workers.size());
+  for (const auto& reg : workers) {
+    dest_worker_endpoints.push_back(reg.raiden_transfer_endpoints);
+  }
+
   std::vector<Buffer> dst_buffers;
   dst_buffers.reserve(dest_host_block_ids.size());
   for (size_t i = 0; i < dest_host_block_ids.size(); ++i) {
-    size_t worker_idx = (workers.size() == 1) ? 0 : (i % workers.size());
-    dst_buffers.emplace_back(dest_host_block_ids[i], std::vector<BufferShard>{},
-                             std::nullopt, rpc::MemoryType::MEMORY_TYPE_DRAM,
-                             workers[worker_idx].raiden_transfer_endpoints);
+    Buffer dst_buf(dest_host_block_ids[i], std::vector<BufferShard>{},
+                   std::nullopt, rpc::MemoryType::MEMORY_TYPE_DRAM);
+    dst_buf.set_remote_worker_endpoints(dest_worker_endpoints);
+    dst_buffers.push_back(std::move(dst_buf));
   }
 
   std::string controller_address;

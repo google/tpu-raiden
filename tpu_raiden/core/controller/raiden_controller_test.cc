@@ -24,6 +24,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
@@ -565,8 +566,14 @@ TEST_F(RaidenControllerTest, ReadRemoteSuccess) {
         for (const auto& buf : dst_buffers) {
           EXPECT_EQ(buf.memory_type(), rpc::MemoryType::MEMORY_TYPE_DRAM);
           callback_dst_offsets.push_back(buf.index());
-          for (const auto& desc : buf.remote_descriptors()) {
-            callback_peers.push_back(desc.endpoint);
+          // Every dst buffer (block) carries the full ordered list of
+          // destination-worker endpoint groups; the source narrows this to the
+          // matched peer per source worker inside TransferBuffers (which this
+          // test overrides).
+          for (const auto& group : buf.remote_worker_endpoints()) {
+            for (const auto& desc : group) {
+              callback_peers.push_back(desc.endpoint);
+            }
           }
         }
         return tsl::Future<>(absl::OkStatus());
@@ -584,8 +591,62 @@ TEST_F(RaidenControllerTest, ReadRemoteSuccess) {
   EXPECT_TRUE(callback_triggered);
   EXPECT_THAT(callback_src_offsets, ElementsAre(10, 11));
   EXPECT_THAT(callback_dst_offsets, ElementsAre(20, 21));
-  EXPECT_THAT(callback_peers, ElementsAre(test_server_->server_address,
-                                          test_server2->server_address));
+  // Each of the two dst blocks carries both destination workers' endpoint
+  // groups (sorted by worker id: worker_0 -> test_server_, worker_1 ->
+  // test_server2), so both blocks contribute the same ordered pair.
+  EXPECT_THAT(callback_peers,
+              ElementsAre(test_server_->server_address,
+                          test_server2->server_address,
+                          test_server_->server_address,
+                          test_server2->server_address));
+}
+
+// End-to-end at the source worker: when the source worker's transfer manager
+// exposes the vector (shard-matching) H2h overloads, the controller fan-out ->
+// WorkerServiceImpl -> KVManagerHolder must dispatch to that SHARD-MATCHING path
+// (not the single-endpoint string fallback) and hand it the full shard-tagged
+// descriptor list. This is the path that was previously untested because
+// MockTransferManager only has the string overloads.
+TEST_F(RaidenControllerTest,
+       TransferBuffersTriggersShardMatchingVectorPathAtWorker) {
+  ShardAwareMockTransferManager shard_mock;
+  test_server_->service->SetTransferManager(KVManagerHolder(&shard_mock));
+
+  RaidenController controller(unit_, /*num_blocks=*/5, /*num_shards=*/2,
+                              /*shard_size_bytes=*/512, orchestrator_address_,
+                              "");
+  RegisterAndInitWorker(controller, "worker_0", test_server_->server_address);
+
+  // Source block -> destination host block. The destination peer worker exposes
+  // two shard-tagged sub-manager endpoints; both must reach the worker's vector
+  // H2hWrite intact so its NUMA sub-managers can shard-match against them.
+  std::vector<Buffer> src_buffers;
+  src_buffers.emplace_back(/*index=*/10, std::vector<BufferShard>{},
+                           std::nullopt, rpc::MemoryType::MEMORY_TYPE_DRAM);
+
+  std::vector<::tpu_raiden::RaidenTransferEndpoint> peer_worker_endpoints = {
+      {"10.0.0.9:41000", {0, 1, 2, 3}}, {"10.0.0.9:41001", {4, 5, 6, 7}}};
+  Buffer dst_buf(/*index=*/20, std::vector<BufferShard>{}, std::nullopt,
+                 rpc::MemoryType::MEMORY_TYPE_DRAM);
+  dst_buf.set_remote_worker_endpoints({peer_worker_endpoints});  // one group: worker_0
+  std::vector<Buffer> dst_buffers;
+  dst_buffers.push_back(std::move(dst_buf));
+
+  auto status = controller.TransferBuffers(src_buffers, dst_buffers).Await();
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  // Shard-matching (vector) path was taken, NOT the single-endpoint string
+  // fallback...
+  EXPECT_EQ(shard_mock.vector_h2h_write_calls, 1);
+  EXPECT_EQ(shard_mock.h2h_write_calls, 0);
+  // ...and the worker received the full shard-tagged descriptor list intact.
+  ASSERT_EQ(shard_mock.last_write_descriptors.size(), 2u);
+  EXPECT_EQ(shard_mock.last_write_descriptors[0].endpoint, "10.0.0.9:41000");
+  EXPECT_EQ(shard_mock.last_write_descriptors[0].shards,
+            (std::vector<int64_t>{0, 1, 2, 3}));
+  EXPECT_EQ(shard_mock.last_write_descriptors[1].endpoint, "10.0.0.9:41001");
+  EXPECT_EQ(shard_mock.last_write_descriptors[1].shards,
+            (std::vector<int64_t>{4, 5, 6, 7}));
 }
 
 TEST_F(RaidenControllerTest, AllocateBuffersAndDeallocateBuffersSuccess) {

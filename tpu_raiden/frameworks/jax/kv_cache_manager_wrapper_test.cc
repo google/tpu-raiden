@@ -122,6 +122,36 @@ class MockSubManager : public KVCacheManagerWithTransfer {
     last_h2d_copy_sizes = copy_sizes_major_dim;
     return raiden::PjRtCopyFuture();
   }
+
+  // Records the single remote endpoint the wrapper's shard-matching selected for
+  // this sub-manager (the wrapper narrows the full remote_descriptors list down
+  // to one endpoint per sub-manager before calling the string overload).
+  int h2h_write_calls = 0;
+  int h2h_read_calls = 0;
+  std::string last_h2h_write_peer;
+  std::string last_h2h_read_peer;
+  std::vector<int> last_h2h_write_src_blocks;
+  std::vector<int> last_h2h_write_dst_blocks;
+  std::vector<int> last_h2h_read_src_blocks;
+
+  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hWrite(
+      std::string peer, const std::vector<int>& src_block_ids,
+      const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
+      int layer_idx = -1) override {
+    h2h_write_calls++;
+    last_h2h_write_peer = std::move(peer);
+    last_h2h_write_src_blocks = src_block_ids;
+    last_h2h_write_dst_blocks = dst_block_ids;
+    return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
+  }
+
+  absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>> H2hRead(
+      std::string peer, const std::vector<int>& src_block_ids) override {
+    h2h_read_calls++;
+    last_h2h_read_peer = std::move(peer);
+    last_h2h_read_src_blocks = src_block_ids;
+    return std::make_pair(std::vector<int>(), raiden::PjRtCopyFuture());
+  }
 };
 
 TEST(KVCacheManagerWrapperTest,
@@ -232,6 +262,113 @@ TEST(KVCacheManagerWrapperTest,
   EXPECT_EQ(ptr1->started_ep, "10.0.0.1:45000");
   EXPECT_EQ(ptr1->started_remote_blocks, remote_blocks);
   EXPECT_EQ(ptr1->started_local_blocks, local_blocks);
+}
+
+// H2hWrite is the sub-manager transfer the controller-orchestrated ReadRemote
+// path drives (via WorkerServiceImpl). Each local sub-manager must be matched to
+// the remote (destination peer) endpoint whose advertised shards intersect its
+// own global shards -- not by index or list position.
+TEST(KVCacheManagerWrapperTest,
+     H2hWriteMatchesRemoteEndpointsByShardIntersection) {
+  auto sub0 = std::make_unique<MockSubManager>();
+  auto sub1 = std::make_unique<MockSubManager>();
+  MockSubManager* ptr0 = sub0.get();
+  MockSubManager* ptr1 = sub1.get();
+
+  std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> subs;
+  subs.push_back(std::move(sub0));
+  subs.push_back(std::move(sub1));
+
+  KVCacheManager mgr(std::move(subs));
+
+  // Local sub0 holds shards [4, 5, 6, 7], sub1 holds [0, 1, 2, 3].
+  mgr.SetSubmanagerShardsForTesting({{4, 5, 6, 7}, {0, 1, 2, 3}});
+
+  // Remote peer endpoints tagged with their global shards, listed in the
+  // OPPOSITE order to the local sub-managers to prove matching is by shard, not
+  // position.
+  std::vector<RaidenTransferEndpoint> remote_descs = {
+      {"10.0.0.1:45000", {0, 1, 2, 3}}, {"10.0.0.2:45000", {4, 5, 6, 7}}};
+
+  std::vector<int> src_blocks = {10, 20};
+  std::vector<int> dst_blocks = {30, 40};
+
+  auto status = mgr.H2hWrite(remote_descs, src_blocks, dst_blocks, /*uuid=*/7,
+                             /*layer_idx=*/0);
+  ASSERT_TRUE(status.ok()) << status.status().message();
+
+  // sub0 ([4-7]) -> the [4-7] endpoint; sub1 ([0-3]) -> the [0-3] endpoint.
+  EXPECT_EQ(ptr0->h2h_write_calls, 1);
+  EXPECT_EQ(ptr0->last_h2h_write_peer, "10.0.0.2:45000");
+  EXPECT_EQ(ptr0->last_h2h_write_src_blocks, src_blocks);
+  EXPECT_EQ(ptr0->last_h2h_write_dst_blocks, dst_blocks);
+
+  EXPECT_EQ(ptr1->h2h_write_calls, 1);
+  EXPECT_EQ(ptr1->last_h2h_write_peer, "10.0.0.1:45000");
+  EXPECT_EQ(ptr1->last_h2h_write_src_blocks, src_blocks);
+  EXPECT_EQ(ptr1->last_h2h_write_dst_blocks, dst_blocks);
+}
+
+TEST(KVCacheManagerWrapperTest,
+     H2hReadMatchesRemoteEndpointsByShardIntersection) {
+  auto sub0 = std::make_unique<MockSubManager>();
+  auto sub1 = std::make_unique<MockSubManager>();
+  MockSubManager* ptr0 = sub0.get();
+  MockSubManager* ptr1 = sub1.get();
+
+  std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> subs;
+  subs.push_back(std::move(sub0));
+  subs.push_back(std::move(sub1));
+
+  KVCacheManager mgr(std::move(subs));
+
+  // Local sub0 holds shards [4, 5, 6, 7], sub1 holds [0, 1, 2, 3].
+  mgr.SetSubmanagerShardsForTesting({{4, 5, 6, 7}, {0, 1, 2, 3}});
+
+  std::vector<RaidenTransferEndpoint> remote_descs = {
+      {"10.0.0.1:45000", {0, 1, 2, 3}}, {"10.0.0.2:45000", {4, 5, 6, 7}}};
+
+  std::vector<int> src_blocks = {11, 22};
+
+  auto status = mgr.H2hRead(remote_descs, src_blocks);
+  ASSERT_TRUE(status.ok()) << status.status().message();
+
+  EXPECT_EQ(ptr0->h2h_read_calls, 1);
+  EXPECT_EQ(ptr0->last_h2h_read_peer, "10.0.0.2:45000");
+  EXPECT_EQ(ptr0->last_h2h_read_src_blocks, src_blocks);
+
+  EXPECT_EQ(ptr1->h2h_read_calls, 1);
+  EXPECT_EQ(ptr1->last_h2h_read_peer, "10.0.0.1:45000");
+  EXPECT_EQ(ptr1->last_h2h_read_src_blocks, src_blocks);
+}
+
+// When endpoints carry no shard info (e.g. registrations with empty shard
+// lists), shard intersection never matches and every sub-manager falls back to
+// the first remote endpoint. This documents the fallback the empty-shard unit
+// tests implicitly rely on.
+TEST(KVCacheManagerWrapperTest, H2hWriteEmptyShardsFallsBackToFirstEndpoint) {
+  auto sub0 = std::make_unique<MockSubManager>();
+  auto sub1 = std::make_unique<MockSubManager>();
+  MockSubManager* ptr0 = sub0.get();
+  MockSubManager* ptr1 = sub1.get();
+
+  std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> subs;
+  subs.push_back(std::move(sub0));
+  subs.push_back(std::move(sub1));
+
+  KVCacheManager mgr(std::move(subs));
+  mgr.SetSubmanagerShardsForTesting({{4, 5, 6, 7}, {0, 1, 2, 3}});
+
+  // Endpoints with empty shard lists -> no intersection possible.
+  std::vector<RaidenTransferEndpoint> remote_descs = {{"10.0.0.1:45000", {}},
+                                                      {"10.0.0.2:45000", {}}};
+
+  auto status = mgr.H2hWrite(remote_descs, /*src_block_ids=*/{10},
+                             /*dst_block_ids=*/{30});
+  ASSERT_TRUE(status.ok()) << status.status().message();
+
+  EXPECT_EQ(ptr0->last_h2h_write_peer, "10.0.0.1:45000");
+  EXPECT_EQ(ptr1->last_h2h_write_peer, "10.0.0.1:45000");
 }
 
 TEST(KVCacheManagerWrapperTest, StartReadUnifiedMultiEndpointMultiSubManager) {

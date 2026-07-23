@@ -203,7 +203,7 @@ cc_library(
     name = "test_util",
     testonly = True,
     hdrs = ["test_util.h"],
-    visibility = ["//:internal"],
+    visibility = ["//visibility:public"],
     deps = [
         ":controller_client",
         ":controller_service",
@@ -237,6 +237,9 @@ cc_test(
     name = "raiden_controller_test",
     srcs = ["raiden_controller_test.cc"],
     copts = ["-fexceptions"],
+    # Unlocks the unqualified ASSERT_OK/EXPECT_OK macros from
+    # absl/status/status_matchers.h (on-by-default in google3, off in OSS).
+    local_defines = ["ABSL_DEFINE_UNQUALIFIED_STATUS_TESTING_MACROS"],
     features = ["-use_header_modules"],
     deps = [
         ":controller_client",
@@ -252,6 +255,7 @@ cc_test(
         "//tpu_raiden/rpc:raiden_service_cc_proto",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",

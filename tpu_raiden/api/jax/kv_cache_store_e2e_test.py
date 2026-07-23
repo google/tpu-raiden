@@ -277,7 +277,12 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         num_slots=2,
         unsafe_skip_buffer_lock=self.skip_lock,
         raiden_worker_port=0,
-        raiden_controller_address=f"{get_local_ip()}:{controller_port}",
+        # Must match the address the store's controller binds
+        # ("localhost:{controller_port}", see the KVCacheStore above); using
+        # get_local_ip() here dials a LAN IP the controller is not listening on,
+        # so RegisterWorker never lands and Save fails with "No registered
+        # workers available for TransferBuffers".
+        raiden_controller_address=f"localhost:{controller_port}",
         worker_id="worker_0",
     )
 
