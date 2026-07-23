@@ -82,17 +82,6 @@ class TorchKVCacheManager : public KVCacheManagerWithTransfer {
   std::string transfer_address() const;
   std::string listener_address() const;
 
-  absl::Status PushRegisteredPlan(uint64_t uuid, const std::string& peer,
-                                  const std::vector<int>& src_block_ids,
-                                  const std::vector<int>& dst_block_ids,
-                                  int layer_idx = -1, int parallelism = 1);
-
-  absl::StatusOr<std::string> ReadBlockBytes(size_t layer_idx, int block_id,
-                                             size_t shard_idx = 0);
-
-  absl::Status WriteBlockBytes(size_t layer_idx, int block_id,
-                               absl::string_view payload, size_t shard_idx = 0);
-
  private:
   // Buffers unpacked from a 2D tensor list, together with the owning
   // DeviceBufferRefs that must outlive their use (see UnpackTorchTensor).
@@ -188,25 +177,6 @@ class KVCacheManager {
     return torch_manager_->listener_address();
   }
 
-  absl::Status PushRegisteredPlan(uint64_t uuid, const std::string& peer,
-                                  const std::vector<int>& src_block_ids,
-                                  const std::vector<int>& dst_block_ids,
-                                  int layer_idx = -1, int parallelism = 1) {
-    return torch_manager_->PushRegisteredPlan(
-        uuid, peer, src_block_ids, dst_block_ids, layer_idx, parallelism);
-  }
-
-  absl::StatusOr<std::string> ReadBlockBytes(size_t layer_idx, int block_id,
-                                             size_t shard_idx = 0) {
-    return torch_manager_->ReadBlockBytes(layer_idx, block_id, shard_idx);
-  }
-
-  absl::Status WriteBlockBytes(size_t layer_idx, int block_id,
-                               absl::string_view payload,
-                               size_t shard_idx = 0) {
-    return torch_manager_->WriteBlockBytes(layer_idx, block_id, payload,
-                                           shard_idx);
-  }
 
   int64_t node_id() const { return torch_manager_->node_id(); }
   int local_control_port() const {
@@ -230,11 +200,6 @@ class KVCacheManager {
 
   absl::Status UnregisterActivePlan(uint64_t uuid) {
     return torch_manager_->UnregisterActivePlan(uuid);
-  }
-
-  absl::Status RegisterRecv(uint64_t uuid, const std::string& req_id,
-                            int64_t expected_block_count) {
-    return torch_manager_->RegisterRecv(uuid, req_id, expected_block_count);
   }
 
   int64_t NotifyForRead(const std::string& req_id, uint64_t uuid,
@@ -363,12 +328,6 @@ class KVCacheManager {
     return torch_manager_->PoolIndicesWithTag(tag);
   }
 
-  absl::StatusOr<uintptr_t> GetBlockHostPointerValue(size_t layer_idx,
-                                                     size_t shard_idx,
-                                                     int block_id) {
-    return torch_manager_->GetBlockHostPointerValue(layer_idx, shard_idx,
-                                                    block_id);
-  }
 
   int64_t LayerBlockByteSize(size_t layer_idx) const {
     return torch_manager_->LayerBlockByteSize(layer_idx);

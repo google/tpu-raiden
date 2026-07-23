@@ -61,6 +61,9 @@ std::string FormatAddressWithPort(absl::string_view ip, int port) {
   return absl::StrCat(ip, ":", port);
 }
 
+// Test/library role configuration of KVCacheManagerWithTransfer; not part of
+// the TPU serving path (scaffolding ledger A.4 classification; exported to
+// the third-party raiden library surface, 539d7ea).
 class HostKVCacheManager : public KVCacheManagerWithTransfer {
  public:
   HostKVCacheManager(size_t num_layers, size_t num_shards,
@@ -81,86 +84,6 @@ class HostKVCacheManager : public KVCacheManagerWithTransfer {
     return FormatAddressWithPort(local_ip(), *port);
   }
 
-  absl::Status PushRegisteredPlan(uint64_t uuid, const std::string& peer,
-                                  const std::vector<int>& src_block_ids,
-                                  const std::vector<int>& dst_block_ids,
-                                  int layer_idx, int parallelism) {
-    if (peer.empty()) {
-      return absl::InvalidArgumentError("peer must not be empty");
-    }
-    if (src_block_ids.empty()) {
-      return absl::InvalidArgumentError("src_block_ids must not be empty");
-    }
-    if (src_block_ids.size() != dst_block_ids.size()) {
-      return absl::InvalidArgumentError(
-          "src_block_ids and dst_block_ids must have the same length");
-    }
-    InitTransportServer();
-    // Copy the transport pointer and release server_init_mu_ before the
-    // blocking Push: holding the lock across it serializes concurrent pushes
-    // from the same manager (one per destination peer).
-    tpu_raiden::transport::BlockTransport* transport = nullptr;
-    {
-      absl::MutexLock lock(server_init_mu_);
-      transport = server_.get();
-    }
-    if (!transport) {
-      return absl::FailedPreconditionError("Transport server is not running");
-    }
-    auto status_or = transport->SyncPush(
-        {peer}, src_block_ids, dst_block_ids, parallelism,
-        tpu_raiden::transport::MajorOrder::kLayerMajor, uuid, layer_idx);
-    if (!status_or.ok()) {
-      return status_or.status();
-    }
-    return absl::OkStatus();
-  }
-
-  absl::StatusOr<std::string> ReadBlockBytes(size_t layer_idx, int block_id,
-                                             size_t shard_idx = 0) {
-    if (block_id < 0) {
-      return absl::InvalidArgumentError("block_id must be non-negative");
-    }
-    const size_t block_bytes = bytes_per_block();
-    const size_t host_size = GetHostSize(layer_idx, shard_idx);
-    const uint8_t* base = GetHostPointer(layer_idx, shard_idx);
-    if (base == nullptr) {
-      return absl::OutOfRangeError("layer or shard index out of range");
-    }
-    const size_t block = static_cast<size_t>(block_id);
-    if (block_bytes == 0 || block > host_size / block_bytes ||
-        block * block_bytes + block_bytes > host_size) {
-      return absl::OutOfRangeError("block range exceeds host buffer");
-    }
-    const char* ptr = reinterpret_cast<const char*>(base + block * block_bytes);
-    return std::string(ptr, block_bytes);
-  }
-
-  absl::Status WriteBlockBytes(size_t layer_idx, int block_id,
-                               absl::string_view payload,
-                               size_t shard_idx = 0) {
-    if (block_id < 0) {
-      return absl::InvalidArgumentError("block_id must be non-negative");
-    }
-    const size_t block_bytes = bytes_per_block();
-    if (payload.size() != block_bytes) {
-      return absl::InvalidArgumentError(
-          absl::StrCat("payload size must equal block size: got ",
-                       payload.size(), ", expected ", block_bytes));
-    }
-    const size_t host_size = GetHostSize(layer_idx, shard_idx);
-    uint8_t* base = GetHostPointer(layer_idx, shard_idx);
-    if (base == nullptr) {
-      return absl::OutOfRangeError("layer or shard index out of range");
-    }
-    const size_t block = static_cast<size_t>(block_id);
-    if (block_bytes == 0 || block > host_size / block_bytes ||
-        block * block_bytes + block_bytes > host_size) {
-      return absl::OutOfRangeError("block range exceeds host buffer");
-    }
-    std::memcpy(base + block * block_bytes, payload.data(), block_bytes);
-    return absl::OkStatus();
-  }
 };
 
 // Distinct C++ wrapper so the host and torch extension modules can each
@@ -253,43 +176,7 @@ NB_MODULE(_tpu_raiden_host, m) {
             ThrowIfError(self.UnregisterActivePlan(uuid),
                          "KVCacheManager unregister_active_plan failed");
           },
-          nb::arg("uuid"))
-      .def(
-          "push_registered_plan",
-          [](HostKVCacheManager& self, uint64_t uuid, const std::string& peer,
-             const std::vector<int>& src_block_ids,
-             const std::vector<int>& dst_block_ids, int layer_idx,
-             int parallelism) {
-            ThrowIfError(
-                self.PushRegisteredPlan(uuid, peer, src_block_ids,
-                                        dst_block_ids, layer_idx, parallelism),
-                "KVCacheManager push_registered_plan failed");
-          },
-          nb::arg("uuid"), nb::arg("peer"), nb::arg("src_block_ids"),
-          nb::arg("dst_block_ids"), nb::arg("layer_idx") = -1,
-          nb::arg("parallelism") = 1, nb::call_guard<nb::gil_scoped_release>())
-      .def(
-          "read_block_bytes",
-          [](HostKVCacheManager& self, size_t layer_idx, int block_id) {
-            auto status_or = self.ReadBlockBytes(layer_idx, block_id);
-            if (!status_or.ok()) {
-              throw std::runtime_error(
-                  absl::StrCat("KVCacheManager read_block_bytes failed: ",
-                               status_or.status().message()));
-            }
-            const std::string& data = status_or.value();
-            return nb::bytes(data.data(), data.size());
-          },
-          nb::arg("layer_idx"), nb::arg("block_id"))
-      .def(
-          "write_block_bytes",
-          [](HostKVCacheManager& self, size_t layer_idx, int block_id,
-             const nb::bytes& payload) {
-            std::string payload_str(payload.c_str(), payload.size());
-            ThrowIfError(self.WriteBlockBytes(layer_idx, block_id, payload_str),
-                         "KVCacheManager write_block_bytes failed");
-          },
-          nb::arg("layer_idx"), nb::arg("block_id"), nb::arg("payload"));
+          nb::arg("uuid"));
   tpu_raiden::torch_bindings::BindPoolApi<HostRaidenFuture>(manager_cls);
 }
 

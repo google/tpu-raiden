@@ -43,8 +43,9 @@ namespace {
 bool HasPoolReshardFields(
     const tpu_raiden::rpc::StartTransferRequest& request) {
   // Treat either field as opting into the pool executor. This intentionally
-  // sends partially populated pool plans to PoolReshardPush/RegisterRecv so
-  // their validation fails closed instead of silently taking the legacy path.
+  // sends partially populated pool plans to PoolReshardPush /
+  // PoolReshardRegisterRecv so their validation fails closed instead of
+  // silently taking the legacy path.
   return request.expected_pushes_per_pool() != 0 ||
          !request.transfer_pool_indices().empty();
 }

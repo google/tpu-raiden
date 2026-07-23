@@ -56,12 +56,6 @@ struct BlockChunk {
   size_t size;
 };
 
-enum class BlockChunkRegionValidationMode {
-  kDisabled = 0,
-  kWarn = 1,
-  kFail = 2,
-};
-
 // Receiver-side expectation contract for one plan-declared (pool-keyed)
 // transfer. The transport keeps a single progress map for every push; a
 // registered plan supplies this spec and switches the expectation source for
@@ -98,21 +92,6 @@ class BlockTransportDelegate : public lib::RawBufferTransportDelegate {
   virtual size_t GetBlockArrayHostSize(size_t block_array_idx,
                                        size_t shard_idx) {
     return GetHostSize(block_array_idx, shard_idx);
-  }
-
-  // Optional second-pass validation for chunked transfers. The transport always
-  // validates chunks against the addressed block array first. Delegates with
-  // per-layer interior-layout knowledge can additionally reject or warn on
-  // chunks that target padding or otherwise non-live bytes.
-  virtual BlockChunkRegionValidationMode block_chunk_region_validation_mode()
-      const {
-    return BlockChunkRegionValidationMode::kDisabled;
-  }
-
-  virtual absl::Status ValidateBlockChunksInRegions(
-      size_t layer_idx, size_t shard_idx,
-      const std::vector<BlockChunk>& chunks) {
-    return absl::OkStatus();
   }
 
   // Returns the active node ID (rank) of the worker.

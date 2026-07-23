@@ -186,63 +186,6 @@ NB_MODULE(_tpu_raiden_torch, m) {
           },
           nb::arg("uuid"))
       .def(
-          "push_registered_plan",
-          [](KVCacheManager& self, uint64_t uuid, const std::string& peer,
-             const std::vector<int>& src_block_ids,
-             const std::vector<int>& dst_block_ids, int layer_idx,
-             int parallelism) {
-            absl::Status status =
-                self.PushRegisteredPlan(uuid, peer, src_block_ids,
-                                        dst_block_ids, layer_idx, parallelism);
-            if (!status.ok()) {
-              throw std::runtime_error(
-                  "KVCacheManager push_registered_plan failed: " +
-                  std::string(status.message()));
-            }
-          },
-          nb::arg("uuid"), nb::arg("peer"), nb::arg("src_block_ids"),
-          nb::arg("dst_block_ids"), nb::arg("layer_idx") = -1,
-          nb::arg("parallelism") = 1, nb::call_guard<nb::gil_scoped_release>())
-      .def(
-          "read_block_bytes",
-          [](KVCacheManager& self, size_t layer_idx, int block_id) {
-            auto status_or = self.ReadBlockBytes(layer_idx, block_id);
-            if (!status_or.ok()) {
-              throw std::runtime_error(
-                  "KVCacheManager read_block_bytes failed: " +
-                  std::string(status_or.status().message()));
-            }
-            const std::string& data = status_or.value();
-            return nb::bytes(data.data(), data.size());
-          },
-          nb::arg("layer_idx"), nb::arg("block_id"))
-      .def(
-          "write_block_bytes",
-          [](KVCacheManager& self, size_t layer_idx, int block_id,
-             const nb::bytes& payload) {
-            std::string payload_str(payload.c_str(), payload.size());
-            absl::Status status =
-                self.WriteBlockBytes(layer_idx, block_id, payload_str);
-            if (!status.ok()) {
-              throw std::runtime_error(
-                  "KVCacheManager write_block_bytes failed: " +
-                  std::string(status.message()));
-            }
-          },
-          nb::arg("layer_idx"), nb::arg("block_id"), nb::arg("payload"))
-      .def(
-          "RegisterRecv",
-          [](KVCacheManager& self, uint64_t uuid, const std::string& req_id,
-             int expected_block_count) {
-            absl::Status status =
-                self.RegisterRecv(uuid, req_id, expected_block_count);
-            if (!status.ok()) {
-              throw std::runtime_error("KVCacheManager RegisterRecv failed: " +
-                                       std::string(status.message()));
-            }
-          },
-          nb::arg("uuid"), nb::arg("req_id"), nb::arg("expected_block_count"))
-      .def(
           "H2d",
           [](KVCacheManager& self,
              const std::vector<int64_t>& src_offsets_major_dim,

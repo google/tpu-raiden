@@ -210,9 +210,6 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
                                   const rpc::StartTransferRequest& request,
                                   bool is_sender) override;
 
-  absl::Status RegisterRecv(uint64_t uuid, const std::string& req_id,
-                            int64_t expected_block_count) override;
-
   // Pool reshard executor. The controller owns topology and entry math; this
   // boundary validates the declared pool contract before any staging or
   // network side effect. Both methods are device-only: a manager without

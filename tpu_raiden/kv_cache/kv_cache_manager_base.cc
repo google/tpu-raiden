@@ -1026,25 +1026,6 @@ int64_t KVCacheManagerBase::LayerBlockByteSize(size_t layer_idx) const {
   return static_cast<int64_t>(slice_byte_size_);
 }
 
-absl::StatusOr<uintptr_t> KVCacheManagerBase::GetBlockHostPointerValue(
-    size_t layer_idx, size_t shard_idx, int block_id) {
-  if (block_id < 0) {
-    return absl::InvalidArgumentError("block_id must be non-negative");
-  }
-  const size_t block_bytes = bytes_per_block();
-  const size_t host_size = GetHostSize(layer_idx, shard_idx);
-  const uint8_t* base = GetHostPointer(layer_idx, shard_idx);
-  if (base == nullptr) {
-    return absl::OutOfRangeError("layer or shard index out of range");
-  }
-  const size_t block = static_cast<size_t>(block_id);
-  if (block_bytes == 0 || block > host_size / block_bytes ||
-      block * block_bytes + block_bytes > host_size) {
-    return absl::OutOfRangeError("block range exceeds host buffer");
-  }
-  return reinterpret_cast<uintptr_t>(base + block * block_bytes);
-}
-
 void KVCacheManagerBase::EnsureImplicitPools() const {
   absl::MutexLock l(pools_mu_);
   if (explicit_pools_ || !pools_.empty()) {
@@ -1341,73 +1322,6 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dPoolBlocks(
     std::optional<size_t> shard_idx) {
   return CopyPoolBlocks(pool_idx, block_ids, shard_idx,
                         /*device_to_host=*/false);
-}
-
-void KVCacheManagerBase::SetBlockChunkRegionValidation(
-    tpu_raiden::transport::BlockChunkRegionValidationMode mode) {
-  block_chunk_region_validation_mode_ = mode;
-}
-
-tpu_raiden::transport::BlockChunkRegionValidationMode
-KVCacheManagerBase::block_chunk_region_validation_mode() const {
-  return block_chunk_region_validation_mode_;
-}
-
-absl::Status KVCacheManagerBase::ValidateBlockChunksInRegions(
-    size_t pool_idx, size_t shard_idx,
-    const std::vector<tpu_raiden::transport::BlockChunk>& chunks) {
-  if (!explicit_pools_) {
-    return absl::OkStatus();
-  }
-  if (pool_idx >= pools_.size() || shard_idx >= num_shards_) {
-    return absl::OutOfRangeError("pool or shard index out of range");
-  }
-  const PoolSpec& pool = pools_[pool_idx];
-  uint8_t* base = GetHostPointer(pool.storage_index, shard_idx);
-  const size_t host_size = GetHostSize(pool.storage_index, shard_idx);
-  if (base == nullptr) {
-    return absl::FailedPreconditionError("host pointer is null");
-  }
-  const size_t block_stride = static_cast<size_t>(pool.block_stride_bytes);
-  if (block_stride == 0) {
-    return absl::FailedPreconditionError(
-        "pool block_stride_bytes must be positive");
-  }
-  const uintptr_t pool_base_addr = reinterpret_cast<uintptr_t>(base) +
-                                   static_cast<size_t>(pool.base_offset_bytes);
-  const int64_t storage_end = pool.storage_extent_end_bytes();
-  if (storage_end < pool.base_offset_bytes ||
-      static_cast<uint64_t>(storage_end) > host_size) {
-    return absl::OutOfRangeError("pool live regions exceed host buffer");
-  }
-  const size_t pool_bytes =
-      static_cast<size_t>(storage_end - pool.base_offset_bytes);
-  for (const auto& chunk : chunks) {
-    if (chunk.size == 0) continue;
-    const uintptr_t chunk_addr = reinterpret_cast<uintptr_t>(chunk.ptr);
-    if (chunk_addr < pool_base_addr ||
-        chunk_addr - pool_base_addr > pool_bytes ||
-        chunk.size > pool_bytes - (chunk_addr - pool_base_addr)) {
-      return absl::OutOfRangeError("chunk is outside pool block array");
-    }
-    size_t relative_offset = chunk_addr - pool_base_addr;
-    size_t remaining = chunk.size;
-    while (remaining > 0) {
-      const size_t block_offset = relative_offset % block_stride;
-      const size_t bytes_in_block =
-          std::min(remaining, block_stride - block_offset);
-      if (!RegionsCoverRange(pool.regions, block_offset,
-                             block_offset + bytes_in_block)) {
-        return absl::FailedPreconditionError(absl::StrCat(
-            "chunk crosses non-live bytes for pool ", pool_idx, " (", pool.tag,
-            "), shard ", shard_idx, ", block_offset ", block_offset, ", size ",
-            bytes_in_block));
-      }
-      relative_offset += bytes_in_block;
-      remaining -= bytes_in_block;
-    }
-  }
-  return absl::OkStatus();
 }
 
 bool KVCacheManagerBase::use_block_chunks(uint64_t uuid) const {

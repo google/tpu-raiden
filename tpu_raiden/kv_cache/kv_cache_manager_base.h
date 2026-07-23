@@ -274,12 +274,6 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
 
   int64_t LayerBlockByteSize(size_t layer_idx) const;
 
-  // Returns the host address of one legacy (layer, shard, block) block.
-  // Shared by the framework bindings; block granularity is bytes_per_block().
-  absl::StatusOr<uintptr_t> GetBlockHostPointerValue(size_t layer_idx,
-                                                     size_t shard_idx,
-                                                     int block_id);
-
   // Registers explicit block pools over the wrapped storages. Fails while
   // active plans are registered. Until this is called the manager exposes one
   // implicit pool per constructor storage (tag "opaque", base_offset 0,
@@ -316,27 +310,11 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   absl::StatusOr<std::optional<tpu_raiden::transport::PoolPushProgressSpec>>
   GetPoolPushProgressSpec(size_t pool_idx, uint64_t uuid) const override;
 
-  void SetBlockChunkRegionValidation(
-      tpu_raiden::transport::BlockChunkRegionValidationMode mode);
-
-  tpu_raiden::transport::BlockChunkRegionValidationMode
-  block_chunk_region_validation_mode() const override;
-
-  absl::Status ValidateBlockChunksInRegions(
-      size_t layer_idx, size_t shard_idx,
-      const std::vector<tpu_raiden::transport::BlockChunk>& chunks) override;
-
   virtual absl::Status RegisterActivePlan(
       uint64_t uuid, const tpu_raiden::rpc::StartTransferRequest& request,
       bool is_sender);
 
   virtual absl::Status UnregisterActivePlan(uint64_t uuid);
-
-  virtual absl::Status RegisterRecv(uint64_t uuid, const std::string& req_id,
-                                    int64_t expected_block_count) {
-    return absl::UnimplementedError(
-        "RegisterRecv not implemented in base class");
-  }
 
   // Resolves the host memory pointers (BlockChunks) for the given block_ids.
   // If `src_block_id` is provided (not -1), it is used to filter the active
@@ -385,9 +363,6 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   mutable absl::Mutex pools_mu_;
   mutable std::vector<PoolSpec> pools_;
   bool explicit_pools_ = false;
-  tpu_raiden::transport::BlockChunkRegionValidationMode
-      block_chunk_region_validation_mode_ =
-          tpu_raiden::transport::BlockChunkRegionValidationMode::kDisabled;
 
   // Returns the per-block byte size for a given layer.  Uses the layer's
   // actual physical_size when available (device-backed path); falls back

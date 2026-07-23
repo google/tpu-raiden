@@ -211,35 +211,6 @@ class KVCacheManager:
     """Removes a previously registered strided push plan."""
     self._impl.unregister_active_plan(uuid)
 
-  def push_registered_plan(
-      self,
-      uuid: int,
-      peer: str,
-      src_block_ids: Sequence[int],
-      dst_block_ids: Sequence[int],
-      layer_idx: int = -1,
-      parallelism: int = 1,
-  ) -> None:
-    """Synchronously pushes host blocks using an already registered plan."""
-    self._impl.push_registered_plan(
-        uuid,
-        peer,
-        list(src_block_ids),
-        list(dst_block_ids),
-        layer_idx,
-        parallelism,
-    )
-
-  def read_block_bytes(self, layer_idx: int, block_id: int) -> bytes:
-    """Returns one host block as bytes."""
-    return self._impl.read_block_bytes(layer_idx, block_id)
-
-  def write_block_bytes(
-      self, layer_idx: int, block_id: int, payload: bytes
-  ) -> None:
-    """Overwrites one host block with bytes."""
-    self._impl.write_block_bytes(layer_idx, block_id, payload)
-
   def register_pools(self, pools: Sequence[Any]) -> Dict[str, Any]:
     """Registers explicit block pools over the wrapped storages.
 
@@ -334,26 +305,6 @@ class KVCacheManager:
     if self._admission_summary is None:
       return {"admitted": False}
     return dict(self._admission_summary)
-
-  def register_recv(
-      self, uuid: int, req_id: str, expected_block_count: int
-  ) -> None:
-    """[EXPERIMENTAL] Registers expected incoming blocks for decentralized push resharding.
-
-    This allocates staging slots in the C++ receiver engine and sets the
-    synchronization barrier for the expected physical block-pushes. The
-    engine will automatically trigger Host-to-Device (H2D) copy to TPU HBM
-    once this count is reached.
-
-    This API is experimental and subject to change.
-
-    Args:
-      uuid: Unique identifier for the transfer transaction.
-      req_id: Request ID associated with the transfer.
-      expected_block_count: The total number of physical block-pushes expected
-        from all contributing source ranks.
-    """
-    self._impl.RegisterRecv(uuid, req_id, expected_block_count)
 
   def register_read(
       self, req_id: str, uuid: int, block_ids: List[int]

@@ -223,72 +223,6 @@ TEST(KVCacheManagerTest, RegisterPoolsFailsAfterActivePlanRegistered) {
   EXPECT_THAT(status.message(), testing::HasSubstr("active plans"));
 }
 
-TEST(KVCacheManagerTest, RegionAwareChunkValidationAcceptsStridedLiveChunks) {
-  TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
-                             /*slice_byte_size=*/128, /*host_blocks=*/2);
-  ASSERT_TRUE(
-      manager.RegisterPools({StridedPool("kind_a", 0, 0, 128, 2)}).ok());
-  manager.SetBlockChunkRegionValidation(
-      transport::BlockChunkRegionValidationMode::kFail);
-  EXPECT_EQ(manager.block_chunk_region_validation_mode(),
-            transport::BlockChunkRegionValidationMode::kFail);
-
-  uint8_t* base = manager.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
-  std::vector<transport::BlockChunk> chunks = {
-      {.ptr = base, .size = 32},
-      {.ptr = base + 64, .size = 32},
-      {.ptr = base + 128 + 64, .size = 32},
-  };
-
-  absl::Status status = manager.ValidateBlockChunksInRegions(
-      /*pool_idx=*/0, /*shard_idx=*/0, chunks);
-  EXPECT_TRUE(status.ok()) << status.ToString();
-}
-
-TEST(KVCacheManagerTest, RegionAwareChunkValidationRejectsPaddingChunks) {
-  TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
-                             /*slice_byte_size=*/128, /*host_blocks=*/4);
-  ASSERT_TRUE(manager
-                  .RegisterPools({
-                      StridedPool("kind_a", 0, 0, 128, 2),
-                      StridedPool("kind_b", 0, 256, 128, 2),
-                  })
-                  .ok());
-  manager.SetBlockChunkRegionValidation(
-      transport::BlockChunkRegionValidationMode::kFail);
-
-  uint8_t* base = manager.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
-  std::vector<transport::BlockChunk> tail_padding = {
-      {.ptr = base + 96, .size = 16},
-  };
-  absl::Status status = manager.ValidateBlockChunksInRegions(
-      /*pool_idx=*/0, /*shard_idx=*/0, tail_padding);
-  EXPECT_EQ(status.code(), absl::StatusCode::kFailedPrecondition);
-  EXPECT_THAT(status.message(), testing::HasSubstr("non-live bytes"));
-
-  std::vector<transport::BlockChunk> crosses_stride_gap = {
-      {.ptr = base, .size = 96},
-  };
-  status = manager.ValidateBlockChunksInRegions(
-      /*pool_idx=*/0, /*shard_idx=*/0, crosses_stride_gap);
-  EXPECT_EQ(status.code(), absl::StatusCode::kFailedPrecondition);
-  EXPECT_THAT(status.message(), testing::HasSubstr("non-live bytes"));
-
-  std::vector<transport::BlockChunk> offset_pool_live = {
-      {.ptr = base + 256 + 64, .size = 32},
-  };
-  status = manager.ValidateBlockChunksInRegions(
-      /*pool_idx=*/1, /*shard_idx=*/0, offset_pool_live);
-  EXPECT_TRUE(status.ok()) << status.ToString();
-
-  std::vector<transport::BlockChunk> before_pool = {
-      {.ptr = base + 128, .size = 32},
-  };
-  status = manager.ValidateBlockChunksInRegions(
-      /*pool_idx=*/1, /*shard_idx=*/0, before_pool);
-  EXPECT_EQ(status.code(), absl::StatusCode::kOutOfRange);
-}
-
 TEST(KVCacheManagerTest, PoolIndicesWithTag) {
   TestKVCacheManager manager(/*num_layers=*/2, /*num_shards=*/1,
                              /*slice_byte_size=*/128, /*host_blocks=*/2);
@@ -591,11 +525,6 @@ TEST(KVCacheManagerTest, ImplicitPoolsMirrorStorages) {
   EXPECT_EQ(ref->ptr, manager.GetHostPointer(/*layer_idx=*/1,
                                              /*shard_idx=*/0) +
                           128);
-
-  // Region validation stays inert without explicit pools.
-  uint8_t* base = manager.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
-  std::vector<transport::BlockChunk> chunks = {{.ptr = base, .size = 128}};
-  EXPECT_TRUE(manager.ValidateBlockChunksInRegions(0, 0, chunks).ok());
 }
 
 TEST(KVCacheManagerTest, UnregisterActivePlanAllowsUuidReuse) {
