@@ -77,6 +77,32 @@ cc_test(
 )
 
 cc_library(
+    name = "kv_cache_metadata",
+    srcs = ["kv_cache_metadata.cc"],
+    hdrs = ["kv_cache_metadata.h"],
+    deps = [
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "kv_cache_metadata_test",
+    srcs = ["kv_cache_metadata_test.cc"],
+    deps = [
+        ":kv_cache_metadata",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/types:span",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "pool_layout",
     srcs = ["pool_layout.cc"],
     hdrs = ["pool_layout.h"],
