@@ -51,9 +51,9 @@ SRC_DIR="${SRC_DIR:-${SCRIPTS_DIR}/.src}"
 # tpu-inference/.buildkite/vllm_lkg.version), so keep the two in lockstep if you
 # bump either.
 VLLM_REPO="${VLLM_REPO:-https://github.com/vllm-project/vllm.git}"
-VLLM_COMMIT="${VLLM_COMMIT:-c8d2f3cb1485fcca725653fb92a445b6cc10ade7}"
+VLLM_COMMIT="${VLLM_COMMIT:-239fc7355361ee60ea10756c10944041d8e38ded}"
 TPU_INFERENCE_REPO="${TPU_INFERENCE_REPO:-https://github.com/vllm-project/tpu-inference.git}"
-TPU_INFERENCE_COMMIT="${TPU_INFERENCE_COMMIT:-34f3afe929d95e7b7dca83571d83edee2306dd51}"
+TPU_INFERENCE_COMMIT="${TPU_INFERENCE_COMMIT:-24c556240b044b52071b21674e82fc9fb068daf4}"
 
 OFFLOAD_CONNECTOR_REL="tpu_inference/offload/raiden_offload_connector.py"
 
