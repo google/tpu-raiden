@@ -1634,9 +1634,10 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteSuccess) {
           EXPECT_EQ(buf.memory_type(), rpc::MemoryType::MEMORY_TYPE_DRAM);
           dst_offsets.push_back(buf.index());
           // ReadRemote carries the destination peer workers as per-worker
-          // endpoint groups; the source narrows them to the matched worker.
+          // endpoint groups (each tagged with node_id); the source narrows them
+          // to the node_id-matched worker.
           for (const auto& group : buf.remote_worker_endpoints()) {
-            for (const auto& p : group) {
+            for (const auto& p : group.endpoints) {
               peer_addrs.push_back(p.endpoint);
             }
           }

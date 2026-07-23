@@ -83,6 +83,9 @@ class KVCacheManager:
           raiden_worker_port,
           raiden_controller_address,
           worker_id,
+          # Pass node_id so ReadRemote can always match src<->dst workers by
+          # node_id (see the non-host_blocks branch, which already forwards it).
+          node_id=node_id,
       )
     else:
       if max_blocks is None or num_slots is None:

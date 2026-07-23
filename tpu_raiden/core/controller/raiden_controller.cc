@@ -487,16 +487,23 @@ tsl::Future<> RaidenController::TransferBuffers(
       Buffer dst_buf = dst_buffers[i];
       const auto& peer_worker_groups = dst_buf.remote_worker_endpoints();
       if (!peer_worker_groups.empty()) {
-        // Remote read: match this source worker to its exact destination peer
-        // worker by sorted worker index, and forward ONLY that peer worker's
-        // endpoints. Requires a symmetric worker count on both sides.
-        if (w >= peer_worker_groups.size()) {
-          return tsl::Future<>(absl::InvalidArgumentError(absl::StrCat(
-              "ReadRemote peer-worker mismatch: source has ", workers.size(),
-              " workers but destination provided ", peer_worker_groups.size(),
-              " worker endpoint groups")));
+        // Remote read: match this source worker to its destination peer worker
+        // strictly by node_id, and forward ONLY that peer worker's endpoints.
+        const RaidenWorkerEndpoints* matched = nullptr;
+        for (const auto& group : peer_worker_groups) {
+          if (group.node_id == workers[w].node_id) {
+            matched = &group;
+            break;
+          }
         }
-        dst_buf.set_remote_descriptors(peer_worker_groups[w]);
+        if (matched == nullptr) {
+          return tsl::Future<>(absl::FailedPreconditionError(absl::StrCat(
+              "ReadRemote: no destination worker group with node_id ",
+              workers[w].node_id, " to match source worker '",
+              workers[w].worker_id, "' (destination provided ",
+              peer_worker_groups.size(), " group(s))")));
+        }
+        dst_buf.set_remote_descriptors(matched->endpoints);
         dst_buf.set_remote_worker_endpoints({});
       } else if (dst_buf.remote_descriptors().empty() &&
                  !dst_buf.remote_address().has_value() &&
@@ -572,14 +579,15 @@ tsl::Future<> RaidenController::ReadRemote(
   }
 
   // A KV block is sharded across every (destination) worker, so every block is
-  // transferred by every worker. Attach the full ordered list of destination
-  // workers' endpoint groups (sorted by worker index) to each dst buffer so the
-  // remote source controller can match each of its workers to the exact
-  // destination peer worker. `workers` is already sorted above.
-  std::vector<std::vector<RaidenTransferEndpoint>> dest_worker_endpoints;
+  // transferred by every worker. Attach the full list of destination workers'
+  // endpoint groups to each dst buffer, each tagged with its node_id, so the
+  // remote source controller can match each of its workers to the destination
+  // peer worker with the same node_id.
+  std::vector<RaidenWorkerEndpoints> dest_worker_endpoints;
   dest_worker_endpoints.reserve(workers.size());
   for (const auto& reg : workers) {
-    dest_worker_endpoints.push_back(reg.raiden_transfer_endpoints);
+    dest_worker_endpoints.push_back(
+        {reg.node_id, reg.worker_id, reg.raiden_transfer_endpoints});
   }
 
   std::vector<Buffer> dst_buffers;

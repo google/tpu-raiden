@@ -89,10 +89,10 @@ TorchKVCacheManager::UnpackedLayers TorchKVCacheManager::UnpackLayers(
 TorchKVCacheManager::TorchKVCacheManager(
     const std::vector<std::vector<at::Tensor>>& device_tensors,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
-    bool unsafe_skip_buffer_lock, int parallelism)
+    bool unsafe_skip_buffer_lock, int parallelism, int64_t node_id)
     : TorchKVCacheManager(
           UnpackLayers(device_tensors), local_port, host_blocks_to_allocate,
-          unsafe_skip_buffer_lock, parallelism, /*node_id=*/0,
+          unsafe_skip_buffer_lock, parallelism, node_id,
           /*local_control_port=*/-1,
           /*max_blocks=*/0, /*num_slots=*/0, /*timeout_s=*/120.0,
           /*kv_caches=*/{}) {}
@@ -268,10 +268,10 @@ KVCacheManager::KVCacheManager(
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     bool unsafe_skip_buffer_lock, int parallelism, int raiden_worker_port,
     std::optional<std::string> raiden_controller_address,
-    std::optional<std::string> worker_id)
+    std::optional<std::string> worker_id, int64_t node_id)
     : torch_manager_(std::make_unique<TorchKVCacheManager>(
           device_tensors, local_port, host_blocks_to_allocate,
-          unsafe_skip_buffer_lock, parallelism)) {
+          unsafe_skip_buffer_lock, parallelism, node_id)) {
   StartGrpcServer(raiden_worker_port, raiden_controller_address, worker_id);
 }
 
@@ -362,7 +362,8 @@ void KVCacheManager::StartGrpcServer(
     }
 
     core::controller::RaidenControllerClient client(*raiden_controller_address);
-    status = client.RegisterWorker(w_id, worker_endpoint, local_eps);
+    status = client.RegisterWorker(w_id, worker_endpoint, local_eps,
+                                   torch_manager_->node_id());
     if (!status.ok()) {
       LOG(ERROR) << "Failed to register worker with controller: "
                  << status.message();

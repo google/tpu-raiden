@@ -58,6 +58,7 @@ grpc::Status RaidenControllerServiceImpl::RegisterWorker(
       .worker_id = request->worker_id(),
       .raiden_worker_endpoint = request->raiden_worker_endpoint(),
       .raiden_transfer_endpoints = std::move(eps),
+      .node_id = request->node_id(),
   };
 
   std::shared_ptr<WorkerRegistry> registry;

@@ -50,9 +50,15 @@ message RaidenTransferEndpointProto {
 // A group of transfer endpoints owned by a single peer worker (a worker may
 // expose more than one endpoint, e.g. one per NUMA sub-manager). Used to carry,
 // per destination worker, that worker's endpoints so a source worker can be
-// matched to its exact destination peer worker.
+// matched to its exact destination peer worker by node_id.
 message RaidenWorkerEndpointsProto {
   repeated RaidenTransferEndpointProto endpoints = 1;
+  // Mesh node identifier of the worker that owns these endpoints. The source
+  // controller matches each of its workers to the destination group with the
+  // same node_id.
+  int64 node_id = 2;
+  // Owning worker id (diagnostics/logging only; matching uses node_id).
+  string worker_id = 3;
 }
 
 // Uniquely identifies a buffer handle on a worker.

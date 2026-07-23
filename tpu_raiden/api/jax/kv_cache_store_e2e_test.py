@@ -387,7 +387,13 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
   def test_e2e_with_multi_numa(self):
     self._run_e2e_test(enable_multi_numa=True)
 
-  def _run_remote_read_e2e_test(self, enable_multi_numa: bool):
+  def _run_remote_read_e2e_test(
+      self,
+      enable_multi_numa: bool,
+      producer_node_id: int = 0,
+      consumer_node_id: int = 0,
+      expect_read_success: bool = True,
+  ):
     if enable_multi_numa and len(self.devices) > 4:
       # TODO(jcgu): Create a new multi-host setup
       # to test True Multi-NUMA ENABLE_MULTI_NUMA=1 correctly, since running
@@ -452,6 +458,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         raiden_worker_port=worker_port_a,
         raiden_controller_address=f"localhost:{controller_port}",
         worker_id="worker_a",
+        node_id=producer_node_id,
     )
 
     controller_port_b = find_free_port()
@@ -476,6 +483,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         raiden_controller_address=f"localhost:{controller_port_b}",
         worker_id="worker_b",
         host_blocks_to_allocate=4,  # Allocating enough space for receiver host blocks
+        node_id=consumer_node_id,
     )
 
     # Wait for listeners to start
@@ -563,6 +571,23 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     # 7. Job B calls ReadRemote
     self.assertTrue(store_b.read_remote(hashes))
 
+    if not expect_read_success:
+      # Strict node_id matching: the producer worker's node_id must equal the
+      # consumer (destination) worker's node_id. A mismatch makes the source
+      # controller find no destination group and the remote read fail.
+      failed = False
+      for _ in range(500):
+        _, read_failed, _ = store_b.poll_remote_read_status()
+        if read_failed:
+          failed = True
+          break
+        time.sleep(0.01)
+      self.assertTrue(
+          failed,
+          "expected ReadRemote to fail on producer/consumer node_id mismatch",
+      )
+      return
+
     # Wait for ReadRemote completion
     done = False
     while not done:
@@ -614,6 +639,27 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
 
   def test_remote_read_e2e_with_multi_numa(self):
     self._run_remote_read_e2e_test(enable_multi_numa=True)
+
+  def test_remote_read_e2e_matching_node_id(self):
+    # Non-zero, matching node_ids on producer and consumer: exercises node_id
+    # plumbing end-to-end (including the consumer's host_blocks_to_allocate
+    # branch) and strict node_id matching succeeding.
+    self._run_remote_read_e2e_test(
+        enable_multi_numa=False,
+        producer_node_id=7,
+        consumer_node_id=7,
+        expect_read_success=True,
+    )
+
+  def test_remote_read_e2e_mismatched_node_id_fails(self):
+    # Producer and consumer node_ids differ: strict matching finds no
+    # destination group for the producer worker and the remote read fails.
+    self._run_remote_read_e2e_test(
+        enable_multi_numa=False,
+        producer_node_id=1,
+        consumer_node_id=2,
+        expect_read_success=False,
+    )
 
 
 if __name__ == "__main__":

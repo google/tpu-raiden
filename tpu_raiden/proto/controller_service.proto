@@ -35,6 +35,10 @@ message RegisterWorkerRequest {
   // Data-plane socket addresses/endpoints owned by this worker.
   repeated .tpu_raiden.proto.RaidenTransferEndpointProto
       raiden_transfer_endpoints = 3;
+  // Unique identifier for this host/node in the distributed mesh. Used by the
+  // controller to match source workers to their destination peer worker during
+  // ReadRemote. Must be unique per controller.
+  int64 node_id = 4;
 }
 
 message RegisterWorkerResponse {

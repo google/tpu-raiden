@@ -48,10 +48,12 @@ RaidenControllerClient::RaidenControllerClient(absl::string_view endpoint)
 absl::Status RaidenControllerClient::RegisterWorker(
     absl::string_view worker_id, absl::string_view raiden_worker_endpoint,
     const std::vector<::tpu_raiden::RaidenTransferEndpoint>&
-        raiden_transfer_endpoints) {
+        raiden_transfer_endpoints,
+    int64_t node_id) {
   ::tpu_raiden::tpu_raiden::proto::RegisterWorkerRequest request;
   request.set_worker_id(std::string(worker_id));
   request.set_raiden_worker_endpoint(std::string(raiden_worker_endpoint));
+  request.set_node_id(node_id);
   for (const auto& ep : raiden_transfer_endpoints) {
     auto* desc = request.add_raiden_transfer_endpoints();
     desc->set_endpoint(ep.endpoint);

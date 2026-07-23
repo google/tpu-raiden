@@ -87,21 +87,21 @@ class Buffer {
     remote_descriptors_ = std::move(remote_descriptors);
   }
 
-  // Ordered per-peer-worker endpoint groups (sorted by worker index). ReadRemote
-  // attaches every destination worker's endpoints here so the source controller
-  // can match each of its workers to the exact destination peer worker. Once
-  // matched, the peer's endpoints are moved into remote_descriptors() and this
-  // is cleared before the buffer is sent to a worker.
+  // Per-peer-worker endpoint groups, each tagged with the owning worker's
+  // node_id. ReadRemote attaches every destination worker's endpoints here so
+  // the source controller can match each of its workers to the destination peer
+  // worker with the same node_id. Once matched, the peer's endpoints are moved
+  // into remote_descriptors() and this is cleared before the buffer is sent to a
+  // worker.
   //
   // TODO(raiden): this is duplicated on every dst buffer; consider moving it to
   // a single repeated field on ReadRemoteRequest instead of carrying it on each
   // Buffer.
-  const std::vector<std::vector<RaidenTransferEndpoint>>&
-  remote_worker_endpoints() const {
+  const std::vector<RaidenWorkerEndpoints>& remote_worker_endpoints() const {
     return remote_worker_endpoints_;
   }
   void set_remote_worker_endpoints(
-      std::vector<std::vector<RaidenTransferEndpoint>> remote_worker_endpoints) {
+      std::vector<RaidenWorkerEndpoints> remote_worker_endpoints) {
     remote_worker_endpoints_ = std::move(remote_worker_endpoints);
   }
 
@@ -127,7 +127,9 @@ class Buffer {
     }
     for (const auto& group : remote_worker_endpoints_) {
       auto* proto_group = proto.add_remote_worker_endpoints();
-      for (const auto& ep : group) {
+      proto_group->set_node_id(group.node_id);
+      proto_group->set_worker_id(group.worker_id);
+      for (const auto& ep : group.endpoints) {
         auto* proto_ep = proto_group->add_endpoints();
         proto_ep->set_endpoint(ep.endpoint);
         for (int64_t shard : ep.shards) {
@@ -166,15 +168,17 @@ class Buffer {
     }
     Buffer buffer(index, std::move(shards), std::move(addr), memory_type,
                   std::move(remote_descriptors));
-    std::vector<std::vector<RaidenTransferEndpoint>> remote_worker_endpoints;
+    std::vector<RaidenWorkerEndpoints> remote_worker_endpoints;
     remote_worker_endpoints.reserve(proto.remote_worker_endpoints_size());
     for (const auto& group_proto : proto.remote_worker_endpoints()) {
-      std::vector<RaidenTransferEndpoint> group;
-      group.reserve(group_proto.endpoints_size());
+      RaidenWorkerEndpoints group;
+      group.node_id = group_proto.node_id();
+      group.worker_id = group_proto.worker_id();
+      group.endpoints.reserve(group_proto.endpoints_size());
       for (const auto& ep_proto : group_proto.endpoints()) {
         std::vector<int64_t> shards(ep_proto.shards().begin(),
                                     ep_proto.shards().end());
-        group.push_back({ep_proto.endpoint(), std::move(shards)});
+        group.endpoints.push_back({ep_proto.endpoint(), std::move(shards)});
       }
       remote_worker_endpoints.push_back(std::move(group));
     }
@@ -188,7 +192,7 @@ class Buffer {
   std::optional<std::string> remote_address_;
   rpc::MemoryType memory_type_ = rpc::MEMORY_TYPE_UNSPECIFIED;
   std::vector<RaidenTransferEndpoint> remote_descriptors_;
-  std::vector<std::vector<RaidenTransferEndpoint>> remote_worker_endpoints_;
+  std::vector<RaidenWorkerEndpoints> remote_worker_endpoints_;
 };
 
 }  // namespace tpu_raiden
