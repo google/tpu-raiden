@@ -276,6 +276,7 @@ cc_library(
     features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
+        ":kv_cache_metadata",
         ":lru_cache",
         ":raiden_id",
         "//tpu_raiden/core:buffer",
@@ -310,6 +311,7 @@ cc_test(
     ],
     features = ["-use_header_modules"],
     deps = [
+        ":kv_cache_metadata",
         ":kv_cache_store",
         ":lru_cache",
         "//tpu_raiden/core:kv_manager_holder",
