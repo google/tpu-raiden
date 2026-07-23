@@ -80,7 +80,7 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   absl::Status PushWeightsChunk(absl::string_view peer, size_t dst_shard_idx,
                                 size_t dst_offset_bytes,
                                 const uint8_t* data_ptr, size_t size_bytes,
-                                uint64_t uuid = 0);
+                                uint64_t uuid = 0, size_t layer_idx = 0);
 
   absl::Status RegisterExpectedChunks(uint64_t uuid, uint32_t expected_chunks);
 
@@ -105,6 +105,9 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
   size_t num_shards() const override { return num_shards_; }
   size_t slice_byte_size() const override { return slice_byte_size_; }
   size_t bytes_per_block() const override;
+  // Returns the layer-specific block size, falling back to bytes_per_block() if
+  // the layer size is not initialized (0).
+  size_t block_bytes(size_t layer_idx) const override;
   size_t shard_factor() const override { return shard_factor_; }
 
  protected:

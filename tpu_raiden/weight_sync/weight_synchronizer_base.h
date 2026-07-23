@@ -24,7 +24,6 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/string_view.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_raw_buffer_extension.h"
 #include "xla/pjrt/pjrt_client.h"
@@ -50,7 +49,8 @@ class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
           std::nullopt,
       bool unsafe_skip_buffer_lock = false, int parallelism = 1,
       std::optional<int> listener_port = std::nullopt,
-      std::optional<std::string> bind_ip = std::nullopt);
+      std::optional<std::string> bind_ip = std::nullopt,
+      std::vector<std::string> layer_names = {}, bool auto_h2d = false);
 
   // CPU-only constructor for remote workers and mock E2E testing
   WeightSynchronizerBase(
@@ -58,7 +58,19 @@ class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<int> local_port = std::nullopt,
       std::optional<int> host_blocks_to_allocate = std::nullopt,
       int parallelism = 1, std::optional<int> listener_port = std::nullopt,
-      std::optional<std::string> bind_ip = std::nullopt);
+      std::optional<std::string> bind_ip = std::nullopt,
+      std::vector<std::string> layer_names = {}, bool auto_h2d = false);
+
+  // CPU-only constructor for remote workers and mock E2E testing supporting
+  // heterogeneous slice sizes and custom layer names.
+  WeightSynchronizerBase(
+      size_t num_layers, size_t num_shards,
+      std::vector<size_t> slice_byte_sizes,
+      std::optional<int> local_port = std::nullopt,
+      std::optional<int> host_blocks_to_allocate = std::nullopt,
+      int parallelism = 1, std::optional<int> listener_port = std::nullopt,
+      std::optional<std::string> bind_ip = std::nullopt,
+      std::vector<std::string> layer_names = {}, bool auto_h2d = false);
 
   std::optional<int> listener_port() const;
   bool is_listener_active() const;
@@ -94,6 +106,9 @@ class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
     return layers_[layer_idx].shards[shard_idx].host_ptr;
   }
 
+  // Returns the list of layer names associated with the weight synchronizer.
+  const std::vector<std::string>& layer_names() const { return layer_names_; }
+
   absl::StatusOr<raiden::PjRtCopyFuture> H2d();
   absl::StatusOr<raiden::PjRtCopyFuture> D2h();
 
@@ -102,6 +117,8 @@ class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
   const PJRT_Api* c_api_ = nullptr;
   const PJRT_RawBuffer_Extension* extension_ = nullptr;
   size_t physical_size_ = 0;
+  // Opaque human-readable name labels mapped to logical layer index boundaries.
+  std::vector<std::string> layer_names_;
 
   // Separate PJRT active holds matrix E2E!
   std::vector<std::vector<raiden::BufferHoldAndAlias>> buffer_holds_;
@@ -120,6 +137,11 @@ class WeightSynchronizerBase : public tpu_raiden::RaidenManagerBase {
   }
 
   absl::Status OnDataReceived() override;
+
+ private:
+  // When enabled, automatically schedules asynchronous device transfers (H2D)
+  // upon complete host buffer writes.
+  bool auto_h2d_ = false;
 };
 
 }  // namespace weight_sync
