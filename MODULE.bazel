@@ -1,6 +1,6 @@
 module(name = "tpu_raiden")
 
-bazel_dep(name = "protobuf", version = "32.1", repo_name = "com_google_protobuf")
+bazel_dep(name = "protobuf", version = "35.1", repo_name = "com_google_protobuf")
 bazel_dep(name = "rules_cc", version = "0.2.9")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
@@ -61,14 +61,14 @@ single_version_override(
     version = "1.8.5",
 )
 
-bazel_dep(name = "grpc", version = "1.78.0", repo_name = "com_github_grpc_grpc")
+bazel_dep(name = "grpc", version = "1.83.0", repo_name = "com_github_grpc_grpc")
 single_version_override(
     module_name = "grpc",
     patch_strip = 1,
     patches = [
         "//:third_party/grpc/grpc.patch",
     ],
-    version = "1.78.0",
+    version = "1.83.0",
 )
 
 third_party = use_extension("@xla//third_party/extensions:third_party.bzl", "third_party_ext")
@@ -79,6 +79,7 @@ use_repo(
 )
 
 bazel_dep(name = "abseil-cpp", version = "20260107.1", repo_name = "com_google_absl")
+bazel_dep(name = "gloop", version = "20260708.rc1", repo_name = "com_google_gloop")
 
 # OSS crypto for global_registry_client.cc SHA256.
 bazel_dep(name = "boringssl", version = "0.20240913.0")
