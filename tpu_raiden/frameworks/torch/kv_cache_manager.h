@@ -49,7 +49,8 @@ class TorchKVCacheManager : public KVCacheManagerWithTransfer {
       const std::vector<std::vector<at::Tensor>>& device_tensors,
       std::optional<int> local_port = std::nullopt,
       std::optional<int> host_blocks_to_allocate = std::nullopt,
-      bool unsafe_skip_buffer_lock = false, int parallelism = 1);
+      bool unsafe_skip_buffer_lock = false, int parallelism = 1,
+      int64_t node_id = 0);
 
   // New transfer-enabled constructor (flat list of tensors, single shard per
   // layer)
@@ -134,7 +135,7 @@ class KVCacheManager {
       bool unsafe_skip_buffer_lock = false, int parallelism = 1,
       int raiden_worker_port = 0,
       std::optional<std::string> raiden_controller_address = std::nullopt,
-      std::optional<std::string> worker_id = std::nullopt);
+      std::optional<std::string> worker_id = std::nullopt, int64_t node_id = 0);
 
   KVCacheManager(
       const std::vector<at::Tensor>& kv_caches, int64_t node_id,

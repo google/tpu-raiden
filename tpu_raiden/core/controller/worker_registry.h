@@ -15,6 +15,7 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_CORE_CONTROLLER_WORKER_REGISTRY_H_
 #define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_CORE_CONTROLLER_WORKER_REGISTRY_H_
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -41,6 +42,10 @@ struct WorkerRegistration {
   std::shared_ptr<::tpu_raiden::controller::WorkerServiceClient>
       worker_service_client;
   std::vector<::tpu_raiden::proto::BufferProto> buffers;
+  // Unique mesh node identifier of this worker. Used to match source workers to
+  // their destination peer worker during ReadRemote. Must be unique per
+  // controller (enforced at registration).
+  int64_t node_id = 0;
 };
 
 // Thread-safe registry for worker node registrations in the controller plane.
@@ -60,12 +65,15 @@ class WorkerRegistry {
     on_register_cb_ = std::move(cb);
   }
 
-  // Registers or updates a worker registration.
+  // Registers or updates a worker registration. Enforces that node_id (when
+  // non-zero) and worker_id are unique across distinct registered workers;
+  // re-registration under the same worker_id is an update.
   absl::Status RegisterWorker(const WorkerRegistration& reg);
   absl::Status RegisterWorker(
       absl::string_view worker_id, absl::string_view raiden_worker_endpoint,
       const std::vector<::tpu_raiden::RaidenTransferEndpoint>&
-          raiden_transfer_endpoints);
+          raiden_transfer_endpoints,
+      int64_t node_id = 0);
 
   // Retrieves all registered workers.
   std::vector<WorkerRegistration> GetRegisteredWorkers() const;

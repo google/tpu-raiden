@@ -47,6 +47,20 @@ message RaidenTransferEndpointProto {
   repeated int64 shards = 2;
 }
 
+// A group of transfer endpoints owned by a single peer worker (a worker may
+// expose more than one endpoint, e.g. one per NUMA sub-manager). Used to carry,
+// per destination worker, that worker's endpoints so a source worker can be
+// matched to its exact destination peer worker by node_id.
+message RaidenWorkerEndpointsProto {
+  repeated RaidenTransferEndpointProto endpoints = 1;
+  // Mesh node identifier of the worker that owns these endpoints. The source
+  // controller matches each of its workers to the destination group with the
+  // same node_id.
+  int64 node_id = 2;
+  // Owning worker id (diagnostics/logging only; matching uses node_id).
+  string worker_id = 3;
+}
+
 // Uniquely identifies a buffer handle on a worker.
 message BufferHandleProto {
   uint64 handle = 1;
@@ -59,6 +73,15 @@ message BufferProto {
   tpu_raiden.rpc.MemoryType memory_type = 3;
   string remote_address = 4;
   repeated RaidenTransferEndpointProto remote_descriptors = 9;
+  // Ordered per-destination-worker endpoint groups (sorted by worker index),
+  // populated by ReadRemote so the source controller can match each of its
+  // workers to the exact destination peer worker. Once the source narrows this
+  // down to the matched peer, that worker's endpoints are moved into
+  // remote_descriptors before dispatch (so remote_worker_endpoints is empty on
+  // the wire to a worker).
+  // TODO(raiden): this grouping is duplicated on every dst buffer; it could
+  // instead be a single repeated field on ReadRemoteRequest.
+  repeated RaidenWorkerEndpointsProto remote_worker_endpoints = 10;
 }
 
 // Specification for creating/allocating a sharded buffer in host RAM.

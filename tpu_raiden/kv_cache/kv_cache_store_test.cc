@@ -991,13 +991,13 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, SaveMultiWorkerSuccess) {
 
   EXPECT_EQ(mock_mgr_0.d2h_calls, 1);
   EXPECT_EQ(mock_mgr_0.h2d_calls, 0);
-  EXPECT_THAT(mock_mgr_0.last_src_offsets, ElementsAre(0));
-  EXPECT_THAT(mock_mgr_0.last_dst_offsets, ElementsAre(0));
+  EXPECT_THAT(mock_mgr_0.last_src_offsets, ElementsAre(0, 1));
+  EXPECT_THAT(mock_mgr_0.last_dst_offsets, ElementsAre(0, 1));
 
   EXPECT_EQ(mock_mgr_1.d2h_calls, 1);
   EXPECT_EQ(mock_mgr_1.h2d_calls, 0);
-  EXPECT_THAT(mock_mgr_1.last_src_offsets, ElementsAre(1));
-  EXPECT_THAT(mock_mgr_1.last_dst_offsets, ElementsAre(1));
+  EXPECT_THAT(mock_mgr_1.last_src_offsets, ElementsAre(0, 1));
+  EXPECT_THAT(mock_mgr_1.last_dst_offsets, ElementsAre(0, 1));
 
   auto lookup_res = store.Lookup(hashes);
   ASSERT_TRUE(lookup_res.ok());
@@ -1061,13 +1061,13 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, LoadMultiWorkerSuccess) {
 
   EXPECT_EQ(mock_mgr_0.d2h_calls, 0);
   EXPECT_EQ(mock_mgr_0.h2d_calls, 1);
-  EXPECT_THAT(mock_mgr_0.last_src_offsets, ElementsAre(0));
-  EXPECT_THAT(mock_mgr_0.last_dst_offsets, ElementsAre(2));
+  EXPECT_THAT(mock_mgr_0.last_src_offsets, ElementsAre(0, 1));
+  EXPECT_THAT(mock_mgr_0.last_dst_offsets, ElementsAre(2, 3));
 
   EXPECT_EQ(mock_mgr_1.d2h_calls, 0);
   EXPECT_EQ(mock_mgr_1.h2d_calls, 1);
-  EXPECT_THAT(mock_mgr_1.last_src_offsets, ElementsAre(1));
-  EXPECT_THAT(mock_mgr_1.last_dst_offsets, ElementsAre(3));
+  EXPECT_THAT(mock_mgr_1.last_src_offsets, ElementsAre(0, 1));
+  EXPECT_THAT(mock_mgr_1.last_dst_offsets, ElementsAre(2, 3));
 
   auto lookup_res = store.Lookup(hashes);
   ASSERT_TRUE(lookup_res.ok());
@@ -1633,8 +1633,13 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteSuccess) {
         for (const auto& buf : dst_buffers) {
           EXPECT_EQ(buf.memory_type(), rpc::MemoryType::MEMORY_TYPE_DRAM);
           dst_offsets.push_back(buf.index());
-          for (const auto& p : buf.remote_descriptors()) {
-            peer_addrs.push_back(p.endpoint);
+          // ReadRemote carries the destination peer workers as per-worker
+          // endpoint groups (each tagged with node_id); the source narrows them
+          // to the node_id-matched worker.
+          for (const auto& group : buf.remote_worker_endpoints()) {
+            for (const auto& p : group.endpoints) {
+              peer_addrs.push_back(p.endpoint);
+            }
           }
         }
         EXPECT_THAT(dst_offsets, ::testing::ElementsAre(

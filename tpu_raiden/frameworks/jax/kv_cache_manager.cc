@@ -155,18 +155,19 @@ UnpackedCache UnpackAndMove(nanobind::list device_arrays) {
 NumaAwareKVCacheManager::NumaAwareKVCacheManager(
     nb::list device_arrays, std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate, bool unsafe_skip_buffer_lock,
-    int parallelism)
+    int parallelism, int64_t node_id)
     : NumaAwareKVCacheManager(UnpackAndMove(std::move(device_arrays)),
                               local_port, host_blocks_to_allocate,
-                              unsafe_skip_buffer_lock, parallelism) {}
+                              unsafe_skip_buffer_lock, parallelism, node_id) {}
 
 NumaAwareKVCacheManager::NumaAwareKVCacheManager(
     UnpackedCache&& cache, std::optional<int> local_port,
     std::optional<int> host_blocks_to_allocate, bool unsafe_skip_buffer_lock,
-    int parallelism)
+    int parallelism, int64_t node_id)
     : device_arrays_(std::move(cache.device_arrays)) {
   InitSubManagers(cache.layer_buffers, local_port, host_blocks_to_allocate,
-                  unsafe_skip_buffer_lock, parallelism, 0, -1, 0, 0, 120.0);
+                  unsafe_skip_buffer_lock, parallelism, node_id, -1, 0, 0,
+                  120.0);
 }
 
 NumaAwareKVCacheManager::NumaAwareKVCacheManager(
@@ -819,10 +820,10 @@ KVCacheManager::KVCacheManager(
     std::optional<int> host_blocks_to_allocate, bool unsafe_skip_buffer_lock,
     int parallelism, int raiden_worker_port,
     std::optional<std::string> raiden_controller_address,
-    std::optional<std::string> worker_id)
+    std::optional<std::string> worker_id, int64_t node_id)
     : numa_manager_(std::make_unique<NumaAwareKVCacheManager>(
           std::move(device_arrays), local_port, host_blocks_to_allocate,
-          unsafe_skip_buffer_lock, parallelism)) {
+          unsafe_skip_buffer_lock, parallelism, node_id)) {
   StartGrpcServer(raiden_worker_port, raiden_controller_address, worker_id);
 }
 
@@ -923,7 +924,8 @@ void KVCacheManager::StartGrpcServer(
     }
 
     core::controller::RaidenControllerClient client(*raiden_controller_address);
-    status = client.RegisterWorker(w_id, worker_endpoint, local_eps);
+    status = client.RegisterWorker(w_id, worker_endpoint, local_eps,
+                                   numa_manager_->node_id());
     if (!status.ok()) {
       LOG(ERROR) << "Failed to register worker with controller: "
                  << status.message();

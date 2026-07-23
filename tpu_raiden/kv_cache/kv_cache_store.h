@@ -82,6 +82,9 @@ struct RaidenBlockID {
            host_block_id == other.host_block_id &&
            device_block_id == other.device_block_id && status == other.status;
   }
+  bool operator!=(const RaidenBlockID& other) const {
+    return !(*this == other);
+  }
 };
 
 using BlockSliceList = std::vector<std::pair<std::string, RaidenBlockID>>;

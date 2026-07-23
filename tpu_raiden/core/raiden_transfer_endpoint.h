@@ -30,6 +30,20 @@ struct RaidenTransferEndpoint {
   }
 };
 
+// A group of transfer endpoints owned by a single peer worker, tagged with the
+// worker's mesh node_id (used for source<->destination worker matching during
+// ReadRemote) and worker_id (diagnostics/logging only).
+struct RaidenWorkerEndpoints {
+  int64_t node_id = 0;
+  std::string worker_id;
+  std::vector<RaidenTransferEndpoint> endpoints;
+
+  bool operator==(const RaidenWorkerEndpoints& other) const {
+    return node_id == other.node_id && worker_id == other.worker_id &&
+           endpoints == other.endpoints;
+  }
+};
+
 }  // namespace tpu_raiden
 
 #endif  // THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_CORE_RAIDEN_TRANSFER_ENDPOINT_H_

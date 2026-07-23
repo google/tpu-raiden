@@ -19,11 +19,13 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
@@ -79,14 +81,15 @@ class RaidenControllerTest : public ::testing::Test {
 
   void RegisterAndInitWorker(RaidenController& controller,
                              const std::string& worker_id,
-                             const std::string& worker_address) {
+                             const std::string& worker_address,
+                             int64_t node_id = 0) {
     auto resolve_or = controller.ResolvePeerController(controller.unit());
     ASSERT_TRUE(resolve_or.ok());
     std::string server_address = *resolve_or;
     core::controller::RaidenControllerClient client(server_address);
     auto status = client.RegisterWorker(
         worker_id, worker_address,
-        {::tpu_raiden::RaidenTransferEndpoint{worker_address, {}}});
+        {::tpu_raiden::RaidenTransferEndpoint{worker_address, {}}}, node_id);
     ASSERT_TRUE(status.ok()) << status.message();
   }
 
@@ -565,8 +568,14 @@ TEST_F(RaidenControllerTest, ReadRemoteSuccess) {
         for (const auto& buf : dst_buffers) {
           EXPECT_EQ(buf.memory_type(), rpc::MemoryType::MEMORY_TYPE_DRAM);
           callback_dst_offsets.push_back(buf.index());
-          for (const auto& desc : buf.remote_descriptors()) {
-            callback_peers.push_back(desc.endpoint);
+          // Every dst buffer (block) carries the full list of
+          // destination-worker endpoint groups; the source narrows this to the
+          // node_id-matched peer per source worker inside TransferBuffers (which
+          // this test overrides).
+          for (const auto& group : buf.remote_worker_endpoints()) {
+            for (const auto& desc : group.endpoints) {
+              callback_peers.push_back(desc.endpoint);
+            }
           }
         }
         return tsl::Future<>(absl::OkStatus());
@@ -584,8 +593,158 @@ TEST_F(RaidenControllerTest, ReadRemoteSuccess) {
   EXPECT_TRUE(callback_triggered);
   EXPECT_THAT(callback_src_offsets, ElementsAre(10, 11));
   EXPECT_THAT(callback_dst_offsets, ElementsAre(20, 21));
-  EXPECT_THAT(callback_peers, ElementsAre(test_server_->server_address,
-                                          test_server2->server_address));
+  // Each of the two dst blocks carries both destination workers' endpoint
+  // groups (sorted by worker id: worker_0 -> test_server_, worker_1 ->
+  // test_server2), so both blocks contribute the same ordered pair.
+  EXPECT_THAT(callback_peers,
+              ElementsAre(test_server_->server_address,
+                          test_server2->server_address,
+                          test_server_->server_address,
+                          test_server2->server_address));
+}
+
+// End-to-end at the source worker: when the source worker's transfer manager
+// exposes the vector (shard-matching) H2h overloads, the controller fan-out ->
+// WorkerServiceImpl -> KVManagerHolder must dispatch to that SHARD-MATCHING path
+// (not the single-endpoint string fallback) and hand it the full shard-tagged
+// descriptor list. This is the path that was previously untested because
+// MockTransferManager only has the string overloads.
+TEST_F(RaidenControllerTest,
+       TransferBuffersTriggersShardMatchingVectorPathAtWorker) {
+  ShardAwareMockTransferManager shard_mock;
+  test_server_->service->SetTransferManager(KVManagerHolder(&shard_mock));
+
+  RaidenController controller(unit_, /*num_blocks=*/5, /*num_shards=*/2,
+                              /*shard_size_bytes=*/512, orchestrator_address_,
+                              "");
+  RegisterAndInitWorker(controller, "worker_0", test_server_->server_address);
+
+  // Source block -> destination host block. The destination peer worker exposes
+  // two shard-tagged sub-manager endpoints; both must reach the worker's vector
+  // H2hWrite intact so its NUMA sub-managers can shard-match against them.
+  std::vector<Buffer> src_buffers;
+  src_buffers.emplace_back(/*index=*/10, std::vector<BufferShard>{},
+                           std::nullopt, rpc::MemoryType::MEMORY_TYPE_DRAM);
+
+  // One destination peer worker group. Its node_id (0) matches the source
+  // worker registered above (RegisterAndInitWorker defaults node_id to 0), so
+  // strict node_id matching selects it.
+  ::tpu_raiden::RaidenWorkerEndpoints peer_group{
+      /*node_id=*/0, /*worker_id=*/"worker_0",
+      {{"10.0.0.9:41000", {0, 1, 2, 3}}, {"10.0.0.9:41001", {4, 5, 6, 7}}}};
+  Buffer dst_buf(/*index=*/20, std::vector<BufferShard>{}, std::nullopt,
+                 rpc::MemoryType::MEMORY_TYPE_DRAM);
+  dst_buf.set_remote_worker_endpoints({peer_group});
+  std::vector<Buffer> dst_buffers;
+  dst_buffers.push_back(std::move(dst_buf));
+
+  auto status = controller.TransferBuffers(src_buffers, dst_buffers).Await();
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  // Shard-matching (vector) path was taken, NOT the single-endpoint string
+  // fallback...
+  EXPECT_EQ(shard_mock.vector_h2h_write_calls, 1);
+  EXPECT_EQ(shard_mock.h2h_write_calls, 0);
+  // ...and the worker received the full shard-tagged descriptor list intact.
+  ASSERT_EQ(shard_mock.last_write_descriptors.size(), 2u);
+  EXPECT_EQ(shard_mock.last_write_descriptors[0].endpoint, "10.0.0.9:41000");
+  EXPECT_EQ(shard_mock.last_write_descriptors[0].shards,
+            (std::vector<int64_t>{0, 1, 2, 3}));
+  EXPECT_EQ(shard_mock.last_write_descriptors[1].endpoint, "10.0.0.9:41001");
+  EXPECT_EQ(shard_mock.last_write_descriptors[1].shards,
+            (std::vector<int64_t>{4, 5, 6, 7}));
+}
+
+// Source workers are matched to destination peer groups strictly by node_id, not
+// by sorted-worker-id index. Here the worker_id sort order is the REVERSE of the
+// node_id order, so index-based matching would pair them backwards.
+TEST_F(RaidenControllerTest, TransferBuffersMatchesWorkersByNodeIdNotSortOrder) {
+  auto test_server2 = CreateTestWorkerServer();
+  MockTransferManager mock_lo;  // node_id 10
+  MockTransferManager mock_hi;  // node_id 20
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock_lo));
+  test_server2->service->SetTransferManager(KVManagerHolder(&mock_hi));
+
+  RaidenController controller(unit_, /*num_blocks=*/5, /*num_shards=*/2,
+                              /*shard_size_bytes=*/512, orchestrator_address_,
+                              "");
+  // worker_id "z_lo" (node 10) sorts AFTER "a_hi" (node 20): sorted order is
+  // [a_hi(node20), z_lo(node10)] -- reverse of node order.
+  RegisterAndInitWorker(controller, "z_lo", test_server_->server_address,
+                        /*node_id=*/10);
+  RegisterAndInitWorker(controller, "a_hi", test_server2->server_address,
+                        /*node_id=*/20);
+
+  std::vector<Buffer> src_buffers;
+  src_buffers.emplace_back(/*index=*/1, std::vector<BufferShard>{}, std::nullopt,
+                           rpc::MemoryType::MEMORY_TYPE_DRAM);
+  // Groups listed node-10 first, node-20 second.
+  Buffer dst_buf(/*index=*/2, std::vector<BufferShard>{}, std::nullopt,
+                 rpc::MemoryType::MEMORY_TYPE_DRAM);
+  dst_buf.set_remote_worker_endpoints({
+      ::tpu_raiden::RaidenWorkerEndpoints{10, "z_lo", {{"ep_lo:1", {}}}},
+      ::tpu_raiden::RaidenWorkerEndpoints{20, "a_hi", {{"ep_hi:1", {}}}},
+  });
+  std::vector<Buffer> dst_buffers;
+  dst_buffers.push_back(std::move(dst_buf));
+
+  auto status = controller.TransferBuffers(src_buffers, dst_buffers).Await();
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  // node-10 worker got node-10's endpoints; node-20 worker got node-20's --
+  // NOT what sorted index (a_hi first -> group[0]=node10) would produce.
+  EXPECT_EQ(mock_lo.last_peer, "ep_lo:1");
+  EXPECT_EQ(mock_hi.last_peer, "ep_hi:1");
+}
+
+// Strict matching: a source worker whose node_id has no destination group is an
+// error (no silent fallback).
+TEST_F(RaidenControllerTest, TransferBuffersStrictErrorsOnUnmatchedNodeId) {
+  MockTransferManager mock;
+  test_server_->service->SetTransferManager(KVManagerHolder(&mock));
+  RaidenController controller(unit_, /*num_blocks=*/5, /*num_shards=*/2,
+                              /*shard_size_bytes=*/512, orchestrator_address_,
+                              "");
+  RegisterAndInitWorker(controller, "worker_0", test_server_->server_address,
+                        /*node_id=*/99);
+
+  std::vector<Buffer> src_buffers;
+  src_buffers.emplace_back(/*index=*/1, std::vector<BufferShard>{}, std::nullopt,
+                           rpc::MemoryType::MEMORY_TYPE_DRAM);
+  Buffer dst_buf(/*index=*/2, std::vector<BufferShard>{}, std::nullopt,
+                 rpc::MemoryType::MEMORY_TYPE_DRAM);
+  dst_buf.set_remote_worker_endpoints(
+      {::tpu_raiden::RaidenWorkerEndpoints{5, "other", {{"ep:1", {}}}}});
+  std::vector<Buffer> dst_buffers;
+  dst_buffers.push_back(std::move(dst_buf));
+
+  auto status = controller.TransferBuffers(src_buffers, dst_buffers).Await();
+  EXPECT_FALSE(status.ok());
+  EXPECT_THAT(std::string(status.message()), HasSubstr("node_id"));
+}
+
+// The controller rejects a second worker that registers a duplicate non-zero
+// node_id; re-registration under the same worker_id is an allowed update.
+TEST_F(RaidenControllerTest, RegisterWorkerRejectsDuplicateNodeId) {
+  RaidenController controller(unit_, /*num_blocks=*/5, /*num_shards=*/2,
+                              /*shard_size_bytes=*/512, orchestrator_address_,
+                              "");
+  auto resolve_or = controller.ResolvePeerController(controller.unit());
+  ASSERT_TRUE(resolve_or.ok());
+  core::controller::RaidenControllerClient client(*resolve_or);
+
+  const std::string& addr = test_server_->server_address;
+  ASSERT_TRUE(
+      client.RegisterWorker("worker_0", addr, {{addr, {}}}, /*node_id=*/7).ok());
+  // Distinct worker, same node_id -> rejected (node_id check runs before any
+  // worker-side buffer creation, so the address is irrelevant here).
+  auto dup = client.RegisterWorker("worker_1", addr, {{addr, {}}},
+                                   /*node_id=*/7);
+  EXPECT_FALSE(dup.ok());
+  // Same worker_id re-registering the same node_id -> allowed (update).
+  auto same =
+      client.RegisterWorker("worker_0", addr, {{addr, {}}}, /*node_id=*/7);
+  EXPECT_TRUE(same.ok()) << same.message();
 }
 
 TEST_F(RaidenControllerTest, AllocateBuffersAndDeallocateBuffersSuccess) {

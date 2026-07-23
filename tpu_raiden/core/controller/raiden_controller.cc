@@ -467,6 +467,14 @@ tsl::Future<> RaidenController::TransferBuffers(
               return CompareWorkerIds(a.worker_id, b.worker_id);
             });
 
+  absl::flat_hash_map<int64_t, const RaidenWorkerEndpoints*>
+      peer_node_id_to_endpoints;
+  for (const auto& dst_buf : dst_buffers) {
+    for (const auto& group : dst_buf.remote_worker_endpoints()) {
+      peer_node_id_to_endpoints.emplace(group.node_id, &group);
+    }
+  }
+
   std::vector<tsl::Future<>> worker_futures;
   worker_futures.reserve(workers.size());
 
@@ -476,17 +484,32 @@ tsl::Future<> RaidenController::TransferBuffers(
     std::vector<Buffer> worker_src;
     std::vector<Buffer> worker_dst;
     std::vector<int64_t> worker_copy_sizes;
+    worker_src.reserve(src_buffers.size());
+    worker_dst.reserve(dst_buffers.size());
 
+    // Every buffer/block is transferred by every worker (each worker owns a
+    // shard of every block), so there is no per-block partitioning here.
     for (size_t i = 0; i < src_buffers.size(); ++i) {
-      if (workers.size() > 1 && (i % workers.size() != w)) {
-        continue;
-      }
       worker_src.push_back(src_buffers[i]);
 
       Buffer dst_buf = dst_buffers[i];
-      if (dst_buf.remote_descriptors().empty() &&
-          !dst_buf.remote_address().has_value() &&
-          !workers[w].raiden_transfer_endpoints.empty()) {
+      if (!dst_buf.remote_worker_endpoints().empty()) {
+        auto it = peer_node_id_to_endpoints.find(workers[w].node_id);
+        if (it == peer_node_id_to_endpoints.end()) {
+          return tsl::Future<>(absl::FailedPreconditionError(absl::StrCat(
+              "ReadRemote: no destination worker group with node_id ",
+              workers[w].node_id, " to match source worker '",
+              workers[w].worker_id, "' (destination provided ",
+              dst_buf.remote_worker_endpoints().size(), " group(s))")));
+        }
+        dst_buf.set_remote_descriptors(it->second->endpoints);
+        dst_buf.set_remote_worker_endpoints({});
+      } else if (dst_buf.remote_descriptors().empty() &&
+                 !dst_buf.remote_address().has_value() &&
+                 !workers[w].raiden_transfer_endpoints.empty()) {
+        // Default fallback for local (intra-node / single-host) buffer transfers
+        // where remote_worker_endpoints was omitted. Inject local worker w's
+        // registered sub-manager transfer endpoints into remote_descriptors.
         dst_buf.set_remote_descriptors(workers[w].raiden_transfer_endpoints);
       }
       worker_dst.push_back(std::move(dst_buf));
@@ -557,13 +580,25 @@ tsl::Future<> RaidenController::ReadRemote(
                              rpc::MemoryType::MEMORY_TYPE_DRAM);
   }
 
+  // A KV block is sharded across every (destination) worker, so every block is
+  // transferred by every worker. Attach the full list of destination workers'
+  // endpoint groups to each dst buffer, each tagged with its node_id, so the
+  // remote source controller can match each of its workers to the destination
+  // peer worker with the same node_id.
+  std::vector<RaidenWorkerEndpoints> dest_worker_endpoints;
+  dest_worker_endpoints.reserve(workers.size());
+  for (const auto& reg : workers) {
+    dest_worker_endpoints.push_back(
+        {reg.node_id, reg.worker_id, reg.raiden_transfer_endpoints});
+  }
+
   std::vector<Buffer> dst_buffers;
   dst_buffers.reserve(dest_host_block_ids.size());
   for (size_t i = 0; i < dest_host_block_ids.size(); ++i) {
-    size_t worker_idx = (workers.size() == 1) ? 0 : (i % workers.size());
-    dst_buffers.emplace_back(dest_host_block_ids[i], std::vector<BufferShard>{},
-                             std::nullopt, rpc::MemoryType::MEMORY_TYPE_DRAM,
-                             workers[worker_idx].raiden_transfer_endpoints);
+    Buffer dst_buf(dest_host_block_ids[i], std::vector<BufferShard>{},
+                   std::nullopt, rpc::MemoryType::MEMORY_TYPE_DRAM);
+    dst_buf.set_remote_worker_endpoints(dest_worker_endpoints);
+    dst_buffers.push_back(std::move(dst_buf));
   }
 
   std::string controller_address;

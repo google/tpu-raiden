@@ -67,7 +67,8 @@ class NumaAwareKVCacheManager {
       nanobind::list device_arrays,
       std::optional<int> local_port = std::nullopt,
       std::optional<int> host_blocks_to_allocate = std::nullopt,
-      bool unsafe_skip_buffer_lock = false, int parallelism = 1);
+      bool unsafe_skip_buffer_lock = false, int parallelism = 1,
+      int64_t node_id = 0);
 
   // New transfer-enabled constructor (flat list of arrays, single shard per
   // layer)
@@ -182,7 +183,8 @@ class NumaAwareKVCacheManager {
 #ifndef WITHOUT_PYTHON
   NumaAwareKVCacheManager(UnpackedCache&& cache, std::optional<int> local_port,
                           std::optional<int> host_blocks_to_allocate,
-                          bool unsafe_skip_buffer_lock, int parallelism);
+                          bool unsafe_skip_buffer_lock, int parallelism,
+                          int64_t node_id = 0);
 
   NumaAwareKVCacheManager(UnpackedCache&& cache, int64_t node_id,
                           int64_t local_control_port, int64_t max_blocks,
@@ -230,7 +232,7 @@ class KVCacheManager {
       bool unsafe_skip_buffer_lock = false, int parallelism = 1,
       int raiden_worker_port = 0,
       std::optional<std::string> raiden_controller_address = std::nullopt,
-      std::optional<std::string> worker_id = std::nullopt);
+      std::optional<std::string> worker_id = std::nullopt, int64_t node_id = 0);
 
   // New transfer-enabled constructor (flat list of arrays, single shard per
   // layer)

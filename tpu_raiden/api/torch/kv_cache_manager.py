@@ -115,6 +115,9 @@ class KVCacheManager:
           raiden_worker_port,
           raiden_controller_address,
           worker_id,
+          # Pass node_id so ReadRemote can always match src<->dst workers by
+          # node_id (see the non-host_blocks branch, which already forwards it).
+          node_id=node_id,
       )
     else:
       if max_blocks is None or num_slots is None:
@@ -289,7 +292,7 @@ class KVCacheManager:
   def get_block_ref(
       self, pool_idx: int, block_id: int, shard_idx: int = 0
   ) -> Dict[str, Any]:
-    """Returns a host block reference; only its declared regions are live."""
+    """Returns a reference descriptor for one host-side pool block."""
     return dict(
         self._impl.get_pool_block_ref_native(
             pool_idx=pool_idx, shard_idx=shard_idx, block_id=block_id
@@ -317,7 +320,7 @@ class KVCacheManager:
       block_ids: Sequence[int],
       shard_idx: Optional[int] = None,
   ) -> Any:
-    """Copies the selected blocks' declared-live regions to the host mirror."""
+    """Partial D2H of whole pool blocks into the host mirror."""
     return self._impl.d2h_pool_blocks(pool_idx, list(block_ids), shard_idx)
 
   def h2d_pool_blocks(
@@ -326,7 +329,7 @@ class KVCacheManager:
       block_ids: Sequence[int],
       shard_idx: Optional[int] = None,
   ) -> Any:
-    """Copies the selected blocks' declared-live regions to device storage."""
+    """Partial H2D of whole pool blocks from the host mirror."""
     return self._impl.h2d_pool_blocks(pool_idx, list(block_ids), shard_idx)
 
   def admission_summary(self) -> Dict[str, Any]:

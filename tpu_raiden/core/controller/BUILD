@@ -131,7 +131,6 @@ cc_library(
         "//tpu_raiden/proto:controller_service_cc_proto",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/status",
-        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
     ],
 )
@@ -203,12 +202,13 @@ cc_library(
     name = "test_util",
     testonly = True,
     hdrs = ["test_util.h"],
-    visibility = ["//:internal"],
+    visibility = ["//visibility:public"],
     deps = [
         ":controller_client",
         ":controller_service",
         ":worker_service_client",
         ":worker_service_impl",
+        "//tpu_raiden/core:raiden_transfer_endpoint",
         "//tpu_raiden/core:raw_transfer_core",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/status:statusor",
@@ -238,6 +238,7 @@ cc_test(
     srcs = ["raiden_controller_test.cc"],
     copts = ["-fexceptions"],
     features = ["-use_header_modules"],
+    local_defines = ["ABSL_DEFINE_UNQUALIFIED_STATUS_TESTING_MACROS"],
     deps = [
         ":controller_client",
         ":orchestrator_service_client",
@@ -252,6 +253,7 @@ cc_test(
         "//tpu_raiden/rpc:raiden_service_cc_proto",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
