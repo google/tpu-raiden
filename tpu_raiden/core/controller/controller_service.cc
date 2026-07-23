@@ -43,8 +43,8 @@ RaidenControllerServiceImpl::RaidenControllerServiceImpl(
 
 grpc::Status RaidenControllerServiceImpl::RegisterWorker(
     grpc::ServerContext* context,
-    const ::tpu_raiden::tpu_raiden::proto::RegisterWorkerRequest* request,
-    ::tpu_raiden::tpu_raiden::proto::RegisterWorkerResponse* response) {
+    const ::tpu_raiden::proto::RegisterWorkerRequest* request,
+    ::tpu_raiden::proto::RegisterWorkerResponse* response) {
   std::vector<::tpu_raiden::RaidenTransferEndpoint> eps;
   eps.reserve(request->raiden_transfer_endpoints_size());
   for (const auto& desc_proto : request->raiden_transfer_endpoints()) {
@@ -79,8 +79,8 @@ grpc::Status RaidenControllerServiceImpl::RegisterWorker(
 
 grpc::Status RaidenControllerServiceImpl::ReadRemote(
     grpc::ServerContext* context,
-    const ::tpu_raiden::tpu_raiden::proto::ReadRemoteRequest* request,
-    ::tpu_raiden::tpu_raiden::proto::ReadRemoteResponse* response) {
+    const ::tpu_raiden::proto::ReadRemoteRequest* request,
+    ::tpu_raiden::proto::ReadRemoteResponse* response) {
   std::vector<Buffer> src_buffers;
   src_buffers.reserve(request->src_buffers_size());
   for (const auto& buf_proto : request->src_buffers()) {

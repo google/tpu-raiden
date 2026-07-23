@@ -54,7 +54,7 @@ class RaidenControllerClient {
 
  private:
   std::unique_ptr<
-      ::tpu_raiden::tpu_raiden::proto::RaidenControllerService::Stub>
+      ::tpu_raiden::proto::RaidenControllerService::Stub>
       stub_;
 };
 

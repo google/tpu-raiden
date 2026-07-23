@@ -185,7 +185,7 @@ class RaidenController {
   absl::flat_hash_map<
       std::string,
       std::shared_ptr<
-          ::tpu_raiden::tpu_raiden::proto::RaidenControllerService::Stub>>
+          ::tpu_raiden::proto::RaidenControllerService::Stub>>
       stubs_ ABSL_GUARDED_BY(mutex_);
 };
 

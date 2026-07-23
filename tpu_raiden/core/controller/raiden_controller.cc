@@ -530,7 +530,7 @@ tsl::Future<> RaidenController::ReadRemote(
     const kv_cache::RaidenId& src_raiden_id,
     const std::vector<int32_t>& src_host_block_ids,
     const std::vector<int32_t>& dest_host_block_ids) {
-  namespace cproto = ::tpu_raiden::tpu_raiden::proto;
+  namespace cproto = ::tpu_raiden::proto;
 
   if (src_host_block_ids.size() != dest_host_block_ids.size()) {
     return tsl::Future<>(absl::InvalidArgumentError(absl::StrCat(

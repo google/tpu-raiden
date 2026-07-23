@@ -14,7 +14,7 @@
 
 syntax = "proto3";
 
-package tpu_raiden.tpu_raiden.proto;
+package tpu_raiden.proto;
 
 import "tpu_raiden/proto/worker_service.proto";
 

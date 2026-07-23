@@ -42,7 +42,7 @@ namespace core {
 namespace controller {
 
 class RaidenControllerServiceImpl final
-    : public ::tpu_raiden::tpu_raiden::proto::RaidenControllerService::Service {
+    : public ::tpu_raiden::proto::RaidenControllerService::Service {
  public:
   explicit RaidenControllerServiceImpl(
       std::shared_ptr<WorkerRegistry> worker_registry = nullptr);
@@ -55,14 +55,14 @@ class RaidenControllerServiceImpl final
 
   grpc::Status RegisterWorker(
       grpc::ServerContext* context,
-      const ::tpu_raiden::tpu_raiden::proto::RegisterWorkerRequest* request,
-      ::tpu_raiden::tpu_raiden::proto::RegisterWorkerResponse* response)
+      const ::tpu_raiden::proto::RegisterWorkerRequest* request,
+      ::tpu_raiden::proto::RegisterWorkerResponse* response)
       override;
 
   grpc::Status ReadRemote(
       grpc::ServerContext* context,
-      const ::tpu_raiden::tpu_raiden::proto::ReadRemoteRequest* request,
-      ::tpu_raiden::tpu_raiden::proto::ReadRemoteResponse* response) override;
+      const ::tpu_raiden::proto::ReadRemoteRequest* request,
+      ::tpu_raiden::proto::ReadRemoteResponse* response) override;
 
   using TransferBuffersCallback = absl::AnyInvocable<tsl::Future<>(
       absl::Span<const Buffer> src_buffers,
