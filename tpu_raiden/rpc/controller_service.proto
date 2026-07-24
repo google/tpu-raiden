@@ -44,6 +44,11 @@ message CoordinateTransferRequest {
   // tags against both peers' registered manifests; the complement becomes the
   // skip summary. Raiden attaches no meaning to any tag value.
   repeated string transfer_pool_tags = 13;
+  // Multi-tag transfers: splits dst_device_block_ids into one contiguous
+  // run per entry of transfer_pool_tags (same order; counts must sum to
+  // len(dst_device_block_ids)). Empty with a single tag preserves the
+  // legacy semantics (the whole list belongs to the one tag).
+  repeated int32 dst_block_counts = 14;
 }
 
 // One contiguous (or uniformly strided) byte copy between one source block

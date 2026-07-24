@@ -414,7 +414,7 @@ class RaidenControllerTest(absltest.TestCase):
     self.assertLen(entries, 256)
     for entry in entries:
       self.assertEqual(entry[4], 256 * 1024)
-      self.assertEqual(entry[7:], (0, 0, 1))
+      self.assertEqual(entry[7:], (0, 0, 1, 0))
     entries_by_dst_block = {
         block_id: [entry for entry in entries if entry[6] == block_id]
         for block_id in dst_ids
@@ -445,6 +445,102 @@ class RaidenControllerTest(absltest.TestCase):
     self.assertEqual(
         set(receiver_req.start_transfer_request.shard_push_schedules),
         set(range(8)),
+    )
+
+  def test_stage3_multi_tag_plan_groups_fa_and_state(self):
+    """T3.1: one transfer carries FA plus a state class as scoped groups."""
+    controller, client, src_units, dst_unit, dst_ids = self._stage3_fixture(
+        src_page_slice_tokens=4096,
+        include_gdn=True,
+        register_blocks=False,
+    )
+    for rank, unit in enumerate(src_units):
+      fa_spans, owned_tokens = _byte_spans_for_rank(
+          rank, num_tokens=65536, interleave=4096, dst_page_tokens=1024
+      )
+      owned_blocks = math.ceil(owned_tokens / 4096)
+      block_ids = [1000 + rank * 100 + i for i in range(owned_blocks)]
+      registrations = [
+          raiden_controller.PoolSpanRegistration(
+              tag="fa",
+              block_ids=tuple(block_ids),
+              spans=tuple(fa_spans),
+              declared_bytes=owned_tokens * 1024,
+          ),
+          # Rank fan-in: each rank owns 8 bytes of the 64-byte state at a
+          # rank-strided destination offset, all from its state block 17.
+          raiden_controller.PoolSpanRegistration(
+              tag="gdn.conv",
+              block_ids=(17,),
+              spans=(
+                  raiden_controller.PoolByteSpan(
+                      src_block_ordinal=0,
+                      src_offset_bytes=rank * 8,
+                      dst_block_index=0,
+                      dst_offset_bytes=rank * 8,
+                      size_bytes=8,
+                  ),
+              ),
+              declared_bytes=8,
+          ),
+      ]
+      controller.register_request_blocks(
+          "request", 123, unit, block_ids, pool_spans=registrations
+      )
+
+    future = controller.start_transfer(
+        src_units=src_units,
+        dst_units=[dst_unit],
+        req_id="request",
+        dst_device_block_ids=list(dst_ids) + [77],
+        dst_mem_type=raiden_controller.RaidenMemoryType.HBM,
+        use_block_chunks=True,
+        uuid=123,
+        num_tokens=65536,
+        transfer_pool_tags=["fa", "gdn.conv"],
+        parallelism=8,
+        dst_block_counts=[len(dst_ids), 1],
+    )
+    asyncio.run(future.wait())
+    plan = controller.get_plan("request")
+
+    self.assertLen(plan.pool_groups, 2)
+    fa_group, conv_group = plan.pool_groups
+    self.assertEqual(fa_group["pool_indices"], list(range(15)))
+    self.assertEqual(fa_group["dst_device_block_ids"], dst_ids)
+    self.assertEqual(fa_group["expected_pushes"], 64)
+    self.assertEqual(fa_group["order_rank"], 0)
+    self.assertEqual(conv_group["pool_indices"], list(range(15, 60)))
+    self.assertEqual(conv_group["dst_device_block_ids"], [77])
+    self.assertEqual(conv_group["expected_pushes"], 8)
+    self.assertEqual(conv_group["order_rank"], 1)
+    self.assertEqual(plan.transfer_pool_indices, list(range(60)))
+    self.assertEqual(plan.dst_device_block_ids, list(dst_ids) + [77])
+
+    for unit in src_units:
+      unit_entries = plan.shard_push_schedules[unit][0]
+      fa_entries = [e for e in unit_entries if e[10] == 0]
+      conv_entries = [e for e in unit_entries if e[10] == 1]
+      self.assertLen(fa_entries, 8)
+      self.assertLen(conv_entries, 1)
+      self.assertEqual(conv_entries[0][5], 17)
+      self.assertEqual(conv_entries[0][6], 77)
+      self.assertEqual(conv_entries[0][4], 8)
+
+    sender_req = raiden_service_pb2.ControlRequest()
+    sender_req.ParseFromString(
+        client._encode_start_transfer(src_units[0], plan)
+    )
+    encoded = sender_req.start_transfer_request
+    self.assertLen(encoded.pool_groups, 2)
+    self.assertEqual(list(encoded.pool_groups[0].pool_indices),
+                     list(range(15)))
+    self.assertEqual(encoded.pool_groups[1].expected_pushes, 8)
+    self.assertEqual(encoded.pool_groups[1].order_rank, 1)
+    self.assertEqual(
+        sorted({e.pool_group for s in [encoded.shard_push_schedules[0]]
+                for e in s.entries}),
+        [0, 1],
     )
 
   def test_stage3_golden_pcp8_interleave256_tail_reconstructs_tokens(self):
@@ -702,7 +798,7 @@ class RaidenControllerTest(absltest.TestCase):
     # 65,024 ends 512 tokens into its final decode page. The 3,584-token
     # quantity is the tail within the source page, not the final wire entry.
     self.assertEqual(tail_entry[4], 512 * 1024)
-    self.assertEqual(tail_entry[7:], (0, 0, 1))
+    self.assertEqual(tail_entry[7:], (0, 0, 1, 0))
 
     _, _, n2_src_units, _, n2_ids, n2_plan = self._build_stage3_plan(
         dst_page_tokens=2048, src_page_slice_tokens=256
@@ -804,7 +900,8 @@ class RaidenControllerTest(absltest.TestCase):
         {0, 540_672, 1_081_344, 1_622_016},
     )
     self.assertTrue(all(entry[4] == 262_144 for entry in entries))
-    self.assertTrue(all(entry[7:] == (0, 0, 1) for entry in entries))
+    self.assertTrue(
+        all(entry[7:] == (0, 0, 1, 0) for entry in entries))
 
     # The destination controller independently converts the physical
     # schedules back to compact-live coverage and accepts the exact union.

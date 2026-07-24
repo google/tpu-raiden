@@ -1397,9 +1397,18 @@ KVCacheManagerBase::GetPoolPushProgressSpec(size_t pool_idx,
         "pool ", pool_idx, " is not in the active plan's transfer set"));
   }
 
+  size_t expected_pushes =
+      static_cast<size_t>(request.expected_pushes_per_pool());
+  for (const auto& group : request.pool_groups()) {
+    const auto& indices = group.pool_indices();
+    if (std::find(indices.begin(), indices.end(),
+                  static_cast<int32_t>(pool_idx)) != indices.end()) {
+      expected_pushes = static_cast<size_t>(group.expected_pushes());
+      break;
+    }
+  }
   return tpu_raiden::transport::PoolPushProgressSpec{
-      .expected_pushes =
-          static_cast<size_t>(request.expected_pushes_per_pool()),
+      .expected_pushes = expected_pushes,
       .expected_pools =
           static_cast<size_t>(request.transfer_pool_indices_size()),
   };
@@ -1862,6 +1871,23 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
 
   bool is_sender = plan.is_sender;
 
+  // Multi-tag plans scope every entry to one pool group; an entry only
+  // resolves chunks for pools of its own group. Single-tag plans carry no
+  // groups and keep the legacy replay (every entry, every transfer pool).
+  const auto entry_targets_pool = [&request,
+                                   layer_idx](const auto& entry) -> bool {
+    if (request.pool_groups_size() == 0) {
+      return true;
+    }
+    const int32_t group_idx = entry.pool_group();
+    if (group_idx < 0 || group_idx >= request.pool_groups_size()) {
+      return false;
+    }
+    const auto& indices = request.pool_groups(group_idx).pool_indices();
+    return std::find(indices.begin(), indices.end(),
+                     static_cast<int32_t>(layer_idx)) != indices.end();
+  };
+
   std::vector<tpu_raiden::transport::BlockChunk> chunks;
   size_t accumulated_bytes = 0;
 
@@ -1874,6 +1900,9 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
       if (schedule_it != schedules.end()) {
         const auto& schedule = schedule_it->second;
         for (const auto& entry : schedule.entries()) {
+          if (!entry_targets_pool(entry)) {
+            continue;
+          }
           if (!peer.empty() && entry.dst_peer() != peer) {
             continue;
           }
@@ -1907,7 +1936,8 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
         // If src_block_id is -1, we fall back to matching only on dst_block_id.
         for (const auto& [src_shard, src_schedule] : schedules) {
           for (const auto& entry : src_schedule.entries()) {
-            if (static_cast<size_t>(entry.dst_shard_idx()) == shard_idx &&
+            if (entry_targets_pool(entry) &&
+                static_cast<size_t>(entry.dst_shard_idx()) == shard_idx &&
                 static_cast<size_t>(entry.dst_block_id()) == block_id &&
                 (src_block_id == -1 ||
                  static_cast<size_t>(entry.src_block_id()) == src_block_id)) {
@@ -1924,6 +1954,9 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
         if (schedule_found_it != schedules.end()) {
           const auto& schedule = schedule_found_it->second;
           for (const auto& entry : schedule.entries()) {
+            if (!entry_targets_pool(entry)) {
+              continue;
+            }
             if (static_cast<size_t>(entry.dst_shard_idx()) == shard_idx &&
                 static_cast<size_t>(entry.dst_block_id()) == block_id &&
                 (src_block_id == -1 ||

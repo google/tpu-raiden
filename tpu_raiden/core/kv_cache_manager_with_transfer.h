@@ -373,6 +373,16 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     std::set<size_t> expected_pool_indices;
     std::set<size_t> started_pool_indices;
     std::set<size_t> completed_pool_indices;
+    // Multi-tag plans: per-pool H2D upload ordering. A pool's mirror is
+    // uploaded only after every expected pool of a strictly lower order
+    // rank has completed its upload (FA at rank 0, state classes at rank
+    // 1, so state bytes land last on aliased arena pages). Single-tag
+    // plans leave every rank 0 (upload immediately on wire completion).
+    std::map<size_t, int> pool_order_ranks;
+    std::set<size_t> h2d_launched_pools;
+    // Multi-tag plans: each pool uploads only its own group's destination
+    // block ids (the flat chip_block_ids list concatenates all groups).
+    std::map<size_t, std::vector<int64_t>> pool_dst_block_ids;
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
 
@@ -404,6 +414,9 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   void FinishPoolReshardSend(uint64_t uuid, const absl::Status& status);
   void FinishPoolReshardRecvPool(uint64_t uuid, size_t pool_idx,
                                  const absl::Status& status);
+  // Launches H2D uploads for every wire-complete pool whose order-rank
+  // prerequisites (all lower-rank pools uploaded) are satisfied.
+  void LaunchEligiblePoolH2ds(uint64_t uuid);
 
   std::chrono::steady_clock::time_point DeadlineFromNow() const;
 
