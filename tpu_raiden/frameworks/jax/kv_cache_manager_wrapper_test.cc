@@ -371,6 +371,52 @@ TEST(KVCacheManagerWrapperTest, H2hWriteEmptyShardsFallsBackToFirstEndpoint) {
   EXPECT_EQ(ptr1->last_h2h_write_peer, "10.0.0.1:45000");
 }
 
+// The common non-NUMA ReadRemote transfer: a single sub-manager H2hWrite must
+// forward the source/destination block ids and the matched endpoint through to
+// that sub-manager.
+TEST(KVCacheManagerWrapperTest,
+     H2hWriteSingleSubManagerForwardsBlocksAndEndpoint) {
+  auto sub0 = std::make_unique<MockSubManager>();
+  MockSubManager* ptr0 = sub0.get();
+  std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> subs;
+  subs.push_back(std::move(sub0));
+  KVCacheManager mgr(std::move(subs));
+  mgr.SetSubmanagerShardsForTesting({{0, 1, 2, 3}});
+
+  std::vector<RaidenTransferEndpoint> remote_descs = {
+      {"10.0.0.5:41000", {0, 1, 2, 3}}};
+  std::vector<int> src_blocks = {5, 6};
+  std::vector<int> dst_blocks = {7, 8};
+
+  auto status = mgr.H2hWrite(remote_descs, src_blocks, dst_blocks, /*uuid=*/3,
+                             /*layer_idx=*/0);
+  ASSERT_TRUE(status.ok()) << status.status().message();
+  EXPECT_EQ(ptr0->h2h_write_calls, 1);
+  EXPECT_EQ(ptr0->last_h2h_write_peer, "10.0.0.5:41000");
+  EXPECT_EQ(ptr0->last_h2h_write_src_blocks, src_blocks);
+  EXPECT_EQ(ptr0->last_h2h_write_dst_blocks, dst_blocks);
+}
+
+TEST(KVCacheManagerWrapperTest,
+     H2hReadSingleSubManagerForwardsBlocksAndEndpoint) {
+  auto sub0 = std::make_unique<MockSubManager>();
+  MockSubManager* ptr0 = sub0.get();
+  std::vector<std::unique_ptr<KVCacheManagerWithTransfer>> subs;
+  subs.push_back(std::move(sub0));
+  KVCacheManager mgr(std::move(subs));
+  mgr.SetSubmanagerShardsForTesting({{0, 1, 2, 3}});
+
+  std::vector<RaidenTransferEndpoint> remote_descs = {
+      {"10.0.0.5:41000", {0, 1, 2, 3}}};
+  std::vector<int> src_blocks = {11, 12};
+
+  auto status = mgr.H2hRead(remote_descs, src_blocks);
+  ASSERT_TRUE(status.ok()) << status.status().message();
+  EXPECT_EQ(ptr0->h2h_read_calls, 1);
+  EXPECT_EQ(ptr0->last_h2h_read_peer, "10.0.0.5:41000");
+  EXPECT_EQ(ptr0->last_h2h_read_src_blocks, src_blocks);
+}
+
 TEST(KVCacheManagerWrapperTest, StartReadUnifiedMultiEndpointMultiSubManager) {
   auto sub0 = std::make_unique<MockSubManager>();
   auto sub1 = std::make_unique<MockSubManager>();

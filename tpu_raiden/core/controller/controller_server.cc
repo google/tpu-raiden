@@ -102,6 +102,16 @@ void ControllerServer::SetTransferBuffersCallback(
   }
 }
 
+void ControllerServer::SetReadRemoteHooks(
+    RaidenControllerServiceImpl::ValidateAndPinCallback validate_and_pin,
+    RaidenControllerServiceImpl::UnpinCallback unpin) {
+  absl::MutexLock lock(mutex_);
+  if (controller_service_) {
+    controller_service_->SetReadRemoteHooks(std::move(validate_and_pin),
+                                            std::move(unpin));
+  }
+}
+
 std::shared_ptr<WorkerRegistry> ControllerServer::GetWorkerRegistry() const {
   absl::MutexLock lock(mutex_);
   return controller_service_ ? controller_service_->worker_registry() : nullptr;

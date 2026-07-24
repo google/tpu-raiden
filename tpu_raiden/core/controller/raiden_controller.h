@@ -29,6 +29,7 @@
 #include "grpcpp/channel.h"
 #include "xla/tsl/concurrency/future.h"
 #include "tpu_raiden/core/buffer.h"
+#include "tpu_raiden/core/controller/controller_service.h"
 #include "tpu_raiden/core/controller/worker_registry.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
@@ -127,10 +128,20 @@ class RaidenController {
                                 absl::Span<const Buffer> dst_buffers,
                                 absl::Span<const int64_t> copy_sizes = {});
 
-  // Initiates remote read from source controller.
+  // Initiates remote read from source controller. block_hashes (parallel to the
+  // block ids) let the source verify/pin the blocks in its LRU before transfer.
   tsl::Future<> ReadRemote(const kv_cache::RaidenId& src_raiden_id,
                            const std::vector<int32_t>& src_host_block_ids,
-                           const std::vector<int32_t>& dest_host_block_ids);
+                           const std::vector<int32_t>& dest_host_block_ids,
+                           const std::vector<std::string>& block_hashes = {});
+
+  // Registers the ReadRemote step-6a verify/pin and unpin hooks (invoked when
+  // this controller acts as the SOURCE of a remote read). Forwards to the hosted
+  // ControllerService.
+  void SetReadRemoteHooks(
+      core::controller::RaidenControllerServiceImpl::ValidateAndPinCallback
+          validate_and_pin,
+      core::controller::RaidenControllerServiceImpl::UnpinCallback unpin);
 
   // Resolves a peer controller's ControllerService address via the
   // orchestrator.
@@ -179,6 +190,10 @@ class RaidenController {
 
   std::unique_ptr<core::controller::ControllerServer>
       private_controller_server_;
+  // The active ControllerServer hosting this controller's service (either
+  // private_controller_server_ or the shared singleton). Used to register the
+  // ReadRemote step-6a hooks after construction. Not owned.
+  core::controller::ControllerServer* active_server_ = nullptr;
   std::unique_ptr<OrchestratorServiceClient> orchestrator_client_;
   absl::flat_hash_map<kv_cache::RaidenId, std::string, kv_cache::RaidenIdHash>
       resolved_controllers_ ABSL_GUARDED_BY(mutex_);

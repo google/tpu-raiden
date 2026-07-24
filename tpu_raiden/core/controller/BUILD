@@ -96,6 +96,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":controller_server",
+        ":controller_service",
         ":orchestrator_service_client",
         ":worker_registry",
         ":worker_service_client",
@@ -169,6 +170,7 @@ cc_library(
         "//tpu_raiden/rpc:raiden_service_cc_proto",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/functional:any_invocable",
         "@com_google_absl//absl/status",

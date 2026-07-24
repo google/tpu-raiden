@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/cleanup/cleanup.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
@@ -80,6 +81,7 @@ KVCacheStore::KVCacheStore(size_t capacity,
             raiden_orchestrator_address, raiden_controller_address);
   }
   if (raiden_controller_) {
+    RegisterReadRemoteHooks();
     poller_thread_ =
         std::make_unique<std::thread>(&KVCacheStore::PollerLoop, this);
   }
@@ -101,6 +103,7 @@ KVCacheStore::KVCacheStore(
         std::make_shared<global_registry::GlobalRegistryClient>(channel);
   }
   if (raiden_controller_) {
+    RegisterReadRemoteHooks();
     poller_thread_ =
         std::make_unique<std::thread>(&KVCacheStore::PollerLoop, this);
   }
@@ -514,6 +517,61 @@ absl::Status KVCacheStore::Load(const std::vector<std::string>& block_hashes,
   return absl::OkStatus();
 }
 
+void KVCacheStore::RegisterReadRemoteHooks() {
+  if (!raiden_controller_) {
+    return;
+  }
+  raiden_controller_->SetReadRemoteHooks(
+      [this](absl::Span<const std::string> hashes) {
+        return this->ValidateAndPinHostBlocks(hashes);
+      },
+      [this](absl::Span<const std::string> hashes) {
+        this->UnpinHostBlocks(hashes);
+      });
+}
+
+absl::StatusOr<std::vector<int32_t>> KVCacheStore::ValidateAndPinHostBlocks(
+    absl::Span<const std::string> block_hashes) {
+  absl::MutexLock lock(mutex_);
+  std::vector<std::string> pinned_so_far;
+  pinned_so_far.reserve(block_hashes.size());
+  std::vector<int32_t> src_host_block_ids;
+  src_host_block_ids.reserve(block_hashes.size());
+
+  auto rollback = [&]() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
+    for (const auto& hash : pinned_so_far) {
+      lru_cache_.Unpin(hash);
+    }
+  };
+
+  for (const auto& hash : block_hashes) {
+    RaidenBlockID* existing = lru_cache_.PeekMutable(hash);
+    if (existing == nullptr) {
+      rollback();
+      return absl::NotFoundError(absl::StrCat("BLOCK_HASH_NOT_FOUND: ", hash));
+    }
+    if (existing->status != BlockStatus::HOST &&
+        existing->status != BlockStatus::HOST_AND_HBM) {
+      rollback();
+      return absl::FailedPreconditionError(
+          absl::StrCat("Block not resident in host DRAM (status=",
+                       static_cast<int>(existing->status), "): ", hash));
+    }
+    if (lru_cache_.Pin(hash)) {
+      pinned_so_far.push_back(hash);
+    }
+    src_host_block_ids.push_back(existing->host_block_id);
+  }
+  return src_host_block_ids;
+}
+
+void KVCacheStore::UnpinHostBlocks(absl::Span<const std::string> block_hashes) {
+  absl::MutexLock lock(mutex_);
+  for (const auto& hash : block_hashes) {
+    lru_cache_.Unpin(hash);
+  }
+}
+
 absl::Status KVCacheStore::ReadRemote(
     const std::vector<std::string>& block_hashes) {
   std::vector<std::string> successfully_marked_as_reading;
@@ -588,14 +646,17 @@ absl::Status KVCacheStore::ReadRemote(
   for (const auto& [src_raiden_id, indices] : groups) {
     std::vector<int32_t> group_src_ids;
     std::vector<int32_t> group_dst_ids;
+    std::vector<std::string> group_block_hashes;
     group_src_ids.reserve(indices.size());
     group_dst_ids.reserve(indices.size());
+    group_block_hashes.reserve(indices.size());
     for (size_t idx : indices) {
       group_src_ids.push_back(src_info[idx].second);
       group_dst_ids.push_back(dest_host_block_ids[idx]);
+      group_block_hashes.push_back(block_hashes[idx]);
     }
     futures.push_back(raiden_controller_->ReadRemote(
-        src_raiden_id, group_src_ids, group_dst_ids));
+        src_raiden_id, group_src_ids, group_dst_ids, group_block_hashes));
   }
 
   tsl::Future<> combined_future = tsl::JoinFutures(futures);

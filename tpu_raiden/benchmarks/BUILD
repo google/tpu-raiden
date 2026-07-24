@@ -51,7 +51,6 @@ py_binary(
         ":perf_core",
         "@com_google_absl_py//absl:app",
         "@com_google_absl_py//absl/flags",
-        "@pypi//numpy",
     ],
 )
 

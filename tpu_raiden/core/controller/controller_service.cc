@@ -17,11 +17,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
 #include "grpcpp/server_context.h"
@@ -95,14 +98,53 @@ grpc::Status RaidenControllerServiceImpl::ReadRemote(
   }
 
   std::shared_ptr<const TransferBuffersCallback> cb;
+  std::shared_ptr<const ValidateAndPinCallback> validate_cb;
+  std::shared_ptr<const UnpinCallback> unpin_cb;
   {
     absl::MutexLock lock(mutex_);
     cb = transfer_buffers_cb_;
+    validate_cb = validate_and_pin_cb_;
+    unpin_cb = unpin_cb_;
   }
 
   if (!cb) {
     return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
                         "TransferBuffers callback is not registered");
+  }
+
+  // All-or-Nothing validate & pin block hashes at the src controller: verify the requested block hashes exist in the source store's LRU
+  // with status HOST/HOST_AND_HBM and pin them (ALL-OR-NOTHING: a single missing
+  // or wrong-status block aborts the whole ReadRemote before any transfer). On
+  // success, re-derive the authoritative source host_block_ids from the LRU and
+  // rebuild src_buffers with them. The pins are released via RAII after the
+  // transfer completes (on every path).
+  std::vector<std::string> block_hashes(request->block_hashes().begin(),
+                                        request->block_hashes().end());
+  bool pinned = false;
+  auto unpin_guard = absl::MakeCleanup([&pinned, unpin_cb, &block_hashes]() {
+    if (pinned && unpin_cb) {
+      (*unpin_cb)(block_hashes);
+    }
+  });
+
+  if (validate_cb && !block_hashes.empty()) {
+    absl::StatusOr<std::vector<int32_t>> ids_or = (*validate_cb)(block_hashes);
+    if (!ids_or.ok()) {
+      // Forward the verify hook's status code (absl and grpc codes share the
+      // same canonical integers), so distinct errors are preserved:
+      // NOT_FOUND (BLOCK_HASH_NOT_FOUND) vs FAILED_PRECONDITION (present but
+      // not resident in host DRAM).
+      return grpc::Status(static_cast<grpc::StatusCode>(ids_or.status().code()),
+                          std::string(ids_or.status().message()));
+    }
+    pinned = true;  // store pinned all hashes; unpin_guard will release them.
+    const std::vector<int32_t>& src_ids = *ids_or;
+    if (src_ids.size() == src_buffers.size()) {
+      for (size_t i = 0; i < src_ids.size(); ++i) {
+        src_buffers[i] = Buffer(src_ids[i], std::vector<BufferShard>{},
+                                std::nullopt, src_buffers[i].memory_type());
+      }
+    }
   }
 
   tsl::Future<> future = (*cb)(src_buffers, dst_buffers);

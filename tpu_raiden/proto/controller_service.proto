@@ -47,10 +47,15 @@ message RegisterWorkerResponse {
 }
 
 message ReadRemoteRequest {
+  // Advisory (registry-derived): the source re-derives the authoritative source
+  // host block ids from its own LRU after verifying the block_hashes.
   repeated int32 src_host_block_ids = 1;
   repeated int32 dest_host_block_ids = 2;
   repeated .tpu_raiden.proto.BufferProto src_buffers = 3;
   repeated .tpu_raiden.proto.BufferProto dst_buffers = 4;
+  // Prefix hashes of the requested blocks. The source controller verifies each
+  // exists in its LRU with status HOST/HOST_AND_HBM and pins it for the transfer.
+  repeated bytes block_hashes = 5;
 }
 
 message ReadRemoteResponse {}

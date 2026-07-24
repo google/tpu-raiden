@@ -603,6 +603,210 @@ TEST_F(RaidenControllerTest, ReadRemoteSuccess) {
                           test_server2->server_address));
 }
 
+// --- ReadRemote All-or-Nothing validate & pin block hashes at the src controller: source-side verify/pin hooks ---
+
+// Registers `src_controller_server` with the orchestrator under a fixed source
+// RaidenId and returns a destination controller with one worker. Shared setup
+// for the verify-hook tests below.
+namespace {
+kv_cache::RaidenId MakeSrcRaidenId() {
+  kv_cache::RaidenId id;
+  id.job_name = "src_job";
+  id.job_replica_id = "0";
+  id.data_name = "src_data";
+  id.data_replica_idx = 0;
+  return id;
+}
+}  // namespace
+
+TEST_F(RaidenControllerTest, ReadRemoteRunsVerifyHookThenTransferThenUnpin) {
+  auto src = core::controller::CreateTestControllerServer();
+  rpc::RaidenIdProto src_unit;
+  src_unit.set_job_name("src_job");
+  src_unit.set_job_replica_id("0");
+  src_unit.set_data_name("src_data");
+  src_unit.set_data_replica_idx(0);
+  OrchestratorServiceClient orch(grpc::CreateChannel(
+      orchestrator_address_, grpc::InsecureChannelCredentials()));
+  ASSERT_TRUE(orch.RegisterController(src_unit, src->server_address).ok());
+
+  rpc::RaidenIdProto dest_unit;
+  dest_unit.set_job_name("dest_job");
+  RaidenController dest(dest_unit, /*num_blocks=*/5, /*num_shards=*/2,
+                        /*shard_size_bytes=*/512, orchestrator_address_, "");
+  RegisterAndInitWorker(dest, "worker_0", test_server_->server_address);
+
+  std::vector<std::string> validated, unpinned;
+  bool transfer_ran = false;
+  std::vector<int64_t> transfer_src_ids;
+  src->service->SetReadRemoteHooks(
+      [&](absl::Span<const std::string> h)
+          -> absl::StatusOr<std::vector<int32_t>> {
+        validated.assign(h.begin(), h.end());
+        return std::vector<int32_t>{100, 101};  // re-derived source ids
+      },
+      [&](absl::Span<const std::string> h) {
+        unpinned.assign(h.begin(), h.end());
+      });
+  src->service->SetTransferBuffersCallback(
+      [&](absl::Span<const Buffer> src_buffers,
+          absl::Span<const Buffer> /*dst*/) {
+        transfer_ran = true;
+        for (const auto& b : src_buffers) transfer_src_ids.push_back(b.index());
+        return tsl::Future<>(absl::OkStatus());
+      });
+
+  std::vector<std::string> hashes = {"h0", "h1"};
+  auto st = dest.ReadRemote(MakeSrcRaidenId(), {10, 11}, {20, 21}, hashes)
+                .Await();
+  ASSERT_TRUE(st.ok()) << st.message();
+  EXPECT_THAT(validated, ElementsAre("h0", "h1"));
+  EXPECT_TRUE(transfer_ran);
+  // Source rebuilt src_buffers with the re-derived ids (100,101), not (10,11).
+  EXPECT_THAT(transfer_src_ids, ElementsAre(100, 101));
+  EXPECT_THAT(unpinned, ElementsAre("h0", "h1"));
+}
+
+TEST_F(RaidenControllerTest, ReadRemoteVerifyMissingReturnsErrorWithoutTransfer) {
+  auto src = core::controller::CreateTestControllerServer();
+  rpc::RaidenIdProto src_unit;
+  src_unit.set_job_name("src_job");
+  src_unit.set_job_replica_id("0");
+  src_unit.set_data_name("src_data");
+  src_unit.set_data_replica_idx(0);
+  OrchestratorServiceClient orch(grpc::CreateChannel(
+      orchestrator_address_, grpc::InsecureChannelCredentials()));
+  ASSERT_TRUE(orch.RegisterController(src_unit, src->server_address).ok());
+
+  rpc::RaidenIdProto dest_unit;
+  dest_unit.set_job_name("dest_job");
+  RaidenController dest(dest_unit, /*num_blocks=*/5, /*num_shards=*/2,
+                        /*shard_size_bytes=*/512, orchestrator_address_, "");
+  RegisterAndInitWorker(dest, "worker_0", test_server_->server_address);
+
+  bool transfer_ran = false;
+  src->service->SetReadRemoteHooks(
+      [&](absl::Span<const std::string> /*h*/)
+          -> absl::StatusOr<std::vector<int32_t>> {
+        return absl::NotFoundError("BLOCK_HASH_NOT_FOUND: h0");
+      },
+      [&](absl::Span<const std::string> /*h*/) {});
+  src->service->SetTransferBuffersCallback(
+      [&](absl::Span<const Buffer> /*s*/, absl::Span<const Buffer> /*d*/) {
+        transfer_ran = true;
+        return tsl::Future<>(absl::OkStatus());
+      });
+
+  auto st = dest.ReadRemote(MakeSrcRaidenId(), {10}, {20}, {"h0"}).Await();
+  EXPECT_FALSE(st.ok());
+  EXPECT_TRUE(absl::IsNotFound(st)) << st;  // distinct code preserved e2e
+  EXPECT_FALSE(transfer_ran);  // aborted before dispatching the transfer
+}
+
+TEST_F(RaidenControllerTest,
+       ReadRemoteVerifyWrongStatusReturnsFailedPrecondition) {
+  auto src = core::controller::CreateTestControllerServer();
+  rpc::RaidenIdProto src_unit;
+  src_unit.set_job_name("src_job");
+  src_unit.set_job_replica_id("0");
+  src_unit.set_data_name("src_data");
+  src_unit.set_data_replica_idx(0);
+  OrchestratorServiceClient orch(grpc::CreateChannel(
+      orchestrator_address_, grpc::InsecureChannelCredentials()));
+  ASSERT_TRUE(orch.RegisterController(src_unit, src->server_address).ok());
+
+  rpc::RaidenIdProto dest_unit;
+  dest_unit.set_job_name("dest_job");
+  RaidenController dest(dest_unit, /*num_blocks=*/5, /*num_shards=*/2,
+                        /*shard_size_bytes=*/512, orchestrator_address_, "");
+  RegisterAndInitWorker(dest, "worker_0", test_server_->server_address);
+
+  bool transfer_ran = false;
+  src->service->SetReadRemoteHooks(
+      [&](absl::Span<const std::string> /*h*/)
+          -> absl::StatusOr<std::vector<int32_t>> {
+        return absl::FailedPreconditionError("block not resident in host DRAM");
+      },
+      [&](absl::Span<const std::string> /*h*/) {});
+  src->service->SetTransferBuffersCallback(
+      [&](absl::Span<const Buffer> /*s*/, absl::Span<const Buffer> /*d*/) {
+        transfer_ran = true;
+        return tsl::Future<>(absl::OkStatus());
+      });
+
+  auto st = dest.ReadRemote(MakeSrcRaidenId(), {10}, {20}, {"h0"}).Await();
+  EXPECT_FALSE(st.ok());
+  // Distinct from the missing-hash NOT_FOUND case.
+  EXPECT_TRUE(absl::IsFailedPrecondition(st)) << st;
+  EXPECT_FALSE(transfer_ran);
+}
+
+TEST_F(RaidenControllerTest, ReadRemoteNoVerifyHookRunsTransfer) {
+  // Backward-compat: a source controller with no verify hook registered runs
+  // the transfer directly (legacy behavior), even with block_hashes present.
+  auto src = core::controller::CreateTestControllerServer();
+  rpc::RaidenIdProto src_unit;
+  src_unit.set_job_name("src_job");
+  src_unit.set_job_replica_id("0");
+  src_unit.set_data_name("src_data");
+  src_unit.set_data_replica_idx(0);
+  OrchestratorServiceClient orch(grpc::CreateChannel(
+      orchestrator_address_, grpc::InsecureChannelCredentials()));
+  ASSERT_TRUE(orch.RegisterController(src_unit, src->server_address).ok());
+
+  rpc::RaidenIdProto dest_unit;
+  dest_unit.set_job_name("dest_job");
+  RaidenController dest(dest_unit, /*num_blocks=*/5, /*num_shards=*/2,
+                        /*shard_size_bytes=*/512, orchestrator_address_, "");
+  RegisterAndInitWorker(dest, "worker_0", test_server_->server_address);
+
+  bool transfer_ran = false;
+  // Deliberately do NOT call SetReadRemoteHooks.
+  src->service->SetTransferBuffersCallback(
+      [&](absl::Span<const Buffer> /*s*/, absl::Span<const Buffer> /*d*/) {
+        transfer_ran = true;
+        return tsl::Future<>(absl::OkStatus());
+      });
+
+  auto st = dest.ReadRemote(MakeSrcRaidenId(), {10}, {20}, {"h0"}).Await();
+  ASSERT_TRUE(st.ok()) << st.message();
+  EXPECT_TRUE(transfer_ran);
+}
+
+TEST_F(RaidenControllerTest, ReadRemoteTransferFailureStillUnpins) {
+  auto src = core::controller::CreateTestControllerServer();
+  rpc::RaidenIdProto src_unit;
+  src_unit.set_job_name("src_job");
+  src_unit.set_job_replica_id("0");
+  src_unit.set_data_name("src_data");
+  src_unit.set_data_replica_idx(0);
+  OrchestratorServiceClient orch(grpc::CreateChannel(
+      orchestrator_address_, grpc::InsecureChannelCredentials()));
+  ASSERT_TRUE(orch.RegisterController(src_unit, src->server_address).ok());
+
+  rpc::RaidenIdProto dest_unit;
+  dest_unit.set_job_name("dest_job");
+  RaidenController dest(dest_unit, /*num_blocks=*/5, /*num_shards=*/2,
+                        /*shard_size_bytes=*/512, orchestrator_address_, "");
+  RegisterAndInitWorker(dest, "worker_0", test_server_->server_address);
+
+  bool unpinned = false;
+  src->service->SetReadRemoteHooks(
+      [&](absl::Span<const std::string> /*h*/)
+          -> absl::StatusOr<std::vector<int32_t>> {
+        return std::vector<int32_t>{100};
+      },
+      [&](absl::Span<const std::string> /*h*/) { unpinned = true; });
+  src->service->SetTransferBuffersCallback(
+      [&](absl::Span<const Buffer> /*s*/, absl::Span<const Buffer> /*d*/) {
+        return tsl::Future<>(absl::InternalError("transfer boom"));
+      });
+
+  auto st = dest.ReadRemote(MakeSrcRaidenId(), {10}, {20}, {"h0"}).Await();
+  EXPECT_FALSE(st.ok());
+  EXPECT_TRUE(unpinned);  // RAII unpin runs despite the transfer failure
+}
+
 // End-to-end at the source worker: when the source worker's transfer manager
 // exposes the vector (shard-matching) H2h overloads, the controller fan-out ->
 // WorkerServiceImpl -> KVManagerHolder must dispatch to that SHARD-MATCHING path

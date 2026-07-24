@@ -17,6 +17,7 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -74,6 +75,24 @@ class RaidenControllerServiceImpl final
         std::make_shared<TransferBuffersCallback>(std::move(cb));
   }
 
+  // ReadRemote All-or-Nothing validate & pin block hashes at the src controller hooks: verify the requested block hashes exist in the
+  // source store's LRU with status HOST/HOST_AND_HBM, pin them, and return the
+  // authoritative source host_block_ids (re-derived from the LRU). Returns
+  // NotFound (missing hash) / FailedPrecondition (wrong status) on failure.
+  using ValidateAndPinCallback = absl::AnyInvocable<
+      absl::StatusOr<std::vector<int32_t>>(
+          absl::Span<const std::string> block_hashes) const>;
+  using UnpinCallback =
+      absl::AnyInvocable<void(absl::Span<const std::string> block_hashes) const>;
+
+  void SetReadRemoteHooks(ValidateAndPinCallback validate_and_pin,
+                          UnpinCallback unpin) {
+    absl::MutexLock lock(mutex_);
+    validate_and_pin_cb_ =
+        std::make_shared<ValidateAndPinCallback>(std::move(validate_and_pin));
+    unpin_cb_ = std::make_shared<UnpinCallback>(std::move(unpin));
+  }
+
   // Updates the underlying WorkerRegistry.
   void SetWorkerRegistry(std::shared_ptr<WorkerRegistry> worker_registry);
 
@@ -85,6 +104,9 @@ class RaidenControllerServiceImpl final
   std::shared_ptr<WorkerRegistry> worker_registry_ ABSL_GUARDED_BY(mutex_);
   std::shared_ptr<const TransferBuffersCallback> transfer_buffers_cb_
       ABSL_GUARDED_BY(mutex_);
+  std::shared_ptr<const ValidateAndPinCallback> validate_and_pin_cb_
+      ABSL_GUARDED_BY(mutex_);
+  std::shared_ptr<const UnpinCallback> unpin_cb_ ABSL_GUARDED_BY(mutex_);
 };
 
 }  // namespace controller
