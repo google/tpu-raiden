@@ -60,7 +60,7 @@ cc_library(
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
     ],
     alwayslink = 1,
@@ -79,9 +79,13 @@ cc_test(
     linkopts = ["-Wl,--allow-shlib-undefined"],
     deps = [
         ":weight_synchronizer_base",
+        "//tpu_raiden/rpc:raiden_service_cc_proto",
+        "@com_google_absl//absl/flags:flag",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_googletest//:gtest_main",
+        "@xla//xla/pjrt:pjrt_client",
+        "@xla//xla/pjrt/plugin/xla_cpu:xla_cpu_pjrt_client",
     ],
 )
 

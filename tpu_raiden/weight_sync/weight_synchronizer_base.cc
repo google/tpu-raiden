@@ -31,18 +31,18 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
 #include "xla/future.h"
 #include "xla/layout.h"
 #include "xla/pjrt/pjrt_client.h"
-#include "xla/shape_util.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
 #include "tpu_raiden/core/raiden_manager_base.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
-#include "tpu_raiden/weight_sync/weight_synchronizer_listener.h"
 #include "tpu_raiden/weight_sync/tiling_utils.h"
+#include "tpu_raiden/weight_sync/weight_synchronizer_listener.h"
 
 ABSL_FLAG(size_t, raiden_weight_sync_host_buffer_scratchpad_size, 256 * 1024,
           "Amount of scratchpad to allocate to host buffers for resharding "
@@ -51,21 +51,29 @@ ABSL_FLAG(size_t, raiden_weight_sync_host_buffer_scratchpad_size, 256 * 1024,
 namespace tpu_raiden {
 namespace weight_sync {
 
-
-
 WeightSynchronizerBase::WeightSynchronizerBase(
     const std::vector<std::vector<xla::PjRtBuffer*>>& layer_buffers,
     std::optional<int> local_port,
     std::optional<std::vector<const uint8_t*>> external_host_ptrs,
     bool unsafe_skip_buffer_lock, int parallelism,
-    std::optional<int> listener_port, std::optional<std::string> bind_ip)
+    std::optional<int> listener_port, std::optional<std::string> bind_ip,
+    std::vector<std::string> layer_names, bool auto_h2d)
     : tpu_raiden::RaidenManagerBase(
           layer_buffers.size(),
           layer_buffers.empty() ? 0 : layer_buffers[0].size(),
           layer_buffers.empty()
               ? 0
               : layer_buffers[0][0]->GetOnDeviceSizeInBytes().value(),
-          local_port, parallelism, bind_ip) {
+          local_port, parallelism, bind_ip),
+      auto_h2d_(auto_h2d) {
+  if (layer_names.empty()) {
+    layer_names_.reserve(num_layers_);
+    for (size_t i = 0; i < num_layers_; ++i) {
+      layer_names_.push_back("weights_" + std::to_string(i));
+    }
+  } else {
+    layer_names_ = std::move(layer_names);
+  }
   DetectAndAssignNumaNode(layer_buffers);
 
   if (num_layers_ == 0 || num_shards_ == 0) {
@@ -76,8 +84,6 @@ WeightSynchronizerBase::WeightSynchronizerBase(
   physical_size_ = first_buffer->GetOnDeviceSizeInBytes().value();
   extension_ = raiden::GetRawBufferExtension(first_buffer, &c_api_);
 
-  // Symmetrically register single, unified memory blocks representing the
-  // entire weights buffer!
   shard_factor_ = 1;
   major_dim_size_ = 1;
 
@@ -102,15 +108,9 @@ WeightSynchronizerBase::WeightSynchronizerBase(
       ShardBufferInfoBase shard_info;
 
       shard_info.device_size = dst_buffer->GetOnDeviceSizeInBytes().value();
-      if (shard_info.device_size < physical_size_) {
-        throw std::runtime_error(
-            "Device buffer shard size smaller than physical weights size");
-      }
 
-      // Since weight sync acts on the entire buffer, the host size maps exactly
-      // to the physical size!
       size_t alloc_size =
-          physical_size_ +
+          shard_info.device_size +
           absl::GetFlag(FLAGS_raiden_weight_sync_host_buffer_scratchpad_size);
       if (external_host_ptrs.has_value()) {
         if (shard_idx < external_host_ptrs->size()) {
@@ -159,26 +159,55 @@ WeightSynchronizerBase::WeightSynchronizerBase(
     size_t num_layers, size_t num_shards, size_t slice_byte_size,
     std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
     int parallelism, std::optional<int> listener_port,
-    std::optional<std::string> bind_ip)
-    : tpu_raiden::RaidenManagerBase(num_layers, num_shards, slice_byte_size,
-                                    local_port, parallelism, bind_ip) {
+    std::optional<std::string> bind_ip, std::vector<std::string> layer_names,
+    bool auto_h2d)
+    : WeightSynchronizerBase(num_layers, num_shards,
+                             std::vector<size_t>(num_layers, slice_byte_size),
+                             local_port, host_blocks_to_allocate, parallelism,
+                             listener_port, bind_ip, std::move(layer_names),
+                             auto_h2d) {}
+
+WeightSynchronizerBase::WeightSynchronizerBase(
+    size_t num_layers, size_t num_shards, std::vector<size_t> slice_byte_sizes,
+    std::optional<int> local_port, std::optional<int> host_blocks_to_allocate,
+    int parallelism, std::optional<int> listener_port,
+    std::optional<std::string> bind_ip, std::vector<std::string> layer_names,
+    bool auto_h2d)
+    : tpu_raiden::RaidenManagerBase(
+          num_layers, num_shards,
+          slice_byte_sizes.empty() ? 0 : slice_byte_sizes[0], local_port,
+          parallelism, bind_ip),
+      auto_h2d_(auto_h2d) {
+  if (layer_names.empty()) {
+    layer_names_.reserve(num_layers_);
+    for (size_t i = 0; i < num_layers_; ++i) {
+      layer_names_.push_back("weights_" + std::to_string(i));
+    }
+  } else {
+    layer_names_ = std::move(layer_names);
+  }
   physical_size_ = slice_byte_size_;
   shard_factor_ = 1;
   major_dim_size_ = 1;
 
   layers_.reserve(num_layers_);
   for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
+    size_t current_slice_byte_size = (layer_idx < slice_byte_sizes.size())
+                                         ? slice_byte_sizes[layer_idx]
+                                         : slice_byte_size_;
     LayerInfoBase layer_info;
     layer_info.shards.reserve(num_shards_);
 
     for (size_t i = 0; i < num_shards_; ++i) {
       ShardBufferInfoBase shard_info;
+      shard_info.device_size = current_slice_byte_size;
 
       size_t alloc_size =
-          physical_size_ +
+          current_slice_byte_size +
           absl::GetFlag(FLAGS_raiden_weight_sync_host_buffer_scratchpad_size);
-      std::cerr << "[C++ WS] CPU-only constructor: physical_size_="
-                << physical_size_ << ", alloc_size=" << alloc_size << std::endl;
+      std::cerr << "[C++ WS] CPU-only constructor: layer=" << layer_idx
+                << ", device_size=" << current_slice_byte_size
+                << ", alloc_size=" << alloc_size << std::endl;
       void* ptr = nullptr;
       if (alloc_size > 0) {
         if (posix_memalign(&ptr, 64, alloc_size) != 0) {
@@ -227,6 +256,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::H2d() {
   for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
     const auto& layer_info = layers_[layer_idx];
     const auto& layer_holds = buffer_holds_[layer_idx];
+    size_t layer_size = block_bytes(layer_idx);
     for (size_t i = 0; i < num_shards_; ++i) {
       const auto& shard_info = layer_info.shards[i];
       const auto& shard_hold = layer_holds[i];
@@ -240,8 +270,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::H2d() {
 
       std::vector<xla::Future<>> shard_futures;
       if (is_tiled) {
-        auto temp_buffer =
-            std::make_shared<std::vector<uint8_t>>(physical_size_);
+        auto temp_buffer = std::make_shared<std::vector<uint8_t>>(layer_size);
         auto status = tpu_raiden::weight_sync::TileBuffer(
             shard_info.host_ptr, temp_buffer->data(),
             shard_hold.buffer->on_device_shape(), *xla_layout);
@@ -249,13 +278,13 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::H2d() {
           return status;
         }
 
-        xla::Future<> future = shard_hold.CopyRawHostToDevice(
-            temp_buffer->data(), 0, physical_size_);
+        xla::Future<> future =
+            shard_hold.CopyRawHostToDevice(temp_buffer->data(), 0, layer_size);
         xla::Future<> mapped_future = future.Map([temp_buffer]() {});
         shard_futures.push_back(std::move(mapped_future));
       } else {
-        xla::Future<> future = shard_hold.CopyRawHostToDevice(
-            shard_info.host_ptr, 0, physical_size_);
+        xla::Future<> future =
+            shard_hold.CopyRawHostToDevice(shard_info.host_ptr, 0, layer_size);
         shard_futures.push_back(std::move(future));
       }
       shard_futures_to_join.push_back(raiden::CreateBufferFuture(
@@ -274,6 +303,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2h() {
   for (size_t layer_idx = 0; layer_idx < num_layers_; ++layer_idx) {
     const auto& layer_info = layers_[layer_idx];
     const auto& layer_holds = buffer_holds_[layer_idx];
+    size_t layer_size = block_bytes(layer_idx);
     for (size_t i = 0; i < num_shards_; ++i) {
       const auto& shard_info = layer_info.shards[i];
       const auto& shard_hold = layer_holds[i];
@@ -288,12 +318,11 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2h() {
 
       std::vector<xla::Future<>> shard_futures;
       if (is_tiled) {
-        auto temp_buffer =
-            std::make_shared<std::vector<uint8_t>>(physical_size_);
+        auto temp_buffer = std::make_shared<std::vector<uint8_t>>(layer_size);
         uint8_t* temp_buffer_ptr = temp_buffer->data();
 
         xla::Future<> copy_future =
-            shard_hold.CopyRawDeviceToHost(temp_buffer_ptr, 0, physical_size_);
+            shard_hold.CopyRawDeviceToHost(temp_buffer_ptr, 0, layer_size);
 
         xla::Future<> detile_future =
             copy_future.Map([temp_buffer, dst_host_ptr,
@@ -306,7 +335,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2h() {
         shard_futures.push_back(std::move(detile_future));
       } else {
         xla::Future<> future =
-            shard_hold.CopyRawDeviceToHost(dst_host_ptr, 0, physical_size_);
+            shard_hold.CopyRawDeviceToHost(dst_host_ptr, 0, layer_size);
         shard_futures.push_back(std::move(future));
       }
       shard_futures_to_join.push_back(raiden::CreateBufferFuture(
@@ -324,11 +353,9 @@ absl::Status WeightSynchronizerBase::PushWeights(
         "Peer list cannot be empty for trainer weights sync");
   }
 
-  // 1. Automatically copy latest weights from Device TPU HBM onto Host CPU!
   TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2h());
   TF_RETURN_IF_ERROR(d2h_future.Await());
 
-  // 2. Run high-speed parallel sockets H2H write to push host weights to peers!
   std::vector<int> weights_block_id = {0};
   for (const std::string& peer : peers) {
     TF_RETURN_IF_ERROR(H2hWriteDirect(peer, weights_block_id).status());
@@ -338,32 +365,74 @@ absl::Status WeightSynchronizerBase::PushWeights(
 
 absl::Status WeightSynchronizerBase::PushWeightsResharded(
     const tpu_raiden::rpc::StartTransferRequest& request) {
-  const auto& schedules = request.shard_push_schedules();
-  TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2h());
-  TF_RETURN_IF_ERROR(d2h_future.Await());
+  int fallback_layer_idx = -1;
+  bool checked_fallback = false;
+  auto get_fallback_layer_idx = [&]() -> absl::StatusOr<int> {
+    if (checked_fallback) return fallback_layer_idx;
+    checked_fallback = true;
+    if (request.src_units().empty()) {
+      return absl::InvalidArgumentError("src_units list cannot be empty");
+    }
+    std::string data_name = request.src_units(0).data_name();
+    for (size_t l = 0; l < layer_names_.size(); ++l) {
+      if (layer_names_[l] == data_name) {
+        fallback_layer_idx = static_cast<int>(l);
+        break;
+      }
+    }
+    if (fallback_layer_idx == -1) {
+      return absl::NotFoundError(absl::StrCat(
+          "Layer name not found in WeightSynchronizer: ", data_name));
+    }
+    return fallback_layer_idx;
+  };
 
+  if (!request.skip_d2h()) {
+    VLOG(1) << "PushWeightsResharded: Executing D2H copy.";
+    TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2h());
+    TF_RETURN_IF_ERROR(d2h_future.Await());
+  } else {
+    VLOG(1) << "PushWeightsResharded: Skipping D2H copy.";
+  }
+
+  const auto& schedules = request.shard_push_schedules();
   for (size_t i = 0; i < num_shards_; ++i) {
     auto it = schedules.find(static_cast<int32_t>(i));
     if (it == schedules.end()) {
       continue;
     }
     const auto& schedule = it->second;
-    const uint8_t* base_host_ptr = GetHostPointer(0, i);
-    if (base_host_ptr == nullptr) {
-      return absl::InternalError("Host pointer is null during resharded push");
-    }
-    size_t shard_host_size = GetHostSize(0, i);
 
     for (const auto& entry : schedule.entries()) {
+      int layer_idx_to_use = -1;
+      if (entry.has_layer_idx()) {
+        layer_idx_to_use = entry.layer_idx();
+      } else {
+        auto status_or_fallback = get_fallback_layer_idx();
+        if (!status_or_fallback.ok()) {
+          return status_or_fallback.status();
+        }
+        layer_idx_to_use = status_or_fallback.value();
+      }
+      if (layer_idx_to_use < 0 ||
+          static_cast<size_t>(layer_idx_to_use) >= num_layers_) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("Layer index out of bounds: ", layer_idx_to_use));
+      }
+      const uint8_t* base_host_ptr = GetHostPointer(layer_idx_to_use, i);
+      if (base_host_ptr == nullptr) {
+        return absl::InternalError(
+            "Host pointer is null during resharded push");
+      }
+      size_t shard_host_size = GetHostSize(layer_idx_to_use, i);
+
       const std::string& dst_peer = entry.dst_peer();
       size_t dst_shard_idx = entry.dst_shard_idx();
       size_t count = entry.count() > 0 ? entry.count() : 1;
       size_t src_stride = entry.src_stride_bytes();
       size_t dst_stride = entry.dst_stride_bytes();
-      size_t dst_offset =
-          entry.dst_offset_bytes() + entry.dst_block_id() * dst_stride;
-      size_t src_offset =
-          entry.src_offset_bytes() + entry.src_block_id() * src_stride;
+      size_t dst_offset = entry.dst_offset_bytes();
+      size_t src_offset = entry.src_offset_bytes();
       size_t size = entry.size_bytes();
 
       for (size_t c = 0; c < count; ++c) {
@@ -377,7 +446,7 @@ absl::Status WeightSynchronizerBase::PushWeightsResharded(
         const uint8_t* data_ptr = base_host_ptr + curr_src_offset;
         TF_RETURN_IF_ERROR(PushWeightsChunk(dst_peer, dst_shard_idx,
                                             curr_dst_offset, data_ptr, size,
-                                            request.uuid()));
+                                            request.uuid(), layer_idx_to_use));
       }
     }
   }
@@ -385,8 +454,9 @@ absl::Status WeightSynchronizerBase::PushWeightsResharded(
 }
 
 absl::Status WeightSynchronizerBase::OnDataReceived() {
-  // Automatically copy all received staging weights from Host onto Device TPU
-  // HBM!
+  if (!auto_h2d_) {
+    return absl::OkStatus();
+  }
   TF_ASSIGN_OR_RETURN(raiden::PjRtCopyFuture h2d_future, H2d());
   TF_RETURN_IF_ERROR(h2d_future.Await());
   return absl::OkStatus();

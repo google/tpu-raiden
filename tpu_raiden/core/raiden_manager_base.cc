@@ -286,13 +286,14 @@ absl::StatusOr<std::vector<int>> RaidenManagerBase::H2hReadDirect(
 
 absl::Status RaidenManagerBase::PushWeightsChunk(
     absl::string_view peer, size_t dst_shard_idx, size_t dst_offset_bytes,
-    const uint8_t* data_ptr, size_t size_bytes, uint64_t uuid) {
+    const uint8_t* data_ptr, size_t size_bytes, uint64_t uuid,
+    size_t layer_idx) {
   InitTransportServer();
   absl::MutexLock lock(server_init_mu_);
   if (!server_) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
-  return server_->PushBuffer(peer, /*buffer_id=*/0, dst_shard_idx,
+  return server_->PushBuffer(peer, /*buffer_id=*/layer_idx, dst_shard_idx,
                              dst_offset_bytes, data_ptr, size_bytes, uuid);
 }
 
@@ -315,5 +316,14 @@ void RaidenManagerBase::ForgetPushProgress(uint64_t uuid) {
 }
 
 size_t RaidenManagerBase::bytes_per_block() const { return slice_byte_size_; }
+
+size_t RaidenManagerBase::block_bytes(size_t layer_idx) const {
+  if (layers_.empty() || layer_idx >= layers_.size() ||
+      layers_[layer_idx].shards.empty()) {
+    return bytes_per_block();
+  }
+  size_t dev_size = layers_[layer_idx].shards[0].device_size;
+  return dev_size > 0 ? dev_size : bytes_per_block();
+}
 
 }  // namespace tpu_raiden
