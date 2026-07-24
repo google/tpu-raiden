@@ -49,14 +49,29 @@ def _baselines_path():
 
 
 def _opted_out():
-  """True if the HEAD commit message asks to skip the perf floor for this PR."""
+  """Returns a tag if this change opts out of the perf floor.
+
+  In CI the decision is made by the workflow and handed down as an env var:
+  this binary runs under `bazel run`, whose cwd is the runfiles tree, and on
+  pull_request events HEAD is GitHub's synthetic merge commit -- neither can
+  see the CL description. The git path below is the local-run fallback.
+  """
+  if os.environ.get('TPU_RAIDEN_PERF_GATE_OPT_OUT', '').lower() == 'true':
+    return _SKIP_TAGS[0]
+
   try:
-    msg = subprocess.run(['git', 'log', '-1', '--format=%B'],
-                         capture_output=True, text=True).stdout.lower()
-  except Exception:  # pylint: disable=broad-exception-caught
+    result = subprocess.run(
+        ['git', 'log', '-1', '--format=%B'],
+        cwd=os.environ.get('BUILD_WORKSPACE_DIRECTORY'),
+        capture_output=True, text=True, check=True,
+    )
+  except (OSError, subprocess.CalledProcessError) as e:
+    print(f'WARNING: unable to inspect commit message: {e}', file=sys.stderr)
     return None
+
+  message = result.stdout.lower()
   for tag in _SKIP_TAGS:
-    if tag in msg:
+    if tag in message:
       return tag
   return None
 
@@ -162,7 +177,7 @@ def main(_):
     print(msg + '   [report-only: "enforce": false in baselines, NOT blocking]')
     return
   if opt:
-    print(msg + f'   [report-only: {opt} in commit message, NOT blocking]')
+    print(msg + f'   [report-only: opt-out requested via {opt}, NOT blocking]')
     return
   print(msg + f'   (to bypass, add {_SKIP_TAGS[0]} to your CL description)',
         file=sys.stderr)
