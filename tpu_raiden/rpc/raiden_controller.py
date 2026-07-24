@@ -293,6 +293,9 @@ class PoolSpanRegistration:
   block_ids: tuple[int, ...]
   spans: tuple[PoolByteSpan, ...]
   declared_bytes: int
+  # 0 (legacy): page-indexed destination spans. 1: request-global compact
+  # destination byte space; the controller performs the page split.
+  dst_space_version: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1524,6 +1527,8 @@ class RaidenController:
                 block_ids=entry_ids,
                 spans=tuple(entry_spans),
                 declared_bytes=span_bytes,
+                dst_space_version=int(
+                    getattr(entry, "dst_space_version", 0)),
             )
         )
 
@@ -2085,6 +2090,56 @@ class RaidenController:
             f"No byte-span declarations are registered for tag {plan_tag}, "
             f"req_id={req_id}, uuid={uuid}"
         )
+
+      # T3.4: destination-page-agnostic declarations (dst_space_version=1)
+      # address the request-global compact live byte space; split them at
+      # destination page boundaries here, where the destination geometry is
+      # known, so every downstream bound/coverage/emission step sees the
+      # legacy page-indexed form. Producers no longer hand-synchronize the
+      # destination page size.
+      converted: list[tuple[RaidenId, PoolSpanRegistration]] = []
+      for unit, entry in declared:
+        if int(getattr(entry, "dst_space_version", 0)) == 0:
+          converted.append((unit, entry))
+          continue
+        split_spans: list[PoolByteSpan] = []
+        for span in entry.spans:
+          if (span.count > 1 or span.src_stride_bytes
+              or span.dst_stride_bytes):
+            raise ValueError(
+                "Global-space byte spans must be plain contiguous ranges "
+                f"(declared by {unit})"
+            )
+          remaining = int(span.size_bytes)
+          global_offset = int(span.dst_offset_bytes)
+          src_offset = int(span.src_offset_bytes)
+          if span.dst_block_index != 0:
+            raise ValueError(
+                "Global-space byte spans must leave dst_block_index zero "
+                f"(declared by {unit})"
+            )
+          while remaining > 0:
+            page_index = global_offset // dst_live
+            in_page = global_offset % dst_live
+            take = min(remaining, dst_live - in_page)
+            split_spans.append(
+                PoolByteSpan(
+                    src_block_ordinal=span.src_block_ordinal,
+                    src_offset_bytes=src_offset,
+                    dst_block_index=int(page_index),
+                    dst_offset_bytes=int(in_page),
+                    size_bytes=int(take),
+                )
+            )
+            global_offset += take
+            src_offset += take
+            remaining -= take
+        converted.append((
+            unit,
+            dataclasses.replace(
+                entry, spans=tuple(split_spans), dst_space_version=0),
+        ))
+      declared = converted
 
       for pool_idx in selected_pool_indices:
         dst_num_blocks = int(dst_meta.pools[pool_idx].num_blocks)
@@ -4102,6 +4157,7 @@ class RaidenControllerServer:
                           for span in entry.spans
                       ),
                       declared_bytes=entry.declared_bytes,
+                      dst_space_version=entry.dst_space_version,
                   )
                   for entry in block_req.pool_spans
               ],
@@ -4576,6 +4632,7 @@ class RaidenControllerClientFacade:
           tag=str(entry.tag),
           block_ids=[int(block_id) for block_id in entry.block_ids],
           declared_bytes=int(entry.declared_bytes),
+          dst_space_version=int(getattr(entry, "dst_space_version", 0)),
       )
       for span in entry.spans:
         entry_proto.spans.add(

@@ -447,6 +447,83 @@ class RaidenControllerTest(absltest.TestCase):
         set(range(8)),
     )
 
+  def test_stage3_global_dst_space_reproduces_page_split_plan(self):
+    """T3.4: version-1 global-dst spans yield the legacy page-split plan."""
+    controller, client, src_units, dst_unit, dst_ids = self._stage3_fixture(
+        src_page_slice_tokens=256, register_blocks=False
+    )
+    del client
+    for rank, unit in enumerate(src_units):
+      # Producer view under T3.4: one contiguous global-destination span
+      # per owned 256-token interleave slice (slices never cross the
+      # 4096-token source pages) — no destination page arithmetic at all.
+      spans = []
+      owned_tokens = 0
+      local_cursor = 0
+      for slice_start in range(rank * 256, 65536, 8 * 256):
+        block_ordinal, block_token_offset = divmod(local_cursor, 4096)
+        spans.append(
+            raiden_controller.PoolByteSpan(
+                src_block_ordinal=block_ordinal,
+                src_offset_bytes=block_token_offset * 1024,
+                dst_block_index=0,
+                dst_offset_bytes=slice_start * 1024,
+                size_bytes=256 * 1024,
+            ))
+        owned_tokens += 256
+        local_cursor += 256
+      owned_blocks = math.ceil(owned_tokens / 4096)
+      block_ids = [1000 + rank * 100 + i for i in range(owned_blocks)]
+      controller.register_request_blocks(
+          "request", 123, unit, block_ids,
+          pool_spans=[
+              raiden_controller.PoolSpanRegistration(
+                  tag="fa",
+                  block_ids=tuple(block_ids),
+                  spans=tuple(spans),
+                  declared_bytes=owned_tokens * 1024,
+                  dst_space_version=1,
+              )
+          ])
+
+    future = controller.start_transfer(
+        src_units=src_units,
+        dst_units=[dst_unit],
+        req_id="request",
+        dst_device_block_ids=dst_ids,
+        dst_mem_type=raiden_controller.RaidenMemoryType.HBM,
+        use_block_chunks=True,
+        uuid=123,
+        num_tokens=65536,
+        transfer_pool_tags=["fa"],
+        parallelism=8,
+    )
+    asyncio.run(future.wait())
+    plan = controller.get_plan("request")
+
+    # Same shape the legacy page-indexed golden produces: the controller
+    # performed the destination page split.
+    self.assertEqual(plan.expected_pushes_per_pool, 64)
+    entries = []
+    for unit in src_units:
+      unit_entries = plan.shard_push_schedules[unit][0]
+      self.assertLen(unit_entries, 32)
+      entries.extend(unit_entries)
+    self.assertLen(entries, 256)
+    for entry in entries:
+      self.assertEqual(entry[4], 256 * 1024)
+      self.assertEqual(entry[7:], (0, 0, 1, 0))
+    entries_by_dst_block = {
+        block_id: [entry for entry in entries if entry[6] == block_id]
+        for block_id in dst_ids
+    }
+    for page_entries in entries_by_dst_block.values():
+      self.assertLen(page_entries, 4)
+      self.assertEqual(
+          sorted(entry[2] for entry in page_entries),
+          [offset * 256 * 1024 for offset in range(4)],
+      )
+
   def test_stage3_multi_tag_plan_groups_fa_and_state(self):
     """T3.1: one transfer carries FA plus a state class as scoped groups."""
     controller, client, src_units, dst_unit, dst_ids = self._stage3_fixture(
