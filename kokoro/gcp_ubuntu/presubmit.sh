@@ -27,8 +27,14 @@ export HERMETIC_PYTHON_VERSION=3.12
 mkdir -p "${WORK_DIR}"
 mkdir -p "${BAZEL_OUTPUT_BASE}"
 
+echo "=== KOKORO TIMING BENCHMARK RUN FORCE RECOMPILE 2 ==="
 echo "=== 0. Bootstrapping system packages ==="
-apt-get update && apt-get install -y python3-venv python3-pip curl git ca-certificates
+if ! command -v git &> /dev/null || ! dpkg -s python3-venv &> /dev/null || ! command -v curl &> /dev/null; then
+  echo "Installing required system packages via apt-get..."
+  apt-get update && apt-get install -y python3-venv python3-pip curl git ca-certificates
+else
+  echo "Required system packages already installed. Skipping apt-get..."
+fi
 git config --global http.sslVerify false
 
 echo "=== 1. Navigating to checked-out repository ==="
@@ -42,16 +48,37 @@ export BAZEL_VERSION="$(tr -d '\r\n ' < ".bazelversion")"
 echo "Target Bazel version: ${BAZEL_VERSION}"
 
 BAZEL_BIN="${WORK_DIR}/bazel-${BAZEL_VERSION}"
-echo "Downloading standalone Bazel ${BAZEL_VERSION}..."
-curl -Lo "${BAZEL_BIN}" "https://storage.googleapis.com/bazel/${BAZEL_VERSION}/release/bazel-${BAZEL_VERSION}-linux-x86_64"
-chmod +x "${BAZEL_BIN}"
+if [[ -x "${BAZEL_BIN}" ]] && "${BAZEL_BIN}" --version 2>&1 | grep -qF "${BAZEL_VERSION}"; then
+  echo "Found existing Bazel binary at ${BAZEL_BIN} matching version ${BAZEL_VERSION}."
+elif command -v bazel &> /dev/null && bazel --version 2>&1 | grep -qF "${BAZEL_VERSION}"; then
+  BAZEL_BIN="$(command -v bazel)"
+  echo "Found system Bazel at ${BAZEL_BIN} matching version ${BAZEL_VERSION}."
+elif which bazel &> /dev/null && "$(which bazel)" --version 2>&1 | grep -qF "${BAZEL_VERSION}"; then
+  BAZEL_BIN="$(which bazel)"
+  echo "Found system Bazel at ${BAZEL_BIN} matching version ${BAZEL_VERSION}."
+else
+  echo "Downloading standalone Bazel ${BAZEL_VERSION}..."
+  curl -Lo "${BAZEL_BIN}" "https://storage.googleapis.com/bazel/${BAZEL_VERSION}/release/bazel-${BAZEL_VERSION}-linux-x86_64"
+  chmod +x "${BAZEL_BIN}"
+fi
 
 "${BAZEL_BIN}" --version
 
 echo "=== 3. Setting up Python Virtual Environment ==="
-python3 -m venv "${WORK_DIR}/venv"
+if [[ ! -f "${WORK_DIR}/venv/bin/activate" ]]; then
+  echo "Creating Python virtual environment at ${WORK_DIR}/venv..."
+  python3 -m venv "${WORK_DIR}/venv"
+else
+  echo "Reusing existing Python virtual environment at ${WORK_DIR}/venv..."
+fi
 source "${WORK_DIR}/venv/bin/activate"
-pip install --upgrade pip
+
+if command -v pip &> /dev/null && pip --version &> /dev/null; then
+  echo "pip is already present and operational. Skipping upgrade."
+else
+  echo "Installing/upgrading pip..."
+  pip install --upgrade pip
+fi
 
 echo "=== 4. E2E Validation Build with Bazel Remote Cache ==="
 CACHE_BUCKET="tpu-raiden-bazel-cache"
@@ -83,8 +110,11 @@ else
 fi
 
 BAZEL_COMMAND_FLAGS=(
+  "--cxxopt=-std=c++20"
+  "--host_cxxopt=-std=c++20"
   "--remote_cache=https://storage.googleapis.com/${CACHE_BUCKET}"
   "--google_default_credentials"
+  "--remote_download_minimal"
   "--spawn_strategy=standalone"
   "--strategy=standalone"
   "--jobs=${BAZEL_JOBS}"
