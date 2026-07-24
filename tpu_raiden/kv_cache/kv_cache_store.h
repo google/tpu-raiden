@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>  // NOLINT(build/c++11)
 #include <utility>
@@ -34,6 +35,7 @@
 #include "xla/tsl/concurrency/future.h"
 #include "tpu_raiden/core/numa_thread_pool.h"
 #include "tpu_raiden/core/raw_transfer_core.h"
+#include "tpu_raiden/kv_cache/kv_cache_metadata.h"
 #include "tpu_raiden/kv_cache/lru_cache.h"
 #include "tpu_raiden/kv_cache/raiden_id.h"
 
@@ -95,19 +97,24 @@ class KVCacheStore {
  public:
   friend class KVCacheStoreTest;
 
+  // If `metadata` is provided, every LRU cache entry whose data lives in
+  // local host memory is mirrored into it, keeping a crash-persistent copy of
+  // the LRU cache in the caller's region (see KVCacheMetadata).
   explicit KVCacheStore(size_t capacity,
                         absl::string_view global_registry_address = "",
                         RaidenId raiden_id = {}, int num_shards = 0,
                         int64_t shard_size_bytes = 0,
                         absl::string_view raiden_orchestrator_address = "",
-                        absl::string_view raiden_controller_address = "");
+                        absl::string_view raiden_controller_address = "",
+                        std::optional<KVCacheMetadata> metadata = std::nullopt);
 
   // Test-only constructor for injecting mock controller
   explicit KVCacheStore(
       size_t capacity,
       std::unique_ptr<tpu_raiden::controller::RaidenController>
           raiden_controller,
-      absl::string_view global_registry_address = "", RaidenId raiden_id = {});
+      absl::string_view global_registry_address = "", RaidenId raiden_id = {},
+      std::optional<KVCacheMetadata> metadata = std::nullopt);
 
   ~KVCacheStore();
 
@@ -295,9 +302,24 @@ class KVCacheStore {
     }
   };
 
+  // Records `block`'s LRU cache binding in the crash-persistent metadata
+  // table under `hash`. No-op when no table is attached or the block's data
+  // does not live in local host memory.
+  void SetMetadataEntry(absl::string_view hash, const RaidenBlockID& block)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
+  // Removes `block`'s entry from the metadata table. No-op when no table is
+  // attached or the block's data does not live in local host memory.
+  void ClearMetadataEntry(const RaidenBlockID& block)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
   mutable absl::Mutex mutex_;
   mutable LRUCache<std::string, RaidenBlockID> lru_cache_
       ABSL_GUARDED_BY(mutex_);
+  std::optional<KVCacheMetadata> metadata_ ABSL_GUARDED_BY(mutex_);
+  // Recency stamp for metadata entries; strictly increases with every
+  // metadata write so recovery can rebuild the LRU order.
+  uint64_t next_metadata_seq_ ABSL_GUARDED_BY(mutex_) = 0;
   std::shared_ptr<global_registry::GlobalRegistryClient> registry_client_;
   RaidenId raiden_id_;
   std::unique_ptr<tpu_raiden::controller::RaidenController> raiden_controller_;
