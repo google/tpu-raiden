@@ -358,10 +358,10 @@ absl::Status RaidenController::DeallocateBlockIds(
   return block_manager_->Unlock(block_ids);
 }
 
-absl::Status RaidenController::RestoreAllocatedBlockIds(
+absl::Status RaidenController::AllocateTargetBlockIds(
     absl::Span<const int> block_ids) {
   absl::MutexLock lock(mutex_);
-  return block_manager_->RestoreAllocated(block_ids);
+  return block_manager_->AllocateTarget(block_ids);
 }
 
 absl::Status RaidenController::DeallocateBuffers(

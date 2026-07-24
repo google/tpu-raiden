@@ -112,10 +112,11 @@ class RaidenController {
   absl::Status DeallocateBlockIds(absl::Span<const int> block_ids);
 
   // New API (Logical/Block ID Mode):
-  // Marks the given logical block IDs as allocated and locked in the block
-  // manager, restoring allocator state after an owner restart. No RPC is
-  // performed.
-  absl::Status RestoreAllocatedBlockIds(absl::Span<const int> block_ids);
+  // Allocates exactly the given logical block IDs in the block manager,
+  // locked. The whole batch is validated first: fails without changing any
+  // state if an ID is out of range, already allocated, or duplicated. No RPC
+  // is performed.
+  absl::Status AllocateTargetBlockIds(absl::Span<const int> block_ids);
 
   // Targeted worker transfer
   tsl::Future<> TransferBuffers(absl::string_view worker_id,

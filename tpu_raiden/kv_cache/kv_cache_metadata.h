@@ -43,7 +43,7 @@ struct alignas(64) KVCacheMetadataHeader {
 // persistent format read back after a crash, so every byte of the 128-byte
 // entry is spelled out explicitly rather than left to compiler padding.
 struct alignas(64) KVCacheMetadataEntry {
-  // Recency stamp assigned at each directory insert, used to rebuild LRU
+  // Recency stamp assigned at each LRU cache insert, used to rebuild LRU
   // order on recovery and to pick the newest binding if two slots ever claim
   // the same hash.
   uint64_t seq = 0;       // offset 0, 8 bytes
@@ -65,8 +65,8 @@ static_assert(std::atomic<uint8_t>::is_always_lock_free);
 // Table of prefix-hash-to-block bindings maintained in a caller-provided
 // memory region, one fixed-size entry per block. Kept in the same shared
 // memory that backs the host KV block pool, it mirrors the KVCacheStore
-// directory and survives an engine crash together with the block data, so a
-// restarted engine can rebuild its directory locally without consulting the
+// LRU cache and survives an engine crash together with the block data, so a
+// restarted engine can rebuild its LRU cache locally without consulting the
 // global registry.
 //
 // The class is a non-owning view: the region must outlive it. Plain memory

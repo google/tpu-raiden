@@ -46,6 +46,7 @@
 #include "tpu_raiden/core/kv_manager_holder.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_client.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_server.h"
+#include "tpu_raiden/kv_cache/kv_cache_metadata.h"
 #include "tpu_raiden/kv_cache/lru_cache.h"
 #include "tpu_raiden/kv_cache/raiden_id.h"
 
@@ -855,6 +856,114 @@ TEST(KVCacheStoreTest, EvictRaceCondition) {
 }
 
 using ::testing::ElementsAre;
+
+// 64-byte aligned backing buffer standing in for the shared memory region
+// that would hold the KV cache metadata table.
+class MetadataRegion {
+ public:
+  explicit MetadataRegion(int num_blocks)
+      : buffer_(KVCacheMetadata::RequiredSizeBytes(num_blocks) + 63) {}
+
+  absl::Span<uint8_t> span() {
+    auto addr = reinterpret_cast<uintptr_t>(buffer_.data());
+    size_t offset = (64 - addr % 64) % 64;
+    return absl::MakeSpan(buffer_.data() + offset, buffer_.size() - offset);
+  }
+
+ private:
+  std::vector<uint8_t> buffer_;
+};
+
+TEST(KVCacheStoreTest, InsertSetsAndDeleteClearsMetadataEntries) {
+  MetadataRegion region(4);
+  auto metadata_or = KVCacheMetadata::Format(region.span(), 4);
+  ASSERT_TRUE(metadata_or.ok());
+
+  RaidenId rid{"local_job", "0", "kv_cache", 0};
+  KVCacheStore store(4, /*raiden_controller=*/nullptr,
+                     /*global_registry_address=*/"", rid, *metadata_or);
+
+  // host_1 and host_2 own host blocks and get metadata entries; hbm_1 owns
+  // no host data and must stay out of the table.
+  std::vector<std::string> hashes = {"host_1", "host_2", "hbm_1"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, 0, BlockStatus::HOST),
+      RaidenBlockID(rid, 1, BlockStatus::HOST),
+      RaidenBlockID(rid, -1, 0, BlockStatus::HBM)};
+  ASSERT_TRUE(store.Insert(hashes, slices, true).first);
+  EXPECT_THAT(metadata_or->ValidEntries(),
+              ElementsAre(::testing::FieldsAre(0, "host_1", 0),
+                          ::testing::FieldsAre(1, "host_2", 1)));
+
+  // Delete clears the binding's metadata entry.
+  store.Delete({"host_1"}, {slices[0]});
+  EXPECT_THAT(metadata_or->ValidEntries(),
+              ElementsAre(::testing::FieldsAre(1, "host_2", 1)));
+}
+
+TEST(KVCacheStoreTest, MetadataKeepsEvictionCandidates) {
+  MetadataRegion region(4);
+  auto metadata_or = KVCacheMetadata::Format(region.span(), 4);
+  ASSERT_TRUE(metadata_or.ok());
+
+  RaidenId rid{"local_job", "0", "kv_cache", 0};
+  KVCacheStore store(2, /*raiden_controller=*/nullptr,
+                     /*global_registry_address=*/"", rid, *metadata_or);
+
+  ASSERT_TRUE(store
+                  .Insert({"host_1", "host_2"},
+                          {RaidenBlockID(rid, 0, BlockStatus::HOST),
+                           RaidenBlockID(rid, 1, BlockStatus::HOST)},
+                          true)
+                  .first);
+
+  // Inserting host_3 moves host_1 to the candidate list. Its host block stays
+  // allocated, so its metadata entry survives.
+  ASSERT_TRUE(
+      store.Insert({"host_3"}, {RaidenBlockID(rid, 2, BlockStatus::HOST)}, true)
+          .first);
+  EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
+              ElementsAre("host_1"));
+  EXPECT_THAT(metadata_or->ValidEntries(),
+              ElementsAre(::testing::FieldsAre(0, "host_1", 0),
+                          ::testing::FieldsAre(1, "host_2", 1),
+                          ::testing::FieldsAre(2, "host_3", 2)));
+
+  // Re-inserting host_1 under a new host block reactivates the candidate and
+  // overwrites its binding in place: block 0's entry is cleared and block 3's
+  // is set with the newest seq.
+  ASSERT_TRUE(
+      store.Insert({"host_1"}, {RaidenBlockID(rid, 3, BlockStatus::HOST)}, true)
+          .first);
+  EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
+              ::testing::IsEmpty());
+  EXPECT_THAT(metadata_or->ValidEntries(),
+              ElementsAre(::testing::FieldsAre(1, "host_2", 1),
+                          ::testing::FieldsAre(2, "host_3", 2),
+                          ::testing::FieldsAre(3, "host_1", 3)));
+}
+
+TEST(KVCacheStoreTest, EvictClearsMetadataEntries) {
+  MetadataRegion region(2);
+  auto metadata_or = KVCacheMetadata::Format(region.span(), 2);
+  ASSERT_TRUE(metadata_or.ok());
+
+  RaidenId rid{"local_job", "0", "kv_cache", 0};
+  KVCacheStore store(2, /*raiden_controller=*/nullptr,
+                     /*global_registry_address=*/"", rid, *metadata_or);
+
+  ASSERT_TRUE(store
+                  .Insert({"host_1", "host_2"},
+                          {RaidenBlockID(rid, 0, BlockStatus::HOST),
+                           RaidenBlockID(rid, 1, BlockStatus::HOST)},
+                          true)
+                  .first);
+  ASSERT_EQ(metadata_or->ValidEntries().size(), 2);
+
+  EXPECT_EQ(KVCacheStoreTest::Evict(store, {"host_1"}), 1);
+  EXPECT_THAT(metadata_or->ValidEntries(),
+              ElementsAre(::testing::FieldsAre(1, "host_2", 1)));
+}
 
 class KVCacheStoreEmbeddedControllerTest : public ::testing::Test {
  protected:
@@ -2373,6 +2482,152 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteMultipleSources) {
 
   registry_server->Shutdown();
 }
+
+TEST_F(KVCacheStoreEmbeddedControllerTest, SaveSetsMetadataEntriesOnCompletion) {
+  ::tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(
+      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+
+  auto controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(
+          unit_, 10, 1, 512, orchestrator_address_, "");
+  RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
+
+  MetadataRegion region(10);
+  auto metadata_or = KVCacheMetadata::Format(region.span(), 10);
+  ASSERT_TRUE(metadata_or.ok());
+
+  RaidenId rid{"test_job", "0", "test_cache", 0};
+  KVCacheStore store(10, std::move(controller), "", rid, *metadata_or);
+
+  std::vector<std::string> hashes = {"hash_1", "hash_2"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, -1, 0, BlockStatus::HBM),
+      RaidenBlockID(rid, -1, 1, BlockStatus::HBM)};
+
+  ASSERT_TRUE(store.Insert(hashes, slices, false).first);
+  ASSERT_TRUE(store.Pin(hashes));
+
+  // Insert has already called SetMetadataEntry for both slices, but their HBM
+  // status fails its data-lives-in-local-host-memory filter: the data exists
+  // only in HBM at this point, so the LRU registration alone must leave the
+  // table empty.
+  EXPECT_THAT(metadata_or->ValidEntries(), ::testing::IsEmpty());
+
+  absl::Status status = store.Save(hashes);
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  // Poll for completion
+  bool done = false;
+  while (!done) {
+    auto [save_done, save_failed, save_pending] = store.PollSaveStatus();
+    if (!save_failed.empty()) {
+      FAIL() << "Async Save failed during polling";
+    }
+    if (!save_done.empty()) {
+      done = true;
+    }
+    if (!done) {
+      absl::SleepFor(absl::Milliseconds(10));
+    }
+  }
+
+  // Save completion lands the data on host blocks 0 and 1, which is when the
+  // bindings enter the table.
+  EXPECT_THAT(metadata_or->ValidEntries(),
+              ElementsAre(::testing::FieldsAre(0, "hash_1", 0),
+                          ::testing::FieldsAre(1, "hash_2", 1)));
+}
+
+TEST_F(KVCacheStoreEmbeddedControllerTest,
+       ReadRemoteSetsMetadataEntriesOnCompletion) {
+  // Same setup as ReadRemoteSuccess: registry, src controller with a
+  // successful H2H callback, dest store — here with a metadata table attached.
+  auto service = std::make_unique<global_registry::GlobalRegistryServiceImpl>();
+  grpc::ServerBuilder registry_builder;
+  int registry_port = 0;
+  registry_builder.AddListeningPort(
+      "localhost:0", grpc::InsecureServerCredentials(), &registry_port);
+  registry_builder.RegisterService(service.get());
+  auto registry_server = registry_builder.BuildAndStart();
+  std::string registry_address = "localhost:" + std::to_string(registry_port);
+
+  auto src_controller_server = core::controller::CreateTestControllerServer();
+
+  rpc::RaidenIdProto src_unit;
+  src_unit.set_job_name("src_job");
+  src_unit.set_job_replica_id("0");
+  src_unit.set_data_name("src_data");
+  src_unit.set_data_replica_idx(0);
+
+  kv_cache::RaidenId src_raiden_id{"src_job", "0", "src_data", 0};
+
+  ::tpu_raiden::controller::OrchestratorServiceClient orchestrator_client(
+      grpc::CreateChannel(orchestrator_address_,
+                          grpc::InsecureChannelCredentials()));
+  auto register_status = orchestrator_client.RegisterController(
+      src_unit, src_controller_server->server_address);
+  ASSERT_TRUE(register_status.ok()) << register_status.message();
+
+  auto worker_status = src_controller_server->client->RegisterWorker(
+      "worker_0", "src_worker_0_addr", {{"src_worker_0_transfer", {}}});
+  ASSERT_TRUE(worker_status.ok()) << worker_status.message();
+
+  src_controller_server->service->SetTransferBuffersCallback(
+      [&](absl::Span<const Buffer> src_buffers,
+          absl::Span<const Buffer> dst_buffers) {
+        return tsl::Future<>(absl::OkStatus());
+      });
+
+  auto dest_controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(
+          unit_, 10, 1, 512, orchestrator_address_, "");
+  RegisterAndInitWorker(*dest_controller, "worker_0",
+                        test_server_->server_address);
+
+  MetadataRegion metadata_region(10);
+  auto metadata_or = KVCacheMetadata::Format(metadata_region.span(), 10);
+  ASSERT_TRUE(metadata_or.ok());
+
+  RaidenId rid{"dest_job", "0", "dest_cache", 0};
+  KVCacheStore store(10, std::move(dest_controller), registry_address, rid,
+                     *metadata_or);
+
+  std::vector<std::string> hashes = {"hash_0"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(src_raiden_id, 42, BlockStatus::REMOTE)};
+  ASSERT_TRUE(store.InsertAndLock(hashes, slices, true));
+
+  // InsertAndLock has already called SetMetadataEntry for the slice, but its
+  // REMOTE status fails the same data-lives-in-local-host-memory filter: a
+  // REMOTE entry owns no local data and must stay out of the table.
+  EXPECT_THAT(metadata_or->ValidEntries(), ::testing::IsEmpty());
+
+  absl::Status status = store.ReadRemote(hashes);
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  // Poll for completion
+  bool done = false;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    auto [done_hashes, failed_hashes, pending_hashes] =
+        store.PollRemoteReadStatus();
+    ASSERT_TRUE(failed_hashes.empty());
+    if (!done_hashes.empty()) {
+      done = true;
+      break;
+    }
+    absl::SleepFor(absl::Milliseconds(10));
+  }
+  ASSERT_TRUE(done);
+
+  // Read completion lands the remote data on local host block 0, which is
+  // when the binding enters the table.
+  EXPECT_THAT(metadata_or->ValidEntries(),
+              ElementsAre(::testing::FieldsAre(0, "hash_0", 0)));
+
+  registry_server->Shutdown();
+}
+
 
 // In-process registry plus client, for RecoverFromRegistry tests.
 struct RecoveryRegistrySetup {
