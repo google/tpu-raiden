@@ -18,7 +18,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <limits>
 #include <optional>
 #include <string>
 #include <thread>  // NOLINT(build/c++11)
@@ -46,6 +45,7 @@
 #include "tpu_raiden/core/controller/raiden_controller.h"
 #include "tpu_raiden/core/numa_thread_pool.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_client.h"
+#include "tpu_raiden/kv_cache/kv_cache_metadata.h"
 #include "tpu_raiden/kv_cache/lru_cache.h"
 #include "tpu_raiden/kv_cache/raiden_id.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
@@ -58,8 +58,10 @@ KVCacheStore::KVCacheStore(size_t capacity,
                            RaidenId raiden_id, int num_shards,
                            int64_t shard_size_bytes,
                            absl::string_view raiden_orchestrator_address,
-                           absl::string_view raiden_controller_address)
+                           absl::string_view raiden_controller_address,
+                           std::optional<KVCacheMetadata> metadata)
     : lru_cache_(capacity),
+      metadata_(std::move(metadata)),
       raiden_id_(std::move(raiden_id)),
       write_through_pool_(std::make_unique<::tpu_raiden::NumaThreadPool>(4)) {
   if (!global_registry_address.empty()) {
@@ -91,8 +93,10 @@ KVCacheStore::KVCacheStore(
     size_t capacity,
     std::unique_ptr<::tpu_raiden::controller::RaidenController>
         raiden_controller,
-    absl::string_view global_registry_address, RaidenId raiden_id)
+    absl::string_view global_registry_address, RaidenId raiden_id,
+    std::optional<KVCacheMetadata> metadata)
     : lru_cache_(capacity),
+      metadata_(std::move(metadata)),
       raiden_id_(std::move(raiden_id)),
       raiden_controller_(std::move(raiden_controller)),
       write_through_pool_(std::make_unique<::tpu_raiden::NumaThreadPool>(4)) {
@@ -198,9 +202,21 @@ std::pair<bool, BlockSliceList> KVCacheStore::Insert(
       all_inserted = false;
       continue;
     }
+    // The Contains check above ignores eviction candidates, so `hash` may
+    // still sit in the candidate list; Put then overwrites its binding in
+    // place, so clear the old binding's metadata entry first. An eviction
+    // returned by Put only moves an entry to the candidate list — its host
+    // block stays allocated, so its metadata entry is kept.
+    if (metadata_.has_value()) {
+      if (const RaidenBlockID* stale =
+              lru_cache_.PeekIncludingCandidates(hash)) {
+        ClearMetadataEntry(*stale);
+      }
+    }
     std::optional<std::pair<std::string, RaidenBlockID>> evicted;
     if (i < slices.size()) {
       evicted = lru_cache_.Put(hash, slices[i]);
+      SetMetadataEntry(hash, slices[i]);
     } else {
       evicted = lru_cache_.Put(hash, RaidenBlockID());
     }
@@ -255,9 +271,17 @@ bool KVCacheStore::InsertAndLock(const std::vector<std::string>& block_hashes,
   for (auto it = new_indices.rbegin(); it != new_indices.rend(); ++it) {
     size_t i = *it;
     const std::string& hash = block_hashes[i];
+    // Same candidate-overwrite handling as in Insert.
+    if (metadata_.has_value()) {
+      if (const RaidenBlockID* stale =
+              lru_cache_.PeekIncludingCandidates(hash)) {
+        ClearMetadataEntry(*stale);
+      }
+    }
     std::optional<std::pair<std::string, RaidenBlockID>> evicted;
     if (i < slices.size()) {
       evicted = lru_cache_.Put(hash, slices[i]);
+      SetMetadataEntry(hash, slices[i]);
     } else {
       evicted = lru_cache_.Put(hash, RaidenBlockID());
     }
@@ -277,6 +301,10 @@ bool KVCacheStore::InsertAndLock(const std::vector<std::string>& block_hashes,
         lru_cache_.Unpin(block_hashes[j]);
       }
       for (size_t j : new_indices) {
+        if (const RaidenBlockID* val =
+                lru_cache_.PeekIncludingCandidates(block_hashes[j])) {
+          ClearMetadataEntry(*val);
+        }
         lru_cache_.Erase(block_hashes[j]);
       }
       for (size_t j = 0; j < eviction_count; ++j) {
@@ -339,6 +367,9 @@ void KVCacheStore::Delete(const std::vector<std::string>& block_hashes,
                           const std::vector<RaidenBlockID>& slices) {
   absl::MutexLock lock(mutex_);
   for (const std::string& hash : block_hashes) {
+    if (const RaidenBlockID* val = lru_cache_.PeekIncludingCandidates(hash)) {
+      ClearMetadataEntry(*val);
+    }
     lru_cache_.Erase(hash);
   }
 }
@@ -763,90 +794,90 @@ KVCacheStore::PollLoadStatus() {
   return {std::move(done), std::move(failed), std::move(pending)};
 }
 
-absl::StatusOr<size_t> KVCacheStore::RecoverFromRegistry() {
-  if (!registry_client_) {
-    return absl::FailedPreconditionError(
-        "RecoverFromRegistry requires a global registry connection");
-  }
+absl::StatusOr<size_t> KVCacheStore::RecoverFromLocalManifest() {
   if (!raiden_controller_) {
     return absl::FailedPreconditionError(
-        "RecoverFromRegistry requires a raiden controller");
+        "RecoverFromLocalManifest requires a raiden controller");
   }
-
-  auto pulled_or = registry_client_->PullOwned(raiden_id_);
-  if (!pulled_or.ok()) {
-    return pulled_or.status();
-  }
-  std::vector<global_registry::GlobalRegistryClient::PulledEntry> pulled =
-      *std::move(pulled_or);
-  if (pulled.empty()) {
-    return 0;
-  }
-
-  // Sort so that entries closest to expiry come first: they are inserted
-  // first and therefore evicted first. 0 means "never expires" and sorts as
-  // the most recent.
-  auto effective_ttl =
-      [](const global_registry::GlobalRegistryClient::PulledEntry& entry) {
-        return entry.remaining_ttl_seconds == 0
-                   ? std::numeric_limits<int64_t>::max()
-                   : entry.remaining_ttl_seconds;
-      };
-  std::sort(pulled.begin(), pulled.end(),
-            [&effective_ttl](const auto& a, const auto& b) {
-              return effective_ttl(a) < effective_ttl(b);
-            });
 
   absl::MutexLock lock(mutex_);
+  if (!metadata_.has_value()) {
+    return absl::FailedPreconditionError(
+        "RecoverFromLocalManifest requires an attached metadata table");
+  }
+  if (!lru_cache_.empty()) {
+    return absl::FailedPreconditionError(
+        "RecoverFromLocalManifest requires an empty LRU cache");
+  }
 
-  // Skip hashes already present, then keep only the most recently registered
-  // entries that fit in the remaining directory capacity. The skip is
-  // defensive: the directory is normally empty here, but it keeps a re-pull
-  // after a partial recovery (or a call on a live store) from double-inserting.
-  std::vector<const global_registry::GlobalRegistryClient::PulledEntry*>
-      eligible;
-  eligible.reserve(pulled.size());
-  for (const auto& entry : pulled) {
-    if (lru_cache_.PeekIncludingCandidates(entry.prefix_hash) == nullptr) {
-      eligible.push_back(&entry);
-    }
-  }
-  size_t available = lru_cache_.capacity() > lru_cache_.active_size()
-                         ? lru_cache_.capacity() - lru_cache_.active_size()
-                         : 0;
-  if (eligible.size() > available) {
-    LOG(WARNING) << "RecoverFromRegistry: " << eligible.size()
-                 << " recoverable entries exceed remaining capacity "
-                 << available << "; skipping the oldest ones";
-    eligible.erase(eligible.begin(), eligible.end() - available);
-  }
-  if (eligible.empty()) {
+  std::vector<KVCacheMetadata::Entry> entries = metadata_->ValidEntries();
+  if (entries.empty()) {
     return 0;
   }
 
-  std::vector<int> block_ids;
-  block_ids.reserve(eligible.size());
-  for (const auto* entry : eligible) {
-    block_ids.push_back(entry->block_id);
-  }
-  auto restore_status =
-      raiden_controller_->RestoreAllocatedBlockIds(block_ids);
-  if (!restore_status.ok()) {
-    return restore_status;
-  }
-
-  for (const auto* entry : eligible) {
-    auto evicted = lru_cache_.Put(
-        entry->prefix_hash,
-        RaidenBlockID(raiden_id_, entry->block_id, BlockStatus::HOST));
-    if (evicted.has_value()) {
-      // Not expected: inserts are capped to the remaining capacity above.
-      LOG(WARNING) << "RecoverFromRegistry: unexpected eviction of "
-                   << evicted->first;
-      DeallocateBlockIds({evicted->second.host_block_id});
+  // If two blocks claim the same hash, the entry with the largest seq is the
+  // newest binding and wins; stale ones are dropped here and cleared from the
+  // table after the rebuild commits.
+  absl::flat_hash_map<absl::string_view, const KVCacheMetadata::Entry*> newest;
+  newest.reserve(entries.size());
+  for (const KVCacheMetadata::Entry& entry : entries) {
+    auto [it, inserted] = newest.try_emplace(entry.hash, &entry);
+    if (!inserted && entry.seq > it->second->seq) {
+      it->second = &entry;
     }
   }
-  return eligible.size();
+
+  std::vector<const KVCacheMetadata::Entry*> recoverable;
+  recoverable.reserve(newest.size());
+  for (const auto& [hash, entry] : newest) {
+    recoverable.push_back(entry);
+  }
+  std::sort(recoverable.begin(), recoverable.end(),
+            [](const KVCacheMetadata::Entry* a,
+               const KVCacheMetadata::Entry* b) { return a->seq < b->seq; });
+
+  // Allocate the recorded block ids first: AllocateTargetBlockIds validates
+  // the whole batch before mutating any state, so a failure (e.g. a block
+  // already allocated because someone allocated before recovering) leaves
+  // both the allocator and this store untouched.
+  std::vector<int> block_ids;
+  block_ids.reserve(recoverable.size());
+  for (const KVCacheMetadata::Entry* entry : recoverable) {
+    block_ids.push_back(entry->block_id);
+  }
+  absl::Status allocate_status =
+      raiden_controller_->AllocateTargetBlockIds(block_ids);
+  if (!allocate_status.ok()) {
+    return allocate_status;
+  }
+
+  // Repopulate in ascending-seq order so the LRU cache comes back with the
+  // pre-crash recency order. The table may legitimately hold more entries
+  // than the LRU cache capacity (it also records eviction candidates), in
+  // which case the oldest ones overflow into candidates again, keeping their
+  // blocks and metadata entries.
+  uint64_t max_seq = 0;
+  for (const KVCacheMetadata::Entry* entry : recoverable) {
+    lru_cache_.Put(entry->hash, RaidenBlockID(raiden_id_, entry->block_id,
+                                              BlockStatus::HOST));
+    max_seq = std::max(max_seq, entry->seq);
+  }
+  next_metadata_seq_ = max_seq + 1;
+
+  // Stale duplicates were not allocated above, so their blocks hold no
+  // tracked data anymore: clear their entries to keep the table mirroring
+  // exactly the blocks that hold data.
+  for (const KVCacheMetadata::Entry& entry : entries) {
+    if (newest.at(entry.hash)->block_id != entry.block_id) {
+      absl::Status status = metadata_->Clear(entry.block_id);
+      if (!status.ok()) {
+        LOG(WARNING) << "Failed to clear the stale metadata entry for block "
+                     << entry.block_id << ": " << status.message();
+      }
+    }
+  }
+
+  return recoverable.size();
 }
 
 absl::StatusOr<std::vector<int>> KVCacheStore::AllocateBlockIds(int needed) {
@@ -909,6 +940,7 @@ void KVCacheStore::PollRemoteReadsInternal(
         if (existing) {
           existing->host_block_id = state.host_block_ids[i];
           existing->status = BlockStatus::HOST;
+          SetMetadataEntry(hash, *existing);
           if (registry_client_) {
             write_through_regs.push_back({
                 .prefix_hash = hash,
@@ -961,6 +993,7 @@ void KVCacheStore::PollSavesInternal(std::vector<SaveState> ready_saves) {
         if (existing) {
           existing->host_block_id = state.host_block_ids[i];
           existing->status = BlockStatus::HOST_AND_HBM;
+          SetMetadataEntry(hash, *existing);
           if (registry_client_) {
             write_through_regs.push_back({
                 .prefix_hash = hash,
@@ -1086,6 +1119,7 @@ size_t KVCacheStore::Evict(const std::vector<std::string>& block_hashes) {
            existing->status == BlockStatus::HOST_AND_HBM)) {
         host_ids_to_deallocate.push_back(existing->host_block_id);
         erased_hashes.push_back(hash);
+        ClearMetadataEntry(*existing);
         lru_cache_.Erase(hash);
       }
     }
@@ -1099,9 +1133,8 @@ size_t KVCacheStore::Evict(const std::vector<std::string>& block_hashes) {
   if (registry_client_) {
     auto status = registry_client_->Unregister(erased_hashes, raiden_id_);
     if (!status.ok()) {
-      LOG(WARNING)
-          << "Failed to unregister proactively evicted blocks: "
-          << status.message();
+      LOG(WARNING) << "Failed to unregister proactively evicted blocks: "
+                   << status.message();
     }
   }
 
@@ -1109,6 +1142,38 @@ size_t KVCacheStore::Evict(const std::vector<std::string>& block_hashes) {
   DeallocateBlockIds(host_ids_to_deallocate);
 
   return host_ids_to_deallocate.size();
+}
+
+void KVCacheStore::SetMetadataEntry(absl::string_view hash,
+                                    const RaidenBlockID& block) {
+  if (!metadata_.has_value()) {
+    return;
+  }
+  if (block.status != BlockStatus::HOST &&
+      block.status != BlockStatus::HOST_AND_HBM) {
+    return;
+  }
+  absl::Status status =
+      metadata_->Set(block.host_block_id, hash, next_metadata_seq_++);
+  if (!status.ok()) {
+    LOG(WARNING) << "Failed to set the metadata entry for block "
+                 << block.host_block_id << ": " << status.message();
+  }
+}
+
+void KVCacheStore::ClearMetadataEntry(const RaidenBlockID& block) {
+  if (!metadata_.has_value()) {
+    return;
+  }
+  if (block.status != BlockStatus::HOST &&
+      block.status != BlockStatus::HOST_AND_HBM) {
+    return;
+  }
+  absl::Status status = metadata_->Clear(block.host_block_id);
+  if (!status.ok()) {
+    LOG(WARNING) << "Failed to clear the metadata entry for block "
+                 << block.host_block_id << ": " << status.message();
+  }
 }
 
 std::vector<std::string> KVCacheStore::GetSortedHashes(

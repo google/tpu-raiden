@@ -46,6 +46,7 @@
 #include "tpu_raiden/core/kv_manager_holder.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_client.h"
 #include "tpu_raiden/kv_cache/global_registry/global_registry_server.h"
+#include "tpu_raiden/kv_cache/kv_cache_metadata.h"
 #include "tpu_raiden/kv_cache/lru_cache.h"
 #include "tpu_raiden/kv_cache/raiden_id.h"
 
@@ -855,6 +856,114 @@ TEST(KVCacheStoreTest, EvictRaceCondition) {
 }
 
 using ::testing::ElementsAre;
+
+// 64-byte aligned backing buffer standing in for the shared memory region
+// that would hold the KV cache metadata table.
+class MetadataRegion {
+ public:
+  explicit MetadataRegion(int num_blocks)
+      : buffer_(KVCacheMetadata::RequiredSizeBytes(num_blocks) + 63) {}
+
+  absl::Span<uint8_t> span() {
+    auto addr = reinterpret_cast<uintptr_t>(buffer_.data());
+    size_t offset = (64 - addr % 64) % 64;
+    return absl::MakeSpan(buffer_.data() + offset, buffer_.size() - offset);
+  }
+
+ private:
+  std::vector<uint8_t> buffer_;
+};
+
+TEST(KVCacheStoreTest, InsertSetsAndDeleteClearsMetadataEntries) {
+  MetadataRegion region(4);
+  auto metadata_or = KVCacheMetadata::Format(region.span(), 4);
+  ASSERT_TRUE(metadata_or.ok());
+
+  RaidenId rid{"local_job", "0", "kv_cache", 0};
+  KVCacheStore store(4, /*raiden_controller=*/nullptr,
+                     /*global_registry_address=*/"", rid, *metadata_or);
+
+  // host_1 and host_2 own host blocks and get metadata entries; hbm_1 owns
+  // no host data and must stay out of the table.
+  std::vector<std::string> hashes = {"host_1", "host_2", "hbm_1"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, 0, BlockStatus::HOST),
+      RaidenBlockID(rid, 1, BlockStatus::HOST),
+      RaidenBlockID(rid, -1, 0, BlockStatus::HBM)};
+  ASSERT_TRUE(store.Insert(hashes, slices, true).first);
+  EXPECT_THAT(metadata_or->ValidEntries(),
+              ElementsAre(::testing::FieldsAre(0, "host_1", 0),
+                          ::testing::FieldsAre(1, "host_2", 1)));
+
+  // Delete clears the binding's metadata entry.
+  store.Delete({"host_1"}, {slices[0]});
+  EXPECT_THAT(metadata_or->ValidEntries(),
+              ElementsAre(::testing::FieldsAre(1, "host_2", 1)));
+}
+
+TEST(KVCacheStoreTest, MetadataKeepsEvictionCandidates) {
+  MetadataRegion region(4);
+  auto metadata_or = KVCacheMetadata::Format(region.span(), 4);
+  ASSERT_TRUE(metadata_or.ok());
+
+  RaidenId rid{"local_job", "0", "kv_cache", 0};
+  KVCacheStore store(2, /*raiden_controller=*/nullptr,
+                     /*global_registry_address=*/"", rid, *metadata_or);
+
+  ASSERT_TRUE(store
+                  .Insert({"host_1", "host_2"},
+                          {RaidenBlockID(rid, 0, BlockStatus::HOST),
+                           RaidenBlockID(rid, 1, BlockStatus::HOST)},
+                          true)
+                  .first);
+
+  // Inserting host_3 moves host_1 to the candidate list. Its host block stays
+  // allocated, so its metadata entry survives.
+  ASSERT_TRUE(
+      store.Insert({"host_3"}, {RaidenBlockID(rid, 2, BlockStatus::HOST)}, true)
+          .first);
+  EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
+              ElementsAre("host_1"));
+  EXPECT_THAT(metadata_or->ValidEntries(),
+              ElementsAre(::testing::FieldsAre(0, "host_1", 0),
+                          ::testing::FieldsAre(1, "host_2", 1),
+                          ::testing::FieldsAre(2, "host_3", 2)));
+
+  // Re-inserting host_1 under a new host block reactivates the candidate and
+  // overwrites its binding in place: block 0's entry is cleared and block 3's
+  // is set with the newest seq.
+  ASSERT_TRUE(
+      store.Insert({"host_1"}, {RaidenBlockID(rid, 3, BlockStatus::HOST)}, true)
+          .first);
+  EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
+              ::testing::IsEmpty());
+  EXPECT_THAT(metadata_or->ValidEntries(),
+              ElementsAre(::testing::FieldsAre(1, "host_2", 1),
+                          ::testing::FieldsAre(2, "host_3", 2),
+                          ::testing::FieldsAre(3, "host_1", 3)));
+}
+
+TEST(KVCacheStoreTest, EvictClearsMetadataEntries) {
+  MetadataRegion region(2);
+  auto metadata_or = KVCacheMetadata::Format(region.span(), 2);
+  ASSERT_TRUE(metadata_or.ok());
+
+  RaidenId rid{"local_job", "0", "kv_cache", 0};
+  KVCacheStore store(2, /*raiden_controller=*/nullptr,
+                     /*global_registry_address=*/"", rid, *metadata_or);
+
+  ASSERT_TRUE(store
+                  .Insert({"host_1", "host_2"},
+                          {RaidenBlockID(rid, 0, BlockStatus::HOST),
+                           RaidenBlockID(rid, 1, BlockStatus::HOST)},
+                          true)
+                  .first);
+  ASSERT_EQ(metadata_or->ValidEntries().size(), 2);
+
+  EXPECT_EQ(KVCacheStoreTest::Evict(store, {"host_1"}), 1);
+  EXPECT_THAT(metadata_or->ValidEntries(),
+              ElementsAre(::testing::FieldsAre(1, "host_2", 1)));
+}
 
 class KVCacheStoreEmbeddedControllerTest : public ::testing::Test {
  protected:
@@ -2374,27 +2483,151 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteMultipleSources) {
   registry_server->Shutdown();
 }
 
-// In-process registry plus client, for RecoverFromRegistry tests.
-struct RecoveryRegistrySetup {
-  RecoveryRegistrySetup() {
-    service = std::make_unique<global_registry::GlobalRegistryServiceImpl>();
-    grpc::ServerBuilder builder;
-    int port = 0;
-    builder.AddListeningPort("localhost:0", grpc::InsecureServerCredentials(),
-                             &port);
-    builder.RegisterService(service.get());
-    server = builder.BuildAndStart();
-    address = absl::StrCat("localhost:", port);
-    client = std::make_unique<global_registry::GlobalRegistryClient>(
-        grpc::CreateChannel(address, grpc::InsecureChannelCredentials()));
-  }
-  ~RecoveryRegistrySetup() { server->Shutdown(); }
+TEST_F(KVCacheStoreEmbeddedControllerTest, SaveSetsMetadataEntriesOnCompletion) {
+  ::tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(
+      ::tpu_raiden::KVManagerHolder(&mock_mgr));
 
-  std::unique_ptr<global_registry::GlobalRegistryServiceImpl> service;
-  std::unique_ptr<grpc::Server> server;
-  std::string address;
-  std::unique_ptr<global_registry::GlobalRegistryClient> client;
-};
+  auto controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(
+          unit_, 10, 1, 512, orchestrator_address_, "");
+  RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
+
+  MetadataRegion region(10);
+  auto metadata_or = KVCacheMetadata::Format(region.span(), 10);
+  ASSERT_TRUE(metadata_or.ok());
+
+  RaidenId rid{"test_job", "0", "test_cache", 0};
+  KVCacheStore store(10, std::move(controller), "", rid, *metadata_or);
+
+  std::vector<std::string> hashes = {"hash_1", "hash_2"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, -1, 0, BlockStatus::HBM),
+      RaidenBlockID(rid, -1, 1, BlockStatus::HBM)};
+
+  ASSERT_TRUE(store.Insert(hashes, slices, false).first);
+  ASSERT_TRUE(store.Pin(hashes));
+
+  // Insert has already called SetMetadataEntry for both slices, but their HBM
+  // status fails its data-lives-in-local-host-memory filter: the data exists
+  // only in HBM at this point, so the LRU registration alone must leave the
+  // table empty.
+  EXPECT_THAT(metadata_or->ValidEntries(), ::testing::IsEmpty());
+
+  absl::Status status = store.Save(hashes);
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  // Poll for completion
+  bool done = false;
+  while (!done) {
+    auto [save_done, save_failed, save_pending] = store.PollSaveStatus();
+    if (!save_failed.empty()) {
+      FAIL() << "Async Save failed during polling";
+    }
+    if (!save_done.empty()) {
+      done = true;
+    }
+    if (!done) {
+      absl::SleepFor(absl::Milliseconds(10));
+    }
+  }
+
+  // Save completion lands the data on host blocks 0 and 1, which is when the
+  // bindings enter the table.
+  EXPECT_THAT(metadata_or->ValidEntries(),
+              ElementsAre(::testing::FieldsAre(0, "hash_1", 0),
+                          ::testing::FieldsAre(1, "hash_2", 1)));
+}
+
+TEST_F(KVCacheStoreEmbeddedControllerTest,
+       ReadRemoteSetsMetadataEntriesOnCompletion) {
+  // Same setup as ReadRemoteSuccess: registry, src controller with a
+  // successful H2H callback, dest store — here with a metadata table attached.
+  auto service = std::make_unique<global_registry::GlobalRegistryServiceImpl>();
+  grpc::ServerBuilder registry_builder;
+  int registry_port = 0;
+  registry_builder.AddListeningPort(
+      "localhost:0", grpc::InsecureServerCredentials(), &registry_port);
+  registry_builder.RegisterService(service.get());
+  auto registry_server = registry_builder.BuildAndStart();
+  std::string registry_address = "localhost:" + std::to_string(registry_port);
+
+  auto src_controller_server = core::controller::CreateTestControllerServer();
+
+  rpc::RaidenIdProto src_unit;
+  src_unit.set_job_name("src_job");
+  src_unit.set_job_replica_id("0");
+  src_unit.set_data_name("src_data");
+  src_unit.set_data_replica_idx(0);
+
+  kv_cache::RaidenId src_raiden_id{"src_job", "0", "src_data", 0};
+
+  ::tpu_raiden::controller::OrchestratorServiceClient orchestrator_client(
+      grpc::CreateChannel(orchestrator_address_,
+                          grpc::InsecureChannelCredentials()));
+  auto register_status = orchestrator_client.RegisterController(
+      src_unit, src_controller_server->server_address);
+  ASSERT_TRUE(register_status.ok()) << register_status.message();
+
+  auto worker_status = src_controller_server->client->RegisterWorker(
+      "worker_0", "src_worker_0_addr", {{"src_worker_0_transfer", {}}});
+  ASSERT_TRUE(worker_status.ok()) << worker_status.message();
+
+  src_controller_server->service->SetTransferBuffersCallback(
+      [&](absl::Span<const Buffer> src_buffers,
+          absl::Span<const Buffer> dst_buffers) {
+        return tsl::Future<>(absl::OkStatus());
+      });
+
+  auto dest_controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(
+          unit_, 10, 1, 512, orchestrator_address_, "");
+  RegisterAndInitWorker(*dest_controller, "worker_0",
+                        test_server_->server_address);
+
+  MetadataRegion metadata_region(10);
+  auto metadata_or = KVCacheMetadata::Format(metadata_region.span(), 10);
+  ASSERT_TRUE(metadata_or.ok());
+
+  RaidenId rid{"dest_job", "0", "dest_cache", 0};
+  KVCacheStore store(10, std::move(dest_controller), registry_address, rid,
+                     *metadata_or);
+
+  std::vector<std::string> hashes = {"hash_0"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(src_raiden_id, 42, BlockStatus::REMOTE)};
+  ASSERT_TRUE(store.InsertAndLock(hashes, slices, true));
+
+  // InsertAndLock has already called SetMetadataEntry for the slice, but its
+  // REMOTE status fails the same data-lives-in-local-host-memory filter: a
+  // REMOTE entry owns no local data and must stay out of the table.
+  EXPECT_THAT(metadata_or->ValidEntries(), ::testing::IsEmpty());
+
+  absl::Status status = store.ReadRemote(hashes);
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  // Poll for completion
+  bool done = false;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    auto [done_hashes, failed_hashes, pending_hashes] =
+        store.PollRemoteReadStatus();
+    ASSERT_TRUE(failed_hashes.empty());
+    if (!done_hashes.empty()) {
+      done = true;
+      break;
+    }
+    absl::SleepFor(absl::Milliseconds(10));
+  }
+  ASSERT_TRUE(done);
+
+  // Read completion lands the remote data on local host block 0, which is
+  // when the binding enters the table.
+  EXPECT_THAT(metadata_or->ValidEntries(),
+              ElementsAre(::testing::FieldsAre(0, "hash_0", 0)));
+
+  registry_server->Shutdown();
+}
+
 
 // Worker-less controller: sufficient for recovery, which only touches the
 // logical block manager.
@@ -2410,137 +2643,169 @@ MakeRecoveryController(const RaidenId& rid, int num_blocks) {
       /*raiden_orchestrator_address=*/"", /*raiden_controller_address=*/"");
 }
 
-TEST(KVCacheStoreTest, RecoverFromRegistryRebuildsDirectory) {
-  RecoveryRegistrySetup registry;
-  RaidenId rid{"recover_job", "0", "kv_cache", 0};
+TEST(KVCacheStoreTest, RecoverFromLocalManifestRebuildsLruCache) {
+  RaidenId rid{"manifest_job", "0", "kv_cache", 0};
+  MetadataRegion region(10);
+  auto metadata_or = KVCacheMetadata::Format(region.span(), 10);
+  ASSERT_TRUE(metadata_or.ok());
 
-  // Entries left behind by the previous incarnation of this owner, plus one
-  // foreign entry that must not be recovered.
-  ASSERT_TRUE(registry.client
-                  ->Register({{"rh1", rid, 5, absl::Seconds(60)},
-                              {"rh2", rid, 7, absl::Seconds(600)},
-                              {"rh3", rid, 9, absl::Seconds(6000)}})
-                  .ok());
-  RaidenId other{"other_job", "0", "kv_cache", 0};
-  ASSERT_TRUE(
-      registry.client->Register({{"oh", other, 3, absl::Seconds(600)}}).ok());
+  // Table left behind by the previous incarnation of this store.
+  ASSERT_TRUE(metadata_or->Set(5, "hash_b", 3).ok());
+  ASSERT_TRUE(metadata_or->Set(7, "hash_a", 4).ok());
+  ASSERT_TRUE(metadata_or->Set(9, "hash_c", 8).ok());
 
   auto controller = MakeRecoveryController(rid, 10);
   auto* controller_ptr = controller.get();
-  KVCacheStore store(10, std::move(controller), registry.address, rid);
+  KVCacheStore store(10, std::move(controller),
+                     /*global_registry_address=*/"", rid, *metadata_or);
 
-  auto recovered_or = store.RecoverFromRegistry();
+  auto recovered_or = store.RecoverFromLocalManifest();
   ASSERT_TRUE(recovered_or.ok()) << recovered_or.status().ToString();
   EXPECT_EQ(*recovered_or, 3);
 
-  auto lookup = store.Lookup({"rh1", "rh2", "rh3"});
+  auto lookup = store.Lookup({"hash_a", "hash_b", "hash_c"});
   ASSERT_TRUE(lookup.ok());
   ASSERT_EQ(lookup->size(), 3);
   EXPECT_EQ((*lookup)[0].second.status, BlockStatus::HOST);
-  EXPECT_EQ((*lookup)[0].second.host_block_id, 5);
-  EXPECT_EQ((*lookup)[1].second.host_block_id, 7);
+  EXPECT_EQ((*lookup)[0].second.host_block_id, 7);
+  EXPECT_EQ((*lookup)[1].second.host_block_id, 5);
   EXPECT_EQ((*lookup)[2].second.host_block_id, 9);
-  EXPECT_EQ(store.Lookup({"oh"})->size(), 0);
 
   // Recovered blocks are allocated and locked; new allocations avoid them.
-  auto* block_manager = controller_ptr->block_manager();
   for (int id : {5, 7, 9}) {
-    EXPECT_TRUE(block_manager->IsAllocated(id));
-    EXPECT_TRUE(block_manager->IsLocked(id));
+    EXPECT_TRUE(controller_ptr->block_manager()->IsAllocated(id));
+    EXPECT_TRUE(controller_ptr->block_manager()->IsLocked(id));
   }
-  auto alloc_or = controller_ptr->AllocateBlockIds(7);
-  ASSERT_TRUE(alloc_or.ok());
-  for (int id : *alloc_or) {
-    EXPECT_NE(id, 5);
-    EXPECT_NE(id, 7);
-    EXPECT_NE(id, 9);
-  }
+
+  // The seq counter resumes past the largest recovered stamp: the next host
+  // insert is stamped 9, not 0.
+  ASSERT_TRUE(
+      store.Insert({"hash_d"}, {RaidenBlockID(rid, 0, BlockStatus::HOST)}, true)
+          .first);
+  EXPECT_THAT(metadata_or->ValidEntries(),
+              ElementsAre(::testing::FieldsAre(0, "hash_d", 9),
+                          ::testing::FieldsAre(5, "hash_b", 3),
+                          ::testing::FieldsAre(7, "hash_a", 4),
+                          ::testing::FieldsAre(9, "hash_c", 8)));
 }
 
-TEST(KVCacheStoreTest, RecoverFromRegistryPrefersLargestRemainingTtl) {
-  RecoveryRegistrySetup registry;
-  RaidenId rid{"recover_job_ttl", "0", "kv_cache", 0};
-  ASSERT_TRUE(registry.client
-                  ->Register({{"rh1", rid, 1, absl::Seconds(30)},
-                              {"rh2", rid, 2, absl::Seconds(300)},
-                              {"rh3", rid, 3, absl::Seconds(3000)}})
-                  .ok());
+TEST(KVCacheStoreTest, RecoverFromLocalManifestRebuildsLruOrder) {
+  RaidenId rid{"manifest_job_order", "0", "kv_cache", 0};
+  MetadataRegion region(10);
+  auto metadata_or = KVCacheMetadata::Format(region.span(), 10);
+  ASSERT_TRUE(metadata_or.ok());
 
-  // Directory capacity 2 < 3 pulled entries: only the two entries with the
-  // largest remaining TTL are recovered.
-  KVCacheStore store(2, MakeRecoveryController(rid, 10), registry.address, rid);
-  auto recovered_or = store.RecoverFromRegistry();
+  ASSERT_TRUE(metadata_or->Set(5, "hash_b", 3).ok());
+  ASSERT_TRUE(metadata_or->Set(7, "hash_a", 4).ok());
+  ASSERT_TRUE(metadata_or->Set(9, "hash_c", 8).ok());
+
+  // The table also records eviction candidates, so it may hold more entries
+  // than the LRU cache capacity. With capacity 2 the oldest entry overflows
+  // into a candidate again, keeping its block and metadata entry.
+  KVCacheStore store(2, MakeRecoveryController(rid, 10),
+                     /*global_registry_address=*/"", rid, *metadata_or);
+  auto recovered_or = store.RecoverFromLocalManifest();
   ASSERT_TRUE(recovered_or.ok()) << recovered_or.status().ToString();
-  EXPECT_EQ(*recovered_or, 2);
-  EXPECT_EQ(store.Lookup({"rh1"})->size(), 0);
-  EXPECT_EQ(store.Lookup({"rh2"})->size(), 1);
-  EXPECT_EQ(store.Lookup({"rh3"})->size(), 1);
+  EXPECT_EQ(*recovered_or, 3);
+
+  EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
+              ElementsAre("hash_b"));
+  EXPECT_EQ(metadata_or->ValidEntries().size(), 3);
 }
 
-TEST(KVCacheStoreTest, RecoverFromRegistrySkipsExistingHashes) {
-  RecoveryRegistrySetup registry;
-  RaidenId rid{"recover_job_skip", "0", "kv_cache", 0};
-  ASSERT_TRUE(registry.client
-                  ->Register({{"rh1", rid, 5, absl::Seconds(600)},
-                              {"rh2", rid, 7, absl::Seconds(600)}})
-                  .ok());
+TEST(KVCacheStoreTest, RecoverFromLocalManifestKeepsNewestDuplicate) {
+  RaidenId rid{"manifest_job_dup", "0", "kv_cache", 0};
+  MetadataRegion region(10);
+  auto metadata_or = KVCacheMetadata::Format(region.span(), 10);
+  ASSERT_TRUE(metadata_or.ok());
+
+  ASSERT_TRUE(metadata_or->Set(2, "dup_hash", 1).ok());
+  ASSERT_TRUE(metadata_or->Set(4, "other", 3).ok());
+  ASSERT_TRUE(metadata_or->Set(6, "dup_hash", 5).ok());
 
   auto controller = MakeRecoveryController(rid, 10);
   auto* controller_ptr = controller.get();
-  KVCacheStore store(10, std::move(controller), registry.address, rid);
+  KVCacheStore store(10, std::move(controller),
+                     /*global_registry_address=*/"", rid, *metadata_or);
 
-  // rh1 is already tracked locally (e.g. freshly computed): recovery must not
-  // overwrite it, and must not restore its stale registry block ID.
-  ASSERT_TRUE(store
-                  .Insert({"rh1"},
-                          {RaidenBlockID(rid, -1, 0, BlockStatus::HBM)},
-                          /*on_host=*/false)
-                  .first);
-
-  auto recovered_or = store.RecoverFromRegistry();
+  auto recovered_or = store.RecoverFromLocalManifest();
   ASSERT_TRUE(recovered_or.ok()) << recovered_or.status().ToString();
-  EXPECT_EQ(*recovered_or, 1);
+  EXPECT_EQ(*recovered_or, 2);
 
-  auto lookup = store.Lookup({"rh1"});
+  // The newest binding wins; the stale block is neither tracked nor
+  // allocated, and its entry is cleared from the table.
+  auto lookup = store.Lookup({"dup_hash"});
   ASSERT_EQ(lookup->size(), 1);
-  EXPECT_EQ((*lookup)[0].second.status, BlockStatus::HBM);
-  EXPECT_EQ((*lookup)[0].second.host_block_id, -1);
-  EXPECT_FALSE(controller_ptr->block_manager()->IsAllocated(5));
+  EXPECT_EQ((*lookup)[0].second.host_block_id, 6);
+  EXPECT_TRUE(controller_ptr->block_manager()->IsAllocated(6));
+  EXPECT_FALSE(controller_ptr->block_manager()->IsAllocated(2));
+  EXPECT_THAT(metadata_or->ValidEntries(),
+              ElementsAre(::testing::FieldsAre(4, "other", 3),
+                          ::testing::FieldsAre(6, "dup_hash", 5)));
 }
 
 // Only reachable through misuse: recovery must run on a fresh store, so a
 // conflicting allocation means someone allocated before (or instead of)
-// recovering. Verifies the failure is clean — error out, directory untouched.
-TEST(KVCacheStoreTest, RecoverFromRegistryFailsOnAllocatorConflict) {
-  RecoveryRegistrySetup registry;
-  RaidenId rid{"recover_job_conflict", "0", "kv_cache", 0};
+// recovering. Verifies the failure is clean — error out, LRU cache and table
+// untouched.
+TEST(KVCacheStoreTest, RecoverFromLocalManifestFailsOnAllocatorConflict) {
+  RaidenId rid{"manifest_job_conflict", "0", "kv_cache", 0};
+  MetadataRegion region(10);
+  auto metadata_or = KVCacheMetadata::Format(region.span(), 10);
+  ASSERT_TRUE(metadata_or.ok());
+  ASSERT_TRUE(metadata_or->Set(0, "rh1", 0).ok());
 
   auto controller = MakeRecoveryController(rid, 10);
-  auto* controller_ptr = controller.get();
   // Block 0 is already taken locally before recovery runs.
-  ASSERT_TRUE(controller_ptr->AllocateBlockIds(1).ok());
-  ASSERT_TRUE(
-      registry.client->Register({{"rh1", rid, 0, absl::Seconds(600)}}).ok());
+  ASSERT_TRUE(controller->AllocateBlockIds(1).ok());
 
-  KVCacheStore store(10, std::move(controller), registry.address, rid);
-  auto recovered_or = store.RecoverFromRegistry();
+  KVCacheStore store(10, std::move(controller),
+                     /*global_registry_address=*/"", rid, *metadata_or);
+  auto recovered_or = store.RecoverFromLocalManifest();
   EXPECT_EQ(recovered_or.status().code(),
             absl::StatusCode::kFailedPrecondition);
   EXPECT_EQ(store.Lookup({"rh1"})->size(), 0);
+  EXPECT_EQ(metadata_or->ValidEntries().size(), 1);
 }
 
-TEST(KVCacheStoreTest, RecoverFromRegistryPreconditions) {
-  RaidenId rid{"recover_job_pre", "0", "kv_cache", 0};
-  // No registry connection.
-  KVCacheStore store_no_registry(10, MakeRecoveryController(rid, 10), "", rid);
-  EXPECT_EQ(store_no_registry.RecoverFromRegistry().status().code(),
+TEST(KVCacheStoreTest, RecoverFromLocalManifestPreconditions) {
+  RaidenId rid{"manifest_job_pre", "0", "kv_cache", 0};
+  MetadataRegion region(10);
+  auto metadata_or = KVCacheMetadata::Format(region.span(), 10);
+  ASSERT_TRUE(metadata_or.ok());
+
+  // No raiden controller.
+  KVCacheStore store_no_controller(10, /*raiden_controller=*/nullptr,
+                                   /*global_registry_address=*/"", rid,
+                                   *metadata_or);
+  EXPECT_EQ(store_no_controller.RecoverFromLocalManifest().status().code(),
             absl::StatusCode::kFailedPrecondition);
 
-  // Registry reachable but empty: recovery succeeds with zero blocks.
-  RecoveryRegistrySetup registry;
+  // No attached metadata table.
+  KVCacheStore store_no_metadata(10, MakeRecoveryController(rid, 10),
+                                 /*global_registry_address=*/"", rid);
+  EXPECT_EQ(store_no_metadata.RecoverFromLocalManifest().status().code(),
+            absl::StatusCode::kFailedPrecondition);
+
+  // Non-empty LRU cache.
+  KVCacheStore store_non_empty(10, MakeRecoveryController(rid, 10),
+                               /*global_registry_address=*/"", rid,
+                               *metadata_or);
+  ASSERT_TRUE(store_non_empty
+                  .Insert({"hash_a"}, {RaidenBlockID(rid, 0, BlockStatus::HOST)},
+                          true)
+                  .first);
+  EXPECT_EQ(store_non_empty.RecoverFromLocalManifest().status().code(),
+            absl::StatusCode::kFailedPrecondition);
+
+  // Empty table: recovery succeeds with zero blocks.
+  MetadataRegion empty_region(10);
+  auto empty_metadata_or = KVCacheMetadata::Format(empty_region.span(), 10);
+  ASSERT_TRUE(empty_metadata_or.ok());
   KVCacheStore store_empty(10, MakeRecoveryController(rid, 10),
-                           registry.address, rid);
-  auto recovered_or = store_empty.RecoverFromRegistry();
+                           /*global_registry_address=*/"", rid,
+                           *empty_metadata_or);
+  auto recovered_or = store_empty.RecoverFromLocalManifest();
   ASSERT_TRUE(recovered_or.ok()) << recovered_or.status().ToString();
   EXPECT_EQ(*recovered_or, 0);
 }
