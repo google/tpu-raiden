@@ -2218,7 +2218,9 @@ class RaidenController:
         size,
         src_stride,
         count,
+        *extra,
     ) = key
+    layer_idx = extra[0] if extra else 0
 
     available_sources = [src_unit]
     node_slice_offsets = {
@@ -2262,6 +2264,7 @@ class RaidenController:
               s_stride,
               dst_stride,
               count,
+              layer_idx,
           )
 
           hop_uuid = random.randint(1, 2**63 - 1)
@@ -2280,7 +2283,7 @@ class RaidenController:
               is_sender=True,
               expected_block_count=count,
               req_id=hop_req_id,
-              skip_d2h=final_plan.skip_d2h,
+              skip_d2h=(s != src_unit),
           )
 
           async def _run_single_transfer(s_node, d_node, plan):
@@ -3189,52 +3192,101 @@ class RaidenController:
 
             # Source slices (always local to sender controller)
             for unit in src_units:
+              computed_slices.setdefault(unit, {})
               with self._lock:
-                global_shape = self._registered_global_shapes.get(unit)
-                mesh_shape = self._registered_mesh_shapes.get(unit)
-                layout = self._registered_layouts.get(unit)
-              if global_shape and mesh_shape and layout:
+                src_vars = self._registered_variables.get(unit, [])
+              if not src_vars:
+                with self._lock:
+                  global_shape = self._registered_global_shapes.get(unit)
+                  mesh_shape = self._registered_mesh_shapes.get(unit)
+                  layout = self._registered_layouts.get(unit)
+                  itemsize = self._registered_itemsizes.get(unit, 4)
+                if global_shape and mesh_shape and layout:
+                  legacy_var = raiden_service_pb2.VariableMetadataProto(
+                      name="",
+                      shape=global_shape,
+                      mesh_shape=mesh_shape,
+                      layout=layout,
+                      item_size=itemsize,
+                      layer_idx=0,
+                  )
+                  src_vars = [legacy_var]
+              for var in src_vars:
                 phys_shape, phys_mesh = to_physical(
-                    global_shape, mesh_shape, layout
+                    list(var.shape),
+                    list(var.mesh_shape),
+                    list(var.layout),
                 )
                 self._computed_phys_meshes[unit] = phys_mesh
                 slices = nd_slice_math.compute_nd_shard_slices(
                     phys_shape, phys_mesh
                 )
-                computed_slices[unit] = slices
-                logging.info("Computed source slices for %s: %s", unit, slices)
+                computed_slices[unit][var.name] = slices
+                logging.info(
+                    "Computed source slices for %s (var %s): %s",
+                    unit,
+                    var.name,
+                    slices,
+                )
 
             # Destination slices
             for meta in dst_metadata:
               unit = _raiden_id_from_proto(meta.unit)
+              computed_slices.setdefault(unit, {})
               for shard in meta.shards:
                 data_address_to_unit[shard] = unit
-              if meta.global_shape and meta.mesh_shape and meta.layout:
+              dst_vars = list(meta.variables) if meta.variables else []
+              if not dst_vars:
+                if meta.global_shape and meta.mesh_shape and meta.layout:
+                  legacy_var = raiden_service_pb2.VariableMetadataProto(
+                      name="",
+                      shape=list(meta.global_shape),
+                      mesh_shape=list(meta.mesh_shape),
+                      layout=list(meta.layout),
+                      item_size=meta.itemsize if meta.itemsize else 4,
+                      layer_idx=0,
+                  )
+                  dst_vars = [legacy_var]
+              for var in dst_vars:
                 phys_shape, phys_mesh = to_physical(
-                    list(meta.global_shape),
-                    list(meta.mesh_shape),
-                    list(meta.layout),
+                    list(var.shape),
+                    list(var.mesh_shape),
+                    list(var.layout),
                 )
                 self._computed_phys_meshes[unit] = phys_mesh
                 slices = nd_slice_math.compute_nd_shard_slices(
                     phys_shape, phys_mesh
                 )
-                computed_slices[unit] = slices
+                computed_slices[unit][var.name] = slices
                 logging.info(
-                    "Computed destination slices for %s: %s", unit, slices
+                    "Computed destination slices for %s (var %s): %s",
+                    unit,
+                    var.name,
+                    slices,
                 )
 
             # 3. Generate plan (Intersection)
             for src_unit in src_units:
-              src_slices = computed_slices.get(src_unit)
-              if not src_slices:
-                continue
-
-              # Get itemsize
               with self._lock:
-                itemsize = self._registered_itemsizes.get(src_unit)
-              if not itemsize:
-                itemsize = 4  # default fallback
+                src_vars = self._registered_variables.get(src_unit, [])
+              if not src_vars:
+                with self._lock:
+                  global_shape = self._registered_global_shapes.get(src_unit)
+                  mesh_shape = self._registered_mesh_shapes.get(src_unit)
+                  layout = self._registered_layouts.get(src_unit)
+                  itemsize = self._registered_itemsizes.get(src_unit, 4)
+                if global_shape and mesh_shape and layout:
+                  legacy_var = raiden_service_pb2.VariableMetadataProto(
+                      name="",
+                      shape=global_shape,
+                      mesh_shape=mesh_shape,
+                      layout=layout,
+                      item_size=itemsize,
+                      layer_idx=0,
+                  )
+                  src_vars = [legacy_var]
+              if not src_vars:
+                continue
 
               src_shards = self._resolve_shards(src_unit)
               unit_schedules = {}
@@ -3246,135 +3298,155 @@ class RaidenController:
                     if u.job_name == src_unit.job_name
                 }
               num_src_physical_hosts = max(1, len(src_job_replicas))
-              with self._lock:
-                src_logical_mesh = self._registered_mesh_shapes.get(
-                    src_unit, []
-                )
-                src_layout = self._registered_layouts.get(src_unit, [])
 
-              src_indices = _get_global_indices(
-                  src_unit,
-                  src_shards,
-                  src_logical_mesh,
-                  src_layout,
-                  num_src_physical_hosts,
-              )
-
-              for local_src_idx, global_src_idx in src_indices:
-                if global_src_idx >= len(src_slices):
-                  logging.warning(
-                      "global_src_idx %d out of range of src_slices (%d)",
-                      global_src_idx,
-                      len(src_slices),
-                  )
+              for src_var in src_vars:
+                src_slices = computed_slices.get(src_unit, {}).get(src_var.name)
+                if not src_slices:
                   continue
+                itemsize = src_var.item_size
 
-                src_slice_proto = src_slices[global_src_idx]
-                src_slice = _proto_to_nd_slice(src_slice_proto)
-                shard_entries = []
+                with self._lock:
+                  src_logical_mesh = list(src_var.mesh_shape)
+                  src_layout = list(src_var.layout)
 
-                for dst_unit in dst_units:
-                  d_slices = computed_slices.get(dst_unit)
-                  if not d_slices:
+                src_indices = _get_global_indices(
+                    src_unit,
+                    src_shards,
+                    src_logical_mesh,
+                    src_layout,
+                    num_src_physical_hosts,
+                )
+
+                for local_src_idx, global_src_idx in src_indices:
+                  if global_src_idx >= len(src_slices):
+                    logging.warning(
+                        "global_src_idx %d out of range of src_slices (%d)",
+                        global_src_idx,
+                        len(src_slices),
+                    )
                     continue
 
-                  dst_shards = []
-                  dst_logical_mesh = []
-                  dst_layout = []
-                  for meta in dst_metadata:
-                    meta_unit = _raiden_id_from_proto(meta.unit)
-                    if meta_unit == dst_unit:
-                      dst_shards = list(meta.shards)
-                      dst_logical_mesh = list(meta.mesh_shape)
-                      dst_layout = list(meta.layout)
-                      break
-                  if not dst_shards:
-                    dst_shards = ["127.0.0.1:8000"]  # fallback
+                  src_slice_proto = src_slices[global_src_idx]
+                  src_slice = _proto_to_nd_slice(src_slice_proto)
+                  shard_entries = unit_schedules.setdefault(local_src_idx, [])
 
-                  dst_job_replicas = {
-                      m.unit.job_replica_id
-                      for m in dst_metadata
-                      if m.unit.job_name == dst_unit.job_name
-                  }
-
-                  num_dst_physical_hosts = max(1, len(dst_job_replicas))
-
-                  dst_indices = _get_global_indices(
-                      dst_unit,
-                      dst_shards,
-                      dst_logical_mesh,
-                      dst_layout,
-                      num_dst_physical_hosts,
-                  )
-
-                  for local_dst_idx, global_dst_idx in dst_indices:
-                    if global_dst_idx >= len(d_slices):
-                      logging.warning(
-                          "global_dst_idx %d out of range of d_slices (%d)",
-                          global_dst_idx,
-                          len(d_slices),
-                      )
+                  for dst_unit in dst_units:
+                    dst_meta = None
+                    for meta in dst_metadata:
+                      if _raiden_id_from_proto(meta.unit) == dst_unit:
+                        dst_meta = meta
+                        break
+                    if not dst_meta:
                       continue
 
-                    dst_slice_proto = d_slices[global_dst_idx]
-                    dst_slice = _proto_to_nd_slice(dst_slice_proto)
+                    dst_vars = list(dst_meta.variables) if dst_meta.variables else []
+                    if not dst_vars:
+                      if dst_meta.global_shape and dst_meta.mesh_shape and dst_meta.layout:
+                        legacy_var = raiden_service_pb2.VariableMetadataProto(
+                            name="",
+                            shape=list(dst_meta.global_shape),
+                            mesh_shape=list(dst_meta.mesh_shape),
+                            layout=list(dst_meta.layout),
+                            item_size=dst_meta.itemsize if dst_meta.itemsize else 4,
+                            layer_idx=0,
+                        )
+                        dst_vars = [legacy_var]
 
-                    dst_peer = (
-                        dst_shards[local_dst_idx]
-                        if local_dst_idx < len(dst_shards)
-                        else dst_shards[0]
+                    dst_var = None
+                    for v in dst_vars:
+                      if v.name == src_var.name:
+                        dst_var = v
+                        break
+                    if not dst_var:
+                      continue
+
+                    d_slices = computed_slices.get(dst_unit, {}).get(dst_var.name)
+                    if not d_slices:
+                      continue
+
+                    dst_shards = list(dst_meta.shards) if dst_meta.shards else ["127.0.0.1:8000"]
+                    dst_logical_mesh = list(dst_var.mesh_shape)
+                    dst_layout = list(dst_var.layout)
+
+                    dst_job_replicas = {
+                        m.unit.job_replica_id
+                        for m in dst_metadata
+                        if m.unit.job_name == dst_unit.job_name
+                    }
+                    num_dst_physical_hosts = max(1, len(dst_job_replicas))
+
+                    dst_indices = _get_global_indices(
+                        dst_unit,
+                        dst_shards,
+                        dst_logical_mesh,
+                        dst_layout,
+                        num_dst_physical_hosts,
                     )
 
-                    intersection = intersect_nd_slices(src_slice, dst_slice)
-                    if intersection:
-                      chunks = generate_strided_copy_chunks(
-                          src_slice, dst_slice, intersection, itemsize
+                    for local_dst_idx, global_dst_idx in dst_indices:
+                      if global_dst_idx >= len(d_slices):
+                        logging.warning(
+                            "global_dst_idx %d out of range of d_slices (%d)",
+                            global_dst_idx,
+                            len(d_slices),
+                        )
+                        continue
+
+                      dst_slice_proto = d_slices[global_dst_idx]
+                      dst_slice = _proto_to_nd_slice(dst_slice_proto)
+
+                      dst_peer = (
+                          dst_shards[local_dst_idx]
+                          if local_dst_idx < len(dst_shards)
+                          else dst_shards[0]
                       )
-                      for (
-                          src_offset,
-                          dst_offset,
-                          size,
-                          src_stride,
-                          dst_stride,
-                          count,
-                      ) in chunks:
-                        src_block_bytes = (
-                            math.prod([e - s for s, e in src_slice[1:]])
-                            * itemsize
-                            if len(src_slice) > 1
-                            else itemsize
-                        )
-                        dst_block_bytes = (
-                            math.prod([e - s for s, e in dst_slice[1:]])
-                            * itemsize
-                            if len(dst_slice) > 1
-                            else itemsize
-                        )
-                        src_block_id = src_offset // src_block_bytes
-                        dst_block_id = dst_offset // dst_block_bytes
 
-                        # Make offsets block-relative
-                        src_block_offset = src_offset % src_block_bytes
-                        dst_block_offset = dst_offset % dst_block_bytes
-
-                        shard_entries.append((
-                            dst_peer,
-                            local_dst_idx,
-                            dst_block_offset,
-                            src_block_offset,
+                      intersection = intersect_nd_slices(src_slice, dst_slice)
+                      if intersection:
+                        chunks = generate_strided_copy_chunks(
+                            src_slice, dst_slice, intersection, itemsize
+                        )
+                        for (
+                            src_offset,
+                            dst_offset,
                             size,
-                            src_block_id,
-                            dst_block_id,
                             src_stride,
                             dst_stride,
                             count,
-                        ))
+                        ) in chunks:
+                          src_block_bytes = (
+                              math.prod([e - s for s, e in src_slice[1:]])
+                              * itemsize
+                              if len(src_slice) > 1
+                              else itemsize
+                          )
+                          dst_block_bytes = (
+                              math.prod([e - s for s, e in dst_slice[1:]])
+                              * itemsize
+                              if len(dst_slice) > 1
+                              else itemsize
+                          )
+                          src_block_id = src_offset // src_block_bytes
+                          dst_block_id = dst_offset // dst_block_bytes
 
-                if shard_entries:
-                  unit_schedules[local_src_idx] = shard_entries
+                          shard_entries.append((
+                              dst_peer,
+                              local_dst_idx,
+                              dst_offset,
+                              src_offset,
+                              size,
+                              src_block_id,
+                              dst_block_id,
+                              src_stride,
+                              dst_stride,
+                              count,
+                              src_var.layer_idx,
+                          ))
 
               if unit_schedules:
-                computed_schedules[src_unit] = unit_schedules
+                unit_schedules = {k: v for k, v in unit_schedules.items() if v}
+                if unit_schedules:
+                  computed_schedules[src_unit] = unit_schedules
 
           # Build rpc_addresses for local source workers
           rpc_addresses = self.worker_rpc_client.get_worker_endpoints()
@@ -3427,7 +3499,9 @@ class RaidenController:
                       src_stride,
                       dst_stride,
                       count,
+                      *extra,
                   ) = entry
+                  layer_idx = extra[0] if extra else 0
                   dst_unit = data_address_to_unit.get(dst_peer)
                   if not dst_unit:
                     continue
@@ -3439,6 +3513,7 @@ class RaidenController:
                       size,
                       src_stride,
                       count,
+                      layer_idx,
                   )
                   val = (
                       dst_unit,
@@ -3464,7 +3539,9 @@ class RaidenController:
                   size,
                   src_stride,
                   count,
+                  *extra,
               ) = key
+              layer_idx = extra[0] if extra else 0
               if len(targets) <= 1:
                 # Re-assemble entry for flat schedule
                 for (
@@ -3486,6 +3563,7 @@ class RaidenController:
                       src_stride,
                       dst_stride,
                       count,
+                      layer_idx,
                   )
                   direct_schedules.setdefault(src_unit, {}).setdefault(
                       shard_idx, []
@@ -4539,18 +4617,21 @@ class RaidenControllerClientFacade:
                 else shard_idx
             )
           schedule_proto = self._raiden_proto_module.ShardPushScheduleProto()
-          for (
-              dst_peer,
-              dst_shard_idx,
-              dst_offset,
-              src_offset,
-              size,
-              src_block_id,
-              dst_block_id,
-              src_stride,
-              dst_stride,
-              count,
-          ) in schedule:
+          for entry_data in schedule:
+            (
+                dst_peer,
+                dst_shard_idx,
+                dst_offset,
+                src_offset,
+                size,
+                src_block_id,
+                dst_block_id,
+                src_stride,
+                dst_stride,
+                count,
+                *extra,
+            ) = entry_data
+            layer_idx = extra[0] if extra else None
             entry_proto = schedule_proto.entries.add()
             entry_proto.dst_peer = dst_peer
             entry_proto.dst_shard_idx = dst_shard_idx
@@ -4562,6 +4643,8 @@ class RaidenControllerClientFacade:
             entry_proto.src_stride_bytes = src_stride
             entry_proto.dst_stride_bytes = dst_stride
             entry_proto.count = count
+            if layer_idx is not None:
+              entry_proto.layer_idx = layer_idx
           if len(schedule_proto.entries) > 0:
             start_req.shard_push_schedules[key_idx].CopyFrom(schedule_proto)
 

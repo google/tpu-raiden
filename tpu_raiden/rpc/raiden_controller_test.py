@@ -1978,6 +1978,254 @@ class RaidenControllerTest(absltest.TestCase):
       controller.start_transfer = original_start_transfer
       server.stop()
 
+  def test_native_heterogeneous_weights_planning(self):
+    var_0 = raiden_service_pb2.VariableMetadataProto(
+        name="var_0",
+        shape=[128, 128],
+        mesh_shape=[2, 2],
+        layout=[0, 1],
+        item_size=4,
+        layer_idx=0,
+    )
+    var_1 = raiden_service_pb2.VariableMetadataProto(
+        name="var_1",
+        shape=[64, 64],
+        mesh_shape=[2, 2],
+        layout=[1, 0],
+        item_size=4,
+        layer_idx=1,
+    )
+
+    controller = raiden_controller.RaidenController(
+        port=0, worker_rpc_client=DummyWorkerRpcClient()
+    )
+
+    src_unit = raiden_controller.RaidenId("trainer", "0", "weights")
+    dst_unit = raiden_controller.RaidenId("sampler", "0", "weights")
+
+    src_shards = ["10.0.0.1:8000"] * 4
+    dst_shards = ["10.0.0.2:8000"] * 4
+
+    controller.register_work_unit(
+        src_unit,
+        src_shards,
+        variables=[var_0, var_1],
+        control_plane_rpc_address="10.0.0.1:9000",
+    )
+    controller.register_work_unit(
+        dst_unit,
+        dst_shards,
+        variables=[var_0, var_1],
+        control_plane_rpc_address="10.0.0.2:9000",
+    )
+
+    future = controller.start_transfer(
+        src_units=[src_unit],
+        dst_units=[dst_unit],
+        use_block_chunks=True,
+    )
+    asyncio.run(future.wait())
+
+    plan = controller.get_plan("req_0")
+    self.assertIn(src_unit, plan.shard_push_schedules)
+    schedules = plan.shard_push_schedules[src_unit]
+
+    self.assertEqual(len(schedules), 4)
+    for shard_idx in range(4):
+      entries = schedules[shard_idx]
+      self.assertEqual(len(entries), 2)
+      entries_sorted = sorted(entries, key=lambda e: e[10])
+
+      # Check var_0 (layer 0)
+      self.assertEqual(entries_sorted[0][0], "10.0.0.2:8000")  # dst_peer
+      self.assertEqual(entries_sorted[0][1], shard_idx)  # dst_shard_idx
+      self.assertEqual(entries_sorted[0][2], 0)  # dst_offset (global)
+      self.assertEqual(entries_sorted[0][3], 0)  # src_offset (global)
+      self.assertEqual(entries_sorted[0][4], 16384)  # size (bytes)
+      self.assertEqual(entries_sorted[0][5], 0)  # src_block_id
+      self.assertEqual(entries_sorted[0][6], 0)  # dst_block_id
+      self.assertEqual(entries_sorted[0][7], 0)  # src_stride
+      self.assertEqual(entries_sorted[0][8], 0)  # dst_stride
+      self.assertEqual(entries_sorted[0][9], 1)  # count
+      self.assertEqual(entries_sorted[0][10], 0)  # layer_idx
+
+      # Check var_1 (layer 1)
+      self.assertEqual(entries_sorted[1][0], "10.0.0.2:8000")  # dst_peer
+      self.assertEqual(entries_sorted[1][1], shard_idx)  # dst_shard_idx
+      self.assertEqual(entries_sorted[1][2], 0)  # dst_offset (global)
+      self.assertEqual(entries_sorted[1][3], 0)  # src_offset (global)
+      self.assertEqual(entries_sorted[1][4], 4096)  # size (bytes)
+      self.assertEqual(entries_sorted[1][5], 0)  # src_block_id
+      self.assertEqual(entries_sorted[1][6], 0)  # dst_block_id
+      self.assertEqual(entries_sorted[1][7], 0)  # src_stride
+      self.assertEqual(entries_sorted[1][8], 0)  # dst_stride
+      self.assertEqual(entries_sorted[1][9], 1)  # count
+      self.assertEqual(entries_sorted[1][10], 1)  # layer_idx
+
+  def test_native_heterogeneous_weights_planning_replicated_dst(self):
+    recording_client = RecordingWorkerRpcClient()
+    controller = raiden_controller.RaidenController(
+        port=0, worker_rpc_client=recording_client
+    )
+    controller.broadcast_k = 1
+
+    var_0 = raiden_service_pb2.VariableMetadataProto(
+        name="var_0",
+        shape=[128],
+        mesh_shape=[1],
+        layout=[0],
+        item_size=4,
+        layer_idx=0,
+    )
+    var_1 = raiden_service_pb2.VariableMetadataProto(
+        name="var_1",
+        shape=[64],
+        mesh_shape=[1],
+        layout=[0],
+        item_size=4,
+        layer_idx=1,
+    )
+
+    src_unit = raiden_controller.RaidenId("trainer", "0", "weights")
+    dst_unit_0 = raiden_controller.RaidenId("sampler", "0", "weights")
+    dst_unit_1 = raiden_controller.RaidenId("sampler", "1", "weights")
+
+    controller.register_work_unit(
+        src_unit,
+        ["10.0.0.1:8000"],
+        variables=[var_0, var_1],
+        control_plane_rpc_address="10.0.0.1:9000",
+    )
+    controller.register_work_unit(
+        dst_unit_0,
+        ["10.0.0.2:8000"],
+        variables=[var_0, var_1],
+        control_plane_rpc_address="10.0.0.2:9000",
+    )
+    controller.register_work_unit(
+        dst_unit_1,
+        ["10.0.0.3:8000"],
+        variables=[var_0, var_1],
+        control_plane_rpc_address="10.0.0.3:9000",
+    )
+
+    future = controller.start_transfer(
+        src_units=[src_unit],
+        dst_units=[dst_unit_0, dst_unit_1],
+        use_block_chunks=True,
+    )
+    asyncio.run(future.wait())
+
+    self.assertTrue(future.done())
+    self.assertEqual(len(recording_client.calls), 8)
+
+    layers_seen = set()
+    for target_id, plan in recording_client.calls:
+      for src, schedules in plan.shard_push_schedules.items():
+        for shard, entries in schedules.items():
+          for entry in entries:
+            layers_seen.add(entry[10])
+
+    self.assertEqual(layers_seen, {0, 1})
+
+  def test_resharding_heterogeneous_weights_different_mesh_ranks(self):
+    controller = raiden_controller.RaidenController(
+        port=0, worker_rpc_client=DummyWorkerRpcClient()
+    )
+
+    var_0_src = raiden_service_pb2.VariableMetadataProto(
+        name="var_0",
+        shape=[128, 128],
+        mesh_shape=[2, 1],
+        layout=[0, 1],
+        item_size=4,
+        layer_idx=0,
+    )
+    var_1_src = raiden_service_pb2.VariableMetadataProto(
+        name="var_1",
+        shape=[64, 64],
+        mesh_shape=[2, 1],
+        layout=[1, 0],
+        item_size=4,
+        layer_idx=1,
+    )
+
+    var_0_dst = raiden_service_pb2.VariableMetadataProto(
+        name="var_0",
+        shape=[128, 128],
+        mesh_shape=[1, 2],
+        layout=[0, 1],
+        item_size=4,
+        layer_idx=0,
+    )
+    var_1_dst = raiden_service_pb2.VariableMetadataProto(
+        name="var_1",
+        shape=[64, 64],
+        mesh_shape=[1, 2],
+        layout=[1, 0],
+        item_size=4,
+        layer_idx=1,
+    )
+
+    src_0 = raiden_controller.RaidenId("trainer", "0", "weights")
+    src_1 = raiden_controller.RaidenId("trainer", "1", "weights")
+    dst_0 = raiden_controller.RaidenId("sampler", "0", "weights")
+    dst_1 = raiden_controller.RaidenId("sampler", "1", "weights")
+
+    controller.register_work_unit(
+        src_0,
+        ["10.0.0.1:8000"],
+        variables=[var_0_src, var_1_src],
+        control_plane_rpc_address="10.0.0.1:9000",
+    )
+    controller.register_work_unit(
+        src_1,
+        ["10.0.0.1:8001"],
+        variables=[var_0_src, var_1_src],
+        control_plane_rpc_address="10.0.0.1:9001",
+    )
+    controller.register_work_unit(
+        dst_0,
+        ["10.0.0.2:8000"],
+        variables=[var_0_dst, var_1_dst],
+        control_plane_rpc_address="10.0.0.2:9000",
+    )
+    controller.register_work_unit(
+        dst_1,
+        ["10.0.0.2:8001"],
+        variables=[var_0_dst, var_1_dst],
+        control_plane_rpc_address="10.0.0.2:9001",
+    )
+
+    future = controller.start_transfer(
+        src_units=[src_0, src_1],
+        dst_units=[dst_0, dst_1],
+        use_block_chunks=True,
+    )
+    asyncio.run(future.wait())
+
+    plan = controller.get_plan("req_0")
+    self.assertIn(src_0, plan.shard_push_schedules)
+    self.assertIn(src_1, plan.shard_push_schedules)
+
+    schedules_0 = plan.shard_push_schedules[src_0]
+    entries_0 = schedules_0[0]
+    self.assertEqual(len(entries_0), 4)
+
+    entries_0_sorted = sorted(entries_0, key=lambda e: (e[10], e[0]))
+
+    # Entries 0 and 1 are for layer 0 (var_0)
+    self.assertEqual(entries_0_sorted[0][10], 0)
+    self.assertEqual(entries_0_sorted[0][0], "10.0.0.2:8000")  # to dst_0
+    self.assertEqual(entries_0_sorted[1][10], 0)
+    self.assertEqual(entries_0_sorted[1][0], "10.0.0.2:8001")  # to dst_1
+
+    # Entries 2 and 3 are for layer 1 (var_1)
+    self.assertEqual(entries_0_sorted[2][10], 1)
+    self.assertEqual(entries_0_sorted[2][0], "10.0.0.2:8000")  # to dst_0
+    self.assertEqual(entries_0_sorted[3][10], 1)
+    self.assertEqual(entries_0_sorted[3][0], "10.0.0.2:8001")  # to dst_1
+
 
 def _byte_spans_for_rank(
     rank,
@@ -2025,7 +2273,6 @@ def _byte_spans_for_rank(
       local_cursor += run_end - cursor
       cursor = run_end
   return spans, local_cursor
-
 
 if __name__ == "__main__":
   absltest.main()
