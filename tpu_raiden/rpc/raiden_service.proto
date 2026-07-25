@@ -65,6 +65,15 @@ message PoolSpecProto {
   string dtype_tag = 7;
 }
 
+message VariableMetadataProto {
+  string name = 1;
+  repeated int64 shape = 2;
+  repeated int64 mesh_shape = 3;
+  repeated int32 layout = 4;
+  int32 itemsize = 5;
+  int32 layer_idx = 6;
+}
+
 message RegisterWorkUnitRequest {
   RaidenIdProto unit = 1;
   repeated string shards = 2;
@@ -83,6 +92,9 @@ message RegisterWorkUnitRequest {
   // data_replica_idx (the DP engine identity); declared source spans arrive on
   // the registration of the rank that owns them.
   int32 transfer_rank = 13;
+
+  // Multi-variable manifest
+  repeated VariableMetadataProto variables = 14;
 }
 
 // Defines an explicit 1D linear memory push operation from a local source to a
@@ -107,6 +119,7 @@ message ShardPushEntryProto {
   int64 src_stride_bytes = 8;
   int64 dst_stride_bytes = 9;
   int32 count = 10;
+  optional int32 layer_idx = 11;
 }
 
 // A collection of network push entries orchestrated by a specific source TPU
@@ -157,6 +170,7 @@ message StartTransferRequest {
   // receiver validation (no token arithmetic); empty preserves the legacy
   // token/state validation driven by num_tokens.
   repeated int64 dst_expected_extent_bytes = 17;
+  optional bool skip_d2h = 18;
 }
 
 message GetMetadataResponse {

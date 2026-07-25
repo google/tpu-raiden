@@ -114,6 +114,7 @@ py_test(
     deps = [
         ":raiden_controller",
         ":raiden_service_py_pb2",
+        "//third_party/py/absl/logging",
         "@com_google_absl_py//absl/testing:absltest",
     ],
 )

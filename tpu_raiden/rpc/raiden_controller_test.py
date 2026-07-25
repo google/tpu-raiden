@@ -33,6 +33,7 @@ import math
 import socket
 import threading
 from unittest import mock
+from absl import logging
 from absl.testing import absltest
 from tpu_raiden.rpc import raiden_controller
 from tpu_raiden.rpc import raiden_service_pb2
@@ -1757,6 +1758,389 @@ class RaidenControllerTest(absltest.TestCase):
         RuntimeError, "Simulated start_transfer failure"
     ):
       asyncio.run(future.wait())
+
+  def test_native_heterogeneous_weights_planning(self):
+    recorded_calls = []
+
+    class MockWorkerClient(raiden_controller.WorkerRpcClient):
+
+      async def start_transfer(self, target_id, transfer_plan) -> None:
+        recorded_calls.append((target_id, transfer_plan))
+
+    mock_client = MockWorkerClient()
+    controller = raiden_controller.RaidenController(
+        port=10006, worker_rpc_client=mock_client
+    )
+
+    src = raiden_controller.RaidenId(
+        job_name="trainer", job_replica_id="0", data_name="weights"
+    )
+    dst = raiden_controller.RaidenId(
+        job_name="inference_server", job_replica_id="0", data_name="weights"
+    )
+
+    # 3 heterogeneous variables
+    v0 = raiden_service_pb2.VariableMetadataProto(
+        name="weights_0",
+        shape=[128, 128],
+        mesh_shape=[2, 2],
+        layout=[0, 1],
+        itemsize=4,
+        layer_idx=0,
+    )
+    v1 = raiden_service_pb2.VariableMetadataProto(
+        name="weights_1",
+        shape=[64],
+        mesh_shape=[4],
+        layout=[0],
+        itemsize=2,
+        layer_idx=1,
+    )
+    v2 = raiden_service_pb2.VariableMetadataProto(
+        name="weights_2",
+        shape=[32, 32],
+        mesh_shape=[2, 2],
+        layout=[0, 1],
+        itemsize=4,
+        layer_idx=2,
+    )
+
+    controller.register_work_unit(
+        src,
+        ["10.0.0.1:8000", "10.0.0.1:8001", "10.0.0.1:8002", "10.0.0.1:8003"],
+        control_plane_rpc_address="10.0.0.1:9000",
+        variables=[v0, v1, v2],
+    )
+    controller.register_work_unit(
+        dst,
+        ["10.0.0.2:8000", "10.0.0.2:8001", "10.0.0.2:8002", "10.0.0.2:8003"],
+        control_plane_rpc_address="10.0.0.2:9000",
+        variables=[v0, v1, v2],
+    )
+
+    future = controller.start_transfer(
+        src_units=[src],
+        dst_units=[dst],
+        use_block_chunks=True,
+    )
+    asyncio.run(future.wait())
+
+    self.assertTrue(future.done())
+    self.assertLen(recorded_calls, 2)  # 1 for src, 1 for dst
+
+    # Verify src plan has schedules with layer_idx correctly merged
+    src_call = next(c for c in recorded_calls if c[0] == src)
+    src_plan = src_call[1]
+    self.assertTrue(src_plan.is_sender)
+
+    # Check shard_push_schedules inside TransferPlan
+    self.assertIn(src, src_plan.shard_push_schedules)
+    schedules = src_plan.shard_push_schedules[src]
+
+    # We should have entries for each shard index (0, 1, 2, 3)
+    self.assertLen(schedules, 4)
+
+    layer_idxs_seen = set()
+    for _, entries in schedules.items():
+      for entry in entries:
+        self.assertLen(entry, 11)
+        layer_idx = entry[10]
+        layer_idxs_seen.add(layer_idx)
+
+    self.assertEqual(layer_idxs_seen, {0, 1, 2})
+
+  def test_native_heterogeneous_weights_planning_replicated_dst(self):
+    recorded_calls = []
+
+    class MockWorkerClient(raiden_controller.WorkerRpcClient):
+
+      async def start_transfer(self, target_id, transfer_plan) -> None:
+        recorded_calls.append((target_id, transfer_plan))
+
+    mock_client = MockWorkerClient()
+    controller = raiden_controller.RaidenController(
+        port=10007, worker_rpc_client=mock_client
+    )
+
+    src = raiden_controller.RaidenId(
+        job_name="trainer", job_replica_id="0", data_name="weights"
+    )
+    dst = raiden_controller.RaidenId(
+        job_name="inference_server", job_replica_id="0", data_name="weights"
+    )
+
+    v_src = raiden_service_pb2.VariableMetadataProto(
+        name="weights_2",
+        shape=[64, 64],
+        mesh_shape=[2, 2],
+        layout=[1, 0],
+        itemsize=4,
+        layer_idx=2,
+    )
+    v_dst = raiden_service_pb2.VariableMetadataProto(
+        name="weights_2",
+        shape=[64, 64],
+        mesh_shape=[1, 1],
+        layout=[1, 0],
+        itemsize=4,
+        layer_idx=2,
+    )
+
+    controller.register_work_unit(
+        src,
+        ["10.0.0.1:8000", "10.0.0.1:8001", "10.0.0.1:8002", "10.0.0.1:8003"],
+        control_plane_rpc_address="10.0.0.1:9000",
+        variables=[v_src],
+    )
+    controller.register_work_unit(
+        dst,
+        ["10.0.0.2:8000", "10.0.0.2:8001", "10.0.0.2:8002", "10.0.0.2:8003"],
+        control_plane_rpc_address="10.0.0.2:9000",
+        variables=[v_dst],
+    )
+
+    future = controller.start_transfer(
+        src_units=[src],
+        dst_units=[dst],
+        use_block_chunks=True,
+    )
+    asyncio.run(future.wait())
+
+    self.assertTrue(future.done())
+    self.assertNotEmpty(recorded_calls)
+
+    unique_plans = {}
+    for _, plan in recorded_calls:
+      unique_plans[plan.req_id] = plan
+
+    total_entries = 0
+    for req_id, plan in unique_plans.items():
+      logging.info(
+          "Unique plan for req_id=%s (is_sender=%s)", req_id, plan.is_sender
+      )
+      if plan.shard_push_schedules:
+        for _, schedules in plan.shard_push_schedules.items():
+          for shard_idx, entries in schedules.items():
+            for entry in entries:
+              logging.info("  [Shard %d] Entry: %s", shard_idx, entry)
+              total_entries += 1
+              self.assertEqual(len(entry), 11)
+              self.assertEqual(entry[10], 2)  # layer_idx = 2
+              self.assertEqual(entry[7], 128)  # src_stride
+              self.assertEqual(entry[8], 256)  # dst_stride
+
+    self.assertEqual(total_entries, 16)
+
+  def test_register_transfer_schedule_skip_d2h_propagation(self):
+    facade = raiden_controller.RaidenControllerClientFacade("127.0.0.1:0")
+    calls = []
+
+    def mock_send(req):
+      calls.append(req)
+      return True
+
+    facade._send_raiden_protobuf_rpc = mock_send
+
+    src_unit = raiden_controller.RaidenId("prefill", "engine-rank0", "kv.fa", 0)
+    dst_unit = raiden_controller.RaidenId("decode", "engine-rank0", "kv.fa", 0)
+
+    # Test with skip_d2h=True
+    facade.register_transfer_schedule(
+        src_units=[src_unit],
+        dst_units=[dst_unit],
+        req_id="req1",
+        skip_d2h=True,
+    )
+    self.assertLen(calls, 1)
+    req = calls[0]
+    self.assertEqual(
+        req.command,
+        raiden_service_pb2.ControlRequest.COMMAND_REGISTER_TRANSFER_SCHEDULE,
+    )
+    self.assertTrue(req.start_transfer_request.skip_d2h)
+
+    # Test with skip_d2h=False (default)
+    calls.clear()
+    facade.register_transfer_schedule(
+        src_units=[src_unit],
+        dst_units=[dst_unit],
+        req_id="req2",
+    )
+    self.assertLen(calls, 1)
+    req = calls[0]
+    self.assertFalse(req.start_transfer_request.skip_d2h)
+
+  def test_server_skip_d2h_propagation(self):
+    controller = raiden_controller.RaidenController(port=0)
+    server = raiden_controller.RaidenControllerServer(controller)
+    server.start()
+
+    facade = raiden_controller.RaidenControllerClientFacade(
+        f"127.0.0.1:{server.port}",
+        name_resolver=controller.worker_rpc_client.name_resolver,
+    )
+
+    calls = []
+    original_start_transfer = controller.start_transfer
+
+    def mock_start_transfer(*args, **kwargs):
+      calls.append(kwargs)
+      return raiden_controller.RaidenFuture(0, None)
+
+    controller.start_transfer = mock_start_transfer
+
+    src_unit = raiden_controller.RaidenId("prefill", "engine-rank0", "kv.fa", 0)
+    dst_unit = raiden_controller.RaidenId("decode", "engine-rank0", "kv.fa", 0)
+
+    try:
+      # Test with skip_d2h=True
+      facade.register_transfer_schedule(
+          src_units=[src_unit],
+          dst_units=[dst_unit],
+          req_id="req1",
+          skip_d2h=True,
+      )
+      self.assertLen(calls, 1)
+      self.assertTrue(calls[0].get("skip_d2h"))
+
+      # Test with skip_d2h=False (default)
+      calls.clear()
+      facade.register_transfer_schedule(
+          src_units=[src_unit],
+          dst_units=[dst_unit],
+          req_id="req2",
+      )
+      self.assertLen(calls, 1)
+      self.assertFalse(calls[0].get("skip_d2h"))
+
+    finally:
+      controller.start_transfer = original_start_transfer
+      server.stop()
+
+  def test_resharding_heterogeneous_weights_different_mesh_ranks(self):
+    recorded_calls = []
+
+    class MockWorkerClient(raiden_controller.WorkerRpcClient):
+
+      async def start_transfer(self, target_id, transfer_plan) -> None:
+        recorded_calls.append((target_id, transfer_plan))
+
+    mock_client = MockWorkerClient()
+    controller = raiden_controller.RaidenController(
+        port=10008, worker_rpc_client=mock_client
+    )
+
+    src = raiden_controller.RaidenId(
+        job_name="trainer", job_replica_id="0", data_name="model_weights"
+    )
+    dst_0 = raiden_controller.RaidenId(
+        job_name="sampler", job_replica_id="0", data_name="model_weights"
+    )
+    dst_1 = raiden_controller.RaidenId(
+        job_name="sampler", job_replica_id="1", data_name="model_weights"
+    )
+
+    v_src = raiden_service_pb2.VariableMetadataProto(
+        name="weights_1",
+        shape=[512],
+        mesh_shape=[2, 2],
+        layout=[0],
+        itemsize=2,
+        layer_idx=1,
+    )
+    v_dst = raiden_service_pb2.VariableMetadataProto(
+        name="weights_1",
+        shape=[512],
+        mesh_shape=[1, 4],
+        layout=[1],
+        itemsize=2,
+        layer_idx=1,
+    )
+
+    controller.register_work_unit(
+        src,
+        ["10.0.0.1:8000"] * 4,
+        control_plane_rpc_address="10.0.0.1:9000",
+        variables=[v_src],
+    )
+    controller.register_work_unit(
+        dst_0,
+        ["10.0.0.2:8000"] * 4,
+        control_plane_rpc_address="10.0.0.2:9000",
+        variables=[v_dst],
+    )
+    controller.register_work_unit(
+        dst_1,
+        ["10.0.0.3:8000"] * 4,
+        control_plane_rpc_address="10.0.0.3:9000",
+        variables=[v_dst],
+    )
+
+    future = controller.start_transfer(
+        src_units=[src],
+        dst_units=[dst_0, dst_1],
+        use_block_chunks=True,
+    )
+    asyncio.run(future.wait())
+
+    self.assertTrue(future.done())
+
+    # Aggregate all schedule entries from recorded plans
+    aggregated_schedules = {}  # (target_unit, shard_idx) -> list of entries
+    for _, plan in recorded_calls:
+      if plan.shard_push_schedules:
+        for unit, schedules in plan.shard_push_schedules.items():
+          for shard_idx, entries in schedules.items():
+            aggregated_schedules.setdefault((unit, shard_idx), []).extend(
+                entries
+            )
+
+    # Helper to count matching entries
+    def count_matches(
+        entries, dst_peer, dst_shard_idx, dst_offset, src_offset, size, count
+    ):
+      return sum(
+          1
+          for e in entries
+          if e[0] == dst_peer
+          and e[1] == dst_shard_idx
+          and e[2] == dst_offset
+          and e[3] == src_offset
+          and e[4] == size
+          and e[9] == count
+      )
+
+    # Assert for Shard 0
+    t_s0 = aggregated_schedules[(src, 0)]
+    self.assertLen(t_s0, 8)
+    self.assertEqual(count_matches(t_s0, "10.0.0.2:8000", 0, 0, 0, 2, 128), 2)
+    self.assertEqual(count_matches(t_s0, "10.0.0.3:8000", 0, 0, 0, 2, 128), 2)
+    self.assertEqual(count_matches(t_s0, "10.0.0.2:8000", 1, 0, 256, 2, 128), 2)
+    self.assertEqual(count_matches(t_s0, "10.0.0.3:8000", 1, 0, 256, 2, 128), 2)
+
+    # Assert for Shard 1
+    t_s1 = aggregated_schedules[(src, 1)]
+    self.assertLen(t_s1, 8)
+    self.assertEqual(count_matches(t_s1, "10.0.0.2:8000", 0, 0, 0, 2, 128), 2)
+    self.assertEqual(count_matches(t_s1, "10.0.0.3:8000", 0, 0, 0, 2, 128), 2)
+    self.assertEqual(count_matches(t_s1, "10.0.0.2:8000", 1, 0, 256, 2, 128), 2)
+    self.assertEqual(count_matches(t_s1, "10.0.0.3:8000", 1, 0, 256, 2, 128), 2)
+
+    # Assert for Shard 2
+    t_s2 = aggregated_schedules[(src, 2)]
+    self.assertLen(t_s2, 8)
+    self.assertEqual(count_matches(t_s2, "10.0.0.2:8000", 2, 0, 0, 2, 128), 2)
+    self.assertEqual(count_matches(t_s2, "10.0.0.3:8000", 2, 0, 0, 2, 128), 2)
+    self.assertEqual(count_matches(t_s2, "10.0.0.2:8000", 3, 0, 256, 2, 128), 2)
+    self.assertEqual(count_matches(t_s2, "10.0.0.3:8000", 3, 0, 256, 2, 128), 2)
+
+    # Assert for Shard 3
+    t_s3 = aggregated_schedules[(src, 3)]
+    self.assertLen(t_s3, 8)
+    self.assertEqual(count_matches(t_s3, "10.0.0.2:8000", 2, 0, 0, 2, 128), 2)
+    self.assertEqual(count_matches(t_s3, "10.0.0.3:8000", 2, 0, 0, 2, 128), 2)
+    self.assertEqual(count_matches(t_s3, "10.0.0.2:8000", 3, 0, 256, 2, 128), 2)
+    self.assertEqual(count_matches(t_s3, "10.0.0.3:8000", 3, 0, 256, 2, 128), 2)
 
 
 def _byte_spans_for_rank(
