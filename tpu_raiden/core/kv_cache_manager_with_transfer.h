@@ -210,9 +210,6 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
                                   const rpc::StartTransferRequest& request,
                                   bool is_sender) override;
 
-  absl::Status RegisterRecv(uint64_t uuid, const std::string& req_id,
-                            int64_t expected_block_count) override;
-
   // Pool reshard executor. The controller owns topology and entry math; this
   // boundary validates the declared pool contract before any staging or
   // network side effect. Both methods are device-only: a manager without
@@ -225,16 +222,6 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
       const rpc::StartTransferRequest& plan,
       absl::Span<const int64_t> chip_block_ids) override;
 
-  // Native accounting of the pool selection: how many pools the plan moved
-  // and, per opaque tag, how many registered pools it skipped. Raiden never
-  // interprets tag values.
-  struct PoolReshardSkipSummary {
-    int transferred_pools = 0;
-    std::map<std::string, int> skipped_pool_counts;
-  };
-
-  absl::StatusOr<PoolReshardSkipSummary> GetPoolReshardSkipSummary(
-      const std::string& req_id);
 
   absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
                                 uint64_t uuid = 0) override;
@@ -414,8 +401,6 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   absl::Status ValidatePoolReshardPlan(
       const rpc::StartTransferRequest& plan,
       absl::Span<const int64_t> local_block_ids, bool is_sender);
-  PoolReshardSkipSummary BuildPoolReshardSkipSummary(
-      const rpc::StartTransferRequest& plan) const;
   void StartPoolReshardPush(uint64_t uuid, size_t pool_idx);
   void FinishPoolReshardSend(uint64_t uuid, const absl::Status& status);
   void FinishPoolReshardRecvPool(uint64_t uuid, size_t pool_idx,
@@ -445,8 +430,6 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   std::set<std::string> done_sending_;
   std::set<std::string> done_recving_;
   std::set<std::string> failed_recving_;
-  absl::flat_hash_map<std::string, PoolReshardSkipSummary>
-      pool_reshard_skip_summaries_;
   // StagingReadinessState is shared because it is captured by value in the
   // async PjRt copy callbacks (e.g. OnReady). A shared_ptr is required here
   // to ensure the state stays alive even if the entry is removed from this

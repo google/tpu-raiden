@@ -104,18 +104,6 @@ absl::Status ValidateChunks(BlockTransportDelegate* delegate, size_t l,
       }
     }
   }
-  const BlockChunkRegionValidationMode region_mode =
-      delegate->block_chunk_region_validation_mode();
-  if (region_mode != BlockChunkRegionValidationMode::kDisabled) {
-    absl::Status status = delegate->ValidateBlockChunksInRegions(l, sh, chunks);
-    if (!status.ok()) {
-      if (region_mode == BlockChunkRegionValidationMode::kFail) {
-        return status;
-      }
-      LOG(WARNING) << "Block chunk region validation warning: "
-                   << status.ToString();
-    }
-  }
   return absl::OkStatus();
 }
 
@@ -240,7 +228,15 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
             << ", numa=" << block_delegate_->node_id();
 
   if (header.op == 1 || header.op == 6) {
-    return HandleIncomingPush(client_fd, header);
+    absl::Status push_status = HandleIncomingPush(client_fd, header);
+    if (!push_status.ok()) {
+      // The connection drops after a failed push; without this the sender
+      // only sees an anonymous "Push verification failed".
+      LOG(ERROR) << "Incoming push rejected: uuid=" << header.uuid
+                 << " op=" << static_cast<int>(header.op)
+                 << " local_id=" << header.local_id << ": " << push_status;
+    }
+    return push_status;
   } else if (header.op == 2) {
     return HandleIncomingPull(client_fd, header);
   } else {
@@ -343,6 +339,13 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
           expected_size += chunk.size;
         }
         if (sender_size != expected_size) {
+          // The connection is dropped after this return; without a log the
+          // sender only ever sees an anonymous "Push verification failed".
+          LOG(ERROR) << "Incoming push size mismatch: sender offered "
+                     << sender_size << " bytes, receiver expected "
+                     << expected_size << " bytes (chunks=" << chunks.size()
+                     << ") uuid=" << header.uuid << " layer/pool=" << l
+                     << " src_block=" << src_bid << " dst_block=" << dst_id;
           return absl::InternalError(absl::StrCat(
               "Block transfer size mismatch! Sender offered: ", sender_size,
               " bytes, but Receiver expected: ", expected_size,

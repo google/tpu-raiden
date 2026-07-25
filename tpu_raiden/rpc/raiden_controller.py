@@ -63,16 +63,6 @@ class NameResolver(typing.Protocol):
     ...
 
 
-@typing.runtime_checkable
-class RaidenEngine(typing.Protocol):
-  """Standardized Data-Plane collective engine interface for Raiden Worker daemons."""
-
-  @property
-  def local_port(self) -> Optional[int]:
-    """Returns the active TCP socket server listener port."""
-    ...
-
-
 class RaidenMemoryType(enum.IntEnum):
   """Raiden memory type constants."""
 
