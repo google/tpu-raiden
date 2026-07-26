@@ -377,6 +377,7 @@ absl::Status RaidenController::DeallocateBuffers(
 absl::StatusOr<proto::TransferBuffersRequest>
 RaidenController::BuildTransferBuffersRequest(
     absl::Span<const Buffer> src_buffers, absl::Span<const Buffer> dst_buffers,
+    absl::Span<const Buffer> staging_host_buffers,
     absl::Span<const int64_t> copy_sizes) {
   if (src_buffers.empty() || src_buffers.size() != dst_buffers.size()) {
     return absl::InvalidArgumentError(
@@ -416,6 +417,15 @@ RaidenController::BuildTransferBuffersRequest(
   for (int64_t size : copy_sizes) {
     transfer->add_copy_sizes(size);
   }
+  for (const auto& buf : staging_host_buffers) {
+    if (buf.index() < 0) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Staging host buffer has invalid negative index: ", buf.index()));
+    }
+    auto* added_buf = transfer->add_staging_host_buffers();
+    *added_buf = buf.ToProto();
+    added_buf->set_index(buf.index());
+  }
 
   return request;
 }
@@ -423,9 +433,10 @@ RaidenController::BuildTransferBuffersRequest(
 tsl::Future<> RaidenController::TransferBuffers(
     absl::string_view worker_id, absl::Span<const Buffer> src_buffers,
     absl::Span<const Buffer> dst_buffers,
+    absl::Span<const Buffer> staging_host_buffers,
     absl::Span<const int64_t> copy_sizes) {
-  auto request_or =
-      BuildTransferBuffersRequest(src_buffers, dst_buffers, copy_sizes);
+  auto request_or = BuildTransferBuffersRequest(
+      src_buffers, dst_buffers, staging_host_buffers, copy_sizes);
   if (!request_or.ok()) {
     return tsl::Future<>(request_or.status());
   }
@@ -447,6 +458,7 @@ tsl::Future<> RaidenController::TransferBuffers(
 
 tsl::Future<> RaidenController::TransferBuffers(
     absl::Span<const Buffer> src_buffers, absl::Span<const Buffer> dst_buffers,
+    absl::Span<const Buffer> staging_host_buffers,
     absl::Span<const int64_t> copy_sizes) {
   if (src_buffers.empty() || src_buffers.size() != dst_buffers.size()) {
     return tsl::Future<>(absl::InvalidArgumentError(
@@ -523,8 +535,10 @@ tsl::Future<> RaidenController::TransferBuffers(
 
     if (worker_src.empty()) continue;
 
-    auto req_or =
-        BuildTransferBuffersRequest(worker_src, worker_dst, worker_copy_sizes);
+    // Every worker owns a shard of every block, so the (host) staging offsets
+    // are identical across workers.
+    auto req_or = BuildTransferBuffersRequest(
+        worker_src, worker_dst, staging_host_buffers, worker_copy_sizes);
     if (!req_or.ok()) {
       return tsl::Future<>(req_or.status());
     }

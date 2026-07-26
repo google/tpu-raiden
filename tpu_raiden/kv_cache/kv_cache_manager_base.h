@@ -15,6 +15,7 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_KV_CACHE_KV_CACHE_MANAGER_BASE_H_
 #define THIRD_PARTY_TPU_RAIDEN_KV_CACHE_KV_CACHE_MANAGER_BASE_H_
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -118,17 +119,30 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<size_t> layer_idx = std::nullopt,
       std::optional<size_t> shard_idx = std::nullopt);
 
+  // Pushes local Host DRAM blocks into a remote peer's device memory (TPU
+  // HBM). Parameters are flow-ordered: local host source -> REMOTE host
+  // staging (bridge, explicit; never aliased to another id) -> remote device
+  // destination. The full pipeline is self-contained in this one call: the
+  // push carries the H2D plan in-band (transport op 7), the receiver fires
+  // its local H2D once the pushed payload is complete, and the returned
+  // future resolves only once the data is resident in the peer's device
+  // blocks (receiver H2D failures fail this future).
   virtual absl::StatusOr<raiden::PjRtCopyFuture> H2dWrite(
       absl::string_view peer,
-      const std::vector<int64_t>& src_offsets_major_dim = {},
-      const std::vector<int64_t>& dst_offsets_major_dim = {},
-      const std::vector<int64_t>& copy_sizes_major_dim = {});
+      const std::vector<int64_t>& src_host_offsets_major_dim,
+      const std::vector<int64_t>& dst_host_offsets_major_dim,
+      const std::vector<int64_t>& dst_device_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim);
 
+  // Pulls remote Host DRAM blocks into local TPU HBM. Parameters are
+  // flow-ordered: remote host source -> LOCAL host staging (bridge, explicit;
+  // caller-owned, never aliased to the remote id) -> local HBM destination.
   virtual absl::StatusOr<raiden::PjRtCopyFuture> H2dRead(
       absl::string_view peer,
-      const std::vector<int64_t>& src_offsets_major_dim = {},
-      const std::vector<int64_t>& dst_offsets_major_dim = {},
-      const std::vector<int64_t>& copy_sizes_major_dim = {});
+      const std::vector<int64_t>& src_host_offsets_major_dim,
+      const std::vector<int64_t>& dst_host_offsets_major_dim,
+      const std::vector<int64_t>& dst_device_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim);
 
   // Async on-chip D2H offloads E2E
   virtual absl::StatusOr<raiden::PjRtCopyFuture> D2h(
@@ -139,11 +153,15 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<size_t> layer_idx = std::nullopt,
       std::optional<size_t> shard_idx = std::nullopt);
 
+  // Pushes local TPU HBM blocks to a remote peer's Host DRAM. Parameters are
+  // flow-ordered: local HBM source -> LOCAL host staging (bridge, explicit;
+  // caller-owned, never aliased to the remote id) -> remote host destination.
   virtual absl::StatusOr<raiden::PjRtCopyFuture> D2hWrite(
       absl::string_view peer,
-      const std::vector<int64_t>& src_offsets_major_dim = {},
-      const std::vector<int64_t>& dst_offsets_major_dim = {},
-      const std::vector<int64_t>& copy_sizes_major_dim = {});
+      const std::vector<int64_t>& src_device_offsets_major_dim,
+      const std::vector<int64_t>& src_host_offsets_major_dim,
+      const std::vector<int64_t>& dst_host_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim);
 
   virtual absl::StatusOr<raiden::PjRtCopyFuture> D2hRead(
       absl::string_view peer,
@@ -158,17 +176,22 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   D2hAutoAllocate(const std::vector<int64_t>& src_offsets_major_dim = {},
                   const std::vector<int64_t>& copy_sizes_major_dim = {});
 
-  // Symmetrical H2H writes E2E
+  // Symmetrical H2H writes E2E.
+  // dst_device_block_ids (optional): when non-empty, the push carries an
+  // in-band H2D plan (transport op 7) and the receiver copies each landed
+  // host block into the paired device block (see H2dWrite).
   virtual absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
   H2hWrite(const std::vector<std::string>& peers,
            const std::vector<int>& src_block_ids,
            const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
-           int layer_idx = -1);
+           int layer_idx = -1,
+           const std::vector<int>& dst_device_block_ids = {});
 
   virtual absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
   H2hWrite(std::string peer, const std::vector<int>& src_block_ids,
            const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
-           int layer_idx = -1);
+           int layer_idx = -1,
+           const std::vector<int>& dst_device_block_ids = {});
 
   virtual absl::StatusOr<std::pair<std::vector<int>, raiden::PjRtCopyFuture>>
   H2hRead(const std::vector<std::string>& peers,
@@ -306,6 +329,22 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<size_t> shard_idx = std::nullopt);
 
   bool use_block_chunks(uint64_t uuid) const override;
+
+  // In-band H2D plan hooks (transport op 7). ArmRecvH2dFromWire merges each
+  // push stream's staging->device pairs into the per-uuid plan;
+  // OnBlocksReceived finalizes on the LAST stream: fires the local H2D
+  // (staging -> device, all layers) and awaits it before the transport ack,
+  // so the sender's future means "resident in device memory" and receiver
+  // H2D failures propagate back to the sender. (Wire-plan pushes are
+  // whole-blob (layer_idx=-1), so OnLayerReceived is a single
+  // network-complete event, not per-layer -- it is a no-op for wire uuids.)
+  absl::Status ArmRecvH2dFromWire(uint64_t uuid,
+                                  absl::Span<const int> staging_block_ids,
+                                  absl::Span<const int> device_block_ids,
+                                  int expected_streams) override;
+  absl::Status OnLayerReceived(size_t layer_idx, uint64_t uuid) override;
+  absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
+                                uint64_t uuid) override;
 
   absl::StatusOr<std::optional<tpu_raiden::transport::PoolPushProgressSpec>>
   GetPoolPushProgressSpec(size_t pool_idx, uint64_t uuid) const override;
@@ -460,6 +499,24 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   };
   absl::flat_hash_map<uint64_t, RegisteredPlan> active_plans_
       ABSL_GUARDED_BY(plans_mu_);
+
+  // Receiver-side state for in-band H2D plans (transport op 7), keyed by the
+  // push uuid. Streams arm incrementally (disjoint subsets); the last
+  // stream's OnBlocksReceived awaits the per-layer H2D futures and erases the
+  // plan.
+  struct WireH2dPlan {
+    std::vector<int64_t> staging_offsets;
+    std::vector<int64_t> device_offsets;
+    int expected_streams = 0;
+    int completed_streams = 0;
+  };
+  absl::Mutex wire_h2d_mu_;
+  absl::flat_hash_map<uint64_t, WireH2dPlan> wire_h2d_plans_
+      ABSL_GUARDED_BY(wire_h2d_mu_);
+  // Sender-side uuid generator for op-7 pushes. Top bit marks wire-plan
+  // uuids; node id + instance salt keep concurrent senders from colliding in
+  // the receiver's shared uuid keyspace.
+  std::atomic<uint64_t> wire_h2d_uuid_counter_{0};
 };
 
 }  // namespace kv_cache

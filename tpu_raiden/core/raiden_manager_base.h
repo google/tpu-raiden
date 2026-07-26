@@ -44,18 +44,57 @@ class RaidenManagerBase : public tpu_raiden::transport::BlockTransportDelegate {
 
   ~RaidenManagerBase() override;
 
-  // Direct C++ H2H network write (Push)
+  /**
+   * @brief Direct C++ H2H network write (Push).
+   *
+   * Synchronously pushes host-memory blocks to a remote endpoint.
+   * If `dst_device_block_ids` is non-empty, the request escalates to an in-band
+   * pipelined H2D transfer (op=7) that will additionally instruct the remote
+   * peer to automatically execute an H2D memory transfer.
+   *
+   * @param peers The remote endpoints to push to.
+   * @param src_block_ids The source block identifiers on the local host.
+   * @param dst_block_ids The destination staging block identifiers on the
+   * remote host.
+   * @param uuid Uniquely identifies the transfer, used for acknowledging the
+   * correct session.
+   * @param layer_idx Overriding layer index offset.
+   * @param dst_device_block_ids Optional device HBM identifiers. When provided,
+   * signals the remote to initiate HBM DMA immediately following successful
+   * receipt.
+   * @return A status or vector of successfully pushed blocks.
+   */
   absl::StatusOr<std::vector<int>> H2hWriteDirect(
       const std::vector<std::string>& peers,
       const std::vector<int>& src_block_ids,
       const std::vector<int>& dst_block_ids = {}, uint64_t uuid = 0,
-      int layer_idx = -1);
+      int layer_idx = -1, const std::vector<int>& dst_device_block_ids = {});
 
-  void H2hWriteDirectAsync(
-      const std::vector<std::string>& peers,
-      const std::vector<int>& src_block_ids,
-      const std::vector<int>& dst_block_ids, uint64_t uuid, int layer_idx,
-      std::function<void(absl::StatusOr<std::vector<int>>)> on_complete);
+  /**
+   * @brief Asynchronous C++ H2H network write (Push).
+   *
+   * Asynchronously pushes host-memory blocks to a remote endpoint.
+   * Shares semantics with H2hWriteDirect, escalating to op=7 if
+   * `dst_device_block_ids` is present.
+   *
+   * @param peers The remote endpoints to push to.
+   * @param src_block_ids The source block identifiers on the local host.
+   * @param dst_block_ids The destination staging block identifiers on the
+   * remote host.
+   * @param uuid Uniquely identifies the transfer.
+   * @param layer_idx Overriding layer index offset.
+   * @param on_complete Callback fired upon completion or failure of the push
+   * operation.
+   * @param dst_device_block_ids Optional device HBM identifiers. Escalate to
+   * pipelined H2D transfer if present.
+   */
+  void H2hWriteDirectAsync(const std::vector<std::string>& peers,
+                           const std::vector<int>& src_block_ids,
+                           const std::vector<int>& dst_block_ids = {},
+                           uint64_t uuid = 0, int layer_idx = -1,
+                           std::function<void(absl::StatusOr<std::vector<int>>)>
+                               on_complete = nullptr,
+                           const std::vector<int>& dst_device_block_ids = {});
 
   // Direct C++ H2H network read (Pull)
   absl::StatusOr<std::vector<int>> H2hReadDirect(

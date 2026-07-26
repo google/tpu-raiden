@@ -53,6 +53,7 @@ struct MockTransferManager {
   std::string last_peer;
   std::vector<int64_t> last_src_offsets;
   std::vector<int64_t> last_dst_offsets;
+  std::vector<int64_t> last_staging_offsets;
   std::vector<int64_t> last_copy_sizes;
 
   absl::StatusOr<raiden::PjRtCopyFuture> D2h(
@@ -67,13 +68,15 @@ struct MockTransferManager {
   }
 
   absl::StatusOr<raiden::PjRtCopyFuture> D2hWrite(
-      absl::string_view peer, const std::vector<int64_t>& src_offsets,
-      const std::vector<int64_t>& dst_offsets,
+      absl::string_view peer, const std::vector<int64_t>& src_device_offsets,
+      const std::vector<int64_t>& src_host_offsets,
+      const std::vector<int64_t>& dst_host_offsets,
       const std::vector<int64_t>& copy_sizes) {
     d2h_write_calls++;
     last_peer = std::string(peer);
-    last_src_offsets = src_offsets;
-    last_dst_offsets = dst_offsets;
+    last_src_offsets = src_device_offsets;
+    last_staging_offsets = src_host_offsets;
+    last_dst_offsets = dst_host_offsets;
     last_copy_sizes = copy_sizes;
     return raiden::PjRtCopyFuture();
   }
@@ -102,25 +105,29 @@ struct MockTransferManager {
   }
 
   absl::StatusOr<raiden::PjRtCopyFuture> H2dWrite(
-      absl::string_view peer, const std::vector<int64_t>& src_offsets,
-      const std::vector<int64_t>& dst_offsets,
+      absl::string_view peer, const std::vector<int64_t>& src_host_offsets,
+      const std::vector<int64_t>& dst_host_offsets,
+      const std::vector<int64_t>& dst_device_offsets,
       const std::vector<int64_t>& copy_sizes) {
     h2d_write_calls++;
     last_peer = std::string(peer);
-    last_src_offsets = src_offsets;
-    last_dst_offsets = dst_offsets;
+    last_src_offsets = src_host_offsets;
+    last_staging_offsets = dst_host_offsets;
+    last_dst_offsets = dst_device_offsets;
     last_copy_sizes = copy_sizes;
     return raiden::PjRtCopyFuture();
   }
 
   absl::StatusOr<raiden::PjRtCopyFuture> H2dRead(
-      absl::string_view peer, const std::vector<int64_t>& src_offsets,
-      const std::vector<int64_t>& dst_offsets,
+      absl::string_view peer, const std::vector<int64_t>& src_host_offsets,
+      const std::vector<int64_t>& dst_host_offsets,
+      const std::vector<int64_t>& dst_device_offsets,
       const std::vector<int64_t>& copy_sizes) {
     h2d_read_calls++;
     last_peer = std::string(peer);
-    last_src_offsets = src_offsets;
-    last_dst_offsets = dst_offsets;
+    last_src_offsets = src_host_offsets;
+    last_staging_offsets = dst_host_offsets;
+    last_dst_offsets = dst_device_offsets;
     last_copy_sizes = copy_sizes;
     return raiden::PjRtCopyFuture();
   }

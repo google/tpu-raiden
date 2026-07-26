@@ -509,6 +509,15 @@ struct PjRtCopyFuture {
       tsl::AsyncValue* av = future.async_value();
       if (av->IsError()) {
         status = av->GetError();
+      } else {
+        // A stateless xla::Future<> fulfilled via Promise::Set(error_status)
+        // stores the status as the future's VALUE (the async value itself is
+        // concrete, not in error state) -- extract it or the error is
+        // silently dropped.
+        absl::Status value_status = future.Await();
+        if (!value_status.ok()) {
+          status = value_status;
+        }
       }
     }
     return status;

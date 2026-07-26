@@ -2284,7 +2284,7 @@ absl::Status KVCacheManagerWithTransfer::OnBlocksReceived(
 
   if (!found) {
     // Forward to base class for direct pull operations
-    return RaidenManagerBase::OnBlocksReceived(block_ids, uuid);
+    return KVCacheManagerBase::OnBlocksReceived(block_ids, uuid);
   }
 
   {
@@ -2400,7 +2400,9 @@ absl::Status KVCacheManagerWithTransfer::OnLayerReceived(size_t layer_idx,
     absl::MutexLock lock(mu_);
     auto it = active_recv_entries_.find(uuid);
     if (it == active_recv_entries_.end()) {
-      return absl::OkStatus();
+      // Not a disagg recv entry: hand to the base (in-band op-7 H2D plans
+      // live in KVCacheManagerBase).
+      return KVCacheManagerBase::OnLayerReceived(layer_idx, uuid);
     }
     auto& entry = it->second;
     h2d_copy = entry.h2d_copy;

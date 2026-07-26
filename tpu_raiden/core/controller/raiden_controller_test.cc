@@ -326,7 +326,7 @@ TEST_F(RaidenControllerTest, TransferBuffersValidationMismatchedCopySizes) {
 
   auto status = controller
                     .TransferBuffers({src_buf1, src_buf2}, {dst_buf1, dst_buf2},
-                                     copy_sizes)
+                                     /*staging_host_buffers=*/{}, copy_sizes)
                     .Await();
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
@@ -431,7 +431,8 @@ TEST_F(RaidenControllerTest, TransferBuffersD2HSuccess) {
 
   auto status = controller
                     .TransferBuffers("worker_0", {src_buf1, src_buf2},
-                                     {dst_buf1, dst_buf2}, copy_sizes)
+                                     {dst_buf1, dst_buf2},
+                                     /*staging_host_buffers=*/{}, copy_sizes)
                     .Await();
   ASSERT_TRUE(status.ok());
   EXPECT_EQ(mock_mgr.d2h_calls, 1);

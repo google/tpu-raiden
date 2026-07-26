@@ -143,6 +143,13 @@ message TransferBufferSpec {
   repeated BufferProto src_buffers = 7;
   // Destination buffers for transfer.
   repeated BufferProto dst_buffers = 8;
+  // Host DRAM staging (bridge) blocks for 2-stage remote transfers
+  // (remote H2D read/write and remote D2H write). Always the MIDDLE hop of the
+  // data flow: local host staging for H2dRead/D2hWrite, remote host staging
+  // for H2dWrite. Must be explicit and caller-owned -- never aliased to a
+  // peer's block id. Required (same length as src/dst offsets) for those
+  // transfer types; unused otherwise.
+  repeated BufferProto staging_host_buffers = 9;
 }
 
 // Request to transfer data across memory spaces on a transfer worker.

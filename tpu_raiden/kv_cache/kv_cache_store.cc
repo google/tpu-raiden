@@ -459,8 +459,8 @@ absl::Status KVCacheStore::Save(const std::vector<std::string>& block_hashes) {
   }
 
   // Trigger transfer
-  tsl::Future<> future =
-      raiden_controller_->TransferBuffers(src_buffers, dst_buffers);
+  tsl::Future<> future = raiden_controller_->TransferBuffers(
+      src_buffers, dst_buffers, /*staging_host_buffers=*/{}, /*copy_sizes=*/{});
 
   {
     absl::MutexLock lock(mutex_);
@@ -533,8 +533,8 @@ absl::Status KVCacheStore::Load(const std::vector<std::string>& block_hashes,
   }
 
   // Trigger transfer
-  tsl::Future<> future =
-      raiden_controller_->TransferBuffers(src_buffers, dst_buffers);
+  tsl::Future<> future = raiden_controller_->TransferBuffers(
+      src_buffers, dst_buffers, /*staging_host_buffers=*/{}, /*copy_sizes=*/{});
 
   {
     absl::MutexLock lock(mutex_);

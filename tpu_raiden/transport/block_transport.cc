@@ -239,7 +239,7 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
             << ", uuid=" << header.uuid
             << ", numa=" << block_delegate_->node_id();
 
-  if (header.op == 1 || header.op == 6) {
+  if (header.op == 1 || header.op == 6 || header.op == 7) {
     return HandleIncomingPush(client_fd, header);
   } else if (header.op == 2) {
     return HandleIncomingPull(client_fd, header);
@@ -308,6 +308,17 @@ absl::Status BlockTransport::HandleIncomingPush(int client_fd,
     src_block_ids.resize(header.count_or_size, 0);
     RETURN_IF_ERROR(ReadExact(client_fd, src_block_ids.data(),
                               header.count_or_size * sizeof(int)));
+    if (header.op == 7) {
+      // Op 7 ("push + H2D plan"): this stream's device-target subset travels
+      // in-band. Arm (merge) the receiver-side H2D plan BEFORE any payload
+      // lands so the per-layer H2D can fire as soon as a layer completes.
+      std::vector<int> device_block_ids(header.count_or_size, 0);
+      RETURN_IF_ERROR(ReadExact(client_fd, device_block_ids.data(),
+                                header.count_or_size * sizeof(int)));
+      RETURN_IF_ERROR(block_delegate_->ArmRecvH2dFromWire(
+          header.uuid, allocated_ids, device_block_ids,
+          /*expected_streams=*/header.reserved));
+    }
     uint8_t ack = 1;
     RETURN_IF_ERROR(WriteExact(client_fd, &ack, 1));
   }
@@ -588,14 +599,18 @@ absl::StatusOr<std::vector<int>> BlockTransport::SyncPush(
     const std::vector<std::string>& peers,
     const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, int parallelism,
-    MajorOrder major_order, uint64_t uuid, int layer_idx) {
+    MajorOrder major_order, uint64_t uuid, int layer_idx,
+    const std::vector<int>& dst_device_block_ids) {
   auto promise =
       std::make_shared<std::promise<absl::StatusOr<std::vector<int>>>>();
   auto future = promise->get_future();
-  AsyncPush(peers, src_block_ids, dst_block_ids, parallelism, major_order, uuid,
-            layer_idx, [promise](absl::StatusOr<std::vector<int>> res) {
-              promise->set_value(std::move(res));
-            });
+  AsyncPush(
+      peers, src_block_ids, dst_block_ids, parallelism, major_order, uuid,
+      layer_idx,
+      [promise](absl::StatusOr<std::vector<int>> res) {
+        promise->set_value(std::move(res));
+      },
+      dst_device_block_ids);
   return future.get();
 }
 
@@ -604,7 +619,8 @@ void BlockTransport::AsyncPush(
     const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, int parallelism,
     MajorOrder major_order, uint64_t uuid, int layer_idx,
-    std::function<void(absl::StatusOr<std::vector<int>>)> on_complete) {
+    std::function<void(absl::StatusOr<std::vector<int>>)> on_complete,
+    const std::vector<int>& dst_device_block_ids) {
   size_t num_blocks = src_block_ids.size();
   if (num_blocks == 0) {
     on_complete(absl::InvalidArgumentError("Block list cannot be empty"));
@@ -612,6 +628,13 @@ void BlockTransport::AsyncPush(
   }
   if (peers.empty()) {
     on_complete(absl::InvalidArgumentError("Peer list cannot be empty"));
+    return;
+  }
+  if (!dst_device_block_ids.empty() &&
+      (dst_device_block_ids.size() != num_blocks ||
+       dst_block_ids.size() != num_blocks)) {
+    on_complete(absl::InvalidArgumentError(
+        "dst_device_block_ids, if provided, must match src/dst block lists"));
     return;
   }
 
@@ -624,6 +647,8 @@ void BlockTransport::AsyncPush(
 
   auto shared_src_block_ids = std::make_shared<std::vector<int>>(src_block_ids);
   auto shared_dst_block_ids = std::make_shared<std::vector<int>>(dst_block_ids);
+  auto shared_dst_device_block_ids =
+      std::make_shared<std::vector<int>>(dst_device_block_ids);
   auto allocated_ids = std::make_shared<std::vector<int>>(num_blocks, 0);
   auto statuses =
       std::make_shared<std::vector<absl::Status>>(P, absl::OkStatus());
@@ -641,13 +666,14 @@ void BlockTransport::AsyncPush(
     std::string remote_peer = peers[i % peers.size()];
 
     auto task_run = [this, i, remote_peer, local_ip, block_offset, block_count,
-                     shared_src_block_ids, shared_dst_block_ids, allocated_ids,
-                     statuses, remaining_workers, major_order, uuid, layer_idx,
-                     P, on_complete]() {
+                     shared_src_block_ids, shared_dst_block_ids,
+                     shared_dst_device_block_ids, allocated_ids, statuses,
+                     remaining_workers, major_order, uuid, layer_idx, P,
+                     on_complete]() {
       H2hWriteWorker(i, remote_peer, local_ip, block_offset, block_count,
                      *shared_src_block_ids, *shared_dst_block_ids,
-                     *allocated_ids, *statuses, major_order, uuid, layer_idx,
-                     P);
+                     *allocated_ids, *statuses, major_order, uuid, layer_idx, P,
+                     *shared_dst_device_block_ids);
 
       if (remaining_workers->fetch_sub(1) == 1) {
         absl::Status final_status = absl::OkStatus();
@@ -776,15 +802,14 @@ absl::StatusOr<std::vector<int>> BlockTransport::SyncPull(
   return allocated_ids;
 }
 
-void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
-                                    absl::string_view local_ip,
-                                    size_t block_offset, size_t block_count,
-                                    const std::vector<int>& src_block_ids,
-                                    const std::vector<int>& dst_block_ids,
-                                    std::vector<int>& allocated_ids,
-                                    std::vector<absl::Status>& statuses,
-                                    MajorOrder major_order, uint64_t uuid,
-                                    int layer_idx, int parallelism) {
+void BlockTransport::H2hWriteWorker(
+    int stream_idx, absl::string_view peer, absl::string_view local_ip,
+    size_t block_offset, size_t block_count,
+    const std::vector<int>& src_block_ids,
+    const std::vector<int>& dst_block_ids, std::vector<int>& allocated_ids,
+    std::vector<absl::Status>& statuses, MajorOrder major_order, uint64_t uuid,
+    int layer_idx, int parallelism,
+    const std::vector<int>& dst_device_block_ids) {
   auto status_or_fd = BorrowConnection(peer, local_ip);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
@@ -797,7 +822,10 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
       [&] { ReturnConnection(ok_to_pool, fd, peer, local_ip); });
 
   PacketHeader header = {};
-  header.op = dst_block_ids.empty() ? 1 : 6;
+  header.op = dst_block_ids.empty() ? 1
+              : dst_device_block_ids.empty()
+                  ? 6
+                  : 7;  // 7 = push + in-band H2D plan
   header.flags = static_cast<uint8_t>(major_order);
   header.buffer_id = 0;
   header.remote_id = static_cast<uint32_t>(block_delegate_->node_id());
@@ -817,7 +845,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
     return;
   }
 
-  if (header.op == 6) {
+  if (header.op == 6 || header.op == 7) {
     ABSL_DCHECK_LE(block_offset + block_count, dst_block_ids.size());
     s = WriteExact(fd, &dst_block_ids[block_offset], block_count * sizeof(int));
     if (!s.ok()) {
@@ -828,6 +856,15 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
     if (!s.ok()) {
       statuses[stream_idx] = s;
       return;
+    }
+    if (header.op == 7) {
+      ABSL_DCHECK_LE(block_offset + block_count, dst_device_block_ids.size());
+      s = WriteExact(fd, &dst_device_block_ids[block_offset],
+                     block_count * sizeof(int));
+      if (!s.ok()) {
+        statuses[stream_idx] = s;
+        return;
+      }
     }
     uint8_t ack = 0;
     s = ReadExact(fd, &ack, 1);

@@ -170,6 +170,27 @@ class BlockTransportDelegate : public lib::RawBufferTransportDelegate {
     return absl::OkStatus();
   }
 
+  /**
+   * @brief Hook to arm receiver-side H2D operations directly from the payload
+   * of an in-band H2dWrite request (op=7).
+   *
+   * @param uuid Transfer identifier connecting stream sets.
+   * @param staging_block_ids The array of host-memory block identifiers to
+   * populate.
+   * @param device_block_ids The remote target's device-memory block
+   * identifiers.
+   * @param expected_streams Tracks total concurrent streams processing this
+   * uuid block group.
+   * @return Status or UnimplementedError on host-only delegates lacking
+   * hardware.
+   */
+  virtual absl::Status ArmRecvH2dFromWire(
+      uint64_t uuid, absl::Span<const int> staging_block_ids,
+      absl::Span<const int> device_block_ids, int expected_streams) {
+    return absl::UnimplementedError(
+        "Receiver does not support in-band H2D plans (op 7)");
+  }
+
   virtual absl::Status OnBlocksReceived(const std::vector<int>& block_ids,
                                         uint64_t uuid = 0) {
     return OnDataReceived();
@@ -218,21 +239,47 @@ class BlockTransport : public lib::RawBufferTransport {
                  int parallelism = 1);
   ~BlockTransport() override;
 
-  // Asynchronous Scatter-Gather Push
+  /**
+   * @brief Asynchronous Scatter-Gather Push
+   *
+   * @param peers Target endpoints.
+   * @param src_block_ids Logical source block IDs locally.
+   * @param dst_block_ids Logical target staging block IDs remotely.
+   * @param parallelism Socket concurrency limit.
+   * @param major_order Transposition format instructions for remote.
+   * @param uuid Transfer session UUID.
+   * @param layer_idx Layer index override.
+   * @param on_complete Resolution callback.
+   * @param dst_device_block_ids (Optional) Device block IDs. When non-empty
+   * escalates protocol to op=7 pipelined H2D execution.
+   */
   void AsyncPush(
       const std::vector<std::string>& peers,
       const std::vector<int>& src_block_ids,
       const std::vector<int>& dst_block_ids, int parallelism,
       MajorOrder major_order, uint64_t uuid, int layer_idx,
-      std::function<void(absl::StatusOr<std::vector<int>>)> on_complete);
+      std::function<void(absl::StatusOr<std::vector<int>>)> on_complete,
+      const std::vector<int>& dst_device_block_ids = {});
 
-  // Synchronous Scatter-Gather Push (op = 1 / op = 6)
+  /**
+   * @brief Synchronous Scatter-Gather Push
+   *
+   * @param peers Target endpoints.
+   * @param src_block_ids Logical source block IDs locally.
+   * @param dst_block_ids Logical target staging block IDs remotely.
+   * @param parallelism Socket concurrency limit.
+   * @param major_order Transposition format instructions for remote.
+   * @param uuid Transfer session UUID.
+   * @param layer_idx Layer index override.
+   * @param dst_device_block_ids (Optional) Device block IDs. When non-empty
+   * escalates protocol to op=7 pipelined H2D execution.
+   */
   absl::StatusOr<std::vector<int>> SyncPush(
       const std::vector<std::string>& peers,
       const std::vector<int>& src_block_ids,
       const std::vector<int>& dst_block_ids = {}, int parallelism = 1,
       MajorOrder major_order = MajorOrder::kLayerMajor, uint64_t uuid = 0,
-      int layer_idx = -1);
+      int layer_idx = -1, const std::vector<int>& dst_device_block_ids = {});
 
   // Synchronous Scatter-Gather Pull (op = 2)
   // When explicit_dst_ptrs is supplied it contains one base pointer per
@@ -278,7 +325,8 @@ class BlockTransport : public lib::RawBufferTransport {
                       std::vector<int>& allocated_ids,
                       std::vector<absl::Status>& statuses,
                       MajorOrder major_order, uint64_t uuid = 0,
-                      int layer_idx = -1, int parallelism = 1);
+                      int layer_idx = -1, int parallelism = 1,
+                      const std::vector<int>& dst_device_block_ids = {});
 
   void H2hReadWorker(int stream_idx, absl::string_view peer,
                      absl::string_view local_ip, size_t local_block_offset,

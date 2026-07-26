@@ -118,16 +118,23 @@ class RaidenController {
   // is performed.
   absl::Status AllocateTargetBlockIds(absl::Span<const int> block_ids);
 
-  // Targeted worker transfer
-  tsl::Future<> TransferBuffers(absl::string_view worker_id,
-                                absl::Span<const Buffer> src_buffers,
-                                absl::Span<const Buffer> dst_buffers,
-                                absl::Span<const int64_t> copy_sizes = {});
+  // Targeted worker transfer.
+  // staging_host_buffers: host DRAM staging (bridge) block offsets, required
+  // for 2-stage remote transfers (remote H2D read/write, remote D2H write);
+  // always the middle hop of the data flow. Unused for local transfers.
+  tsl::Future<> TransferBuffers(
+      absl::string_view worker_id, absl::Span<const Buffer> src_buffers,
+      absl::Span<const Buffer> dst_buffers,
+      absl::Span<const Buffer> staging_host_buffers = {},
+      absl::Span<const int64_t> copy_sizes = {});
 
-  // Broadcast transfer to all registered workers
-  tsl::Future<> TransferBuffers(absl::Span<const Buffer> src_buffers,
-                                absl::Span<const Buffer> dst_buffers,
-                                absl::Span<const int64_t> copy_sizes = {});
+  // Broadcast transfer to all registered workers (staging_host_buffers as
+  // above).
+  tsl::Future<> TransferBuffers(
+      absl::Span<const Buffer> src_buffers,
+      absl::Span<const Buffer> dst_buffers,
+      absl::Span<const Buffer> staging_host_buffers = {},
+      absl::Span<const int64_t> copy_sizes = {});
 
   // Initiates remote read from source controller. block_hashes (parallel to the
   // block ids) let the source verify/pin the blocks in its LRU before transfer.
@@ -169,7 +176,8 @@ class RaidenController {
   absl::StatusOr<proto::TransferBuffersRequest> BuildTransferBuffersRequest(
       absl::Span<const Buffer> src_buffers,
       absl::Span<const Buffer> dst_buffers,
-      absl::Span<const int64_t> copy_sizes);
+      absl::Span<const Buffer> staging_host_buffers = {},
+      absl::Span<const int64_t> copy_sizes = {});
 
   void Init(absl::Span<const std::string> worker_addresses,
             absl::string_view raiden_orchestrator_address,
