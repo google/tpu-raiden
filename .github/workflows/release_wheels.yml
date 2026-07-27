@@ -1,0 +1,236 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Stable release build for tpu_raiden, cut by pushing a vX.Y.Z tag on main
+# (see RELEASING.md for the full process). Builds the tpu_raiden_jax and
+# tpu_raiden_torch wheels with an EMPTY version suffix — the wheel version is
+# exactly the pyproject.toml base version, which must match the tag — then
+# uploads them to the raiden Artifact Registry and attaches wheels + .so files
+# to a GitHub Release. Stable versions carry no .dev suffix, so
+# `pip install tpu_raiden_jax` (without --pre) resolves to the latest release
+# while nightlies stay behind --pre.
+#
+# The torch wheel is built against the torch_tpu commit pinned in the
+# torch_tpu.version file at the repo root (falling back to torch_tpu main if
+# the file does not exist). Record the pin there before tagging so the release
+# is reproducible against a validated torch_tpu build.
+#
+# workflow_dispatch runs are dry runs: they build and archive the wheels as
+# workflow artifacts but never publish.
+#
+# Required repository secrets/variables:
+#   secrets.TORCH_TPU_DEPLOY_KEY  read-only deploy key for the private
+#                                 google-pytorch/torch_tpu repo
+#   vars.RAIDEN_REGISTRY_URL      (optional) overrides the Artifact Registry
+#                                 upload URL
+
+name: Release Wheels
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      torch_tpu_ref:
+        description: "torch_tpu ref override for the dry-run build (default: torch_tpu.version file, else main)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RAIDEN_REGISTRY_URL: ${{ vars.RAIDEN_REGISTRY_URL || 'https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/' }}
+
+jobs:
+  verify:
+    name: "Verify tag and version"
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: check
+        run: |
+          BASE_VERSION=$(sed -n -E 's/^version = "(.*)"/\1/p' pyproject.toml | head -1)
+          echo "pyproject.toml version: ${BASE_VERSION}"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            if [[ "${TAG_VERSION}" != "${BASE_VERSION}" ]]; then
+              echo "ERROR: tag ${GITHUB_REF_NAME} does not match pyproject.toml version ${BASE_VERSION}." >&2
+              echo "       Bump pyproject.toml [project].version on main before tagging." >&2
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+              echo "ERROR: tag ${GITHUB_REF_NAME} is not reachable from origin/main; releases are cut from main only." >&2
+              exit 1
+            fi
+          fi
+          echo "version=${BASE_VERSION}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: "Build ${{ matrix.framework }} release wheel"
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - framework: jax
+            with_torch: "0"
+            so_paths: |
+              tpu-raiden/tpu_raiden/frameworks/jax/_tpu_raiden_jax.so
+          - framework: torch
+            with_torch: "1"
+            so_paths: |
+              tpu-raiden/tpu_raiden/frameworks/torch/_tpu_raiden_host.so
+              tpu-raiden/tpu_raiden/frameworks/torch/_tpu_raiden_torch.so
+    runs-on: linux-x86-n2-32
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
+    timeout-minutes: 300
+    steps:
+      - name: Checkout tpu-raiden
+        uses: actions/checkout@v5
+        with:
+          path: tpu-raiden
+      - name: Resolve torch_tpu pin
+        if: matrix.with_torch == '1'
+        run: |
+          REF="${{ inputs.torch_tpu_ref || '' }}"
+          if [[ -z "${REF}" && -f tpu-raiden/torch_tpu.version ]]; then
+            REF="$(tr -d '\r\n ' < tpu-raiden/torch_tpu.version)"
+          fi
+          echo "TORCH_TPU_REF=${REF:-main}" >> "$GITHUB_ENV"
+      - name: Checkout torch_tpu
+        if: matrix.with_torch == '1'
+        uses: actions/checkout@v5
+        with:
+          repository: google-pytorch/torch_tpu
+          ref: ${{ env.TORCH_TPU_REF }}
+          ssh-key: ${{ secrets.TORCH_TPU_DEPLOY_KEY }}
+          path: torch_tpu
+      # Git security patch (CVE-2022-24765) blocks root from operating on
+      # runner-owned directories. Tell Git explicitly to trust the workspace
+      # inside this ephemeral container.
+      - name: Fix Git Workspace Ownership
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/tpu-raiden"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/torch_tpu"
+      - name: Record torch_tpu commit
+        if: matrix.with_torch == '1'
+        run: |
+          TORCH_TPU_SHA=$(git -C "$GITHUB_WORKSPACE/torch_tpu" rev-parse HEAD)
+          echo "TORCH_TPU_SHA=$TORCH_TPU_SHA" >> "$GITHUB_ENV"
+          echo "torch_tpu: $TORCH_TPU_SHA (ref: $TORCH_TPU_REF)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build wheel
+        working-directory: tpu-raiden
+        env:
+          WITH_TORCH: ${{ matrix.with_torch }}
+          TORCH_TPU_SRC: ${{ github.workspace }}/torch_tpu
+          WHEEL_VERSION_EXTRAS: ""
+          EXTRA_BAZEL_FLAGS: "--config=ci"
+        run: |
+          export BAZEL_CACHE_DIR="${RUNNER_TEMP}/bazel_cache"
+          bash ci/build_wheel_impl.sh
+          if [[ -n "${TORCH_TPU_SHA:-}" ]]; then
+            echo "${TORCH_TPU_SHA}" > dist/torch_tpu_commit.txt
+          fi
+      - name: Check wheel metadata
+        working-directory: tpu-raiden
+        run: uv run --isolated --with twine twine check dist/*.whl
+      # The JAX-stack coupling (jax/jaxlib/libtpu) is enforced through the
+      # wheel's own Requires-Dist pins; extract them so the release records the
+      # stack it must run with, mirroring torch_tpu_commit.txt on the torch side.
+      - name: Record JAX stack pins
+        if: matrix.framework == 'jax'
+        working-directory: tpu-raiden
+        run: |
+          python3 - <<'PY'
+          import glob, re, zipfile
+          whl = sorted(glob.glob('dist/tpu_raiden_jax-*.whl'))[-1]
+          with zipfile.ZipFile(whl) as z:
+              meta = next(n for n in z.namelist() if n.endswith('.dist-info/METADATA'))
+              text = z.read(meta).decode()
+          pins = [l.removeprefix('Requires-Dist: ') for l in text.splitlines()
+                  if re.match(r'Requires-Dist: (jax|jaxlib|libtpu)\b', l)]
+          assert pins, f'no jax/jaxlib/libtpu pins found in {whl} METADATA'
+          open('dist/jax_pins.txt', 'w').write('\n'.join(pins) + '\n')
+          print('\n'.join(pins))
+          PY
+          echo "JAX stack pins:" >> "$GITHUB_STEP_SUMMARY"
+          cat dist/jax_pins.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-wheel-${{ matrix.framework }}
+          path: |
+            tpu-raiden/dist/*.whl
+            tpu-raiden/dist/torch_tpu_commit.txt
+            tpu-raiden/dist/jax_pins.txt
+          if-no-files-found: error
+      - name: Upload shared libraries
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-so-${{ matrix.framework }}
+          path: ${{ matrix.so_paths }}
+          if-no-files-found: error
+
+  publish:
+    name: "Publish release"
+    needs: [verify, build]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: linux-x86-n2-32
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release
+      # Auth uses the runner's ambient GCP service account via the Artifact
+      # Registry keyring backend. --skip-existing makes re-runs idempotent.
+      - name: Upload to Artifact Registry
+        run: |
+          uv run --isolated \
+            --with twine \
+            --with keyrings.google-artifactregistry-auth \
+            twine upload --skip-existing \
+            --repository-url "${RAIDEN_REGISTRY_URL}" \
+            release/tpu_raiden_*.whl
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES="$(printf 'torch_tpu build pin: %s\n\nJAX stack pins:\n%s\n' \
+            "$(cat release/torch_tpu_commit.txt 2>/dev/null || echo 'n/a')" \
+            "$(cat release/jax_pins.txt 2>/dev/null || echo 'n/a')")"
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --generate-notes \
+            --notes "${NOTES}" \
+            release/tpu_raiden_*.whl release/*.so
