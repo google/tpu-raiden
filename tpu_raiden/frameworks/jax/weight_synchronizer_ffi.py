@@ -22,6 +22,16 @@ import numpy as np
 from tpu_raiden.frameworks.jax import _weight_synchronizer_ffi
 
 
+def make_registered_shard_index(mesh):
+  """Canonical logical shard index per device (mesh row-major == controller
+  itertools.product order). Build once at setup, pass to the calls below to keep
+  it off the hot path."""
+  index_spec = jax.sharding.PartitionSpec(*mesh.axis_names)
+  return jax.device_put(
+      jnp.arange(mesh.size, dtype=jnp.int32).reshape(mesh.devices.shape),
+      jax.sharding.NamedSharding(mesh, index_spec))
+
+
 def init_weight_synchronizer(
     device_array,
     shard_idx,
@@ -95,6 +105,7 @@ def init_weight_synchronizer_and_d2h(
     parallelism: int = 1,
     num_layers: int = 1,
     listener_port: int = -1,
+    registered_shard_index=None,
 ) -> jax.Array:
   """Registers and executes init_weight_synchronizer_and_d2h FFI custom call on each device rank.
 
@@ -117,7 +128,7 @@ def init_weight_synchronizer_and_d2h(
   """
 
   @compute_on.compute_on("device_host")
-  def _local_init_and_d2h(anchor, s_idx):
+  def _local_init_and_d2h(anchor, s_idx, l_idx):
     axis_names = mesh.axis_names
     out_dim = 6 if listener_port >= 0 else 5
     out_shape = tuple([1] * len(axis_names)) + (out_dim,)
@@ -128,12 +139,17 @@ def init_weight_synchronizer_and_d2h(
     )(
         anchor,
         s_idx,
+        l_idx,
         slice_byte_size=slice_byte_size,
         local_port=np.int32(local_port),
         parallelism=np.int32(parallelism),
         num_layers=np.int32(num_layers),
         listener_port=np.int32(listener_port),
+        registered_shard_count=np.int32(mesh.size),
     )
+
+  if registered_shard_index is None:
+    registered_shard_index = make_registered_shard_index(mesh)
 
   axis_names = mesh.axis_names
   anchor_spec = device_array.sharding.spec
@@ -143,9 +159,9 @@ def init_weight_synchronizer_and_d2h(
   return jax.shard_map(
       _local_init_and_d2h,
       mesh=mesh,
-      in_specs=(anchor_spec, index_spec),
+      in_specs=(anchor_spec, index_spec, index_spec),
       out_specs=out_spec,
-  )(device_array, shard_idx)
+  )(device_array, shard_idx, registered_shard_index)
 
 
 
@@ -170,7 +186,7 @@ def is_listener_active(shard_idx: int = 0) -> bool:
   return _weight_synchronizer_ffi.is_listener_active(shard_idx)
 
 
-def h2d(device_array, shard_idx, mesh) -> jax.Array:
+def h2d(device_array, shard_idx, mesh, registered_shard_index=None) -> jax.Array:
   """Executes asynchronous Host-to-Device (H2D) copy from local staging buffer directly onto device memory via FFI.
 
   Args:
@@ -185,12 +201,15 @@ def h2d(device_array, shard_idx, mesh) -> jax.Array:
   """
 
   @compute_on.compute_on("device_host")
-  def _local_h2d(anchor, s_idx):
+  def _local_h2d(anchor, s_idx, l_idx):
     return jax.ffi.ffi_call(
         "ws_h2d",
         jax.ShapeDtypeStruct(anchor.shape, anchor.dtype),
         has_side_effect=True,
-    )(anchor, s_idx)
+    )(anchor, s_idx, l_idx, registered_shard_count=np.int32(mesh.size))
+
+  if registered_shard_index is None:
+    registered_shard_index = make_registered_shard_index(mesh)
 
   axis_names = mesh.axis_names
   anchor_spec = device_array.sharding.spec
@@ -199,6 +218,6 @@ def h2d(device_array, shard_idx, mesh) -> jax.Array:
   return jax.shard_map(
       _local_h2d,
       mesh=mesh,
-      in_specs=(anchor_spec, index_spec),
+      in_specs=(anchor_spec, index_spec, index_spec),
       out_specs=anchor_spec,
-  )(device_array, shard_idx)
+  )(device_array, shard_idx, registered_shard_index)

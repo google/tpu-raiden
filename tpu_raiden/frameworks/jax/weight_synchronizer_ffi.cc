@@ -190,8 +190,9 @@ xla::ffi::Error TriggerWeightSynchronizerInitImpl(
 // FFI execution handler for WeightSynchronizer Init and D2H (Host CPU Executed)
 xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
     xla::ffi::AnyBuffer x, xla::ffi::AnyBuffer shard_idx_buf,
+    xla::ffi::AnyBuffer registered_shard_index_buf,
     int64_t slice_byte_size, int32_t local_port, int32_t parallelism,
-    int32_t num_layers, int32_t listener_port,
+    int32_t num_layers, int32_t listener_port, int32_t registered_shard_count,
     xla::ffi::Result<xla::ffi::AnyBuffer> out) {
   // --- Init Part ---
   if (shard_idx_buf.untyped_data() == nullptr) {
@@ -200,6 +201,12 @@ xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
   }
   int32_t shard_idx =
       *reinterpret_cast<const int32_t*>(shard_idx_buf.untyped_data());
+  if (registered_shard_index_buf.untyped_data() == nullptr) {
+    return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
+                           "registered_shard_index_buf null.");
+  }
+  int32_t registered_shard_index =
+      *reinterpret_cast<const int32_t*>(registered_shard_index_buf.untyped_data());
   if (shard_idx < 0 || shard_idx >= 32) {
     return xla::ffi::Error(
         xla::ffi::ErrorCode::kInvalidArgument,
@@ -282,8 +289,22 @@ xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
 
   // --- D2H Part ---
   size_t size = g_weight_synchronizers[shard_idx]->slice_byte_size();
-  size_t local_slot = static_cast<size_t>(shard_idx) %
-                      g_weight_synchronizers[shard_idx]->num_shards();
+  size_t n = g_weight_synchronizers[shard_idx]->num_shards();
+  if (registered_shard_index < 0 || registered_shard_index >= registered_shard_count) {
+    return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
+        absl::StrCat("registered_shard_index out of range: registered_shard_index=", registered_shard_index,
+                     ", registered_shard_count=", registered_shard_count,
+                     ", device_ordinal=", shard_idx));
+  }
+  if (n == 0) return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument, "num_shards must be positive");
+  if (registered_shard_count % n != 0) return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument, "registered_shard_count not divisible by num_shards");
+  size_t local_slot = static_cast<size_t>(registered_shard_index) % n;
+  VLOG(1) << "[CL][D2H]"
+          << " device_ordinal=" << shard_idx
+          << " registered_shard_index=" << registered_shard_index
+          << " registered_shard_count=" << registered_shard_count
+          << " num_local_shards=" << n
+          << " local_buffer_slot=" << local_slot;
   uint8_t* dst_host_ptr = const_cast<uint8_t*>(
       g_weight_synchronizers[shard_idx]->GetHostBufferPtr(0, local_slot));
   const uint8_t* src_device_ptr =
@@ -318,11 +339,12 @@ xla::ffi::Error TriggerWeightSynchronizerInitAndD2hImpl(
 
 // FFI custom call handler executing asynchronous Host-to-Device (H2D) memory
 // transfers from local staging buffers (`GetHostBufferPtr`) directly onto
-// device memory buffers. Uses multi-host modulo indexing (`shard_idx %
-// num_shards()`) to ensure global shard indices map to the correct local
-// staging slot.
+// device memory buffers. Uses explicit logical index from JAX to ensure global
+// shard indices map to the correct local staging slot.
 xla::ffi::Error TriggerH2DImpl(xla::ffi::AnyBuffer anchor,
                                xla::ffi::AnyBuffer shard_idx_buf,
+                               xla::ffi::AnyBuffer registered_shard_index_buf,
+                               int32_t registered_shard_count,
                                xla::ffi::Result<xla::ffi::AnyBuffer> out) {
   (void)anchor;
   if (shard_idx_buf.untyped_data() == nullptr) {
@@ -331,6 +353,12 @@ xla::ffi::Error TriggerH2DImpl(xla::ffi::AnyBuffer anchor,
   }
   int32_t shard_idx =
       *reinterpret_cast<const int32_t*>(shard_idx_buf.untyped_data());
+  if (registered_shard_index_buf.untyped_data() == nullptr) {
+    return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
+                           "registered_shard_index_buf null.");
+  }
+  int32_t registered_shard_index =
+      *reinterpret_cast<const int32_t*>(registered_shard_index_buf.untyped_data());
   if (shard_idx < 0 || shard_idx >= 32 ||
       g_weight_synchronizers[shard_idx] == nullptr) {
     return xla::ffi::Error(xla::ffi::ErrorCode::kInternal,
@@ -338,8 +366,22 @@ xla::ffi::Error TriggerH2DImpl(xla::ffi::AnyBuffer anchor,
   }
 
   size_t size = g_weight_synchronizers[shard_idx]->slice_byte_size();
-  size_t local_slot = static_cast<size_t>(shard_idx) %
-                      g_weight_synchronizers[shard_idx]->num_shards();
+  size_t n = g_weight_synchronizers[shard_idx]->num_shards();
+  if (registered_shard_index < 0 || registered_shard_index >= registered_shard_count) {
+    return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument,
+        absl::StrCat("registered_shard_index out of range: registered_shard_index=", registered_shard_index,
+                     ", registered_shard_count=", registered_shard_count,
+                     ", device_ordinal=", shard_idx));
+  }
+  if (n == 0) return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument, "num_shards must be positive");
+  if (registered_shard_count % n != 0) return xla::ffi::Error(xla::ffi::ErrorCode::kInvalidArgument, "registered_shard_count not divisible by num_shards");
+  size_t local_slot = static_cast<size_t>(registered_shard_index) % n;
+  VLOG(1) << "[CL][H2D]"
+          << " device_ordinal=" << shard_idx
+          << " registered_shard_index=" << registered_shard_index
+          << " registered_shard_count=" << registered_shard_count
+          << " num_local_shards=" << n
+          << " local_buffer_slot=" << local_slot;
   const uint8_t* src_host_ptr =
       g_weight_synchronizers[shard_idx]->GetHostBufferPtr(0, local_slot);
   uint8_t* d_base = reinterpret_cast<uint8_t*>(out->untyped_data());
@@ -382,11 +424,13 @@ XLA_FFI_DEFINE_HANDLER(
     xla::ffi::Ffi::Bind()
         .Arg<xla::ffi::AnyBuffer>()  // anchor JAX input array (Arg 0)
         .Arg<xla::ffi::AnyBuffer>()  // shard_idx JAX input array (Arg 1)
+        .Arg<xla::ffi::AnyBuffer>()  // registered_shard_index
         .Attr<int64_t>("slice_byte_size")
         .Attr<int32_t>("local_port")
         .Attr<int32_t>("parallelism")
         .Attr<int32_t>("num_layers")
         .Attr<int32_t>("listener_port")
+        .Attr<int32_t>("registered_shard_count")
         .Ret<xla::ffi::AnyBuffer>());  // return result buffer
 
 XLA_FFI_DEFINE_HANDLER(
@@ -394,6 +438,8 @@ XLA_FFI_DEFINE_HANDLER(
     xla::ffi::Ffi::Bind()
         .Arg<xla::ffi::AnyBuffer>()  // anchor
         .Arg<xla::ffi::AnyBuffer>()  // shard_idx_buf
+        .Arg<xla::ffi::AnyBuffer>()  // registered_shard_index
+        .Attr<int32_t>("registered_shard_count")
         .Ret<xla::ffi::AnyBuffer>()  // result (aliased to anchor)
 );
 

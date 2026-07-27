@@ -91,9 +91,10 @@ class WeightSynchronizerFfiParamTest : public WeightSynchronizerFfiTest,
           x, shard_idx_buf, slice_byte_size, local_port, parallelism,
           num_layers, listener_port, out);
     } else {
+      // In the mock unit test there is only 1 device, so endpoint_count = 1
       return TriggerWeightSynchronizerInitAndD2hImpl(
-          x, shard_idx_buf, slice_byte_size, local_port, parallelism,
-          num_layers, listener_port, out);
+          x, shard_idx_buf, shard_idx_buf, slice_byte_size, local_port, parallelism,
+          num_layers, listener_port, /*registered_shard_count=*/1, out);
     }
   }
 };
