@@ -780,7 +780,8 @@ class TestH2dKVCacheManager : public TestKVCacheManager {
 TEST(KVCacheManagerTest, D2hWriteFailsWithCpuOnlyManager) {
   KVCacheManagerBase manager(/*num_layers=*/1, /*num_shards=*/1,
                              /*slice_byte_size=*/128);
-  auto res = manager.D2hWrite("127.0.0.1:8080", {0}, {0}, {1});
+  auto res = manager.D2hWrite("127.0.0.1:8080", /*src_device=*/{0},
+                              /*src_host=*/{0}, /*dst_host=*/{0}, {1});
   EXPECT_FALSE(res.ok());
   EXPECT_EQ(res.status().code(), absl::StatusCode::kFailedPrecondition);
   EXPECT_THAT(res.status().message(),
@@ -790,7 +791,8 @@ TEST(KVCacheManagerTest, D2hWriteFailsWithCpuOnlyManager) {
 TEST(KVCacheManagerTest, D2hWriteFailsWithInvalidHostBlockId) {
   TestD2hKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
                                 /*slice_byte_size=*/128, /*host_blocks=*/2);
-  auto res = manager.D2hWrite("127.0.0.1:8080", {0}, {-1}, {1});
+  auto res = manager.D2hWrite("127.0.0.1:8080", /*src_device=*/{0},
+                              /*src_host=*/{-1}, /*dst_host=*/{0}, {1});
   EXPECT_FALSE(res.ok());
   EXPECT_EQ(res.status().code(), absl::StatusCode::kInvalidArgument);
   EXPECT_THAT(res.status().message(),
@@ -808,16 +810,19 @@ TEST(KVCacheManagerTest, D2hWriteSuccessWithMockD2h) {
   std::string receiver_peer =
       absl::StrCat(receiver.local_ip(), ":", *receiver_port);
 
-  std::vector<int64_t> src_offsets = {0};
-  std::vector<int64_t> dst_offsets = {1};
+  std::vector<int64_t> src_device_offsets = {0};
+  std::vector<int64_t> src_host_offsets = {0};  // local staging (bridge)
+  std::vector<int64_t> dst_host_offsets = {1};  // remote destination
   std::vector<int64_t> copy_sizes = {1};
 
-  auto res =
-      sender.D2hWrite(receiver_peer, src_offsets, dst_offsets, copy_sizes);
+  auto res = sender.D2hWrite(receiver_peer, src_device_offsets,
+                             src_host_offsets, dst_host_offsets, copy_sizes);
   ASSERT_TRUE(res.ok()) << res.status().ToString();
   EXPECT_TRUE(sender.d2h_called_);
-  EXPECT_EQ(sender.last_src_offsets_, src_offsets);
-  EXPECT_EQ(sender.last_dst_offsets_, dst_offsets);
+  EXPECT_EQ(sender.last_src_offsets_, src_device_offsets);
+  // The D2H stage lands in the EXPLICIT local staging blocks, not in a local
+  // alias of the remote destination id.
+  EXPECT_EQ(sender.last_dst_offsets_, src_host_offsets);
   EXPECT_EQ(sender.last_copy_sizes_, copy_sizes);
 }
 
@@ -842,12 +847,13 @@ TEST(KVCacheManagerTest, D2hWritePipelinedSuccess) {
   std::memset(sender_buf + 128, 0xCD, 128);
   std::memset(receiver_buf, 0, 256);
 
-  std::vector<int64_t> src_offsets = {0, 1};
-  std::vector<int64_t> dst_offsets = {0, 1};
+  std::vector<int64_t> src_device_offsets = {0, 1};
+  std::vector<int64_t> src_host_offsets = {0, 1};  // local staging (bridge)
+  std::vector<int64_t> dst_host_offsets = {0, 1};  // remote destination
   std::vector<int64_t> copy_sizes = {1, 1};
 
-  auto res =
-      sender.D2hWrite(receiver_peer, src_offsets, dst_offsets, copy_sizes);
+  auto res = sender.D2hWrite(receiver_peer, src_device_offsets,
+                             src_host_offsets, dst_host_offsets, copy_sizes);
   ASSERT_TRUE(res.ok()) << res.status().ToString();
   EXPECT_TRUE(res->Await().ok());
 
@@ -882,12 +888,15 @@ TEST(KVCacheManagerTest, H2dReadSuccess) {
   std::memset(receiver_buf, 0, 256);
 
   // Test empty src_offsets returns OK empty future
-  auto empty_res = receiver.H2dRead(sender_peer, {});
+  auto empty_res = receiver.H2dRead(sender_peer, {}, {}, {}, {});
   ASSERT_TRUE(empty_res.ok()) << empty_res.status().ToString();
   EXPECT_TRUE(empty_res->Await().ok());
 
-  // Test H2dRead reading sender block 0 into receiver block 0
-  auto res = receiver.H2dRead(sender_peer, /*src_offsets_major_dim=*/{0});
+  // Test H2dRead reading sender block 0 via local staging block 0 into
+  // receiver device block 0.
+  auto res = receiver.H2dRead(sender_peer, /*src_host=*/{0},
+                              /*dst_host(staging)=*/{0}, /*dst_device=*/{0},
+                              /*copy_sizes=*/{1});
   ASSERT_TRUE(res.ok()) << res.status().ToString();
   EXPECT_TRUE(res->Await().ok());
 
@@ -915,12 +924,13 @@ TEST(KVCacheManagerTest, H2dReadPipelinedSuccess) {
   std::memset(sender_buf + 128, 0x66, 128);
   std::memset(receiver_buf, 0, 256);
 
-  std::vector<int64_t> src_offsets = {0, 1};
-  std::vector<int64_t> dst_offsets = {0, 1};
+  std::vector<int64_t> src_host_offsets = {0, 1};
+  std::vector<int64_t> dst_host_offsets = {0, 1};  // local staging (bridge)
+  std::vector<int64_t> dst_device_offsets = {0, 1};
   std::vector<int64_t> copy_sizes = {1, 1};
 
-  auto res =
-      receiver.H2dRead(sender_peer, src_offsets, dst_offsets, copy_sizes);
+  auto res = receiver.H2dRead(sender_peer, src_host_offsets, dst_host_offsets,
+                              dst_device_offsets, copy_sizes);
   ASSERT_TRUE(res.ok()) << res.status().ToString();
   EXPECT_TRUE(res->Await().ok());
 
@@ -944,13 +954,14 @@ TEST(KVCacheManagerTest, H2dReadCallsH2dForTpuHbmDestination) {
   ASSERT_NE(sender_buf, nullptr);
   std::memset(sender_buf, 0x77, 128);
 
-  auto res = receiver.H2dRead(sender_peer, /*src_offsets_major_dim=*/{0},
-                              /*dst_offsets_major_dim=*/{1},
-                              /*copy_sizes_major_dim=*/{1});
+  auto res = receiver.H2dRead(sender_peer, /*src_host=*/{0},
+                              /*dst_host(staging)=*/{0}, /*dst_device=*/{1},
+                              /*copy_sizes=*/{1});
   ASSERT_TRUE(res.ok()) << res.status().ToString();
   EXPECT_TRUE(res->Await().ok());
 
-  // H2dRead MUST trigger Stage 2 H2d DMA into TPU HBM destination offset {1}.
+  // H2dRead MUST trigger Stage 2 H2d DMA from the explicit staging block {0}
+  // into TPU HBM destination offset {1}.
   EXPECT_TRUE(receiver.h2d_called_);
   EXPECT_EQ(receiver.last_h2d_src_offsets_, std::vector<int64_t>{0});
   EXPECT_EQ(receiver.last_h2d_dst_offsets_, std::vector<int64_t>{1});
@@ -977,12 +988,13 @@ TEST(KVCacheManagerTest, H2dWriteSuccess) {
   std::memset(sender_buf, 0xCD, 128);
   std::memset(receiver_buf, 0, 256);
 
-  std::vector<int64_t> src_offsets = {0};
-  std::vector<int64_t> dst_offsets = {1};
+  std::vector<int64_t> src_host_offsets = {0};
+  std::vector<int64_t> dst_host_offsets = {1};  // remote staging (bridge)
+  std::vector<int64_t> dst_device_offsets = {0};
   std::vector<int64_t> copy_sizes = {1};
 
-  auto res =
-      sender.H2dWrite(receiver_peer, src_offsets, dst_offsets, copy_sizes);
+  auto res = sender.H2dWrite(receiver_peer, src_host_offsets, dst_host_offsets,
+                             dst_device_offsets, copy_sizes);
   ASSERT_TRUE(res.ok()) << res.status().ToString();
   EXPECT_TRUE(res->Await().ok());
 
@@ -1013,12 +1025,13 @@ TEST(KVCacheManagerTest, H2dWritePipelinedSuccess) {
   std::memset(sender_buf + 128, 0x44, 128);
   std::memset(receiver_buf, 0, 256);
 
-  std::vector<int64_t> src_offsets = {0, 1};
-  std::vector<int64_t> dst_offsets = {0, 1};
+  std::vector<int64_t> src_host_offsets = {0, 1};
+  std::vector<int64_t> dst_host_offsets = {0, 1};  // remote staging (bridge)
+  std::vector<int64_t> dst_device_offsets = {0, 1};
   std::vector<int64_t> copy_sizes = {1, 1};
 
-  auto res =
-      sender.H2dWrite(receiver_peer, src_offsets, dst_offsets, copy_sizes);
+  auto res = sender.H2dWrite(receiver_peer, src_host_offsets, dst_host_offsets,
+                             dst_device_offsets, copy_sizes);
   ASSERT_TRUE(res.ok()) << res.status().ToString();
   EXPECT_TRUE(res->Await().ok());
 
@@ -1026,6 +1039,116 @@ TEST(KVCacheManagerTest, H2dWritePipelinedSuccess) {
                           [](uint8_t v) { return v == 0x33; }));
   EXPECT_TRUE(std::all_of(receiver_buf + 128, receiver_buf + 256,
                           [](uint8_t v) { return v == 0x44; }));
+}
+
+// Anti-clobber regression: the local staging block for H2dRead is the
+// EXPLICIT dst_host block. A local block whose id happens to equal the remote
+// src id must NOT be touched (the pre-fix code aliased the remote src id as
+// the local staging id and destroyed that block's contents).
+TEST(KVCacheManagerTest, H2dReadExplicitStagingDoesNotClobberAliasedBlock) {
+  TestKVCacheManager sender(/*num_layers=*/1, /*num_shards=*/1,
+                            /*slice_byte_size=*/128, /*host_blocks=*/2);
+  TestKVCacheManager receiver(/*num_layers=*/1, /*num_shards=*/1,
+                              /*slice_byte_size=*/128, /*host_blocks=*/2);
+
+  const std::optional<int> sender_port = sender.local_port();
+  ASSERT_TRUE(sender_port.has_value());
+  std::string sender_peer = absl::StrCat(sender.local_ip(), ":", *sender_port);
+
+  uint8_t* sender_buf = sender.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
+  uint8_t* receiver_buf =
+      receiver.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
+  ASSERT_NE(sender_buf, nullptr);
+  ASSERT_NE(receiver_buf, nullptr);
+
+  std::memset(sender_buf, 0xEF, 128);
+  // Sentinel in receiver's local block 0 -- same id as the REMOTE src block.
+  // The pre-fix code staged into local block 0 and destroyed this.
+  std::memset(receiver_buf, 0x99, 128);
+  std::memset(receiver_buf + 128, 0, 128);
+
+  auto res = receiver.H2dRead(sender_peer, /*src_host=*/{0},
+                              /*dst_host(staging)=*/{1}, /*dst_device=*/{0},
+                              /*copy_sizes=*/{1});
+  ASSERT_TRUE(res.ok()) << res.status().ToString();
+  EXPECT_TRUE(res->Await().ok());
+
+  // Data staged into the explicit staging block 1.
+  EXPECT_TRUE(std::all_of(receiver_buf + 128, receiver_buf + 256,
+                          [](uint8_t v) { return v == 0xEF; }));
+  // The would-be-aliased local block 0 is untouched.
+  EXPECT_TRUE(std::all_of(receiver_buf, receiver_buf + 128,
+                          [](uint8_t v) { return v == 0x99; }));
+}
+
+// Anti-clobber regression: D2hWrite stages through the EXPLICIT src_host
+// block and pushes THAT block to the peer. A local block whose id happens to
+// equal the remote dst id must NOT be used (the pre-fix code staged into and
+// pushed from the local alias of the remote dst id).
+TEST(KVCacheManagerTest, D2hWriteExplicitStagingIsPushedNotAliasedBlock) {
+  TestD2hKVCacheManager sender(/*num_layers=*/1, /*num_shards=*/1,
+                               /*slice_byte_size=*/128, /*host_blocks=*/2);
+  TestKVCacheManager receiver(/*num_layers=*/1, /*num_shards=*/1,
+                              /*slice_byte_size=*/128, /*host_blocks=*/2);
+
+  const std::optional<int> receiver_port = receiver.local_port();
+  ASSERT_TRUE(receiver_port.has_value());
+  std::string receiver_peer =
+      absl::StrCat(receiver.local_ip(), ":", *receiver_port);
+
+  uint8_t* sender_buf = sender.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
+  uint8_t* receiver_buf =
+      receiver.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
+  ASSERT_NE(sender_buf, nullptr);
+  ASSERT_NE(receiver_buf, nullptr);
+
+  // Staging block 0 holds the payload (the mocked D2h stage is a no-op, so
+  // the pre-seeded content is what gets pushed). Local block 1 -- same id as
+  // the REMOTE dst block -- holds a sentinel the pre-fix code would have
+  // staged into and pushed.
+  std::memset(sender_buf, 0xAB, 128);
+  std::memset(sender_buf + 128, 0x99, 128);
+  std::memset(receiver_buf, 0, 256);
+
+  auto res = sender.D2hWrite(receiver_peer, /*src_device=*/{0},
+                             /*src_host(staging)=*/{0}, /*dst_host=*/{1},
+                             /*copy_sizes=*/{1});
+  ASSERT_TRUE(res.ok()) << res.status().ToString();
+  EXPECT_TRUE(res->Await().ok());
+
+  // The peer received the STAGING block's payload, not the sentinel from the
+  // sender's local block 1 (the would-be alias of the remote dst id).
+  EXPECT_TRUE(std::all_of(receiver_buf + 128, receiver_buf + 256,
+                          [](uint8_t v) { return v == 0xAB; }));
+  // The sender's local block 1 is untouched.
+  EXPECT_TRUE(std::all_of(sender_buf + 128, sender_buf + 256,
+                          [](uint8_t v) { return v == 0x99; }));
+}
+
+// The 2-stage remote APIs require the explicit staging list (same length as
+// the other offset lists) -- no silent alias fallback.
+TEST(KVCacheManagerTest, RemoteTwoStageApisRequireExplicitStaging) {
+  TestKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
+                             /*slice_byte_size=*/128, /*host_blocks=*/2);
+
+  auto h2d_read = manager.H2dRead("localhost:1", /*src_host=*/{0},
+                                  /*dst_host(staging)=*/{}, /*dst_device=*/{0},
+                                  /*copy_sizes=*/{1});
+  EXPECT_EQ(h2d_read.status().code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(h2d_read.status().message(), testing::HasSubstr("same length"));
+
+  auto d2h_write = manager.D2hWrite("localhost:1", /*src_device=*/{0},
+                                    /*src_host(staging)=*/{}, /*dst_host=*/{0},
+                                    /*copy_sizes=*/{1});
+  EXPECT_EQ(d2h_write.status().code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(d2h_write.status().message(), testing::HasSubstr("same length"));
+
+  auto h2d_write =
+      manager.H2dWrite("localhost:1", /*src_host=*/{0},
+                       /*dst_host(staging)=*/{}, /*dst_device=*/{0},
+                       /*copy_sizes=*/{1});
+  EXPECT_EQ(h2d_write.status().code(), absl::StatusCode::kInvalidArgument);
+  EXPECT_THAT(h2d_write.status().message(), testing::HasSubstr("same length"));
 }
 
 }  // namespace

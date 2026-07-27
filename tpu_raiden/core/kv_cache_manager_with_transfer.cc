@@ -1632,6 +1632,13 @@ void KVCacheManagerWithTransfer::RemoveStagingReadinessLocked(
 void KVCacheManagerWithTransfer::RegisterBlockReadinessCallback(
     size_t layer_idx, size_t shard_idx, int block_id, uint64_t uuid,
     transport::BlockTransportDelegate::HostBlockReadyCallback cb) {
+  LOG(INFO) << "KVCacheManagerWithTransfer::RegisterBlockReadinessCallback uuid=" << uuid << " block_id=" << block_id;
+  if (uuid == 0) {
+    // Legacy generic read requests expect immediate callback.
+    LOG(INFO) << "KVCacheManagerWithTransfer::RegisterBlockReadinessCallback: Legacy uuid=0, immediately returning absl::OkStatus().";
+    cb(absl::OkStatus());
+    return;
+  }
   if (block_id < 0 || max_blocks_ <= 0) {
     cb(absl::OkStatus());
     return;

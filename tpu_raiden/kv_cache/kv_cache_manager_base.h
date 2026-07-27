@@ -118,17 +118,28 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<size_t> layer_idx = std::nullopt,
       std::optional<size_t> shard_idx = std::nullopt);
 
+  // Pushes local Host DRAM blocks to a remote peer, ultimately targeting the
+  // peer's TPU HBM. Parameters are flow-ordered: local host source -> REMOTE
+  // host staging (bridge, explicit; never aliased to another id) -> remote HBM
+  // destination. NOTE: the remote H2D stage (staging -> HBM on the peer) is
+  // not yet executed by this call; data rests in the peer's staging blocks and
+  // the receiver's own machinery must move it to HBM (Phase 2).
   virtual absl::StatusOr<raiden::PjRtCopyFuture> H2dWrite(
       absl::string_view peer,
-      const std::vector<int64_t>& src_offsets_major_dim = {},
-      const std::vector<int64_t>& dst_offsets_major_dim = {},
-      const std::vector<int64_t>& copy_sizes_major_dim = {});
+      const std::vector<int64_t>& src_host_offsets_major_dim,
+      const std::vector<int64_t>& dst_host_offsets_major_dim,
+      const std::vector<int64_t>& dst_device_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim);
 
+  // Pulls remote Host DRAM blocks into local TPU HBM. Parameters are
+  // flow-ordered: remote host source -> LOCAL host staging (bridge, explicit;
+  // caller-owned, never aliased to the remote id) -> local HBM destination.
   virtual absl::StatusOr<raiden::PjRtCopyFuture> H2dRead(
       absl::string_view peer,
-      const std::vector<int64_t>& src_offsets_major_dim = {},
-      const std::vector<int64_t>& dst_offsets_major_dim = {},
-      const std::vector<int64_t>& copy_sizes_major_dim = {});
+      const std::vector<int64_t>& src_host_offsets_major_dim,
+      const std::vector<int64_t>& dst_host_offsets_major_dim,
+      const std::vector<int64_t>& dst_device_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim);
 
   // Async on-chip D2H offloads E2E
   virtual absl::StatusOr<raiden::PjRtCopyFuture> D2h(
@@ -139,11 +150,15 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
       std::optional<size_t> layer_idx = std::nullopt,
       std::optional<size_t> shard_idx = std::nullopt);
 
+  // Pushes local TPU HBM blocks to a remote peer's Host DRAM. Parameters are
+  // flow-ordered: local HBM source -> LOCAL host staging (bridge, explicit;
+  // caller-owned, never aliased to the remote id) -> remote host destination.
   virtual absl::StatusOr<raiden::PjRtCopyFuture> D2hWrite(
       absl::string_view peer,
-      const std::vector<int64_t>& src_offsets_major_dim = {},
-      const std::vector<int64_t>& dst_offsets_major_dim = {},
-      const std::vector<int64_t>& copy_sizes_major_dim = {});
+      const std::vector<int64_t>& src_device_offsets_major_dim,
+      const std::vector<int64_t>& src_host_offsets_major_dim,
+      const std::vector<int64_t>& dst_host_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim);
 
   virtual absl::StatusOr<raiden::PjRtCopyFuture> D2hRead(
       absl::string_view peer,

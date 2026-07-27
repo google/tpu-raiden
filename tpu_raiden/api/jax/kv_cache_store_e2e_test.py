@@ -180,6 +180,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
+    os.environ["RAIDEN_LOCAL_IP"] = "127.0.0.1"
     start_servers()
     try:
       self.devices = jax.devices("tpu")
@@ -239,6 +240,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
       )
 
     os.environ["ENABLE_MULTI_NUMA"] = "1" if enable_multi_numa else "0"
+    os.environ["RAIDEN_LOCAL_IP"] = "127.0.0.1"
 
     tpu_sharding = self.setup_shardings()
     num_blocks = 2
@@ -272,7 +274,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     # 4. Create KVCacheManager (Worker)
     manager = kv_cache_manager.KVCacheManager(
         kv_caches=[tpu_cache],
-        local_control_port=0,
+        local_control_port=-1,
         max_blocks=num_blocks,
         num_slots=2,
         unsafe_skip_buffer_lock=self.skip_lock,
@@ -404,6 +406,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
       )
 
     os.environ["ENABLE_MULTI_NUMA"] = "1" if enable_multi_numa else "0"
+    os.environ["RAIDEN_LOCAL_IP"] = "127.0.0.1"
 
     if len(self.devices) < 1:
       self.skipTest(
@@ -451,7 +454,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     )
     manager_a = kv_cache_manager.KVCacheManager(
         kv_caches=[tpu_cache_a],
-        local_control_port=0,
+        local_control_port=-1,
         max_blocks=num_blocks,
         num_slots=2,
         unsafe_skip_buffer_lock=self.skip_lock,
@@ -475,7 +478,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     )
     manager_b = kv_cache_manager.KVCacheManager(
         kv_caches=[tpu_cache_b],
-        local_control_port=0,
+        local_control_port=-1,
         max_blocks=num_blocks,
         num_slots=2,
         unsafe_skip_buffer_lock=self.skip_lock,
@@ -669,7 +672,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     if len(self.devices) < 1:
       self.skipTest("Requires at least 1 device")
     os.environ["ENABLE_MULTI_NUMA"] = "0"
-
+    os.environ["RAIDEN_LOCAL_IP"] = "127.0.0.1"
     sharding = self.setup_sharding_for_devices(self.devices)
     num_blocks = 2
     shape = (num_blocks, 128, 8, 8, 128)
@@ -701,7 +704,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     )
     manager_a = kv_cache_manager.KVCacheManager(
         kv_caches=[tpu_cache_a],
-        local_control_port=0,
+        local_control_port=-1,
         max_blocks=num_blocks,
         num_slots=2,
         unsafe_skip_buffer_lock=self.skip_lock,
@@ -723,7 +726,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     )
     manager_b = kv_cache_manager.KVCacheManager(
         kv_caches=[tpu_cache_b],
-        local_control_port=0,
+        local_control_port=-1,
         max_blocks=num_blocks,
         num_slots=2,
         unsafe_skip_buffer_lock=self.skip_lock,
@@ -768,7 +771,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     if len(self.devices) < 1:
       self.skipTest("Requires at least 1 device")
     os.environ["ENABLE_MULTI_NUMA"] = "0"
-
+    os.environ["RAIDEN_LOCAL_IP"] = "127.0.0.1"
     sharding = self.setup_sharding_for_devices(self.devices)
     num_blocks = 2
     shape = (num_blocks, 128, 8, 8, 128)
@@ -798,7 +801,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     )
     manager_a = kv_cache_manager.KVCacheManager(
         kv_caches=[tpu_cache_a],
-        local_control_port=0,
+        local_control_port=-1,
         max_blocks=num_blocks,
         num_slots=2,
         unsafe_skip_buffer_lock=self.skip_lock,
@@ -835,7 +838,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     )
     manager_b = kv_cache_manager.KVCacheManager(
         kv_caches=[tpu_cache_b],
-        local_control_port=0,
+        local_control_port=-1,
         max_blocks=num_blocks,
         num_slots=2,
         unsafe_skip_buffer_lock=self.skip_lock,

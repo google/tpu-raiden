@@ -526,6 +526,9 @@ std::vector<HostNicAddress> GetLocalHostNicAddressesInternal(
 
 std::vector<HostNicAddress> GetLocalHostNicAddresses(
     absl::string_view sysfs_root) {
+  if (const char* env_ip = std::getenv("RAIDEN_LOCAL_IP")) {
+    return {{"lo", std::string(env_ip), 0, NicClassification::kDataPlane}};
+  }
   struct ifaddrs* ifaddr;
   if (getifaddrs(&ifaddr) == 0) {
     auto nics = internal::GetLocalHostNicAddressesInternal(ifaddr, sysfs_root);
@@ -536,6 +539,9 @@ std::vector<HostNicAddress> GetLocalHostNicAddresses(
 }
 
 std::vector<std::string> GetLocalHostIpAddresses() {
+  if (const char* env_ip = std::getenv("RAIDEN_LOCAL_IP")) {
+    return {std::string(env_ip)};
+  }
   std::vector<std::string> ips;
   for (const auto& nic : GetLocalHostNicAddresses()) {
     ips.push_back(nic.ip_address);

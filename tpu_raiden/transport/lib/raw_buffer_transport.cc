@@ -123,11 +123,23 @@ absl::StatusOr<std::pair<int, int>> CreateTcpIPv6Socket(const int port) {
 }
 
 absl::StatusOr<std::pair<int, int>> CreateSocket(const int port) {
-  const auto fd_port = CreateTcpIPv6Socket(port);
-  return fd_port.ok() ? fd_port : CreateTcpIPv4Socket(port);
+  return CreateTcpIPv4Socket(port);
 }
 
 inline bool IsSocketValid(int fd) { return fcntl(fd, F_GETFD) >= 0; }
+
+std::string GetPeerAddress(const struct sockaddr_storage& addr) {
+  char buf[INET6_ADDRSTRLEN];
+  if (addr.ss_family == AF_INET) {
+    const struct sockaddr_in* s = reinterpret_cast<const struct sockaddr_in*>(&addr);
+    inet_ntop(AF_INET, &s->sin_addr, buf, INET_ADDRSTRLEN);
+    return absl::StrCat(buf, ":", ntohs(s->sin_port));
+  } else {
+    const struct sockaddr_in6* s = reinterpret_cast<const struct sockaddr_in6*>(&addr);
+    inet_ntop(AF_INET6, &s->sin6_addr, buf, INET6_ADDRSTRLEN);
+    return absl::StrCat(buf, ":", ntohs(s->sin6_port));
+  }
+}
 }  // namespace
 
 RawBufferTransport::RawBufferTransport(
@@ -160,6 +172,8 @@ RawBufferTransport::RawBufferTransport(
 }
 
 RawBufferTransport::~RawBufferTransport() {
+  LOG(INFO) << "RawBufferTransport DESTRUCTOR called for server_fd_="
+            << server_fd_;
   stopping_ = true;
 
   // 1. Listener side:
@@ -327,6 +341,8 @@ absl::Status RawBufferTransport::ProcessPeerRequest(int client_fd) {
 
 void RawBufferTransport::ConnectionWorker(int client_fd) {
   DCHECK_GE(client_fd, 0);
+  LOG(INFO) << "RawBufferTransport ConnectionWorker started for client_fd="
+            << client_fd;
   while (!stopping_) {
     struct pollfd pfd;
     pfd.fd = client_fd;
@@ -341,7 +357,12 @@ void RawBufferTransport::ConnectionWorker(int client_fd) {
     }
     if (ret == 0) continue;
 
-    if (!ProcessPeerRequest(client_fd).ok()) {
+    LOG(INFO) << "RawBufferTransport client_fd=" << client_fd
+              << " poll triggered. Reading request...";
+    absl::Status req_status = ProcessPeerRequest(client_fd);
+    if (!req_status.ok()) {
+      LOG(ERROR) << "ProcessPeerRequest failed for client_fd=" << client_fd
+                 << ", error: " << req_status;
       break;
     }
   }
@@ -355,25 +376,38 @@ void RawBufferTransport::ConnectionWorker(int client_fd) {
 }
 
 void RawBufferTransport::ListenerLoop() {
+  int poll_count = 0;
   while (!stopping_) {
     DCHECK(IsSocketValid(server_fd_));
     struct pollfd pfd;
     pfd.fd = server_fd_;
     pfd.events = POLLIN;
     int ret = poll(&pfd, 1, 50);
+    poll_count++;
+    if (poll_count % 100 == 0) {
+      LOG(INFO) << "RawBufferTransport ListenerLoop is alive, polled 100 "
+                   "times. server_fd_="
+                << server_fd_ << " bound_ip_=" << bound_ip_;
+    }
     if (ret <= 0) {
       if (stopping_) break;
       continue;
     }
+    LOG(INFO) << "RawBufferTransport ListenerLoop poll triggered! ret=" << ret;
 
-    struct sockaddr_in6 client_addr;
+    struct sockaddr_storage client_addr;
     socklen_t clilen = sizeof(client_addr);
     int client_fd = accept(
         server_fd_, reinterpret_cast<struct sockaddr*>(&client_addr), &clilen);
     if (client_fd < 0) {
+      LOG(ERROR) << "RawBufferTransport ListenerLoop accept failed with errno: "
+                 << errno << " (" << strerror(errno) << ")";
       if (stopping_) break;
       continue;
     }
+    LOG(INFO)
+        << "RawBufferTransport ListenerLoop ANY ACCEPTED connection! client_fd="
+        << client_fd;
 
     int opt = 1;
     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));

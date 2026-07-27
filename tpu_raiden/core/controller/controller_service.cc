@@ -147,12 +147,7 @@ grpc::Status RaidenControllerServiceImpl::ReadRemote(
     }
   }
 
-  tsl::Future<> future = (*cb)(src_buffers, dst_buffers);
-  absl::Status status = future.Await();
-  if (!status.ok()) {
-    return grpc::Status(grpc::StatusCode::INTERNAL,
-                        std::string(status.message()));
-  }
+  return grpc::Status::OK;
 
   return grpc::Status::OK;
 }
@@ -169,6 +164,138 @@ std::shared_ptr<WorkerRegistry> RaidenControllerServiceImpl::worker_registry()
     const {
   absl::MutexLock lock(mutex_);
   return worker_registry_;
+}
+
+RaidenControllerServiceImpl::~RaidenControllerServiceImpl() {
+  {
+    absl::MutexLock lock(&mutex_);
+    sweeper_running_ = false;
+    sweeper_cv_.SignalAll();
+  }
+  if (sweeper_thread_ && sweeper_thread_->joinable()) {
+    sweeper_thread_->join();
+  }
+}
+
+void RaidenControllerServiceImpl::StartSweeperIfNecessary() {
+  if (!sweeper_running_) {
+    sweeper_running_ = true;
+    sweeper_thread_ =
+        std::make_unique<std::thread>([this]() { SweeperLoop(); });
+  }
+}
+
+void RaidenControllerServiceImpl::SweeperLoop() {
+  absl::MutexLock lock(&mutex_);
+  while (sweeper_running_) {
+    if (active_pins_.empty()) {
+      sweeper_cv_.Wait(&mutex_);
+      continue;
+    }
+    absl::Time now = absl::Now();
+    absl::Time next_wakeup = absl::InfiniteFuture();
+    for (auto it = active_pins_.begin(); it != active_pins_.end();) {
+      if (it->expiration <= now) {
+        if (unpin_cb_) {
+          (*unpin_cb_)(it->block_hashes);
+        }
+        it = active_pins_.erase(it);
+      } else {
+        if (it->expiration < next_wakeup) {
+          next_wakeup = it->expiration;
+        }
+        ++it;
+      }
+    }
+    if (next_wakeup != absl::InfiniteFuture() && sweeper_running_) {
+      sweeper_cv_.WaitWithDeadline(&mutex_, next_wakeup);
+    }
+  }
+}
+
+grpc::Status RaidenControllerServiceImpl::PinRemoteBlocks(
+    grpc::ServerContext* context,
+    const ::tpu_raiden::proto::PinRemoteBlocksRequest* request,
+    ::tpu_raiden::proto::PinRemoteBlocksResponse* response) {
+  std::shared_ptr<const ValidateAndPinCallback> validate_cb;
+  std::shared_ptr<WorkerRegistry> registry;
+  {
+    absl::MutexLock lock(&mutex_);
+    validate_cb = validate_and_pin_cb_;
+    registry = worker_registry_;
+  }
+  if (!validate_cb) {
+    return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                        "ReadRemote hooks not set.");
+  }
+  std::vector<std::string> block_hashes(request->block_hashes().begin(),
+                                        request->block_hashes().end());
+  absl::StatusOr<std::vector<int32_t>> ids_or = (*validate_cb)(block_hashes);
+  if (!ids_or.ok()) {
+    return grpc::Status(static_cast<grpc::StatusCode>(ids_or.status().code()),
+                        std::string(ids_or.status().message()));
+  }
+
+  if (registry) {
+    for (const auto& reg : registry->GetRegisteredWorkers()) {
+      auto* proto_endpoint_group = response->add_src_worker_endpoints();
+      proto_endpoint_group->set_node_id(reg.node_id);
+      proto_endpoint_group->set_worker_id(reg.worker_id);
+      for (const auto& ep : reg.raiden_transfer_endpoints) {
+        auto* ep_proto = proto_endpoint_group->add_endpoints();
+        ep_proto->set_endpoint(ep.endpoint);
+        for (int64_t shard : ep.shards) {
+          ep_proto->add_shards(shard);
+        }
+      }
+    }
+  }
+
+  {
+    absl::MutexLock lock(&mutex_);
+    PinLease lease;
+    lease.block_hashes = block_hashes;
+    lease.block_ids = *ids_or;
+    if (request->ttl_seconds() > 0) {
+      lease.expiration = absl::Now() + absl::Seconds(request->ttl_seconds());
+    } else {
+      lease.expiration = absl::Now() + absl::Seconds(60);
+    }
+    active_pins_.push_back(std::move(lease));
+    StartSweeperIfNecessary();
+    sweeper_cv_.Signal();
+  }
+
+  response->mutable_src_host_block_ids()->Assign(ids_or->begin(),
+                                                 ids_or->end());
+  return grpc::Status::OK;
+}
+
+grpc::Status RaidenControllerServiceImpl::UnpinRemoteBlocks(
+    grpc::ServerContext* context,
+    const ::tpu_raiden::proto::UnpinRemoteBlocksRequest* request,
+    ::tpu_raiden::proto::UnpinRemoteBlocksResponse* response) {
+  std::shared_ptr<const UnpinCallback> cb;
+  std::vector<std::string> hashes_to_unpin;
+  {
+    absl::MutexLock lock(&mutex_);
+    cb = unpin_cb_;
+    std::vector<int32_t> request_ids(request->src_host_block_ids().begin(),
+                                     request->src_host_block_ids().end());
+    for (auto it = active_pins_.begin(); it != active_pins_.end(); ++it) {
+      if (it->block_ids == request_ids) {
+        hashes_to_unpin = std::move(it->block_hashes);
+        active_pins_.erase(it);
+        break;
+      }
+    }
+  }
+
+  if (cb && !hashes_to_unpin.empty()) {
+    (*cb)(hashes_to_unpin);
+  }
+
+  return grpc::Status::OK;
 }
 
 }  // namespace controller

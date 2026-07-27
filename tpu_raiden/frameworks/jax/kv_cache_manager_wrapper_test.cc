@@ -547,10 +547,12 @@ TEST(KVCacheManagerWrapperTest, RaidenControllerTransferBuffersIntegration) {
   Buffer dst_d2h_1(20, {}, std::nullopt, rpc::MEMORY_TYPE_DRAM);
   Buffer dst_d2h_2(40, {}, std::nullopt, rpc::MEMORY_TYPE_DRAM);
 
-  auto status_d2h = controller
-                        .TransferBuffers("worker_0", {src_d2h_1, src_d2h_2},
-                                         {dst_d2h_1, dst_d2h_2}, copy_sizes)
-                        .Await();
+  auto status_d2h =
+      controller
+          .TransferBuffers("worker_0", {src_d2h_1, src_d2h_2},
+                           {dst_d2h_1, dst_d2h_2}, /*staging_host_buffers=*/{},
+                           copy_sizes)
+          .Await();
   ASSERT_TRUE(status_d2h.ok());
   EXPECT_EQ(ptr0->d2h_calls, 1);
   EXPECT_EQ(ptr0->h2d_calls, 0);
@@ -563,10 +565,12 @@ TEST(KVCacheManagerWrapperTest, RaidenControllerTransferBuffersIntegration) {
   Buffer dst_h2d_1(20, {}, std::nullopt, rpc::MEMORY_TYPE_HBM);
   Buffer dst_h2d_2(40, {}, std::nullopt, rpc::MEMORY_TYPE_HBM);
 
-  auto status_h2d = controller
-                        .TransferBuffers("worker_0", {src_h2d_1, src_h2d_2},
-                                         {dst_h2d_1, dst_h2d_2}, copy_sizes)
-                        .Await();
+  auto status_h2d =
+      controller
+          .TransferBuffers("worker_0", {src_h2d_1, src_h2d_2},
+                           {dst_h2d_1, dst_h2d_2}, /*staging_host_buffers=*/{},
+                           copy_sizes)
+          .Await();
   ASSERT_TRUE(status_h2d.ok());
   EXPECT_EQ(ptr0->d2h_calls, 1);
   EXPECT_EQ(ptr0->h2d_calls, 1);

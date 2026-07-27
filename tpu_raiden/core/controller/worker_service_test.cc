@@ -132,7 +132,7 @@ TEST_F(WorkerServiceTest, TransferBuffersH2hSuccess) {
   transfer->add_dst_buffers()->set_remote_address("localhost:8080");
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
-  ASSERT_TRUE(status.ok());
+  ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_calls, 0);
   EXPECT_EQ(mock_mgr.h2h_calls, 1);
@@ -263,7 +263,7 @@ TEST_F(WorkerServiceTest, TransferBuffersD2HSuccess) {
   transfer->add_copy_sizes(2);
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
-  ASSERT_TRUE(status.ok());
+  ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(mock_mgr.d2h_calls, 1);
   EXPECT_EQ(mock_mgr.h2d_calls, 0);
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(10, 30));
@@ -283,13 +283,17 @@ TEST_F(WorkerServiceTest, TransferBuffersRemoteD2hWithPeerSuccess) {
   transfer->add_dst_offsets(200);
   transfer->add_dst_buffers()->set_remote_address("remote_host:1234");
 
+  auto* staging_buf = transfer->add_staging_host_buffers();
+  staging_buf->set_index(300);
+
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
-  ASSERT_TRUE(status.ok());
+  ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
   EXPECT_EQ(mock_mgr.d2h_write_calls, 1);
   EXPECT_EQ(mock_mgr.h2d_calls, 0);
   EXPECT_EQ(mock_mgr.last_peer, "remote_host:1234");
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
+  EXPECT_THAT(mock_mgr.last_staging_offsets, ElementsAre(300));
   EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
   EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
 }
@@ -311,7 +315,7 @@ TEST_F(WorkerServiceTest,
   dst_buf->set_remote_address("remote_host:5678");
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
-  ASSERT_TRUE(status.ok());
+  ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
   EXPECT_EQ(mock_mgr.d2h_write_calls, 1);
   EXPECT_EQ(mock_mgr.h2d_calls, 0);
@@ -338,7 +342,7 @@ TEST_F(WorkerServiceTest,
   dst_buf->set_index(200);
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
-  ASSERT_TRUE(status.ok());
+  ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
   EXPECT_EQ(mock_mgr.d2h_write_calls, 0);
   EXPECT_EQ(mock_mgr.d2h_read_calls, 1);
@@ -361,7 +365,7 @@ TEST_F(WorkerServiceTest, TransferBuffersLocalD2hFallbackSuccess) {
   transfer->add_dst_offsets(200);
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
-  ASSERT_TRUE(status.ok());
+  ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(mock_mgr.d2h_calls, 1);
   EXPECT_EQ(mock_mgr.d2h_write_calls, 0);
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
@@ -381,7 +385,7 @@ TEST_F(WorkerServiceTest, TransferBuffersH2DSuccess) {
   transfer->add_dst_offsets(200);
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
-  ASSERT_TRUE(status.ok());
+  ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_calls, 1);
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
@@ -400,14 +404,16 @@ TEST_F(WorkerServiceTest, TransferBuffersRemoteH2dWithPeerSuccess) {
   transfer->add_src_offsets(100);
   transfer->add_dst_offsets(200);
   transfer->add_dst_buffers()->set_remote_address("remote_host:1234");
+  transfer->add_staging_host_buffers()->set_index(300);
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
-  ASSERT_TRUE(status.ok());
+  ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_write_calls, 1);
   EXPECT_EQ(mock_mgr.last_peer, "remote_host:1234");
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
+  EXPECT_THAT(mock_mgr.last_staging_offsets, ElementsAre(300));
   EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
   EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
 }
@@ -428,13 +434,17 @@ TEST_F(WorkerServiceTest,
   dst_buf->set_index(200);
   dst_buf->set_remote_address("remote_host:5678");
 
+  auto* staging_buf = transfer->add_staging_host_buffers();
+  staging_buf->set_index(300);
+
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
-  ASSERT_TRUE(status.ok());
+  ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_write_calls, 1);
   EXPECT_EQ(mock_mgr.last_peer, "remote_host:5678");
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
+  EXPECT_THAT(mock_mgr.last_staging_offsets, ElementsAre(300));
   EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
   EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
 }
@@ -455,14 +465,18 @@ TEST_F(WorkerServiceTest,
   auto* dst_buf = transfer->add_dst_buffers();
   dst_buf->set_index(200);
 
+  auto* staging_buf = transfer->add_staging_host_buffers();
+  staging_buf->set_index(300);
+
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
-  ASSERT_TRUE(status.ok());
+  ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_write_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_read_calls, 1);
   EXPECT_EQ(mock_mgr.last_peer, "remote_host:5678");
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(100));
+  EXPECT_THAT(mock_mgr.last_staging_offsets, ElementsAre(300));
   EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(200));
   EXPECT_THAT(mock_mgr.last_copy_sizes, ElementsAre(1));
 }
@@ -479,7 +493,7 @@ TEST_F(WorkerServiceTest, TransferBuffersLocalH2dFallbackSuccess) {
   transfer->add_dst_offsets(200);
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
-  ASSERT_TRUE(status.ok());
+  ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(mock_mgr.d2h_calls, 0);
   EXPECT_EQ(mock_mgr.h2d_calls, 1);
   EXPECT_EQ(mock_mgr.h2d_write_calls, 0);
@@ -502,7 +516,7 @@ TEST_F(WorkerServiceTest, TransferBuffersWithBufferProtosSuccess) {
   dst_buf->set_index(20);
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
-  ASSERT_TRUE(status.ok());
+  ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(mock_mgr.d2h_calls, 1);
   EXPECT_THAT(mock_mgr.last_src_offsets, ElementsAre(10));
   EXPECT_THAT(mock_mgr.last_dst_offsets, ElementsAre(20));
@@ -524,7 +538,7 @@ TEST_F(WorkerServiceTest,
   dst_buf->set_remote_address("localhost:8080");
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
-  ASSERT_TRUE(status.ok());
+  ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(mock_mgr.h2h_calls, 1);
   EXPECT_EQ(mock_mgr.h2h_read_calls, 0);
   EXPECT_EQ(mock_mgr.h2h_write_calls, 1);
@@ -548,7 +562,7 @@ TEST_F(WorkerServiceTest, TransferBuffersH2hReadRemoteSrcSuccess) {
   dst_buf->set_memory_type(rpc::MEMORY_TYPE_DRAM);
 
   auto status = test_server_->client->TransferBuffers(transfer_req).Await();
-  ASSERT_TRUE(status.ok());
+  ASSERT_TRUE(status.ok()) << status.message();
   EXPECT_EQ(mock_mgr.h2h_calls, 1);
   EXPECT_EQ(mock_mgr.h2h_read_calls, 1);
   EXPECT_EQ(mock_mgr.h2h_write_calls, 0);

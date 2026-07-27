@@ -796,6 +796,42 @@ NumaAwareKVCacheManager::H2hRead(
   return std::make_pair(std::move(all_ids), std::move(composite));
 }
 
+absl::StatusOr<raiden::PjRtCopyFuture> NumaAwareKVCacheManager::H2dRead(
+    const std::vector<RaidenTransferEndpoint>& remote_descriptors,
+    const std::vector<int64_t>& src_host_offsets,
+    const std::vector<int64_t>& dst_host_offsets,
+    const std::vector<int64_t>& dst_device_offsets,
+    const std::vector<int64_t>& copy_sizes) {
+  if (sub_managers_.empty()) {
+    return raiden::PjRtCopyFuture();
+  }
+  std::vector<raiden::PjRtCopyFuture> sub_copy_futures;
+  sub_copy_futures.reserve(sub_managers_.size());
+  for (size_t s = 0; s < sub_managers_.size(); ++s) {
+    const auto& sub_shards = submanager_to_global_shards_[s];
+    std::string matched_ep;
+    for (const auto& desc : remote_descriptors) {
+      for (int64_t gsh : sub_shards) {
+        if (std::find(desc.shards.begin(), desc.shards.end(), gsh) !=
+            desc.shards.end()) {
+          matched_ep = desc.endpoint;
+          break;
+        }
+      }
+      if (!matched_ep.empty()) break;
+    }
+    if (matched_ep.empty() && !remote_descriptors.empty()) {
+      matched_ep = remote_descriptors[0].endpoint;
+    }
+
+    ASSIGN_OR_RETURN(auto f, sub_managers_[s]->H2dRead(
+                                 matched_ep, src_host_offsets, dst_host_offsets,
+                                 dst_device_offsets, copy_sizes));
+    sub_copy_futures.push_back(std::move(f));
+  }
+  return raiden::JoinPjRtCopyFutures(absl::MakeSpan(sub_copy_futures));
+}
+
 absl::Status NumaAwareKVCacheManager::UnlockBlocks(
     const std::vector<int>& block_ids) {
   for (auto& sub : sub_managers_) {

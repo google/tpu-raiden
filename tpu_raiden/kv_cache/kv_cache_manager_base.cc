@@ -92,6 +92,21 @@ absl::Status ValidateOffsetsAndSizes(const std::vector<int64_t>& src_offsets,
   return absl::OkStatus();
 }
 
+// Converts int64 host-block offsets to validated int block ids.
+absl::StatusOr<std::vector<int>> ToHostBlockIds(
+    const std::vector<int64_t>& offsets) {
+  std::vector<int> ids;
+  ids.reserve(offsets.size());
+  for (int64_t offset : offsets) {
+    if (offset < 0 || offset > std::numeric_limits<int>::max()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Invalid host block ID: ", offset));
+    }
+    ids.push_back(static_cast<int>(offset));
+  }
+  return ids;
+}
+
 // Coalesce runs of adjacent copies into one, so a run of N consecutive
 // 1-block copies becomes one N-block copy.
 void CoalesceMajorDimCopies(const std::vector<int64_t>& src_offsets,
@@ -690,50 +705,39 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2h(
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dWrite(
-    absl::string_view peer, const std::vector<int64_t>& src_offsets_major_dim,
-    const std::vector<int64_t>& dst_offsets_major_dim,
+    absl::string_view peer,
+    const std::vector<int64_t>& src_host_offsets_major_dim,
+    const std::vector<int64_t>& dst_host_offsets_major_dim,
+    const std::vector<int64_t>& dst_device_offsets_major_dim,
     const std::vector<int64_t>& copy_sizes_major_dim) {
-  const bool present = !src_offsets_major_dim.empty() ||
-                       !dst_offsets_major_dim.empty() ||
-                       !copy_sizes_major_dim.empty();
-  if (present &&
-      (src_offsets_major_dim.size() != dst_offsets_major_dim.size() ||
-       src_offsets_major_dim.size() != copy_sizes_major_dim.size())) {
-    return absl::InvalidArgumentError(
-        "src_offsets, dst_offsets, and sizes must have the same length");
-  }
-
-  std::vector<int> src_block_ids;
-  src_block_ids.reserve(src_offsets_major_dim.size());
-  for (int64_t offset : src_offsets_major_dim) {
-    if (offset < 0 || offset > std::numeric_limits<int>::max()) {
-      return absl::InvalidArgumentError(
-          absl::StrCat("Invalid host block ID: ", offset));
-    }
-    src_block_ids.push_back(static_cast<int>(offset));
-  }
-
-  std::vector<int> dst_block_ids;
-  dst_block_ids.reserve(dst_offsets_major_dim.size());
-  for (int64_t offset : dst_offsets_major_dim) {
-    if (offset < 0 || offset > std::numeric_limits<int>::max()) {
-      return absl::InvalidArgumentError(
-          absl::StrCat("Invalid host block ID: ", offset));
-    }
-    dst_block_ids.push_back(static_cast<int>(offset));
-  }
-
-  TF_RETURN_IF_ERROR(ValidateOffsetsAndSizes(
-      src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim));
-
-  size_t num_chunks = src_offsets_major_dim.size();
+  size_t num_chunks = src_host_offsets_major_dim.size();
   if (num_chunks == 0) {
     return raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{});
   }
+  if (dst_host_offsets_major_dim.size() != num_chunks ||
+      dst_device_offsets_major_dim.size() != num_chunks ||
+      copy_sizes_major_dim.size() != num_chunks) {
+    return absl::InvalidArgumentError(
+        "src_host, dst_host (staging), dst_device offsets and copy_sizes "
+        "must have the same length");
+  }
 
+  ASSIGN_OR_RETURN(std::vector<int> src_block_ids,
+                   ToHostBlockIds(src_host_offsets_major_dim));
+  ASSIGN_OR_RETURN(std::vector<int> staging_block_ids,
+                   ToHostBlockIds(dst_host_offsets_major_dim));
+  TF_RETURN_IF_ERROR(ValidateOffsetsAndSizes(src_host_offsets_major_dim,
+                                             dst_device_offsets_major_dim,
+                                             copy_sizes_major_dim));
+
+  // Push local host blocks into the peer's EXPLICIT host staging blocks
+  // (dst_host_offsets_major_dim) -- never into an HBM id reinterpreted as a
+  // host id. NOTE: the remote H2D stage (staging -> dst_device on the peer)
+  // is not yet executed by this call; dst_device_offsets_major_dim identifies
+  // the eventual remote HBM destination for the receiver-side device copy.
   if (num_chunks == 1 || !push_pool_) {
-    ASSIGN_OR_RETURN(auto h2h_res,
-                     H2hWrite(std::string(peer), src_block_ids, dst_block_ids));
+    ASSIGN_OR_RETURN(auto h2h_res, H2hWrite(std::string(peer), src_block_ids,
+                                            staging_block_ids));
     return h2h_res.second;
   }
 
@@ -745,14 +749,14 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dWrite(
   std::string peer_str(peer);
   for (size_t i = 0; i < num_chunks; ++i) {
     int src_block_id = src_block_ids[i];
-    int dst_block_id = dst_block_ids.empty() ? src_block_id : dst_block_ids[i];
-    pool->Schedule([this, state, peer_str, src_block_id, dst_block_id]() {
+    int staging_block_id = staging_block_ids[i];
+    pool->Schedule([this, state, peer_str, src_block_id, staging_block_id]() {
       if (state->HasFailed()) {
         state->MarkChunkComplete();
         return;
       }
       absl::Status status =
-          H2hWriteDirect(peer_str, {src_block_id}, {dst_block_id}).status();
+          H2hWriteDirect(peer_str, {src_block_id}, {staging_block_id}).status();
       if (!status.ok()) {
         state->SetError(status);
       }
@@ -765,62 +769,44 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dWrite(
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dRead(
-    absl::string_view peer, const std::vector<int64_t>& src_offsets_major_dim,
-    const std::vector<int64_t>& dst_offsets_major_dim,
+    absl::string_view peer,
+    const std::vector<int64_t>& src_host_offsets_major_dim,
+    const std::vector<int64_t>& dst_host_offsets_major_dim,
+    const std::vector<int64_t>& dst_device_offsets_major_dim,
     const std::vector<int64_t>& copy_sizes_major_dim) {
-  const bool present = !src_offsets_major_dim.empty() ||
-                       !dst_offsets_major_dim.empty() ||
-                       !copy_sizes_major_dim.empty();
-  if (present && !dst_offsets_major_dim.empty() &&
-      src_offsets_major_dim.size() != dst_offsets_major_dim.size()) {
-    return absl::InvalidArgumentError(
-        "src_offsets and dst_offsets must have the same length");
-  }
-  if (present && !copy_sizes_major_dim.empty() &&
-      src_offsets_major_dim.size() != copy_sizes_major_dim.size()) {
-    return absl::InvalidArgumentError(
-        "src_offsets and copy_sizes must have the same length");
-  }
-
-  std::vector<int> src_block_ids;
-  src_block_ids.reserve(src_offsets_major_dim.size());
-  for (int64_t offset : src_offsets_major_dim) {
-    if (offset < 0 || offset > std::numeric_limits<int>::max()) {
-      return absl::InvalidArgumentError(
-          absl::StrCat("Invalid host block ID: ", offset));
-    }
-    src_block_ids.push_back(static_cast<int>(offset));
-  }
-
-  for (int64_t offset : dst_offsets_major_dim) {
-    if (offset < 0 || offset > std::numeric_limits<int>::max()) {
-      return absl::InvalidArgumentError(
-          absl::StrCat("Invalid host block ID: ", offset));
-    }
-  }
-
-  TF_RETURN_IF_ERROR(ValidateOffsetsAndSizes(
-      src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim));
-
-  size_t num_chunks = src_offsets_major_dim.size();
+  size_t num_chunks = src_host_offsets_major_dim.size();
   if (num_chunks == 0) {
     return raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{});
   }
+  LOG(INFO) << "KVCacheManagerBase::H2dRead string_view peer version called with " << num_chunks << " chunks, peer=" << peer;
+  if (dst_host_offsets_major_dim.size() != num_chunks ||
+      dst_device_offsets_major_dim.size() != num_chunks ||
+      copy_sizes_major_dim.size() != num_chunks) {
+    return absl::InvalidArgumentError(
+        "src_host, dst_host (staging), dst_device offsets and copy_sizes "
+        "must have the same length");
+  }
 
+  ASSIGN_OR_RETURN(std::vector<int> src_block_ids,
+                   ToHostBlockIds(src_host_offsets_major_dim));
+  ASSIGN_OR_RETURN(std::vector<int> staging_block_ids,
+                   ToHostBlockIds(dst_host_offsets_major_dim));
+  TF_RETURN_IF_ERROR(ValidateOffsetsAndSizes(dst_host_offsets_major_dim,
+                                             dst_device_offsets_major_dim,
+                                             copy_sizes_major_dim));
+
+  // Pull remote host blocks into the EXPLICIT local host staging blocks
+  // (dst_host_offsets_major_dim) -- never into an aliased copy of the remote
+  // src id -- then H2D the staging blocks into the local device destination.
   if (num_chunks == 1 || !pull_pool_) {
-    ASSIGN_OR_RETURN(auto h2h_fut, H2hReadExplicit(std::string(peer),
-                                                   src_block_ids, src_block_ids,
-                                                   /*explicit_dst_ptrs=*/{}));
+    ASSIGN_OR_RETURN(
+        auto h2h_fut,
+        H2hReadExplicit(std::string(peer), src_block_ids, staging_block_ids,
+                        /*explicit_dst_ptrs=*/{}));
     RETURN_IF_ERROR(h2h_fut.Await());
 
-    const std::vector<int64_t>& h2d_dst_offsets = dst_offsets_major_dim.empty()
-                                                      ? src_offsets_major_dim
-                                                      : dst_offsets_major_dim;
-    std::vector<int64_t> h2d_sizes = copy_sizes_major_dim.empty()
-                                         ? std::vector<int64_t>(num_chunks, 1)
-                                         : copy_sizes_major_dim;
-
-    return H2d(src_offsets_major_dim, h2d_dst_offsets, h2d_sizes);
+    return H2d(dst_host_offsets_major_dim, dst_device_offsets_major_dim,
+               copy_sizes_major_dim);
   }
 
   auto [promise, aggregate_future] = xla::MakePromise();
@@ -838,20 +824,23 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dRead(
   std::string peer_str(peer);
   for (size_t i = 0; i < num_chunks; ++i) {
     int src_block_id = src_block_ids[i];
-    int64_t dst_offset = dst_offsets_major_dim.empty()
-                             ? src_offsets_major_dim[i]
-                             : dst_offsets_major_dim[i];
-    int64_t size = copy_sizes_major_dim.empty() ? 1 : copy_sizes_major_dim[i];
+    int staging_block_id = staging_block_ids[i];
+    int64_t staging_offset = dst_host_offsets_major_dim[i];
+    int64_t dst_device_offset = dst_device_offsets_major_dim[i];
+    int64_t size = copy_sizes_major_dim[i];
 
-    pull_pool_->Schedule([this, state, peer_str, src_block_id, dst_offset,
-                          size]() {
+    LOG(INFO) << "KVCacheManagerBase::H2dRead Scheduling pull task for chunk " << i << " src_block_id=" << src_block_id << " peer=" << peer_str;
+    pull_pool_->Schedule([this, state, peer_str, src_block_id, staging_block_id,
+                          staging_offset, dst_device_offset, size]() {
+      LOG(INFO) << "H2dRead pull task lambda running for src_block_id=" << src_block_id;
       if (state->HasFailed()) {
         state->MarkChunkComplete();
         return;
       }
 
-      auto h2h_fut_or = H2hReadExplicit(
-          peer_str, {src_block_id}, {src_block_id}, /*explicit_dst_ptrs=*/{});
+      auto h2h_fut_or =
+          H2hReadExplicit(peer_str, {src_block_id}, {staging_block_id},
+                          /*explicit_dst_ptrs=*/{});
       if (!h2h_fut_or.ok()) {
         state->SetError(h2h_fut_or.status());
         state->MarkChunkComplete();
@@ -870,7 +859,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dRead(
         return;
       }
 
-      auto h2d_fut_or = H2d({src_block_id}, {dst_offset}, {size});
+      auto h2d_fut_or = H2d({staging_offset}, {dst_device_offset}, {size});
       if (!h2d_fut_or.ok()) {
         state->SetError(h2d_fut_or.status());
         state->MarkChunkComplete();
@@ -891,44 +880,42 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dRead(
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hWrite(
-    absl::string_view peer, const std::vector<int64_t>& src_offsets_major_dim,
-    const std::vector<int64_t>& dst_offsets_major_dim,
+    absl::string_view peer,
+    const std::vector<int64_t>& src_device_offsets_major_dim,
+    const std::vector<int64_t>& src_host_offsets_major_dim,
+    const std::vector<int64_t>& dst_host_offsets_major_dim,
     const std::vector<int64_t>& copy_sizes_major_dim) {
-  const bool present = !src_offsets_major_dim.empty() ||
-                       !dst_offsets_major_dim.empty() ||
-                       !copy_sizes_major_dim.empty();
-  if (present &&
-      (src_offsets_major_dim.size() != dst_offsets_major_dim.size() ||
-       src_offsets_major_dim.size() != copy_sizes_major_dim.size())) {
-    return absl::InvalidArgumentError(
-        "src_offsets, dst_offsets, and sizes must have the same length");
-  }
-
-  std::vector<int> host_block_ids;
-  host_block_ids.reserve(dst_offsets_major_dim.size());
-  for (int64_t offset : dst_offsets_major_dim) {
-    if (offset < 0 || offset > std::numeric_limits<int>::max()) {
-      return absl::InvalidArgumentError(
-          absl::StrCat("Invalid host block ID: ", offset));
-    }
-    host_block_ids.push_back(static_cast<int>(offset));
-  }
-
-  TF_RETURN_IF_ERROR(ValidateOffsetsAndSizes(
-      src_offsets_major_dim, dst_offsets_major_dim, copy_sizes_major_dim));
-  size_t num_chunks = src_offsets_major_dim.size();
+  size_t num_chunks = src_device_offsets_major_dim.size();
   if (num_chunks == 0) {
     return raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{});
   }
+  if (src_host_offsets_major_dim.size() != num_chunks ||
+      dst_host_offsets_major_dim.size() != num_chunks ||
+      copy_sizes_major_dim.size() != num_chunks) {
+    return absl::InvalidArgumentError(
+        "src_device, src_host (staging), dst_host offsets and copy_sizes "
+        "must have the same length");
+  }
 
+  ASSIGN_OR_RETURN(std::vector<int> staging_block_ids,
+                   ToHostBlockIds(src_host_offsets_major_dim));
+  ASSIGN_OR_RETURN(std::vector<int> dst_block_ids,
+                   ToHostBlockIds(dst_host_offsets_major_dim));
+  TF_RETURN_IF_ERROR(ValidateOffsetsAndSizes(src_device_offsets_major_dim,
+                                             src_host_offsets_major_dim,
+                                             copy_sizes_major_dim));
+
+  // Stage local device blocks into the EXPLICIT local host staging blocks
+  // (src_host_offsets_major_dim) -- never into an aliased copy of the remote
+  // dst id -- then push the staging blocks to the peer's host destination.
   if (num_chunks == 1 || !push_pool_) {
     ASSIGN_OR_RETURN(auto d2h_future,
-                     D2h(src_offsets_major_dim, dst_offsets_major_dim,
-                         copy_sizes_major_dim));
+                     D2h(src_device_offsets_major_dim,
+                         src_host_offsets_major_dim, copy_sizes_major_dim));
     RETURN_IF_ERROR(d2h_future.Await());
 
-    ASSIGN_OR_RETURN(auto h2h_res, H2hWrite(std::string(peer), host_block_ids,
-                                            host_block_ids));
+    ASSIGN_OR_RETURN(auto h2h_res, H2hWrite(std::string(peer),
+                                            staging_block_ids, dst_block_ids));
     return h2h_res.second;
   }
 
@@ -937,22 +924,24 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hWrite(
 
   struct ChunkD2h {
     raiden::PjRtCopyFuture d2h_fut;
-    int host_block_id;
+    int staging_block_id;
+    int dst_block_id;
   };
   std::vector<ChunkD2h> chunks;
   chunks.reserve(num_chunks);
 
   for (size_t i = 0; i < num_chunks; ++i) {
     ASSIGN_OR_RETURN(auto chunk_futures,
-                     DispatchD2hChunks({src_offsets_major_dim[i]},
-                                       {dst_offsets_major_dim[i]},
+                     DispatchD2hChunks({src_device_offsets_major_dim[i]},
+                                       {src_host_offsets_major_dim[i]},
                                        {copy_sizes_major_dim[i]}));
     raiden::PjRtCopyFuture d2h_fut =
         raiden::JoinPjRtCopyFutures(absl::MakeSpan(chunk_futures));
     for (const auto& h : d2h_fut.holds) {
       all_holds.push_back(h);
     }
-    chunks.push_back({std::move(d2h_fut), host_block_ids[i]});
+    chunks.push_back(
+        {std::move(d2h_fut), staging_block_ids[i], dst_block_ids[i]});
   }
 
   auto state = std::make_shared<TransferPipelinedState>(
@@ -961,21 +950,23 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hWrite(
   std::shared_ptr<NumaThreadPool> pool = push_pool_;
   std::string peer_str(peer);
   for (size_t i = 0; i < num_chunks; ++i) {
-    int host_block_id = chunks[i].host_block_id;
-    chunks[i].d2h_fut.OnReady([this, pool, state, peer_str,
-                               host_block_id](auto status_or) {
+    int staging_block_id = chunks[i].staging_block_id;
+    int dst_block_id = chunks[i].dst_block_id;
+    chunks[i].d2h_fut.OnReady([this, pool, state, peer_str, staging_block_id,
+                               dst_block_id](auto status_or) {
       if (!status_or.ok()) {
         state->SetError(status_or.status());
         state->MarkChunkComplete();
         return;
       }
-      pool->Schedule([this, state, peer_str, host_block_id]() {
+      pool->Schedule([this, state, peer_str, staging_block_id, dst_block_id]() {
         if (state->HasFailed()) {
           state->MarkChunkComplete();
           return;
         }
         absl::Status status =
-            H2hWriteDirect(peer_str, {host_block_id}, {host_block_id}).status();
+            H2hWriteDirect(peer_str, {staging_block_id}, {dst_block_id})
+                .status();
         if (!status.ok()) {
           state->SetError(status);
         }

@@ -17,8 +17,10 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include <chrono>
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
@@ -27,6 +29,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "grpcpp/server_context.h"
 #include "grpcpp/support/status.h"
@@ -47,7 +50,7 @@ class RaidenControllerServiceImpl final
  public:
   explicit RaidenControllerServiceImpl(
       std::shared_ptr<WorkerRegistry> worker_registry = nullptr);
-  ~RaidenControllerServiceImpl() override = default;
+  ~RaidenControllerServiceImpl() override;
 
   // Disallow copy and assign
   RaidenControllerServiceImpl(const RaidenControllerServiceImpl&) = delete;
@@ -64,6 +67,16 @@ class RaidenControllerServiceImpl final
       grpc::ServerContext* context,
       const ::tpu_raiden::proto::ReadRemoteRequest* request,
       ::tpu_raiden::proto::ReadRemoteResponse* response) override;
+
+  grpc::Status PinRemoteBlocks(
+      grpc::ServerContext* context,
+      const ::tpu_raiden::proto::PinRemoteBlocksRequest* request,
+      ::tpu_raiden::proto::PinRemoteBlocksResponse* response) override;
+
+  grpc::Status UnpinRemoteBlocks(
+      grpc::ServerContext* context,
+      const ::tpu_raiden::proto::UnpinRemoteBlocksRequest* request,
+      ::tpu_raiden::proto::UnpinRemoteBlocksResponse* response) override;
 
   using TransferBuffersCallback = absl::AnyInvocable<tsl::Future<>(
       absl::Span<const Buffer> src_buffers,
@@ -107,6 +120,19 @@ class RaidenControllerServiceImpl final
   std::shared_ptr<const ValidateAndPinCallback> validate_and_pin_cb_
       ABSL_GUARDED_BY(mutex_);
   std::shared_ptr<const UnpinCallback> unpin_cb_ ABSL_GUARDED_BY(mutex_);
+
+  struct PinLease {
+    std::vector<std::string> block_hashes;
+    absl::Time expiration;
+    std::vector<int32_t> block_ids;
+  };
+  std::vector<PinLease> active_pins_ ABSL_GUARDED_BY(mutex_);
+  bool sweeper_running_ ABSL_GUARDED_BY(mutex_) = false;
+  std::unique_ptr<std::thread> sweeper_thread_;
+  absl::CondVar sweeper_cv_;
+
+  void StartSweeperIfNecessary() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  void SweeperLoop();
 };
 
 }  // namespace controller

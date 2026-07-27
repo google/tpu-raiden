@@ -228,6 +228,8 @@ absl::Status BlockTransport::HandleCustomRequest(int client_fd,
             << ", numa=" << block_delegate_->node_id();
 
   if (header.op == 1 || header.op == 6) {
+    LOG(INFO) << "HandleCustomRequest calling HandleIncomingPush for client_fd="
+              << client_fd;
     absl::Status push_status = HandleIncomingPush(client_fd, header);
     if (!push_status.ok()) {
       // The connection drops after a failed push; without this the sender
@@ -500,9 +502,14 @@ void BlockTransport::TriggerNextSendStep(
   ResolveStepCoordinates(state, &l, &sh, &k);
   int block_id = state->remote_id + k;
 
+  LOG(INFO) << "RegisterBlockReadinessCallback calling for block_id="
+            << block_id << " uuid=" << state->uuid;
   block_delegate_->RegisterBlockReadinessCallback(
       l, sh, block_id, state->uuid,
       [this, state, l, sh, block_id](absl::Status status) {
+        LOG(INFO) << "RegisterBlockReadinessCallback async lambda resolving "
+                     "for block_id="
+                  << block_id << " status=" << status.ToString();
         if (!status.ok()) {
           LOG(ERROR) << "Pull response failed at step " << state->current_step
                      << " for uuid " << state->uuid
@@ -514,6 +521,7 @@ void BlockTransport::TriggerNextSendStep(
         }
 
         block_delegate_->ScheduleAsyncTask([this, state, l, sh, block_id]() {
+          LOG(INFO) << "ScheduleAsyncTask running for block_id=" << block_id;
           const int64_t block_id_val = block_id;
           std::vector<BlockChunk> chunks = block_delegate_->GetBlockChunks(
               l, sh, absl::MakeConstSpan(&block_id_val, 1),
@@ -536,6 +544,8 @@ void BlockTransport::TriggerNextSendStep(
           }
 
           uint32_t total_size = GetChunksTotalSize(chunks);
+          LOG(INFO) << "ScheduleAsyncTask calling WriteExact for total_size="
+                    << total_size;
           s = WriteExact(state->client_fd, &total_size, sizeof(total_size));
           if (!s.ok()) {
             LOG(ERROR) << "Write size failed: " << s.ToString();
@@ -544,7 +554,9 @@ void BlockTransport::TriggerNextSendStep(
             active_sends_.erase(state->uuid);
             return;
           }
+          LOG(INFO) << "ScheduleAsyncTask calling WriteVExact";
           s = WriteVExact(state->client_fd, ToIovec(chunks));
+          LOG(INFO) << "ScheduleAsyncTask finished WriteVExact";
           if (!s.ok()) {
             LOG(ERROR) << "Write payload failed: " << s.ToString();
             shutdown(state->client_fd, SHUT_RDWR);
@@ -795,6 +807,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
   }
 
   const int fd = status_or_fd.value();
+  LOG(INFO) << "SyncPush GetConnection established fd=" << fd << " to peer=" << peer;
   bool ok_to_pool = false;
   auto fd_cleaner = absl::MakeCleanup(
       [&] { ReturnConnection(ok_to_pool, fd, peer, local_ip); });
@@ -1005,14 +1018,19 @@ void BlockTransport::H2hReadWorker(
     header.count_or_size = static_cast<uint32_t>(chunk.remote_count);
     header.uuid = uuid;
 
+    LOG(INFO) << "SyncPull (" << peer << ") writing header: op=2, uuid=" << uuid
+              << ", remote_id=" << header.remote_id
+              << ", count=" << header.count_or_size;
     absl::Status s = WriteExact(fd, &header, sizeof(header));
     if (!s.ok()) {
       statuses[stream_idx] = s;
       return;
     }
 
+    LOG(INFO) << "SyncPull (" << peer << ") waiting for response header";
     PacketHeader resp_header = {};
     s = ReadExact(fd, &resp_header, sizeof(resp_header));
+    LOG(INFO) << "SyncPull (" << peer << ") read response header, status=" << s;
     if (!s.ok()) {
       statuses[stream_idx] = s;
       return;
@@ -1087,7 +1105,9 @@ void BlockTransport::H2hReadWorker(
           }
 
           uint32_t sender_size = 0;
+          LOG(INFO) << "H2hReadWorker about to ReadExact sender_size";
           RETURN_IF_ERROR(ReadExact(fd, &sender_size, sizeof(sender_size)));
+          LOG(INFO) << "H2hReadWorker read sender_size=" << sender_size;
 
           if (sender_size != expected_size) {
             return absl::InternalError(absl::StrCat(
@@ -1096,7 +1116,9 @@ void BlockTransport::H2hReadWorker(
                 " bytes for Block ID: ", dst_id));
           }
 
+          LOG(INFO) << "H2hReadWorker about to ReadVExact";
           RETURN_IF_ERROR(ReadVExact(fd, ToIovec(chunks)));
+          LOG(INFO) << "H2hReadWorker completed ReadVExact";
 
           if (on_block_received != nullptr) {
             RETURN_IF_ERROR(on_block_received(l, sh, dst_id, expected_size));
@@ -1107,7 +1129,10 @@ void BlockTransport::H2hReadWorker(
       statuses[stream_idx] = s;
       return;
     }
+    LOG(INFO) << "SyncPull (" << peer
+              << ") finished reading chunk payloads, status=" << s;
   }
+  LOG(INFO) << "SyncPull (" << peer << ") completed perfectly, returning OK";
   ok_to_pool = true;
 }
 

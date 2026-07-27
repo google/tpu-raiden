@@ -25,6 +25,14 @@ service RaidenControllerService {
 
   // Requests a remote read from this controller.
   rpc ReadRemote(ReadRemoteRequest) returns (ReadRemoteResponse) {  }
+
+  // Pins remote blocks for a worker-initiated H2dRead transfer.
+  rpc PinRemoteBlocks(PinRemoteBlocksRequest)
+      returns (PinRemoteBlocksResponse) {  }
+
+  // Unpins previously pinned remote blocks.
+  rpc UnpinRemoteBlocks(UnpinRemoteBlocksRequest)
+      returns (UnpinRemoteBlocksResponse) {  }
 }
 
 message RegisterWorkerRequest {
@@ -54,8 +62,26 @@ message ReadRemoteRequest {
   repeated .tpu_raiden.proto.BufferProto src_buffers = 3;
   repeated .tpu_raiden.proto.BufferProto dst_buffers = 4;
   // Prefix hashes of the requested blocks. The source controller verifies each
-  // exists in its LRU with status HOST/HOST_AND_HBM and pins it for the transfer.
+  // exists in its LRU with status HOST/HOST_AND_HBM and pins it for the
+  // transfer.
   repeated bytes block_hashes = 5;
 }
 
 message ReadRemoteResponse {}
+
+message PinRemoteBlocksRequest {
+  int64 ttl_seconds = 1;
+  repeated bytes block_hashes = 2;
+}
+
+message PinRemoteBlocksResponse {
+  repeated int32 src_host_block_ids = 1;
+  repeated .tpu_raiden.proto.RaidenWorkerEndpointsProto src_worker_endpoints =
+      2;
+}
+
+message UnpinRemoteBlocksRequest {
+  repeated int32 src_host_block_ids = 1;
+}
+
+message UnpinRemoteBlocksResponse {}

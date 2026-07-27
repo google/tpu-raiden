@@ -179,6 +179,13 @@ class NumaAwareKVCacheManager {
       const std::vector<RaidenTransferEndpoint>& remote_descriptors,
       const std::vector<int>& src_block_ids);
 
+  absl::StatusOr<raiden::PjRtCopyFuture> H2dRead(
+      const std::vector<RaidenTransferEndpoint>& remote_descriptors,
+      const std::vector<int64_t>& src_host_offsets,
+      const std::vector<int64_t>& dst_host_offsets,
+      const std::vector<int64_t>& dst_device_offsets,
+      const std::vector<int64_t>& copy_sizes);
+
  private:
 #ifndef WITHOUT_PYTHON
   NumaAwareKVCacheManager(UnpackedCache&& cache, std::optional<int> local_port,
@@ -398,6 +405,17 @@ class KVCacheManager {
       const std::vector<RaidenTransferEndpoint>& remote_descriptors,
       const std::vector<int>& src_block_ids) {
     return numa_manager_->H2hRead(remote_descriptors, src_block_ids);
+  }
+
+  absl::StatusOr<raiden::PjRtCopyFuture> H2dRead(
+      const std::vector<RaidenTransferEndpoint>& remote_descriptors,
+      const std::vector<int64_t>& src_host_offsets,
+      const std::vector<int64_t>& dst_host_offsets,
+      const std::vector<int64_t>& dst_device_offsets,
+      const std::vector<int64_t>& copy_sizes) {
+    return numa_manager_->H2dRead(remote_descriptors, src_host_offsets,
+                                  dst_host_offsets, dst_device_offsets,
+                                  copy_sizes);
   }
 
  private:
