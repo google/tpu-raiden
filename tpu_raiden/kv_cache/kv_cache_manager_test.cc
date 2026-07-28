@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 #include <string>
@@ -22,8 +23,10 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/base/thread_annotations.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/mutex.h"
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
 #include "tpu_raiden/transport/block_transport.h"
@@ -1158,6 +1161,82 @@ TEST(KVCacheManagerTest, RemoteTwoStageApisRequireExplicitStaging) {
                        /*copy_sizes=*/{1});
   EXPECT_EQ(h2d_write.status().code(), absl::StatusCode::kInvalidArgument);
   EXPECT_THAT(h2d_write.status().message(), testing::HasSubstr("same length"));
+}
+
+class TestBackgroundKVCacheManager : public TestKVCacheManager {
+ public:
+  TestBackgroundKVCacheManager(size_t num_layers, size_t num_shards,
+                               size_t slice_byte_size, int host_blocks = 0)
+      : TestKVCacheManager(num_layers, num_shards, slice_byte_size,
+                           host_blocks) {}
+
+  absl::StatusOr<raiden::PjRtCopyFuture> H2dImpl(
+      const std::vector<int64_t>& src_offsets_major_dim,
+      const std::vector<int64_t>& dst_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim,
+      std::optional<int64_t> slot_idx, std::optional<size_t> layer_idx,
+      std::optional<size_t> shard_idx) override {
+    absl::MutexLock lock(mu_);
+    execution_order_.push_back("H2dImpl");
+    h2d_count_++;
+    return raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{});
+  }
+
+  absl::StatusOr<raiden::PjRtCopyFuture> D2hImpl(
+      const std::vector<int64_t>& src_offsets_major_dim,
+      const std::vector<int64_t>& dst_offsets_major_dim,
+      const std::vector<int64_t>& copy_sizes_major_dim,
+      std::optional<int64_t> slot_idx, std::optional<size_t> layer_idx,
+      std::optional<size_t> shard_idx) override {
+    absl::MutexLock lock(mu_);
+    execution_order_.push_back("D2hImpl");
+    d2h_count_++;
+    return raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{});
+  }
+
+  absl::Mutex mu_;
+  std::vector<std::string> execution_order_ ABSL_GUARDED_BY(mu_);
+  int h2d_count_ ABSL_GUARDED_BY(mu_) = 0;
+  int d2h_count_ ABSL_GUARDED_BY(mu_) = 0;
+};
+
+TEST(KVCacheManagerTest, BackgroundWorkerThreadExecutesInFifoOrder) {
+  setenv("RAIDEN_ENABLE_ASYNC_DISPATCH", "1", 1);
+  TestBackgroundKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
+                                       /*slice_byte_size=*/128,
+                                       /*host_blocks=*/2);
+  // Queue H2D, D2H, H2D sequentially
+  auto f1 = manager.H2d({0}, {0}, {1});
+  auto f2 = manager.D2h({0}, {0}, {1});
+  auto f3 = manager.H2d({0}, {0}, {1});
+  ASSERT_TRUE(f1.ok());
+  ASSERT_TRUE(f2.ok());
+  ASSERT_TRUE(f3.ok());
+
+  // Await all futures
+  EXPECT_TRUE(f1->Await().ok());
+  EXPECT_TRUE(f2->Await().ok());
+  EXPECT_TRUE(f3->Await().ok());
+
+  absl::MutexLock lock(manager.mu_);
+  EXPECT_EQ(manager.h2d_count_, 2);
+  EXPECT_EQ(manager.d2h_count_, 1);
+  ASSERT_EQ(manager.execution_order_.size(), 3);
+  EXPECT_EQ(manager.execution_order_[0], "H2dImpl");
+  EXPECT_EQ(manager.execution_order_[1], "D2hImpl");
+  EXPECT_EQ(manager.execution_order_[2], "H2dImpl");
+  unsetenv("RAIDEN_ENABLE_ASYNC_DISPATCH");
+}
+
+TEST(KVCacheManagerTest, BackgroundWorkerThreadDisabledByDefault) {
+  unsetenv("RAIDEN_ENABLE_ASYNC_DISPATCH");
+  TestBackgroundKVCacheManager manager(/*num_layers=*/1, /*num_shards=*/1,
+                                       /*slice_byte_size=*/128,
+                                       /*host_blocks=*/2);
+  auto f1 = manager.H2d({0}, {0}, {1});
+  ASSERT_TRUE(f1.ok());
+  absl::MutexLock lock(manager.mu_);
+  EXPECT_EQ(manager.h2d_count_, 1);
 }
 
 }  // namespace
