@@ -62,13 +62,15 @@ class RawBufferTransportDelegate {
 // Standalone raw buffer POSIX TCP socket transport engine.
 class RawBufferTransport {
  protected:
+  static constexpr uint16_t kCurrentVersion = 1;
+
   // Compact 32-byte binary packet header layout.
   struct alignas(8) PacketHeader {
     uint8_t op;     // 3=BytePull, 5=ByteSlicePush, 1,2,4,6=HigherLevelBlockOps
     uint8_t flags;  // Holds major_order or protocol flags
     uint16_t buffer_id;      // Multidimensional Buffer / Layer ID coordinate
     uint16_t reserved;       // Holds parallelism/expected chunks count
-    uint16_t padding;        // Unused padding to align fields
+    uint16_t ver;            // Header version
     uint32_t remote_id;      // Remote block ID or linear memory offset
     uint32_t local_id;       // Local block ID or target shard index
     uint32_t count_or_size;  // Number of blocks or continuous payload bytes

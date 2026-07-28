@@ -261,6 +261,12 @@ absl::Status RawBufferTransport::ProcessPeerRequest(int client_fd) {
   PacketHeader header = {};
   RETURN_IF_ERROR(ReadExact(client_fd, &header, sizeof(header)));
 
+  if (header.ver != kCurrentVersion) {
+    VLOG(1) << "Packet header version mismatch: expected " << kCurrentVersion
+            << ", got " << header.ver;
+    return absl::FailedPreconditionError("Packet header version mismatch");
+  }
+
   if (header.op == 5) {  // peer push request
     const uint32_t dst_offset = header.remote_id;
     const uint32_t dst_shard_idx = header.local_id;
@@ -419,6 +425,7 @@ absl::Status RawBufferTransport::PullBuffer(
   const PacketHeader header = {
       .op = 3,
       .buffer_id = static_cast<uint16_t>(buffer_id),
+      .ver = kCurrentVersion,
       .remote_id = static_cast<uint32_t>(src_offset_bytes),
       .local_id = static_cast<uint32_t>(src_shard_idx),
       .count_or_size = static_cast<uint32_t>(size_bytes),
@@ -480,6 +487,7 @@ absl::Status RawBufferTransport::PushBuffer(absl::string_view peer,
   const PacketHeader header = {
       .op = 5,
       .buffer_id = static_cast<uint16_t>(buffer_id),
+      .ver = kCurrentVersion,
       .remote_id = static_cast<uint32_t>(dst_offset_bytes),
       .local_id = static_cast<uint32_t>(dst_shard_idx),
       .count_or_size = static_cast<uint32_t>(size_bytes),

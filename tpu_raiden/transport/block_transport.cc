@@ -459,6 +459,7 @@ absl::Status BlockTransport::HandleIncomingPull(int client_fd,
   PacketHeader resp_header = {};
   resp_header.op = 2;
   resp_header.flags = header.flags;
+  resp_header.ver = kCurrentVersion;
   resp_header.remote_id = header.local_id;
   resp_header.local_id = 0;
   resp_header.count_or_size = header.count_or_size;
@@ -809,6 +810,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
   PacketHeader header = {};
   header.op = dst_block_ids.empty() ? 1 : 6;
   header.flags = static_cast<uint8_t>(major_order);
+  header.ver = kCurrentVersion;
   header.buffer_id = 0;
   header.remote_id = static_cast<uint32_t>(block_delegate_->node_id());
   header.local_id =
@@ -998,6 +1000,7 @@ void BlockTransport::H2hReadWorker(
     PacketHeader header = {};
     header.op = 2;  // Pull request
     header.flags = static_cast<uint8_t>(major_order);
+    header.ver = kCurrentVersion;
     int remote_read_block_id =
         block_delegate_->GetRemoteReadBlockId(chunk.base_remote_id, 0);
     if (remote_read_block_id < 0 ||
@@ -1022,6 +1025,12 @@ void BlockTransport::H2hReadWorker(
     s = ReadExact(fd, &resp_header, sizeof(resp_header));
     if (!s.ok()) {
       statuses[stream_idx] = s;
+      return;
+    }
+    if (resp_header.ver != kCurrentVersion) {
+      statuses[stream_idx] = absl::InternalError(
+          absl::StrCat("Block pull response header version mismatch: expected ",
+                       kCurrentVersion, ", got ", resp_header.ver));
       return;
     }
     if (resp_header.op != 2 ||
