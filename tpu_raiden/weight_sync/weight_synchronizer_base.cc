@@ -427,8 +427,10 @@ absl::Status WeightSynchronizerBase::PushWeightsResharded(
       size_t count = entry.count() > 0 ? entry.count() : 1;
       size_t src_stride = entry.src_stride_bytes();
       size_t dst_stride = entry.dst_stride_bytes();
-      size_t dst_offset = entry.dst_offset_bytes();
-      size_t src_offset = entry.src_offset_bytes();
+      size_t dst_offset =
+          entry.dst_offset_bytes() + entry.dst_block_id() * dst_stride;
+      size_t src_offset =
+          entry.src_offset_bytes() + entry.src_block_id() * src_stride;
       size_t size = entry.size_bytes();
 
       for (size_t c = 0; c < count; ++c) {

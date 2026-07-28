@@ -30,6 +30,7 @@
 import asyncio
 import dataclasses
 import enum
+import functools
 import json
 import logging
 import math
@@ -39,7 +40,7 @@ import socket
 import threading
 import time
 import typing
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 from tpu_raiden.kv_cache import nd_slice_math
 from tpu_raiden.rpc import controller_service_pb2
@@ -2432,7 +2433,7 @@ class RaidenController:
               is_sender=True,
               expected_block_count=count,
               req_id=hop_req_id,
-              skip_d2h=final_plan.skip_d2h,
+              skip_d2h=final_plan.skip_d2h or (s != src_unit),
           )
 
           async def _run_single_transfer(s_node, d_node, plan):
@@ -2444,19 +2445,21 @@ class RaidenController:
               loop = asyncio.get_running_loop()
               success = await loop.run_in_executor(
                   None,
-                  dst_facade.register_transfer_schedule,
-                  [s_node],
-                  [d_node],
-                  plan.req_id,
-                  True,
-                  s_node not in self._registered_shards,
-                  plan.expected_block_count,
-                  plan.uuid,
-                  dst_controller_address,
-                  src_controller_address,
-                  plan.shard_push_schedules,
-                  dst_mem_type,
-                  skip_d2h=plan.skip_d2h,
+                  functools.partial(
+                      dst_facade.register_transfer_schedule,
+                      [s_node],
+                      [d_node],
+                      plan.req_id,
+                      True,
+                      s_node not in self._registered_shards,
+                      plan.expected_block_count,
+                      plan.uuid,
+                      dst_controller_address,
+                      src_controller_address,
+                      plan.shard_push_schedules,
+                      dst_mem_type,
+                      skip_d2h=plan.skip_d2h,
+                  ),
               )
               if not success:
                 raise RuntimeError(
@@ -3205,7 +3208,7 @@ class RaidenController:
                       src_stride,
                       dst_stride,
                       count,
-                  ) = entry
+                  ) = entry[:10]
                   dst_unit = data_address_to_unit.get(dst_peer)
                   if not dst_unit:
                     continue
