@@ -325,7 +325,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2h() {
             shard_hold.CopyRawDeviceToHost(temp_buffer_ptr, 0, layer_size);
 
         xla::Future<> detile_future =
-            copy_future.Map([temp_buffer, dst_host_ptr,
+            copy_future.Map([copy_future, temp_buffer, dst_host_ptr,
                              shape = shard_hold.buffer->on_device_shape(),
                              layout = *xla_layout]() -> absl::Status {
               return tpu_raiden::weight_sync::DetileBuffer(
