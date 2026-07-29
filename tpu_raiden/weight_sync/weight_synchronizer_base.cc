@@ -270,16 +270,22 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::H2d() {
 
       std::vector<xla::Future<>> shard_futures;
       if (is_tiled) {
-        auto temp_buffer = std::make_shared<std::vector<uint8_t>>(layer_size);
+        void* raw_aligned_ptr = nullptr;
+        if (posix_memalign(&raw_aligned_ptr, 32, layer_size) != 0) {
+          return absl::ResourceExhaustedError(
+              "Failed to allocate 32-byte aligned host staging buffer");
+        }
+        auto temp_buffer = std::shared_ptr<uint8_t>(
+            static_cast<uint8_t*>(raw_aligned_ptr), [](uint8_t* p) { free(p); });
         auto status = tpu_raiden::weight_sync::TileBuffer(
-            shard_info.host_ptr, temp_buffer->data(),
+            shard_info.host_ptr, temp_buffer.get(),
             shard_hold.buffer->on_device_shape(), *xla_layout);
         if (!status.ok()) {
           return status;
         }
 
         xla::Future<> future =
-            shard_hold.CopyRawHostToDevice(temp_buffer->data(), 0, layer_size);
+            shard_hold.CopyRawHostToDevice(temp_buffer.get(), 0, layer_size);
         xla::Future<> mapped_future = future.Map([temp_buffer]() {});
         shard_futures.push_back(std::move(mapped_future));
       } else {
@@ -318,8 +324,14 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2h() {
 
       std::vector<xla::Future<>> shard_futures;
       if (is_tiled) {
-        auto temp_buffer = std::make_shared<std::vector<uint8_t>>(layer_size);
-        uint8_t* temp_buffer_ptr = temp_buffer->data();
+        void* raw_aligned_ptr = nullptr;
+        if (posix_memalign(&raw_aligned_ptr, 32, layer_size) != 0) {
+          return absl::ResourceExhaustedError(
+              "Failed to allocate 32-byte aligned host staging buffer");
+        }
+        auto temp_buffer = std::shared_ptr<uint8_t>(
+            static_cast<uint8_t*>(raw_aligned_ptr), [](uint8_t* p) { free(p); });
+        uint8_t* temp_buffer_ptr = temp_buffer.get();
 
         xla::Future<> copy_future =
             shard_hold.CopyRawDeviceToHost(temp_buffer_ptr, 0, layer_size);
@@ -329,7 +341,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2h() {
                              shape = shard_hold.buffer->on_device_shape(),
                              layout = *xla_layout]() -> absl::Status {
               return tpu_raiden::weight_sync::DetileBuffer(
-                  temp_buffer->data(), dst_host_ptr, shape, layout);
+                  temp_buffer.get(), dst_host_ptr, shape, layout);
             });
 
         shard_futures.push_back(std::move(detile_future));
