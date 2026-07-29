@@ -75,120 +75,20 @@ if [[ "${WITH_TORCH}" == "1" ]]; then
   BUILD_MODE="both"
 fi
 
-# The in-container build: install clang-18 (XLA .ll targets) + CPU torch (shim
-# headers), then drive the existing build.sh for the wheel target.
-read -r -d '' INNER <<'INNER_EOF' || true
-set -exu -o pipefail
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq wget gnupg ca-certificates patchelf >/dev/null
-# Add the LLVM jammy-18 apt repo manually (the container's add-apt-repository is
-# broken: python apt_pkg is missing for python3.12).
-wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
-echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-18 main" \
-  > /etc/apt/sources.list.d/llvm18.list
-apt-get update -qq
-apt-get install -y -qq clang-18 >/dev/null
-ln -sf /usr/bin/clang-18 /usr/bin/clang
-ln -sf /usr/bin/clang++-18 /usr/bin/clang++
-clang --version | head -1
-
-if [[ "${WITH_TORCH}" == "1" ]]; then
-  # raiden is built on top of torch_tpu: raiden's _tpu_raiden_torch.so and
-  # torch_tpu's libpywrap_torch_tpu_common.so must resolve the SAME libtorch
-  # symbols at runtime. So raiden MUST compile against the EXACT torch that
-  # torch_tpu was built against — never a floating `torch>=X` specifier, which
-  # drifts to the latest release and breaks ABI (e.g. torch 2.13.x drops
-  # `torch::autograd::deleteNode`, which torch_tpu's libpywrap needs → dlopen
-  # `undefined symbol` at import). torch_tpu's source of truth is its per-Python
-  # requirements lock, which pins an exact `torch==VERSION+cpu`.
-  PYTAG="$(python3 -c 'import sys;print(f"{sys.version_info.major}_{sys.version_info.minor}")')"
-  TORCH_REQ_FILE="/torch_tpu/requirements/requirements_${PYTAG}.txt"
-  TORCH_PIN=""
-  if [[ -f "${TORCH_REQ_FILE}" ]]; then
-    # e.g. line `torch==2.11.0+cpu \` -> `torch==2.11.0+cpu`
-    TORCH_PIN=$(sed -n -E 's/^(torch==[0-9][0-9A-Za-z.+_-]*).*/\1/p' "${TORCH_REQ_FILE}" | head -1 || true)
-  fi
-  if [[ -n "${TORCH_PIN}" ]]; then
-    echo "Installing torch pinned by torch_tpu (${TORCH_REQ_FILE}): ${TORCH_PIN}"
-    pip install -q "${TORCH_PIN}" --index-url https://download.pytorch.org/whl/cpu
-  else
-    # Fallback: the (looser) specifier from torch_tpu's pyproject.toml. This can
-    # float to the latest release and may NOT match torch_tpu's ABI, so warn.
-    TORCH_VERSION=""
-    if [[ -f /torch_tpu/pyproject.toml ]]; then
-      TORCH_VERSION=$(sed -n -E 's/.*["'\''`]torch[[:space:]]*([>=<~=]+[0-9.a-zA-Z+-]+)["'\''`].*/\1/p' /torch_tpu/pyproject.toml 2>/dev/null | head -1 || true)
-    fi
-    if [[ -z "${TORCH_VERSION}" ]]; then
-      echo "WARNING: could not determine torch pin from ${TORCH_REQ_FILE} or /torch_tpu/pyproject.toml. Installing latest torch — this may NOT match torch_tpu's ABI." >&2
-      pip install -q torch --index-url https://download.pytorch.org/whl/cpu
-    else
-      echo "WARNING: no exact pin in ${TORCH_REQ_FILE}; falling back to torch_tpu pyproject specifier 'torch${TORCH_VERSION}', which may float to a torch that does not match torch_tpu's ABI." >&2
-      pip install -q "torch${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cpu
-    fi
-  fi
-  TORCH_SOURCE="$(python3 -c 'import torch,pathlib;print(pathlib.Path(torch.__file__).resolve().parent.parent)')"
-  export TORCH_SOURCE
-  export TORCH_TPU_MODULE_PATH=/torch_tpu
-fi
-
-# Persistent, resumable bazel cache + output base on the mounted volume.
-export BAZEL_CACHE_DIR=/cache
-export BAZEL_OUTPUT_BASE=/cache/output_base
-
-# Separate per-framework wheels: tpu_raiden_torch (no jax deps) vs
-# tpu_raiden_jax. Pick by WITH_TORCH.
-if [[ "${WITH_TORCH}" == "1" ]]; then
-  WHEEL_TARGET="//ci/wheel:raiden_torch_wheel"
-  WHEEL_DIST="tpu_raiden_torch"
-else
-  WHEEL_TARGET="//ci/wheel:raiden_jax_wheel"
-  WHEEL_DIST="tpu_raiden_jax"
-fi
-# Match ONLY the wheel this build just produced. cache/output_base is shared
-# across builds, so its bin/ci/wheel/ dir accumulates wheels from earlier runs,
-# each with a distinct .dev<timestamp>. A broad "${WHEEL_DIST}-*.whl" glob would
-# also match those stale wheels and hand multiple paths to the single-wheel
-# patchelf step below (which then fails). WHEEL_VERSION_EXTRAS (.dev<timestamp>)
-# is unique per build and appears verbatim in the filename, so scope to it.
-WHEEL_GLOB="${WHEEL_DIST}-*${WHEEL_VERSION_EXTRAS}-*.whl"
-
-cd /workspace
-./build.sh "${BUILD_MODE}" "${WHEEL_TARGET}" \
-  --repo_env=WHEEL_VERSION_EXTRAS="${WHEEL_VERSION_EXTRAS}"
-
-mkdir -p /workspace/dist
-cp /cache/output_base/execroot/_main/bazel-out/k8-opt/bin/ci/wheel/${WHEEL_GLOB} /workspace/dist/
-
-# The bazel-built _tpu_raiden_torch.so does not link libpywrap; the torch
-# extension loader (tpu_raiden/api/torch/kv_cache_manager.py) requires it as a
-# NEEDED so the torch_tpu symbols (MaterializeAndReturn, AwaitBuffer, ...)
-# resolve in RTLD_LOCAL scope at import. build.sh injects this for its
-# source-tree copy, but the wheel packages the raw bazel .so -- so inject it
-# into the wheel here and repack (which regenerates RECORD with valid hashes).
-if [[ "${WITH_TORCH}" == "1" ]]; then
-  pip install -q wheel
-  WHL="$(ls /workspace/dist/${WHEEL_GLOB} | head -1)"
-  UNPACK_DIR="$(mktemp -d)"
-  wheel unpack "${WHL}" -d "${UNPACK_DIR}"
-  PKG_DIR="$(ls -d "${UNPACK_DIR}"/*/)"
-  patchelf --add-needed libpywrap_torch_tpu_common.so \
-    "${PKG_DIR}tpu_raiden/frameworks/torch/_tpu_raiden_torch.so"
-  rm -f "${WHL}"
-  wheel pack "${PKG_DIR}" -d /workspace/dist
-  echo "patchelf: injected NEEDED libpywrap_torch_tpu_common.so into wheel .so"
-fi
-INNER_EOF
-
+# The in-container build (clang-18 install + pinned torch + build.sh wheel
+# target) lives in ci/build_wheel_impl.sh so GitHub Actions jobs that already
+# run inside the ml-build container can invoke it without docker-in-docker.
 echo "===> Building ${BUILD_MODE} wheel in ${CONTAINER_IMAGE}..."
 docker run --rm \
   "${DOCKER_MOUNTS[@]}" \
   -w /workspace \
   -e WHEEL_VERSION_EXTRAS="${WHEEL_VERSION_EXTRAS}" \
   -e WITH_TORCH="${WITH_TORCH}" \
-  -e BUILD_MODE="${BUILD_MODE}" \
+  -e TORCH_TPU_SRC=/torch_tpu \
+  -e BAZEL_CACHE_DIR=/cache \
+  -e EXTRA_BAZEL_FLAGS="${EXTRA_BAZEL_FLAGS:-}" \
   "${CONTAINER_IMAGE}" \
-  bash -c "${INNER}"
+  bash ci/build_wheel_impl.sh
 
 # Scope to THIS build's wheel(s) (.dev<timestamp>); REPO_ROOT/dist and WHEEL_DIR
 # are persistent and may hold wheels from earlier runs.

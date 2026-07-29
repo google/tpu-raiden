@@ -1,0 +1,237 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Nightly build of the tpu_raiden distributables:
+#   - tpu_raiden_jax wheel   (+ _tpu_raiden_jax.so)
+#   - tpu_raiden_torch wheel (+ _tpu_raiden_host.so / _tpu_raiden_torch.so)
+#
+# Wheels are versioned <pyproject base>.dev<UTC timestamp> (same scheme as
+# torch_tpu) and built inside the ml-build container via
+# ci/build_wheel_impl.sh. Every run publishes the wheels and bare .so files as
+# GitHub Actions artifacts; scheduled runs (and dispatches that opt in)
+# additionally twine-upload the wheels to the raiden Artifact Registry, where
+# they are installable with:
+#
+#   pip install --pre tpu_raiden_jax \
+#     --extra-index-url https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/simple/
+#
+# The torch wheel is ABI-coupled to torch_tpu: it is built against the
+# torch_tpu checkout selected by torch_tpu_ref (default: main HEAD) and the
+# exact torch that torch_tpu's per-Python requirements lock pins. The torch_tpu
+# commit used is recorded in the job summary and in the
+# torch_tpu_commit.txt file inside the wheel artifact.
+#
+# Required repository secrets/variables:
+#   secrets.TORCH_TPU_DEPLOY_KEY  read-only deploy key for the private
+#                                 google-pytorch/torch_tpu repo
+#   vars.RAIDEN_REGISTRY_URL      (optional) overrides the Artifact Registry
+#                                 upload URL
+
+name: Nightly Wheels
+
+on:
+  schedule:
+    - cron: "0 8 * * *"  # 08:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      torch_tpu_ref:
+        description: "torch_tpu ref to build the torch wheel against"
+        required: false
+        default: "main"
+        type: string
+      upload_to_registry:
+        description: "Upload wheels to the raiden Artifact Registry?"
+        type: choice
+        default: "no"
+        options:
+          - "yes"
+          - "no"
+      use_remote_cache:
+        description: "Use the RBE remote bazel cache (--config=ci)?"
+        type: choice
+        default: "yes"
+        options:
+          - "yes"
+          - "no"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  RAIDEN_REGISTRY_URL: ${{ vars.RAIDEN_REGISTRY_URL || 'https://us-python.pkg.dev/cloud-tpu-inference-test/tpu-raiden/' }}
+
+jobs:
+  version:
+    name: "Stamp nightly version"
+    runs-on: ubuntu-latest
+    outputs:
+      wheel_version_extras: ${{ steps.stamp.outputs.wheel_version_extras }}
+    steps:
+      - id: stamp
+        # One timestamp for the whole run so the jax and torch wheels of a
+        # single nightly share a version.
+        run: echo "wheel_version_extras=.dev$(date -u +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: "Build ${{ matrix.framework }} wheel"
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - framework: jax
+            with_torch: "0"
+            so_paths: |
+              tpu-raiden/tpu_raiden/frameworks/jax/_tpu_raiden_jax.so
+          - framework: torch
+            with_torch: "1"
+            so_paths: |
+              tpu-raiden/tpu_raiden/frameworks/torch/_tpu_raiden_host.so
+              tpu-raiden/tpu_raiden/frameworks/torch/_tpu_raiden_torch.so
+    runs-on: linux-x86-n2-32
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest@sha256:480f397c57207671315a27173ccec790ea9c66ef030af96cbe6ac9b4a6613996
+    timeout-minutes: 300
+    steps:
+      - name: Checkout tpu-raiden
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
+          path: tpu-raiden
+      # The ml-build container has no ssh client; the deploy-key checkout
+      # below needs one.
+      - name: Install SSH client
+        if: matrix.with_torch == '1'
+        run: apt-get update -qq && apt-get install -y -qq openssh-client
+      - name: Checkout torch_tpu
+        if: matrix.with_torch == '1'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
+          repository: google-pytorch/torch_tpu
+          ref: ${{ inputs.torch_tpu_ref || 'main' }}
+          ssh-key: ${{ secrets.TORCH_TPU_DEPLOY_KEY }}
+          path: torch_tpu
+      # Git security patch (CVE-2022-24765) blocks root from operating on
+      # runner-owned directories. Tell Git explicitly to trust the workspace
+      # inside this ephemeral container.
+      - name: Fix Git Workspace Ownership
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/tpu-raiden"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE/torch_tpu"
+      - name: Record torch_tpu commit
+        if: matrix.with_torch == '1'
+        env:
+          TORCH_TPU_REF: ${{ inputs.torch_tpu_ref || 'main' }}
+        run: |
+          TORCH_TPU_SHA=$(git -C "$GITHUB_WORKSPACE/torch_tpu" rev-parse HEAD)
+          echo "TORCH_TPU_SHA=$TORCH_TPU_SHA" >> "$GITHUB_ENV"
+          echo "torch_tpu: $TORCH_TPU_SHA (ref: ${TORCH_TPU_REF})" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build wheel
+        working-directory: tpu-raiden
+        env:
+          WITH_TORCH: ${{ matrix.with_torch }}
+          TORCH_TPU_SRC: ${{ github.workspace }}/torch_tpu
+          WHEEL_VERSION_EXTRAS: ${{ needs.version.outputs.wheel_version_extras }}
+          EXTRA_BAZEL_FLAGS: ${{ (inputs.use_remote_cache || 'yes') == 'yes' && '--config=ci' || '' }}
+        run: |
+          export BAZEL_CACHE_DIR="${RUNNER_TEMP}/bazel_cache"
+          bash ci/build_wheel_impl.sh
+          if [[ -n "${TORCH_TPU_SHA:-}" ]]; then
+            echo "${TORCH_TPU_SHA}" > dist/torch_tpu_commit.txt
+          fi
+      - name: Check wheel metadata
+        working-directory: tpu-raiden
+        env:
+          WHEEL_VERSION_EXTRAS: ${{ needs.version.outputs.wheel_version_extras }}
+        run: uv run --isolated --with twine twine check dist/*"${WHEEL_VERSION_EXTRAS}"-*.whl
+      # The JAX-stack coupling (jax/jaxlib/libtpu) is enforced through the
+      # wheel's own Requires-Dist pins; extract them so each build records the
+      # stack it must run with, mirroring torch_tpu_commit.txt on the torch side.
+      - name: Record JAX stack pins
+        if: matrix.framework == 'jax'
+        working-directory: tpu-raiden
+        run: |
+          python3 - <<'PY'
+          import glob, re, zipfile
+          whl = sorted(glob.glob('dist/tpu_raiden_jax-*.whl'))[-1]
+          with zipfile.ZipFile(whl) as z:
+              meta = next(n for n in z.namelist() if n.endswith('.dist-info/METADATA'))
+              text = z.read(meta).decode()
+          pins = [l.removeprefix('Requires-Dist: ') for l in text.splitlines()
+                  if re.match(r'Requires-Dist: (jax|jaxlib|libtpu)\b', l)]
+          assert pins, f'no jax/jaxlib/libtpu pins found in {whl} METADATA'
+          open('dist/jax_pins.txt', 'w').write('\n'.join(pins) + '\n')
+          print('\n'.join(pins))
+          PY
+          echo "JAX stack pins:" >> "$GITHUB_STEP_SUMMARY"
+          cat dist/jax_pins.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: nightly-wheel-${{ matrix.framework }}
+          path: |
+            tpu-raiden/dist/*${{ needs.version.outputs.wheel_version_extras }}-*.whl
+            tpu-raiden/dist/torch_tpu_commit.txt
+            tpu-raiden/dist/jax_pins.txt
+          if-no-files-found: error
+      - name: Upload shared libraries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: nightly-so-${{ matrix.framework }}
+          path: ${{ matrix.so_paths }}
+          if-no-files-found: error
+      - name: Summarize
+        working-directory: tpu-raiden
+        env:
+          WHEEL_VERSION_EXTRAS: ${{ needs.version.outputs.wheel_version_extras }}
+        run: |
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ls -lh dist/*"${WHEEL_VERSION_EXTRAS}"-*.whl >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  upload:
+    name: "Upload wheels to Artifact Registry"
+    needs: [version, build]
+    # Scheduled nightlies always publish; manual dispatches only on request.
+    if: github.event_name == 'schedule' || inputs.upload_to_registry == 'yes'
+    runs-on: linux-x86-n2-32
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest@sha256:480f397c57207671315a27173ccec790ea9c66ef030af96cbe6ac9b4a6613996
+    timeout-minutes: 30
+    steps:
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          pattern: nightly-wheel-*
+          merge-multiple: true
+          path: dist
+      # Auth uses the runner's ambient GCP service account via the Artifact
+      # Registry keyring backend. --skip-existing makes re-runs idempotent.
+      - name: Upload to Artifact Registry
+        env:
+          WHEEL_VERSION_EXTRAS: ${{ needs.version.outputs.wheel_version_extras }}
+        run: |
+          uv run --isolated \
+            --with twine \
+            --with keyrings.google-artifactregistry-auth \
+            twine upload --skip-existing \
+            --repository-url "${RAIDEN_REGISTRY_URL}" \
+            dist/tpu_raiden_*"${WHEEL_VERSION_EXTRAS}"-*.whl
+          echo "Uploaded to ${RAIDEN_REGISTRY_URL}:" >> "$GITHUB_STEP_SUMMARY"
+          ls dist/tpu_raiden_*.whl >> "$GITHUB_STEP_SUMMARY"
