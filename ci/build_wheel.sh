@@ -45,7 +45,7 @@ set -exu -o pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 
-WHEEL_VERSION_EXTRAS=".dev$(date +%Y%m%d%H%M%S)"
+WHEEL_VERSION_EXTRAS="${WHEEL_VERSION_EXTRAS:-.dev$(date +%Y%m%d%H%M%S)}"
 export WHEEL_VERSION_EXTRAS
 echo "WHEEL_VERSION_EXTRAS: ${WHEEL_VERSION_EXTRAS}"
 
