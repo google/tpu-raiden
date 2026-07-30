@@ -22,14 +22,12 @@ archive_override(
 bazel_dep(name = "jax")
 git_override(
     module_name = "jax",
-    commit = "990e6a0b84138346e6a38785412f36356e0e5dc3",
+    commit = "56d7344dc875409c49b23e06ba595e0bf4dfe510",
     patch_strip = 1,
     patches = [
-        # This patch makes two jax MODULE.bazel fixups: (1) drop
-        # `dev_dependency = True` on the pip use_extension so the `jax_pypi` hub is
-        # created when jax is a dependency (tpu-raiden imports it via use_repo);
-        # (2) remove the local_wheels attribute (CI libtpu nightly) that pinned
-        # rules_python (1.8.5) doesn't support, so libtpu resolves from the index.
+        # This patch makes one jax MODULE.bazel fixup: remove the local_wheels
+        # attribute (CI libtpu/NumPy nightly) that pinned rules_python (1.8.5) doesn't
+        # support, so packages resolve from the index.
         "//:third_party/py/jax_remove_local_wheels.patch",
     ],
     remote = "https://github.com/jax-ml/jax.git",
@@ -38,7 +36,7 @@ git_override(
 bazel_dep(name = "xla")
 git_override(
     module_name = "xla",
-    commit = "5a9e73cbd92530cac2ac36f4736a774b2412afe2",
+    commit = "039e0a6bc6cc4ec4f0b5a6f44334da77d4357be9",
     patch_strip = 1,
     patches = [
         "//:third_party/xla/future_sfinae.patch",
@@ -145,4 +143,9 @@ raiden_version_repo = use_repo_rule("//bazel:wheel_version.bzl", "raiden_version
 raiden_version_repo(
     name = "raiden_version",
     pyproject_toml = "//:pyproject.toml",
+)
+
+single_version_override(
+    module_name = "abseil-cpp",
+    version = "20260526.0",
 )
