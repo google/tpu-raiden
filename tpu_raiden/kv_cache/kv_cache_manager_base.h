@@ -19,12 +19,15 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/functional/any_invocable.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
@@ -357,6 +360,22 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
                                int block_id) override;
 
  protected:
+  virtual absl::StatusOr<raiden::PjRtCopyFuture> H2dImpl(
+      const std::vector<int64_t>& src_offsets_major_dim = {},
+      const std::vector<int64_t>& dst_offsets_major_dim = {},
+      const std::vector<int64_t>& copy_sizes_major_dim = {},
+      std::optional<int64_t> slot_idx = std::nullopt,
+      std::optional<size_t> layer_idx = std::nullopt,
+      std::optional<size_t> shard_idx = std::nullopt);
+
+  virtual absl::StatusOr<raiden::PjRtCopyFuture> D2hImpl(
+      const std::vector<int64_t>& src_offsets_major_dim = {},
+      const std::vector<int64_t>& dst_offsets_major_dim = {},
+      const std::vector<int64_t>& copy_sizes_major_dim = {},
+      std::optional<int64_t> slot_idx = std::nullopt,
+      std::optional<size_t> layer_idx = std::nullopt,
+      std::optional<size_t> shard_idx = std::nullopt);
+
   const PJRT_Api* c_api_ = nullptr;
   const PJRT_RawBuffer_Extension* extension_ = nullptr;
   size_t max_physical_size_ = 0;
@@ -462,6 +481,40 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   };
   absl::flat_hash_map<uint64_t, RegisteredPlan> active_plans_
       ABSL_GUARDED_BY(plans_mu_);
+
+  // An asynchronous FFI task item representing a queued H2D or D2H copy
+  // request. Bundles the work lambda with the XLA promise that signals Python
+  // caller completion.
+  struct AsyncTask {
+    absl::AnyInvocable<absl::StatusOr<raiden::PjRtCopyFuture>() &&> work;
+    xla::Promise<void> promise;
+  };
+
+  // Background worker loop that dequeues tasks from task_queue_ and executes
+  // them in FIFO order, resolving promises when under-the-hood DMA completes.
+  void WorkerLoop();
+
+  // Condition variable predicate helper checking if tasks are available or if
+  // shutdown has been requested.
+  bool QueueNotEmptyOrShutdown() const ABSL_SHARED_LOCKS_REQUIRED(queue_mu_);
+
+  // Mutex guarding access to the asynchronous background dispatch queue and
+  // shutdown state.
+  absl::Mutex queue_mu_;
+
+  // FIFO task queue for sequential H2D/D2H transfer scheduling.
+  std::queue<AsyncTask> task_queue_ ABSL_GUARDED_BY(queue_mu_);
+
+  // Background worker thread executing queued FFI transfers.
+  std::thread worker_thread_;
+
+  // True if destruction has been initiated and the worker loop should exit
+  // after draining the queue.
+  bool shutdown_ ABSL_GUARDED_BY(queue_mu_) = false;
+
+  // True if background FFI dispatching is enabled via the
+  // RAIDEN_ENABLE_ASYNC_DISPATCH environment variable.
+  bool enable_background_ = false;
 };
 
 }  // namespace kv_cache

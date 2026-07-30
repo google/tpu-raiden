@@ -54,6 +54,7 @@
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/kv_cache/logical_block_manager.h"
+#include "tpu_raiden/kv_cache/pool_layout.h"
 #include "tpu_raiden/rpc/raiden_service.pb.h"
 #include "tpu_raiden/transport/block_transport.h"
 
@@ -153,7 +154,7 @@ struct TransferPipelinedState {
   void SetError(const absl::Status& status) {
     if (status.ok()) return;
     {
-      absl::MutexLock lock(&err_mu);
+      absl::MutexLock lock(err_mu);
       if (first_error.ok()) {
         first_error = status;
       }
@@ -163,7 +164,7 @@ struct TransferPipelinedState {
     if (promise_fulfilled.compare_exchange_strong(expected, true)) {
       absl::Status err;
       {
-        absl::MutexLock lock(&err_mu);
+        absl::MutexLock lock(err_mu);
         err = first_error;
       }
       promise.Set(err);
@@ -178,7 +179,7 @@ struct TransferPipelinedState {
         if (has_failed.load(std::memory_order_acquire)) {
           absl::Status err;
           {
-            absl::MutexLock lock(&err_mu);
+            absl::MutexLock lock(err_mu);
             err = first_error;
           }
           promise.Set(err);
@@ -339,6 +340,11 @@ KVCacheManagerBase::KVCacheManagerBase(
   dma_pool_ = std::make_unique<NumaThreadPool>(kPoolSize);
   push_pool_ = std::make_shared<NumaThreadPool>(kPoolSize);
   pull_pool_ = std::make_unique<NumaThreadPool>(kPoolSize);
+  const char* bg_env = std::getenv("RAIDEN_ENABLE_ASYNC_DISPATCH");
+  enable_background_ = (bg_env != nullptr && std::string(bg_env) == "1");
+  if (enable_background_) {
+    worker_thread_ = std::thread(&KVCacheManagerBase::WorkerLoop, this);
+  }
 }
 
 KVCacheManagerBase::KVCacheManagerBase(
@@ -409,9 +415,21 @@ KVCacheManagerBase::KVCacheManagerBase(
   push_pool_ = std::make_shared<NumaThreadPool>(kPoolSize);
   pull_pool_ = std::make_unique<NumaThreadPool>(kPoolSize);
   InitTransportServer();
+  const char* bg_env = std::getenv("RAIDEN_ENABLE_ASYNC_DISPATCH");
+  enable_background_ = (bg_env != nullptr && std::string(bg_env) == "1");
+  if (enable_background_) {
+    worker_thread_ = std::thread(&KVCacheManagerBase::WorkerLoop, this);
+  }
 }
 
 KVCacheManagerBase::~KVCacheManagerBase() {
+  if (worker_thread_.joinable()) {
+    {
+      absl::MutexLock lock(queue_mu_);
+      shutdown_ = true;
+    }
+    worker_thread_.join();
+  }
   push_pool_.reset();
   dma_pool_.reset();
   pull_pool_.reset();
@@ -420,7 +438,40 @@ KVCacheManagerBase::~KVCacheManagerBase() {
   host_block_manager_.reset();
 }
 
-absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
+void KVCacheManagerBase::WorkerLoop() {
+  while (true) {
+    AsyncTask task;
+    {
+      absl::MutexLock lock(queue_mu_);
+      queue_mu_.Await(
+          absl::Condition(this, &KVCacheManagerBase::QueueNotEmptyOrShutdown));
+      if (shutdown_ && task_queue_.empty()) {
+        break;
+      }
+      task = std::move(task_queue_.front());
+      task_queue_.pop();
+    }
+    auto status_or_future = std::move(task.work)();
+    if (!status_or_future.ok()) {
+      task.promise.Set(status_or_future.status());
+    } else {
+      status_or_future->OnReady(
+          [promise = std::move(task.promise)](auto status_or_holds) mutable {
+            if (status_or_holds.ok()) {
+              promise.Set();
+            } else {
+              promise.Set(status_or_holds.status());
+            }
+          });
+    }
+  }
+}
+
+bool KVCacheManagerBase::QueueNotEmptyOrShutdown() const {
+  return !task_queue_.empty() || shutdown_;
+}
+
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dImpl(
     const std::vector<int64_t>& src_offsets_major_dim,
     const std::vector<int64_t>& dst_offsets_major_dim,
     const std::vector<int64_t>& copy_sizes_major_dim,
@@ -692,7 +743,7 @@ KVCacheManagerBase::DispatchD2hChunks(const std::vector<int64_t>& src_offsets,
   return logical_futures;
 }
 
-absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2h(
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2hImpl(
     const std::vector<int64_t>& src_offsets_major_dim,
     const std::vector<int64_t>& dst_offsets_major_dim,
     const std::vector<int64_t>& copy_sizes_major_dim,
@@ -1988,7 +2039,7 @@ absl::Status KVCacheManagerBase::PushKVCacheResharded(
   }
 
   // 2. D2H to copy from device to host.
-  ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2h());
+  ASSIGN_OR_RETURN(raiden::PjRtCopyFuture d2h_future, D2hImpl());
 
   // 3. Group entries by dst_peer and collect unique block IDs
   std::map<std::string, std::vector<std::pair<int, int>>> peer_transfers;
@@ -2374,6 +2425,60 @@ uint8_t* KVCacheManagerBase::GetBlockHostPointer(size_t layer_idx,
   }
   return BlockTransportDelegate::GetBlockHostPointer(layer_idx, shard_idx,
                                                      block_id);
+}
+
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2d(
+    const std::vector<int64_t>& src_offsets_major_dim,
+    const std::vector<int64_t>& dst_offsets_major_dim,
+    const std::vector<int64_t>& copy_sizes_major_dim,
+    std::optional<int64_t> slot_idx, std::optional<size_t> target_layer_idx,
+    std::optional<size_t> target_shard_idx) {
+  if (enable_background_) {
+    auto [promise, future] = xla::MakePromise();
+    AsyncTask task;
+    task.work = [this, src = src_offsets_major_dim, dst = dst_offsets_major_dim,
+                 sizes = copy_sizes_major_dim, slot_idx, target_layer_idx,
+                 target_shard_idx]() mutable {
+      return this->H2dImpl(src, dst, sizes, slot_idx, target_layer_idx,
+                           target_shard_idx);
+    };
+    task.promise = std::move(promise);
+    {
+      absl::MutexLock lock(queue_mu_);
+      task_queue_.push(std::move(task));
+    }
+    return raiden::PjRtCopyFuture(future, {});
+  }
+  return H2dImpl(src_offsets_major_dim, dst_offsets_major_dim,
+                 copy_sizes_major_dim, slot_idx, target_layer_idx,
+                 target_shard_idx);
+}
+
+absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::D2h(
+    const std::vector<int64_t>& src_offsets_major_dim,
+    const std::vector<int64_t>& dst_offsets_major_dim,
+    const std::vector<int64_t>& copy_sizes_major_dim,
+    std::optional<int64_t> slot_idx, std::optional<size_t> target_layer_idx,
+    std::optional<size_t> target_shard_idx) {
+  if (enable_background_) {
+    auto [promise, future] = xla::MakePromise();
+    AsyncTask task;
+    task.work = [this, src = src_offsets_major_dim, dst = dst_offsets_major_dim,
+                 sizes = copy_sizes_major_dim, slot_idx, target_layer_idx,
+                 target_shard_idx]() mutable {
+      return this->D2hImpl(src, dst, sizes, slot_idx, target_layer_idx,
+                           target_shard_idx);
+    };
+    task.promise = std::move(promise);
+    {
+      absl::MutexLock lock(queue_mu_);
+      task_queue_.push(std::move(task));
+    }
+    return raiden::PjRtCopyFuture(future, {});
+  }
+  return D2hImpl(src_offsets_major_dim, dst_offsets_major_dim,
+                 copy_sizes_major_dim, slot_idx, target_layer_idx,
+                 target_shard_idx);
 }
 
 }  // namespace kv_cache
