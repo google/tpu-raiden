@@ -15,9 +15,15 @@
 # BUILD file for tpu_raiden transport library package.
 # It is only visible to the BlockTransport package.
 
+load("@com_github_google_flatbuffers//:build_defs.bzl", "flatbuffer_cc_library")
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
+
+flatbuffer_cc_library(
+    name = "chunk_cc_fbs",
+    srcs = ["chunk.fbs"],
+)
 
 cc_library(
     name = "chunk",
@@ -34,6 +40,35 @@ cc_library(
     features = ["-use_header_modules"],
     deps = [
         "@com_google_absl//absl/status",
+    ],
+)
+
+cc_library(
+    name = "chunk_serializer",
+    srcs = ["chunk_serializer.cc"],
+    hdrs = ["chunk_serializer.h"],
+    deps = [
+        ":chunk",
+        ":chunk_cc_fbs",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:string_view",
+    ],
+)
+
+cc_test(
+    name = "chunk_serializer_test",
+    srcs = ["chunk_serializer_test.cc"],
+    deps = [
+        ":chunk",
+        ":chunk_serializer",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:status_matchers",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 

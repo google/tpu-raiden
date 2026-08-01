@@ -27,6 +27,7 @@ inline constexpr uint8_t kOpBufferPushBatched = 7;
 // TODO(swasthi): serialization using flatbuffer.
 // TODO(swasthi): add version field to prevent breaking changes.
 struct alignas(8) ChunkHeader {
+  // LINT.IfChange
   uint8_t op;     // OP code. See kOp* constants.
   uint8_t flags;  // Holds major_order or protocol flags
   uint16_t buffer_id;      // Multidimensional Buffer / Layer ID coordinate
@@ -36,13 +37,20 @@ struct alignas(8) ChunkHeader {
   uint32_t local_id;       // Local block ID or target shard index
   uint32_t count_or_size;  // Number of blocks or continuous payload bytes
   uint64_t uuid;           // Globally unique transaction routing ID
+  // LINT.ThenChange(//depot/google3/tpu_raiden/transport/lib/chunk.fbs)
+
+  bool operator==(const ChunkHeader&) const = default;
 };
 
 struct ChunkMetadata {
+  // LINT.IfChange
   uint32_t layer_idx;
   uint32_t dst_shard_idx;
   uint32_t dst_offset_bytes;
   uint32_t size_bytes;
+  // LINT.ThenChange(//depot/google3/tpu_raiden/transport/lib/chunk.fbs)
+
+  bool operator==(const ChunkMetadata&) const = default;
 };
 
 }  // namespace tpu_raiden::transport::lib
