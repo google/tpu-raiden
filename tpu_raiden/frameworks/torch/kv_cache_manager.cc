@@ -375,8 +375,15 @@ void KVCacheManager::StartGrpcServer(
     status = client.RegisterWorker(w_id, worker_endpoint, local_eps,
                                    torch_manager_->node_id());
     if (!status.ok()) {
-      LOG(ERROR) << "Failed to register worker with controller: "
-                 << status.message();
+      // A worker that silently fails to register never receives
+      // TransferBuffers fanout, so a controller-driven save would transfer on
+      // the remaining workers and still report success -- silent data
+      // corruption on a later load. Fail construction instead so the caller
+      // sees the broken registration immediately.
+      throw std::runtime_error(absl::StrCat(
+          "Failed to register worker ", w_id,
+          " (worker_endpoint=", worker_endpoint, ") with controller at ",
+          *raiden_controller_address, ": ", status.ToString()));
     } else {
       LOG(INFO) << "Successfully registered worker " << w_id
                 << " (worker_endpoint=" << worker_endpoint

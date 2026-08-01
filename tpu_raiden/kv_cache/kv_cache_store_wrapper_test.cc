@@ -15,11 +15,14 @@
 #include "tpu_raiden/kv_cache/kv_cache_store_wrapper.h"
 
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <cstdlib>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -159,6 +162,47 @@ TEST_F(KVCacheStoreWrapperTest, ModelUidMismatchColdStarts) {
   auto lookup_or = (*wrapper)->Lookup({"host_1"});
   ASSERT_TRUE(lookup_or.ok());
   EXPECT_THAT(*lookup_or, IsEmpty());
+}
+
+TEST_F(KVCacheStoreWrapperTest, ControllerBindFailureThrows) {
+  unsetenv("RAIDEN_SHM_KEY");
+
+  // Squat a port with a plain TCP socket (no SO_REUSEPORT), so the embedded
+  // controller's gRPC bind on the same port must fail with EADDRINUSE.
+  int squatter = socket(AF_INET, SOCK_STREAM, 0);
+  ASSERT_GE(squatter, 0);
+  sockaddr_in addr = {};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  ASSERT_EQ(bind(squatter, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)),
+            0);
+  ASSERT_EQ(listen(squatter, 1), 0);
+  socklen_t addr_len = sizeof(addr);
+  ASSERT_EQ(
+      getsockname(squatter, reinterpret_cast<sockaddr*>(&addr), &addr_len), 0);
+  const int occupied_port = ntohs(addr.sin_port);
+
+  RaidenId rid{"wrapper_test_job", "0", "wrapper_test_cache", 0};
+  EXPECT_THROW(KVCacheStoreWrapper(
+                   /*lru_capacity=*/4, /*global_registry_address=*/"", rid,
+                   /*num_shards=*/1, /*shard_size_bytes=*/512,
+                   /*raiden_orchestrator_address=*/"",
+                   /*store_server_ip=*/"127.0.0.1",
+                   /*raiden_controller_port=*/occupied_port),
+               std::runtime_error);
+  close(squatter);
+}
+
+TEST_F(KVCacheStoreWrapperTest, NumRegisteredWorkers) {
+  unsetenv("RAIDEN_SHM_KEY");
+  // No controller (num_shards=0): the accessor reports zero workers.
+  auto no_controller = MakeWrapper(/*capacity=*/4, /*num_shards=*/0);
+  EXPECT_EQ((*no_controller)->num_registered_workers(), 0);
+  // Controller up, nobody registered yet: still zero, and the gate a caller
+  // builds on this accessor stays closed.
+  auto with_controller = MakeWrapper(/*capacity=*/4, /*num_shards=*/1);
+  EXPECT_EQ((*with_controller)->num_registered_workers(), 0);
 }
 
 }  // namespace

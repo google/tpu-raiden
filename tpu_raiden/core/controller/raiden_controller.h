@@ -210,6 +210,13 @@ class RaidenController {
   int num_shards() const { return num_shards_; }
   int64_t shard_size_bytes() const { return shard_size_bytes_; }
   std::string controller_address() const { return raiden_controller_address_; }
+  // Outcome of starting this controller's ControllerServer. A bind failure
+  // (e.g. requested port already in use) leaves the controller unreachable at
+  // an address ending in ":0"; callers that need a working control plane must
+  // check this instead of trusting construction to have succeeded.
+  const absl::Status& controller_server_status() const {
+    return controller_server_status_;
+  }
   const std::vector<proto::BufferProto>& all_sharded_buffers() const {
     return all_sharded_buffers_;
   }
@@ -238,6 +245,7 @@ class RaidenController {
   std::unique_ptr<kv_cache::LogicalBlockManager> block_manager_
       ABSL_GUARDED_BY(mutex_);
   std::string raiden_controller_address_;
+  absl::Status controller_server_status_;
 
   // Issues the pull for an in-flight read and chains the release. Runs on a
   // gRPC callback thread with lifetime_->mu held.

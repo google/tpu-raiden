@@ -523,6 +523,14 @@ NB_MODULE(_tpu_raiden_torch, m) {
                      return self->store_server_address();
                    })
       .def(
+          "num_registered_workers",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
+            return self->num_registered_workers();
+          },
+          "Number of workers currently registered with this store's "
+          "controller. Save/Load fan out to exactly these workers; callers "
+          "must gate transfers until every expected worker has registered.")
+      .def(
           "lookup",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
              const std::vector<nb::bytes>& block_hashes, bool enable_global) {

@@ -131,6 +131,14 @@ class HostOffloadBackend : public KVCacheStoreBackend {
   void ClearMetadataEntry(const RaidenBlockID& block)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
+  // Reclaims the state of a stale eviction candidate that is about to be
+  // replaced by a fresh insert of the same hash: clears its metadata entry
+  // and returns its host block (if it owned one) to the controller's block
+  // allocator. Without this, Put() on a candidate hash overwrites the value
+  // in place and the old host block leaks permanently.
+  void ReclaimStaleCandidate(const std::string& hash)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
   std::vector<std::string> GetSortedHashes(
       absl::Span<const std::string> hashes) const;
 

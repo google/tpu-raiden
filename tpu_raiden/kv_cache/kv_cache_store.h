@@ -243,6 +243,13 @@ class KVCacheStore {
   size_t capacity() const;
   std::string raiden_controller_address() const;
 
+  // Number of workers currently registered with this store's in-process
+  // raiden controller (0 when the store has no controller). Save/Load fan out
+  // to exactly these workers, and a partial worker set still reports success
+  // -- callers gating on full registration (e.g. one worker per TP rank) must
+  // poll this before enabling transfers.
+  size_t num_registered_workers() const;
+
   // "host:port" of this store's KVCacheStoreService, as published to the
   // global registry. Empty when no `store_server_ip` was supplied, which is
   // also exactly when this store is not discoverable by peers.

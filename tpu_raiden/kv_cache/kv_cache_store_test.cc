@@ -1155,6 +1155,138 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, LoadSuccess) {
   EXPECT_EQ((*lookup_res)[1].second.device_block_id, 3);
 }
 
+// Candidate re-admission is the normal capacity-pressure path: save a block
+// to host, let a later insert displace it to the eviction-candidate list,
+// then re-store the same prefix. The re-admitting Put() replaces the
+// candidate's value in place, so its host block must be returned to the
+// allocator at that point -- before the fix it leaked permanently.
+TEST_F(KVCacheStoreEmbeddedControllerTest,
+       CandidateReadmissionReclaimsHostBlock) {
+  ::tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(
+      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+
+  auto controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(
+          unit_, 10, 1, 512, orchestrator_address_, "");
+  RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
+
+  RaidenId rid{"test_job", "0", "test_cache", 0};
+  // LRU capacity 1 so the next insert displaces the saved block.
+  KVCacheStore store(1, std::move(controller), "", rid);
+  auto* raiden_controller = KVCacheStoreTest::GetController(store);
+  ASSERT_NE(raiden_controller, nullptr);
+  EXPECT_EQ(store.num_registered_workers(), 1);
+  // DeallocateBlockIds unlocks blocks (making them evictable) but never
+  // clears is_allocated, so reclamation is visible in the locked count, not
+  // num_free_blocks().
+  const int base_locked =
+      raiden_controller->block_manager()->num_locked_blocks();
+
+  // 1. Save hash_a to host: insert as HBM, pin, save, poll, release.
+  ASSERT_TRUE(store
+                  .Insert({"hash_a"},
+                          {RaidenBlockID(rid, -1, 0, BlockStatus::HBM)}, false)
+                  .first);
+  ASSERT_TRUE(store.Pin({"hash_a"}));
+  ASSERT_TRUE(store.Save({"hash_a"}).ok());
+  bool done = false;
+  while (!done) {
+    auto [save_done, save_failed, save_pending] = store.PollSaveStatus();
+    ASSERT_TRUE(save_failed.empty()) << "Async Save failed during polling";
+    done = !save_done.empty();
+    if (!done) {
+      absl::SleepFor(absl::Milliseconds(10));
+    }
+  }
+  store.Release({"hash_a"});
+  EXPECT_EQ(raiden_controller->block_manager()->num_locked_blocks(),
+            base_locked + 1);
+
+  // 2. Displace hash_a to the eviction-candidate list; the candidate keeps
+  // its host block.
+  ASSERT_TRUE(store
+                  .Insert({"hash_b"},
+                          {RaidenBlockID(rid, -1, 1, BlockStatus::HBM)}, false)
+                  .first);
+  EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
+              ::testing::ElementsAre("hash_a"));
+  EXPECT_EQ(raiden_controller->block_manager()->num_locked_blocks(),
+            base_locked + 1);
+
+  // 3. Re-admit hash_a with a fresh HBM slice (re-store of the same prefix).
+  // The rescue replaces the candidate's value; its stale host block must
+  // return to the allocator.
+  ASSERT_TRUE(store.InsertAndLock(
+      {"hash_a"}, {RaidenBlockID(rid, -1, 2, BlockStatus::HBM)}, false));
+  EXPECT_EQ(raiden_controller->block_manager()->num_locked_blocks(),
+            base_locked);
+  EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
+              ::testing::IsEmpty());
+
+  // 4. Roll back the admission: the fresh HBM entry is deleted, and nothing
+  // double-frees the already-reclaimed host block.
+  EXPECT_EQ(store.ReleaseAndDelete({"hash_a"}), 1);
+  EXPECT_EQ(raiden_controller->block_manager()->num_locked_blocks(),
+            base_locked);
+  auto lookup_a = store.Lookup({"hash_a"});
+  ASSERT_TRUE(lookup_a.ok());
+  EXPECT_EQ(lookup_a->size(), 0);
+  auto lookup_b = store.Lookup({"hash_b"});
+  ASSERT_TRUE(lookup_b.ok());
+  EXPECT_EQ(lookup_b->size(), 1);
+}
+
+// Same leak through the plain Insert() path: re-inserting a hash that sits in
+// the candidate list rescues the entry with the new value and must reclaim
+// the stale host block.
+TEST_F(KVCacheStoreEmbeddedControllerTest,
+       CandidateReadmissionViaInsertReclaimsHostBlock) {
+  ::tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(
+      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+
+  auto controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(
+          unit_, 10, 1, 512, orchestrator_address_, "");
+  RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
+
+  RaidenId rid{"test_job", "0", "test_cache", 0};
+  KVCacheStore store(1, std::move(controller), "", rid);
+  auto* raiden_controller = KVCacheStoreTest::GetController(store);
+  // Reclamation unlocks the block rather than clearing is_allocated, so
+  // track the locked count (see CandidateReadmissionReclaimsHostBlock).
+  const int base_locked =
+      raiden_controller->block_manager()->num_locked_blocks();
+
+  // Give hash_a a real allocated host block, then displace it.
+  auto host_ids_or = raiden_controller->AllocateBlockIds(1);
+  ASSERT_TRUE(host_ids_or.ok());
+  ASSERT_TRUE(
+      store
+          .Insert({"hash_a"},
+                  {RaidenBlockID(rid, (*host_ids_or)[0], BlockStatus::HOST)},
+                  true)
+          .first);
+  ASSERT_TRUE(store
+                  .Insert({"hash_b"},
+                          {RaidenBlockID(rid, -1, 1, BlockStatus::HBM)}, false)
+                  .first);
+  EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
+              ::testing::ElementsAre("hash_a"));
+  EXPECT_EQ(raiden_controller->block_manager()->num_locked_blocks(),
+            base_locked + 1);
+
+  // Re-insert hash_a with a device-only slice: the candidate's host block
+  // must be reclaimed as its value is replaced.
+  store.Insert({"hash_a"}, {RaidenBlockID(rid, -1, 3, BlockStatus::HBM)},
+               false);
+  EXPECT_EQ(raiden_controller->block_manager()->num_locked_blocks(),
+            base_locked);
+  EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
+              ::testing::IsEmpty());
+}
+
 TEST_F(KVCacheStoreEmbeddedControllerTest, SaveMultiWorkerSuccess) {
   auto test_server_0 = ::tpu_raiden::controller::CreateTestWorkerServer();
   auto test_server_1 = ::tpu_raiden::controller::CreateTestWorkerServer();

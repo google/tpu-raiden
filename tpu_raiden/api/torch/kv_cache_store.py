@@ -307,6 +307,15 @@ class KVCacheStore:
   def capacity(self) -> int:
     return self._impl.capacity()
 
+  def num_registered_workers(self) -> int:
+    """Number of workers currently registered with this store's controller.
+
+    Save/Load fan out to exactly the registered workers, and a partial worker
+    set still reports success -- callers must gate transfers until every
+    expected worker (e.g. one per TP rank) has registered.
+    """
+    return self._impl.num_registered_workers()
+
   def pin(self, block_hashes: list[bytes]) -> bool:
     """Pins cached block hashes in memory, protecting them against LRU eviction while in active use."""
     return self._impl.pin(block_hashes)

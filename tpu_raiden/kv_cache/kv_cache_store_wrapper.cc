@@ -20,12 +20,14 @@
 #include <cstring>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "tpu_raiden/core/controller/raiden_controller.h"
 #include "tpu_raiden/kv_cache/kv_cache_metadata.h"
 #include "tpu_raiden/kv_cache/kv_cache_metadata_shm.h"
 #include "tpu_raiden/kv_cache/kv_cache_store.h"
@@ -81,6 +83,21 @@ KVCacheStoreWrapper::KVCacheStoreWrapper(
       lru_capacity, global_registry_address, std::move(raiden_id), num_shards,
       shard_size_bytes, raiden_orchestrator_address, store_server_ip,
       raiden_controller_port, std::move(metadata));
+
+  // A controller whose server failed to bind (e.g. the requested port is in
+  // use) is silently unreachable: workers cannot register and every
+  // controller-driven transfer would fail. Surface that to the caller here
+  // instead of letting serving come up looking healthy.
+  if (controller_->raiden_controller() != nullptr) {
+    const absl::Status& server_status =
+        controller_->raiden_controller()->controller_server_status();
+    if (!server_status.ok()) {
+      throw std::runtime_error(absl::StrCat(
+          "KVCacheStore raiden controller failed to bind its server (",
+          "requested port ", raiden_controller_port,
+          "): ", server_status.ToString()));
+    }
+  }
 
   if (metadata_region_ != nullptr && metadata_region_->warm()) {
     auto recovered_or = controller_->RecoverFromLocalManifest();

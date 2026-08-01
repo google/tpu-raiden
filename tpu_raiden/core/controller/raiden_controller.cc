@@ -221,6 +221,7 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
     LOG(WARNING) << "Failed to start ControllerServer in RaidenController: "
                  << server_status.message();
   }
+  controller_server_status_ = server_status;
 
   int actual_port = server_ptr->GetGrpcPort();
   if (raiden_controller_address.empty()) {

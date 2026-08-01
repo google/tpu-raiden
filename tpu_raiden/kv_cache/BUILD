@@ -124,12 +124,15 @@ cc_library(
     name = "kv_cache_store_wrapper",
     srcs = ["kv_cache_store_wrapper.cc"],
     hdrs = ["kv_cache_store_wrapper.h"],
+    copts = ["-fexceptions"],
+    features = ["-use_header_modules"],
     visibility = ["//visibility:public"],
     deps = [
         ":kv_cache_metadata",
         ":kv_cache_metadata_shm",
         ":kv_cache_store",
         ":raiden_id",
+        "//tpu_raiden/core/controller:raiden_controller",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/strings",
@@ -139,6 +142,11 @@ cc_library(
 cc_test(
     name = "kv_cache_store_wrapper_test",
     srcs = ["kv_cache_store_wrapper_test.cc"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
     deps = [
         ":kv_cache_store",
         ":kv_cache_store_wrapper",

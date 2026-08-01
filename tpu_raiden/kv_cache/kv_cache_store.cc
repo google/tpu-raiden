@@ -628,6 +628,17 @@ std::string KVCacheStore::raiden_controller_address() const {
   return "";
 }
 
+size_t KVCacheStore::num_registered_workers() const {
+  if (!raiden_controller_) {
+    return 0;
+  }
+  auto registry = raiden_controller_->worker_registry();
+  if (registry == nullptr) {
+    return 0;
+  }
+  return registry->GetRegisteredWorkers().size();
+}
+
 absl::Status KVCacheStore::Save(const std::vector<std::string>& block_hashes) {
   if (!raiden_controller_) {
     return absl::FailedPreconditionError("RaidenController is not initialized");

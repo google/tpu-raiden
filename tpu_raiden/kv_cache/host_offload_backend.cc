@@ -266,12 +266,7 @@ std::pair<bool, BlockSliceList> HostOffloadBackend::Insert(
         }
         continue;
       }
-      if (metadata_.has_value()) {
-        if (const RaidenBlockID* stale =
-                lru_cache_.PeekIncludingCandidates(hash)) {
-          ClearMetadataEntry(*stale);
-        }
-      }
+      ReclaimStaleCandidate(hash);
       std::optional<std::pair<std::string, RaidenBlockID>> evicted;
       if (i < slices.size()) {
         evicted = lru_cache_.Put(hash, slices[i]);
@@ -354,12 +349,7 @@ bool HostOffloadBackend::InsertAndLock(
   for (auto it = new_indices.rbegin(); it != new_indices.rend(); ++it) {
     size_t i = *it;
     const std::string& hash = block_hashes[i];
-    if (metadata_.has_value()) {
-      if (const RaidenBlockID* stale =
-              lru_cache_.PeekIncludingCandidates(hash)) {
-        ClearMetadataEntry(*stale);
-      }
-    }
+    ReclaimStaleCandidate(hash);
     std::optional<std::pair<std::string, RaidenBlockID>> evicted;
     if (i < slices.size()) {
       evicted = lru_cache_.Put(hash, slices[i]);
@@ -842,6 +832,31 @@ void HostOffloadBackend::ClearMetadataEntry(const RaidenBlockID& block) {
   if (!status.ok()) {
     LOG(WARNING) << "Failed to clear the metadata entry for block "
                  << block.host_block_id << ": " << status.message();
+  }
+}
+
+void HostOffloadBackend::ReclaimStaleCandidate(const std::string& hash) {
+  // The caller only reaches here when Contains(hash) is false, so any entry
+  // still findable under this hash is an eviction candidate.
+  const RaidenBlockID* stale = lru_cache_.PeekIncludingCandidates(hash);
+  if (stale == nullptr) {
+    return;
+  }
+  ClearMetadataEntry(*stale);
+  // HOST / HOST_AND_HBM means host_block_id is a block of the LOCAL
+  // allocator (REMOTE entries carry the peer's coordinate instead). The
+  // fresh insert replaces the value in place, so this is the last point the
+  // old block id is visible -- return it to the allocator here.
+  if (raiden_controller_ != nullptr && stale->host_block_id >= 0 &&
+      (stale->status == BlockStatus::HOST ||
+       stale->status == BlockStatus::HOST_AND_HBM)) {
+    absl::Status status =
+        raiden_controller_->DeallocateBlockIds({stale->host_block_id});
+    if (!status.ok()) {
+      LOG(WARNING) << "Failed to deallocate host block "
+                   << stale->host_block_id
+                   << " of replaced eviction candidate: " << status.message();
+    }
   }
 }
 
