@@ -15,7 +15,24 @@
 name: Run Benchmarks
 
 on:
+  # Allow manual runs from the Actions tab for testing
   workflow_dispatch:
+    inputs:
+      benchmark_filter:
+        description: "Regex to filter by benchmark name (e.g., 'h2d_d2h.*')."
+        required: false
+        type: string
+        default: ""
+      environment_filter:
+        description: "Regex to filter by environment configuration ID (e.g., 'tpu-v5e.*')."
+        required: false
+        type: string
+        default: ""
+      ab_mode:
+        description: "Run A/B comparison (baseline vs experiment)."
+        required: false
+        type: boolean
+        default: false
 
   push:
     branches:
@@ -32,11 +49,14 @@ permissions:
 jobs: 
   run_benchmarks:
     name: Run TPU Raiden H2D D2H Benchmarks
-    uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@affd28b492f67c242afa8b119e590b25816b7b88
+    uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@bd952b0063be0b4169f698947792d203ab5f5c42 # main
     with:
       registry_file: "tpu_raiden/benchmarks/benchmark_registry.pbtxt"
-      ml_actions_ref: "affd28b492f67c242afa8b119e590b25816b7b88"
+      bap_ref: "bd952b0063be0b4169f698947792d203ab5f5c42"
       runner: "linux-x86-n2-32"
       publish_metrics: false
       pub_sub_gcp_project_id: "ml-oss-benchmarking-production"
       pub_sub_gcp_topic_id: "public-results-prod"
+      benchmark_filter: ${{ inputs.benchmark_filter }}
+      environment_filter: ${{ inputs.environment_filter }}
+      ab_mode: ${{ inputs.ab_mode }}
