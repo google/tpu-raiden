@@ -48,6 +48,7 @@
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/transport/block_transport_delegate.h"
 #include "tpu_raiden/transport/lib/chunk.h"
+#include "tpu_raiden/transport/lib/chunk_serializer.h"
 #include "tpu_raiden/transport/lib/raw_buffer_transport.h"
 #include "tpu_raiden/transport/peregrine/src/api/socket_util.h"
 
@@ -462,12 +463,15 @@ absl::Status BlockTransport::HandleIncomingPull(
         "Requested remote block count is not divisible by shard_factor");
   }
   lib::ChunkHeader resp_header = {};
+  resp_header.version = 1;
   resp_header.op = 2;
   resp_header.flags = header.flags;
   resp_header.remote_id = header.local_id;
   resp_header.local_id = 0;
   resp_header.count_or_size = header.count_or_size;
-  RETURN_IF_ERROR(WriteExact(client_fd, &resp_header, sizeof(resp_header)));
+  const std::string serialized_resp = lib::SerializeChunkHeader(resp_header);
+  RETURN_IF_ERROR(
+      WriteExact(client_fd, serialized_resp.data(), serialized_resp.size()));
 
   size_t local_blocks = header.count_or_size / block_delegate_->shard_factor();
   if (header.remote_id >
@@ -819,6 +823,7 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
   });
 
   lib::ChunkHeader header = {};
+  header.version = 1;
   header.op = static_cast<uint8_t>(dst_block_ids.empty() ? 1 : 6);
   header.flags = static_cast<uint8_t>(major_order);
   header.buffer_id = 0;
@@ -828,7 +833,9 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
       layer_idx == -1 ? 0xFFFF'FFFF : static_cast<uint32_t>(layer_idx);
   header.count_or_size = static_cast<uint32_t>(block_count);
   header.uuid = uuid;
-  absl::Status s = WriteExact(fd, &header, sizeof(header));
+  const std::string serialized_header = lib::SerializeChunkHeader(header);
+  absl::Status s =
+      WriteExact(fd, serialized_header.data(), serialized_header.size());
   if (!s.ok()) {
     statuses[stream_idx] = s;
     return;
@@ -1015,23 +1022,34 @@ void BlockTransport::H2hReadWorker(
     }
 
     lib::ChunkHeader header = {};
+    header.version = 1;
     header.op = 2;  // Pull request
     header.flags = static_cast<uint8_t>(major_order);
     header.remote_id = static_cast<uint32_t>(remote_read_block_id);
     header.count_or_size = static_cast<uint32_t>(chunk.remote_count);
     header.uuid = uuid;
-    absl::Status s = WriteExact(fd, &header, sizeof(header));
+    const std::string serialized_header = lib::SerializeChunkHeader(header);
+    absl::Status s =
+        WriteExact(fd, serialized_header.data(), serialized_header.size());
     if (!s.ok()) {
       statuses[stream_idx] = s;
       return;
     }
 
-    lib::ChunkHeader resp_header = {};
-    s = ReadExact(fd, &resp_header, sizeof(resp_header));
+    char resp_buf[lib::kChunkHeaderSize];
+    s = ReadExact(fd, resp_buf, sizeof(resp_buf));
     if (!s.ok()) {
       statuses[stream_idx] = s;
       return;
     }
+    absl::StatusOr<lib::ChunkHeader> deserialized_header =
+        lib::DeserializeChunkHeader(
+            absl::string_view(resp_buf, sizeof(resp_buf)));
+    if (!deserialized_header.ok()) {
+      statuses[stream_idx] = deserialized_header.status();
+      return;
+    }
+    const lib::ChunkHeader resp_header = deserialized_header.value();
     if (resp_header.op != 2 ||
         resp_header.count_or_size != chunk.remote_count) {
       statuses[stream_idx] =

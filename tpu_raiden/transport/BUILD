@@ -46,6 +46,7 @@ cc_library(
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/core:tsl_platform_headers",
         "//tpu_raiden/transport/lib:chunk",
+        "//tpu_raiden/transport/lib:chunk_serializer",
         "//tpu_raiden/transport/lib:raw_buffer_transport",
         "//tpu_raiden/transport/peregrine/src/api:socket_util",
         "@com_google_absl//absl/base:core_headers",
