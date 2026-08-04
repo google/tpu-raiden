@@ -48,12 +48,16 @@ namespace {
 
 using TensorList = std::vector<at::Tensor>;
 
+// This is a test only change.
 std::vector<std::vector<at::Tensor>> SingleShardLayers(
     const TensorList& kv_caches) {
   std::vector<std::vector<at::Tensor>> layers;
   layers.reserve(kv_caches.size());
   for (const auto& kv_cache : kv_caches) {
     layers.push_back({kv_cache});
+  }
+  if (kv_caches.size() > 1) {
+    LOG(INFO) << "Just print something";
   }
   return layers;
 }
