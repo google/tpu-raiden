@@ -51,6 +51,29 @@ inline std::vector<std::vector<raiden::RaidenBufferHandle>> UnpackJaxArrays(
           "Number of shards mismatch across layers during unpack");
     }
 
+    try {
+      nanobind::object utils_mod = nanobind::module_::import_(
+          "tpu_raiden.api.jax.utils");
+      nanobind::object get_permutation_fn =
+          utils_mod.attr("get_shard_sorting_permutation");
+      nanobind::list permutation =
+          nanobind::cast<nanobind::list>(get_permutation_fn(dst));
+
+      std::vector<raiden::RaidenBufferHandle> sorted_shard_buffers;
+      sorted_shard_buffers.reserve(num_shards);
+      for (size_t i = 0; i < num_shards; ++i) {
+        size_t src_idx = nanobind::cast<size_t>(permutation[i]);
+        if (src_idx >= shard_buffers.size()) {
+          throw std::runtime_error("Permutation index out of bounds");
+        }
+        sorted_shard_buffers.push_back(std::move(shard_buffers[src_idx]));
+      }
+      shard_buffers = std::move(sorted_shard_buffers);
+    } catch (const std::exception& e) {
+      throw std::runtime_error(std::string("Failed to sort shards: ") +
+                               e.what());
+    }
+
     layer_buffers.push_back(std::move(shard_buffers));
   }
   return layer_buffers;

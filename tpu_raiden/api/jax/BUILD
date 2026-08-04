@@ -75,10 +75,15 @@ py_test(
 
 py_library(
     name = "weight_synchronizer_jax_py",
-    srcs = ["weight_synchronizer.py"],
+    srcs = [
+        "utils.py",
+        "weight_synchronizer.py",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
+        "@jax//jax",
+        "@pypi//numpy",
     ],
 )
 

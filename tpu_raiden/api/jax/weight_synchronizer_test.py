@@ -22,6 +22,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from tpu_raiden.api.jax import utils
 from tpu_raiden.api.jax import weight_synchronizer
 from tpu_raiden.rpc import raiden_service_pb2
 
@@ -42,6 +43,9 @@ class WeightSynchronizerIntegrationTest(absltest.TestCase):
     self.mesh = jax.sharding.Mesh(np.array(self.devices), ("data",))
     self.sharding = jax.sharding.NamedSharding(
         self.mesh, jax.sharding.PartitionSpec("data")
+    )
+    self.mesh_2d = jax.sharding.Mesh(
+        np.array(self.devices[:4]).reshape(2, 2), ("x", "y")
     )
     self.shape = (8, 128)
     self.dtype = jnp.float32
@@ -215,6 +219,110 @@ class WeightSynchronizerIntegrationTest(absltest.TestCase):
     # (should still be 5.0)
     for arr in dst_arrs:
       np.testing.assert_array_equal(np.asarray(arr), 5.0)
+
+  def _run_resharding_test(self, src_sharding, dst_sharding, shape):
+    src_arrs = [
+        jax.device_put(
+            jnp.arange(np.prod(shape), dtype=self.dtype).reshape(shape),
+            src_sharding,
+        )
+    ]
+    dst_arrs = [
+        jax.device_put(jnp.zeros(shape, dtype=self.dtype), dst_sharding)
+    ]
+
+    for arr in src_arrs:
+      arr.block_until_ready()
+    for arr in dst_arrs:
+      arr.block_until_ready()
+
+    ws_source = WeightSynchronizer(
+        jax_arrays=src_arrs,
+        local_port=0,
+        unsafe_skip_buffer_lock=True,
+        listener_port=0,
+        bind_ip="127.0.0.1",
+    )
+    ws_dest = WeightSynchronizer(
+        jax_arrays=dst_arrs,
+        local_port=0,
+        unsafe_skip_buffer_lock=True,
+        bind_ip="127.0.0.1",
+    )
+
+    req = raiden_service_pb2.ControlRequest(
+        command=raiden_service_pb2.ControlRequest.COMMAND_START_TRANSFER,
+        peers=[
+            f"127.0.0.1:{ws_dest.local_port}",
+        ],
+        start_transfer_request=raiden_service_pb2.StartTransferRequest(
+            is_sender=True
+        ),
+    )
+    payload = req.SerializeToString()
+
+    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM, 0)
+    sock.connect(("::1", ws_source.listener_port))
+    sock.sendall(len(payload).to_bytes(4, "big") + payload)
+
+    resp_len = int.from_bytes(sock.recv(4), "big")
+    resp_bytes = sock.recv(resp_len)
+    resp = raiden_service_pb2.ControlResponse()
+    resp.ParseFromString(resp_bytes)
+    self.assertTrue(resp.success)
+    sock.close()
+
+    ws_dest.h2d()
+
+    # Verify data integrity
+    np.testing.assert_array_equal(
+        np.asarray(dst_arrs[0]), np.asarray(src_arrs[0])
+    )
+
+  def test_push_sync_aligned_to_aligned(self):
+    src_sharding = jax.sharding.NamedSharding(
+        self.mesh_2d, jax.sharding.PartitionSpec("x", "y")
+    )
+    dst_sharding = jax.sharding.NamedSharding(
+        self.mesh_2d, jax.sharding.PartitionSpec("x", "y")
+    )
+    self._run_resharding_test(src_sharding, dst_sharding, (8, 8))
+
+class ShardSortingUtilTest(absltest.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    try:
+      self.devices = jax.devices("tpu")
+    except RuntimeError:
+      self.devices = jax.devices("cpu")
+    self.mesh_2d = jax.sharding.Mesh(
+        np.array(self.devices[:4]).reshape(2, 2), ("x", "y")
+    )
+
+  def test_aligned_sharding_permutation(self):
+    sharding = jax.sharding.NamedSharding(
+        self.mesh_2d, jax.sharding.PartitionSpec("x", "y")
+    )
+    arr = jax.device_put(jnp.zeros((8, 8)), sharding)
+    perm = utils.get_shard_sorting_permutation(arr)
+    self.assertEqual(perm, [0, 1, 2, 3])
+
+  def test_transposed_sharding_permutation(self):
+    sharding = jax.sharding.NamedSharding(
+        self.mesh_2d, jax.sharding.PartitionSpec("y", "x")
+    )
+    arr = jax.device_put(jnp.zeros((8, 8)), sharding)
+    perm = utils.get_shard_sorting_permutation(arr)
+    self.assertEqual(perm, [0, 2, 1, 3])
+
+  def test_replicated_sharding_permutation(self):
+    sharding = jax.sharding.NamedSharding(
+        self.mesh_2d, jax.sharding.PartitionSpec("x")
+    )
+    arr = jax.device_put(jnp.zeros((8, 8)), sharding)
+    perm = utils.get_shard_sorting_permutation(arr)
+    self.assertEqual(perm, [0, 1, 2, 3])
 
 
 if __name__ == "__main__":
