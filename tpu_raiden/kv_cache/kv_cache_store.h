@@ -194,6 +194,13 @@ class KVCacheStore {
   bool InsertAndLock(const std::vector<std::string>& block_hashes,
                      const std::vector<RaidenBlockID>& slices, bool on_host);
 
+  // InsertAndLock plus a per-hash classification of the batch (existing vs
+  // newly inserted vs displaced-to-candidate entries) from the primary
+  // backend — see InsertAndLockResult.
+  InsertAndLockResult InsertAndLockDetailed(
+      const std::vector<std::string>& block_hashes,
+      const std::vector<RaidenBlockID>& slices, bool on_host);
+
   // Reverts an InsertAndLock operation by unlocking all block_hashes in the
   // LRU cache, deleting any block_hash NOT in HOST or HOST_AND_HBM status
   // whose pin count is 0, and restoring evicted entries from the LRU cache's

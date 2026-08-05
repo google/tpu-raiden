@@ -590,6 +590,39 @@ NB_MODULE(_tpu_raiden_torch, m) {
           },
           nb::arg("block_hashes"), nb::arg("slices"), nb::arg("on_host"))
       .def(
+          "insert_and_lock_detailed",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
+             const std::vector<nb::bytes>& block_hashes,
+             const std::vector<tpu_raiden::kv_cache::RaidenBlockID>& slices,
+             bool on_host) {
+            auto hashes = ToStdStringVector(block_hashes);
+            auto res = self->InsertAndLockDetailed(hashes, slices, on_host);
+            std::vector<nb::bytes> py_existing, py_inserted;
+            py_existing.reserve(res.existing.size());
+            for (const auto& h : res.existing) {
+              py_existing.push_back(nb::bytes(h.data(), h.size()));
+            }
+            py_inserted.reserve(res.inserted.size());
+            for (const auto& h : res.inserted) {
+              py_inserted.push_back(nb::bytes(h.data(), h.size()));
+            }
+            std::vector<
+                std::pair<nb::bytes, tpu_raiden::kv_cache::RaidenBlockID>>
+                py_displaced;
+            py_displaced.reserve(res.displaced.size());
+            for (const auto& pair : res.displaced) {
+              py_displaced.push_back(std::make_pair(
+                  nb::bytes(pair.first.data(), pair.first.size()),
+                  pair.second));
+            }
+            return std::make_tuple(res.success, py_existing, py_inserted,
+                                   py_displaced);
+          },
+          nb::arg("block_hashes"), nb::arg("slices"), nb::arg("on_host"),
+          "insert_and_lock plus a per-hash classification: returns (success, "
+          "existing, inserted, displaced). On failure the operation was "
+          "fully rolled back and the lists are empty.")
+      .def(
           "release_and_delete",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
              const std::vector<nb::bytes>& block_hashes) {

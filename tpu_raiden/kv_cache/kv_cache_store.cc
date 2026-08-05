@@ -685,6 +685,29 @@ bool KVCacheStore::InsertAndLock(const std::vector<std::string>& block_hashes,
   return true;
 }
 
+InsertAndLockResult KVCacheStore::InsertAndLockDetailed(
+    const std::vector<std::string>& block_hashes,
+    const std::vector<RaidenBlockID>& slices, bool on_host) {
+  if (backends_.empty()) return InsertAndLockResult{};
+
+  InsertAndLockResult result =
+      backends_[0]->InsertAndLockDetailed(block_hashes, slices, on_host);
+  if (!result.success) {
+    return result;
+  }
+  for (size_t i = 1; i < backends_.size(); ++i) {
+    if (!backends_[i]) continue;
+    if (!backends_[i]->InsertAndLock(block_hashes, slices, on_host)) {
+      backends_[0]->ReleaseAndDelete(block_hashes);
+      for (size_t j = 1; j < i; ++j) {
+        if (backends_[j]) backends_[j]->ReleaseAndDelete(block_hashes);
+      }
+      return InsertAndLockResult{};
+    }
+  }
+  return result;
+}
+
 size_t KVCacheStore::ReleaseAndDelete(
     const std::vector<std::string>& block_hashes) {
   size_t total_deleted = 0;

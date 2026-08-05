@@ -328,8 +328,15 @@ std::pair<bool, BlockSliceList> HostOffloadBackend::Insert(
 
 bool HostOffloadBackend::InsertAndLock(
     absl::Span<const std::string> block_hashes,
+    absl::Span<const RaidenBlockID> slices, bool on_host) {
+  return InsertAndLockDetailed(block_hashes, slices, on_host).success;
+}
+
+InsertAndLockResult HostOffloadBackend::InsertAndLockDetailed(
+    absl::Span<const std::string> block_hashes,
     absl::Span<const RaidenBlockID> slices, bool /*on_host*/) {
   absl::MutexLock lock(mutex_);
+  InsertAndLockResult result;
 
   std::vector<size_t> existing_indices;
   std::vector<size_t> new_indices;
@@ -347,7 +354,7 @@ bool HostOffloadBackend::InsertAndLock(
       for (size_t j = 0; j < idx; ++j) {
         lru_cache_.Unpin(block_hashes[existing_indices[j]]);
       }
-      return false;
+      return result;
     }
   }
 
@@ -355,10 +362,9 @@ bool HostOffloadBackend::InsertAndLock(
     for (size_t i : existing_indices) {
       lru_cache_.Unpin(block_hashes[i]);
     }
-    return false;
+    return result;
   }
 
-  size_t eviction_count = 0;
   for (auto it = new_indices.rbegin(); it != new_indices.rend(); ++it) {
     size_t i = *it;
     const std::string& hash = block_hashes[i];
@@ -376,9 +382,10 @@ bool HostOffloadBackend::InsertAndLock(
       evicted = lru_cache_.Put(hash, RaidenBlockID());
     }
     if (evicted.has_value()) {
-      eviction_count++;
+      result.displaced.push_back(std::move(*evicted));
     }
   }
+  const size_t eviction_count = result.displaced.size();
 
   for (size_t idx = 0; idx < new_indices.size(); ++idx) {
     size_t i = new_indices[idx];
@@ -399,14 +406,24 @@ bool HostOffloadBackend::InsertAndLock(
       for (size_t j = 0; j < eviction_count; ++j) {
         lru_cache_.RestoreLastCandidate();
       }
-      return false;
+      result.displaced.clear();
+      return result;
     }
   }
 
   if (eviction_count > 0) {
     pending_eviction_counts_[GetSortedHashes(block_hashes)] = eviction_count;
   }
-  return true;
+  result.success = true;
+  result.existing.reserve(existing_indices.size());
+  for (size_t i : existing_indices) {
+    result.existing.push_back(block_hashes[i]);
+  }
+  result.inserted.reserve(new_indices.size());
+  for (size_t i : new_indices) {
+    result.inserted.push_back(block_hashes[i]);
+  }
+  return result;
 }
 
 size_t HostOffloadBackend::ReleaseAndDelete(

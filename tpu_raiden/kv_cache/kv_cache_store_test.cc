@@ -1658,6 +1658,60 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, LoadUnpinnedRemoteBlockFails) {
   EXPECT_THAT(status.message(), ::testing::HasSubstr("is not pinned"));
 }
 
+TEST(KVCacheStoreTest, InsertAndLockDetailedClassifiesBatch) {
+  RaidenId rid{"test_job", "0", "test_cache", 0};
+  KVCacheStore store(2, "", rid, /*num_shards=*/1, /*shard_size_bytes=*/512, "",
+                     /*store_server_ip=*/"127.0.0.1");
+
+  // hash_a pre-exists (unpinned); hash_b is new. The batch must classify
+  // them apart, with no displacement at capacity 2.
+  ASSERT_TRUE(
+      store.Insert({"hash_a"}, {RaidenBlockID(rid, 0, BlockStatus::HOST)}, true)
+          .first);
+  InsertAndLockResult result =
+      store.InsertAndLockDetailed({"hash_a", "hash_b"},
+                                  {RaidenBlockID(rid, 0, BlockStatus::HOST),
+                                   RaidenBlockID(rid, -1, 1, BlockStatus::HBM)},
+                                  false);
+  EXPECT_TRUE(result.success);
+  EXPECT_THAT(result.existing, ::testing::ElementsAre("hash_a"));
+  EXPECT_THAT(result.inserted, ::testing::ElementsAre("hash_b"));
+  EXPECT_THAT(result.displaced, ::testing::IsEmpty());
+  EXPECT_EQ(store.GetPinCount("hash_a"), 1);
+  EXPECT_EQ(store.GetPinCount("hash_b"), 1);
+
+  // Capacity full and everything pinned: the admission fails, is fully
+  // rolled back, and reports empty lists.
+  InsertAndLockResult rejected = store.InsertAndLockDetailed(
+      {"hash_c"}, {RaidenBlockID(rid, -1, 2, BlockStatus::HBM)}, false);
+  EXPECT_FALSE(rejected.success);
+  EXPECT_THAT(rejected.existing, ::testing::IsEmpty());
+  EXPECT_THAT(rejected.inserted, ::testing::IsEmpty());
+  EXPECT_THAT(rejected.displaced, ::testing::IsEmpty());
+  EXPECT_EQ(store.GetPinCount("hash_a"), 1);
+  auto lookup_c = store.Lookup({"hash_c"});
+  ASSERT_TRUE(lookup_c.ok());
+  EXPECT_EQ(lookup_c->size(), 0);
+
+  // With the pins released, admitting hash_c displaces the LRU entry into
+  // the candidate list and reports it.
+  store.Release({"hash_a", "hash_b"});
+  InsertAndLockResult displacing = store.InsertAndLockDetailed(
+      {"hash_c"}, {RaidenBlockID(rid, -1, 2, BlockStatus::HBM)}, false);
+  EXPECT_TRUE(displacing.success);
+  EXPECT_THAT(displacing.inserted, ::testing::ElementsAre("hash_c"));
+  ASSERT_EQ(displacing.displaced.size(), 1);
+  EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
+              ::testing::ElementsAre(displacing.displaced[0].first));
+
+  // Reverting the admission restores the displaced candidate.
+  EXPECT_EQ(store.ReleaseAndDelete({"hash_c"}), 1);
+  EXPECT_THAT(KVCacheStoreTest::GetEvictCandidateKeys(store),
+              ::testing::IsEmpty());
+  auto lookup_restored = store.Lookup({displacing.displaced[0].first});
+  ASSERT_TRUE(lookup_restored.ok());
+  EXPECT_EQ(lookup_restored->size(), 1);
+}
 TEST_F(KVCacheStoreEmbeddedControllerTest, SaveMultiWorkerSuccess) {
   auto test_server_0 = ::tpu_raiden::controller::CreateTestWorkerServer();
   auto test_server_1 = ::tpu_raiden::controller::CreateTestWorkerServer();

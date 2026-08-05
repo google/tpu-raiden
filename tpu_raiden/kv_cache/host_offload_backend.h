@@ -81,6 +81,10 @@ class HostOffloadBackend : public KVCacheStoreBackend {
                      absl::Span<const RaidenBlockID> slices,
                      bool on_host) override;
 
+  InsertAndLockResult InsertAndLockDetailed(
+      absl::Span<const std::string> block_hashes,
+      absl::Span<const RaidenBlockID> slices, bool on_host) override;
+
   size_t ReleaseAndDelete(absl::Span<const std::string> block_hashes) override;
 
   void Delete(absl::Span<const std::string> block_hashes,
