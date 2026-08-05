@@ -20,6 +20,11 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 load("@rules_python//python:defs.bzl", "py_library", "py_test")
 load("@rules_python//python:proto.bzl", "py_proto_library")
 
+client_visibility = [
+    "//video/youtube/discovery/ml_infra/clients/shorts/sequence:__subpackages__",
+    "//video/youtube/discovery/ml_infra/clients/shorts/ranking:__subpackages__",
+]
+
 package(default_visibility = ["//visibility:public"])
 
 proto_library(
