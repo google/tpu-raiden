@@ -131,7 +131,7 @@ class HostOffloadBackend : public KVCacheStoreBackend {
 
   tsl::Future<> Load(const RaidenId& remote_id,
                      absl::Span<const std::string> block_hashes,
-                     absl::Span<const int32_t> device_block_ids = {});
+                     absl::Span<const int32_t> device_block_ids = {}) override;
 
   // --- Remote write (WriteRemote); see KVCacheStoreBackend for why each of
   // these exists rather than reusing Lookup/Insert/Delete.

@@ -562,6 +562,104 @@ TEST(HostOffloadBackendTest, LoadSuccess) {
   server->Shutdown();
 }
 
+TEST(HostOffloadBackendTest, LoadLocalSuccess) {
+  RaidenId node_id{"node_job", "0", "data", 0};
+  rpc::RaidenIdProto unit_proto;
+  unit_proto.set_job_name(node_id.job_name);
+  unit_proto.set_job_replica_id(node_id.job_replica_id);
+  unit_proto.set_data_name(node_id.data_name);
+  unit_proto.set_data_replica_idx(node_id.data_replica_idx);
+
+  controller::RaidenController controller(unit_proto, /*num_blocks=*/100,
+                                          /*num_shards=*/1,
+                                          /*shard_size_bytes=*/1024);
+  auto test_worker_server = controller::CreateTestWorkerServer();
+  auto transfer_mock =
+      std::make_unique<controller::ShardAwareMockTransferManager>();
+  test_worker_server->service->SetTransferManager(
+      KVManagerHolder(transfer_mock.get()));
+
+  core::controller::RaidenControllerClient controller_client(
+      controller.controller_address());
+  ASSERT_OK(controller_client.RegisterWorker(
+      "worker_0", test_worker_server->server_address,
+      {{test_worker_server->server_address, {}}}));
+
+  BackendConfig config;
+  config.type = "HostOffloadBackend";
+  config.capacity = 100;
+  config.raiden_id = node_id;
+
+  auto backend_or = HostOffloadBackend::Create(config, &controller);
+  ASSERT_OK(backend_or.status());
+  auto backend = std::dynamic_pointer_cast<HostOffloadBackend>(*backend_or);
+  ASSERT_NE(backend, nullptr);
+
+  backend->Insert({"local_hash_1"},
+                  {RaidenBlockID(node_id, 10, BlockStatus::HOST)},
+                  /*on_host=*/true);
+
+  auto load_future = backend->Load(RaidenId{}, {"local_hash_1"}, {5});
+  EXPECT_OK(load_future.Await());
+}
+
+TEST(HostOffloadBackendTest, LoadLocalMissingBlockError) {
+  RaidenId node_id{"node_job", "0", "data", 0};
+  rpc::RaidenIdProto unit_proto;
+  unit_proto.set_job_name(node_id.job_name);
+  unit_proto.set_job_replica_id(node_id.job_replica_id);
+  unit_proto.set_data_name(node_id.data_name);
+  unit_proto.set_data_replica_idx(node_id.data_replica_idx);
+
+  controller::RaidenController controller(unit_proto, /*num_blocks=*/100,
+                                          /*num_shards=*/1,
+                                          /*shard_size_bytes=*/1024);
+  BackendConfig config;
+  config.type = "HostOffloadBackend";
+  config.capacity = 100;
+  config.raiden_id = node_id;
+
+  auto backend_or = HostOffloadBackend::Create(config, &controller);
+  ASSERT_OK(backend_or.status());
+  auto backend = std::dynamic_pointer_cast<HostOffloadBackend>(*backend_or);
+  ASSERT_NE(backend, nullptr);
+
+  auto load_future = backend->Load(RaidenId{}, {"missing_hash"}, {5});
+  EXPECT_THAT(load_future.Await(),
+              absl_testing::StatusIs(absl::StatusCode::kNotFound));
+}
+
+TEST(HostOffloadBackendTest, LoadLocalNonHostBlockError) {
+  RaidenId node_id{"node_job", "0", "data", 0};
+  rpc::RaidenIdProto unit_proto;
+  unit_proto.set_job_name(node_id.job_name);
+  unit_proto.set_job_replica_id(node_id.job_replica_id);
+  unit_proto.set_data_name(node_id.data_name);
+  unit_proto.set_data_replica_idx(node_id.data_replica_idx);
+
+  controller::RaidenController controller(unit_proto, /*num_blocks=*/100,
+                                          /*num_shards=*/1,
+                                          /*shard_size_bytes=*/1024);
+  BackendConfig config;
+  config.type = "HostOffloadBackend";
+  config.capacity = 100;
+  config.raiden_id = node_id;
+
+  auto backend_or = HostOffloadBackend::Create(config, &controller);
+  ASSERT_OK(backend_or.status());
+  auto backend = std::dynamic_pointer_cast<HostOffloadBackend>(*backend_or);
+  ASSERT_NE(backend, nullptr);
+
+  RaidenId remote_id{"remote_job", "0", "data", 0};
+  backend->Insert({"remote_hash"},
+                  {RaidenBlockID(remote_id, 10, BlockStatus::REMOTE)},
+                  /*on_host=*/true);
+
+  auto load_future = backend->Load(RaidenId{}, {"remote_hash"}, {5});
+  EXPECT_THAT(load_future.Await(),
+              absl_testing::StatusIs(absl::StatusCode::kFailedPrecondition));
+}
+
 TEST(HostOffloadBackendTest, StoreServerOverride) {
   RaidenId local_node_id{"override_job", "0", "cache", 0};
   rpc::RaidenIdProto local_unit;

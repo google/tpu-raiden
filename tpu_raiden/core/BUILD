@@ -57,6 +57,9 @@ cc_library(
 
 cc_library(
     name = "buffer",
+    srcs = [
+        "buffer.cc",
+    ],
     hdrs = [
         "buffer.h",
     ],

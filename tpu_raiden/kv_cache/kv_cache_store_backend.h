@@ -25,6 +25,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "xla/tsl/concurrency/future.h"
 #include "tpu_raiden/kv_cache/raiden_id.h"
 
 namespace tpu_raiden {
@@ -108,6 +109,12 @@ class KVCacheStoreBackend {
   virtual absl::StatusOr<BlockSliceList> Lookup(
       absl::Span<const std::string> block_hashes,
       const LookupOptions& options = {}) = 0;
+
+  // Asynchronously loads remote KV cache blocks from a peer node into local
+  // storage / device. Default implementation returns absl::UnimplementedError.
+  virtual tsl::Future<> Load(
+      const RaidenId& remote_id, absl::Span<const std::string> block_hashes,
+      absl::Span<const int32_t> device_block_ids = {}) = 0;
 
   // Inserts key-block mappings into the backend.
   // Returns:

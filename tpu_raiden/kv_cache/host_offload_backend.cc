@@ -946,9 +946,11 @@ tsl::Future<> HostOffloadBackend::Load(
   }
 
   controller::RaidenController* ctrl = nullptr;
+  bool is_remote = false;
   {
-    absl::MutexLock lock(mutex_);
+    absl::MutexLock lock(&mutex_);
     ctrl = raiden_controller_;
+    is_remote = !remote_id.empty() && remote_id != raiden_id_;
   }
 
   if (ctrl == nullptr) {
@@ -956,109 +958,151 @@ tsl::Future<> HostOffloadBackend::Load(
         absl::FailedPreconditionError("RaidenController is null"));
   }
 
-  auto client_or = GetKVCacheStoreClient(remote_id);
-  if (!client_or.ok()) {
-    return tsl::Future<>(client_or.status());
+  if (is_remote) {
+    auto client_or = GetKVCacheStoreClient(remote_id);
+    if (!client_or.ok()) {
+      return tsl::Future<>(client_or.status());
+    }
+    std::shared_ptr<KVCacheStoreClient> client = std::move(client_or.value());
+
+    auto host_blocks_or = ctrl->AllocateBlockIds(block_hashes.size());
+    if (!host_blocks_or.ok()) {
+      return tsl::Future<>(host_blocks_or.status());
+    }
+    std::vector<int32_t> dst_host_block_ids(host_blocks_or.value().begin(),
+                                            host_blocks_or.value().end());
+
+    auto [load_promise, load_future] = tsl::MakePromise<>();
+
+    tpu_raiden::rpc::RaidenIdProto client_raiden_id = ctrl->unit();
+    std::vector<::tpu_raiden::proto::RaidenWorkerEndpointsProto>
+        client_worker_endpoints = BuildLocalWorkerEndpoints(ctrl);
+    tsl::Future<proto::FetchResponse> fetch_future =
+        client->Fetch(block_hashes, device_block_ids, dst_host_block_ids,
+                      client_raiden_id, client_worker_endpoints);
+
+    fetch_future.OnReady(
+        [this, remote_id, dst_host_block_ids,
+         dev_ids_vec = std::vector<int32_t>(device_block_ids.begin(),
+                                            device_block_ids.end()),
+         load_promise = std::move(load_promise)](
+            const absl::StatusOr<proto::FetchResponse>& response_or) mutable {
+          controller::RaidenController* ctrl_cb = nullptr;
+          {
+            absl::MutexLock lock(&mutex_);
+            ctrl_cb = raiden_controller_;
+          }
+          if (!response_or.ok()) {
+            if (ctrl_cb) {
+              (void)ctrl_cb->DeallocateBlockIds(dst_host_block_ids);
+            }
+            // The peer may have restarted on a new port; drop the cached client
+            // so the next attempt re-resolves instead of redialling a dead one.
+            InvalidateStoreClient(remote_id);
+            load_promise.Set(response_or.status());
+            return;
+          }
+
+          const auto& response = response_or.value();
+          if (!response.failed_block_hashes().empty()) {
+            if (ctrl_cb) {
+              (void)ctrl_cb->DeallocateBlockIds(dst_host_block_ids);
+            }
+            std::string err_msg = response.error_message().empty()
+                                      ? "Fetch RPC returned failed blocks"
+                                      : response.error_message();
+            load_promise.Set(absl::InternalError(err_msg));
+            return;
+          }
+
+          if (dev_ids_vec.empty()) {
+            if (ctrl_cb) {
+              (void)ctrl_cb->DeallocateBlockIds(dst_host_block_ids);
+            }
+            load_promise.Set(absl::OkStatus());
+            return;
+          }
+
+          std::vector<Buffer> src_buffers;
+          src_buffers.reserve(dst_host_block_ids.size());
+          for (int id : dst_host_block_ids) {
+            src_buffers.emplace_back(id, std::vector<BufferShard>{},
+                                     std::nullopt, rpc::MEMORY_TYPE_DRAM);
+          }
+
+          std::vector<Buffer> dst_buffers;
+          dst_buffers.reserve(dev_ids_vec.size());
+          for (int id : dev_ids_vec) {
+            dst_buffers.emplace_back(id, std::vector<BufferShard>{},
+                                     std::nullopt, rpc::MEMORY_TYPE_HBM);
+          }
+
+          if (!ctrl_cb) {
+            load_promise.Set(
+                absl::FailedPreconditionError("RaidenController is null"));
+            return;
+          }
+
+          tsl::Future<> h2d_future =
+              ctrl_cb->TransferBuffers(src_buffers, dst_buffers);
+
+          h2d_future.OnReady([this, dst_host_block_ids,
+                              load_promise = std::move(load_promise)](
+                                 absl::Status status) mutable {
+            controller::RaidenController* ctrl_h2d = nullptr;
+            {
+              absl::MutexLock lock(&mutex_);
+              ctrl_h2d = raiden_controller_;
+            }
+            if (ctrl_h2d) {
+              (void)ctrl_h2d->DeallocateBlockIds(dst_host_block_ids);
+            }
+            load_promise.Set(status);
+          });
+        });
+
+    return load_future;
   }
-  std::shared_ptr<KVCacheStoreClient> client = std::move(client_or.value());
 
-  auto host_blocks_or = ctrl->AllocateBlockIds(block_hashes.size());
-  if (!host_blocks_or.ok()) {
-    return tsl::Future<>(host_blocks_or.status());
+  // --- Local Host DRAM Branch ---
+  std::vector<int64_t> src_host_block_ids;
+  src_host_block_ids.reserve(block_hashes.size());
+  {
+    absl::MutexLock lock(&mutex_);
+    for (const auto& hash : block_hashes) {
+      const RaidenBlockID* entry = lru_cache_.Peek(hash);
+      if (entry == nullptr) {
+        return tsl::Future<>(absl::NotFoundError(
+            absl::StrCat("Block hash not found in host backend: ", hash)));
+      }
+      if (entry->status != BlockStatus::HOST &&
+          entry->status != BlockStatus::HOST_AND_HBM) {
+        return tsl::Future<>(absl::FailedPreconditionError(
+            absl::StrCat("Block is not on host: ", hash)));
+      }
+      if (entry->host_block_id == -1) {
+        return tsl::Future<>(absl::FailedPreconditionError(
+            absl::StrCat("Block host_block_id is -1: ", hash)));
+      }
+      src_host_block_ids.push_back(entry->host_block_id);
+    }
   }
-  std::vector<int32_t> dst_host_block_ids(host_blocks_or.value().begin(),
-                                          host_blocks_or.value().end());
 
-  auto [load_promise, load_future] = tsl::MakePromise<>();
+  std::vector<Buffer> src_buffers;
+  src_buffers.reserve(src_host_block_ids.size());
+  for (int64_t id : src_host_block_ids) {
+    src_buffers.emplace_back(id, std::vector<BufferShard>{}, std::nullopt,
+                             rpc::MEMORY_TYPE_DRAM);
+  }
 
-  tpu_raiden::rpc::RaidenIdProto client_raiden_id = ctrl->unit();
-  std::vector<::tpu_raiden::proto::RaidenWorkerEndpointsProto>
-      client_worker_endpoints = BuildLocalWorkerEndpoints(ctrl);
-  tsl::Future<proto::FetchResponse> fetch_future = client->Fetch(
-      block_hashes, device_block_ids, dst_host_block_ids, client_raiden_id,
-      client_worker_endpoints);
+  std::vector<Buffer> dst_buffers;
+  dst_buffers.reserve(device_block_ids.size());
+  for (int id : device_block_ids) {
+    dst_buffers.emplace_back(id, std::vector<BufferShard>{}, std::nullopt,
+                             rpc::MEMORY_TYPE_HBM);
+  }
 
-  fetch_future.OnReady(
-      [this, remote_id, dst_host_block_ids,
-       dev_ids_vec = std::vector<int32_t>(device_block_ids.begin(),
-                                          device_block_ids.end()),
-       load_promise = std::move(load_promise)](
-          const absl::StatusOr<proto::FetchResponse>& response_or) mutable {
-        controller::RaidenController* ctrl_cb = nullptr;
-        {
-          absl::MutexLock lock(mutex_);
-          ctrl_cb = raiden_controller_;
-        }
-        if (!response_or.ok()) {
-          if (ctrl_cb) {
-            (void)ctrl_cb->DeallocateBlockIds(dst_host_block_ids);
-          }
-          // The peer may have restarted on a new port; drop the cached client
-          // so the next attempt re-resolves instead of redialling a dead one.
-          InvalidateStoreClient(remote_id);
-          load_promise.Set(response_or.status());
-          return;
-        }
-
-        const auto& response = response_or.value();
-        if (!response.failed_block_hashes().empty()) {
-          if (ctrl_cb) {
-            (void)ctrl_cb->DeallocateBlockIds(dst_host_block_ids);
-          }
-          std::string err_msg = response.error_message().empty()
-                                    ? "Fetch RPC returned failed blocks"
-                                    : response.error_message();
-          load_promise.Set(absl::InternalError(err_msg));
-          return;
-        }
-
-        if (dev_ids_vec.empty()) {
-          if (ctrl_cb) {
-            (void)ctrl_cb->DeallocateBlockIds(dst_host_block_ids);
-          }
-          load_promise.Set(absl::OkStatus());
-          return;
-        }
-
-        std::vector<Buffer> src_buffers;
-        src_buffers.reserve(dst_host_block_ids.size());
-        for (int id : dst_host_block_ids) {
-          src_buffers.emplace_back(id, std::vector<BufferShard>{}, std::nullopt,
-                                   rpc::MEMORY_TYPE_DRAM);
-        }
-
-        std::vector<Buffer> dst_buffers;
-        dst_buffers.reserve(dev_ids_vec.size());
-        for (int id : dev_ids_vec) {
-          dst_buffers.emplace_back(id, std::vector<BufferShard>{}, std::nullopt,
-                                   rpc::MEMORY_TYPE_HBM);
-        }
-
-        if (!ctrl_cb) {
-          load_promise.Set(
-              absl::FailedPreconditionError("RaidenController is null"));
-          return;
-        }
-
-        tsl::Future<> h2d_future =
-            ctrl_cb->TransferBuffers(src_buffers, dst_buffers);
-
-        h2d_future.OnReady(
-            [this, dst_host_block_ids, load_promise = std::move(load_promise)](
-                absl::Status status) mutable {
-              controller::RaidenController* ctrl_h2d = nullptr;
-              {
-                absl::MutexLock lock(mutex_);
-                ctrl_h2d = raiden_controller_;
-              }
-              if (ctrl_h2d) {
-                (void)ctrl_h2d->DeallocateBlockIds(dst_host_block_ids);
-              }
-              load_promise.Set(status);
-            });
-      });
-
-  return load_future;
+  return ctrl->TransferBuffers(src_buffers, dst_buffers);
 }
 
 void HostOffloadBackend::SetMetadataEntry(absl::string_view hash,

@@ -874,10 +874,11 @@ absl::Status KVCacheStore::Load(const std::vector<std::string>& block_hashes,
   if (!raiden_controller_) {
     return absl::FailedPreconditionError("RaidenController is not initialized");
   }
+  if (block_hashes.empty()) {
+    return absl::OkStatus();
+  }
 
-  std::vector<int64_t> src_host_block_ids;
-  src_host_block_ids.reserve(block_hashes.size());
-
+  RaidenId remote_id;
   {
     absl::MutexLock lock(mutex_);
     auto lookup_or = backend()->Lookup(block_hashes);
@@ -887,18 +888,15 @@ absl::Status KVCacheStore::Load(const std::vector<std::string>& block_hashes,
       return absl::NotFoundError(
           absl::StrCat("Block hash not found: ", block_hashes[slices.size()]));
     }
+
+    BlockStatus first_status = slices[0].second.status;
+    if (first_status == BlockStatus::REMOTE) {
+      remote_id = slices[0].second.raiden_id;
+    }
+
     for (size_t i = 0; i < slices.size(); ++i) {
       const auto& hash = block_hashes[i];
       const auto& existing = slices[i].second;
-      if (existing.status != BlockStatus::HOST &&
-          existing.status != BlockStatus::HOST_AND_HBM) {
-        return absl::FailedPreconditionError(
-            absl::StrCat("Block is not on host: ", hash));
-      }
-      if (existing.host_block_id == -1) {
-        return absl::FailedPreconditionError(
-            absl::StrCat("Block host_block_id is -1: ", hash));
-      }
       if (backend()->GetPinCount(hash) <= 0) {
         return absl::FailedPreconditionError(
             absl::StrCat("Block is not pinned: ", hash));
@@ -907,29 +905,35 @@ absl::Status KVCacheStore::Load(const std::vector<std::string>& block_hashes,
         return absl::FailedPreconditionError(
             absl::StrCat("Block is already loading: ", hash));
       }
-      src_host_block_ids.push_back(existing.host_block_id);
+
+      if (first_status == BlockStatus::REMOTE) {
+        if (existing.status != BlockStatus::REMOTE) {
+          return absl::InvalidArgumentError(
+              "Mixed block statuses in a single Load call");
+        }
+        if (existing.raiden_id != remote_id) {
+          return absl::InvalidArgumentError(
+              "Mixed remote node IDs in a single Load call");
+        }
+      } else {
+        if (existing.status != BlockStatus::HOST &&
+            existing.status != BlockStatus::HOST_AND_HBM) {
+          return absl::FailedPreconditionError(
+              absl::StrCat("Block is not on host: ", hash));
+        }
+        if (existing.host_block_id == -1) {
+          return absl::FailedPreconditionError(
+              absl::StrCat("Block host_block_id is -1: ", hash));
+        }
+      }
     }
     for (const auto& hash : block_hashes) {
       loading_hashes_.insert(hash);
     }
   }
 
-  std::vector<Buffer> src_buffers;
-  src_buffers.reserve(src_host_block_ids.size());
-  for (int64_t id : src_host_block_ids) {
-    src_buffers.emplace_back(id, std::vector<BufferShard>{}, std::nullopt,
-                             rpc::MEMORY_TYPE_DRAM);
-  }
-  std::vector<Buffer> dst_buffers;
-  dst_buffers.reserve(device_block_ids.size());
-  for (int id : device_block_ids) {
-    dst_buffers.emplace_back(id, std::vector<BufferShard>{}, std::nullopt,
-                             rpc::MEMORY_TYPE_HBM);
-  }
-
-  tsl::Future<> future = raiden_controller_->TransferBuffers(
-      src_buffers, dst_buffers, /*staging_host_buffers=*/{},
-      /*copy_sizes=*/{});
+  tsl::Future<> future = backend()->Load(remote_id, block_hashes,
+                                         absl::MakeConstSpan(device_block_ids));
 
   {
     absl::MutexLock lock(mutex_);
@@ -1620,7 +1624,13 @@ void KVCacheStore::PollLoadsInternal(std::vector<LoadState> ready_loads) {
           if (i < slices.size()) {
             RaidenBlockID block = slices[i].second;
             block.device_block_id = state.device_block_ids[i];
-            block.status = BlockStatus::HOST_AND_HBM;
+            if (block.status == BlockStatus::REMOTE) {
+              block.raiden_id = raiden_id_;
+              block.host_block_id = -1;
+              block.status = BlockStatus::HBM;
+            } else {
+              block.status = BlockStatus::HOST_AND_HBM;
+            }
             update_hashes.push_back(hash);
             update_slices.push_back(block);
           }

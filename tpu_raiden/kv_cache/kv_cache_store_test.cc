@@ -1294,6 +1294,119 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, LoadSuccess) {
   EXPECT_EQ((*lookup_res)[1].second.device_block_id, 3);
 }
 
+TEST_F(KVCacheStoreEmbeddedControllerTest, LoadRemoteSuccess) {
+  // 1. Setup GlobalRegistry server
+  auto service = std::make_unique<global_registry::GlobalRegistryServiceImpl>();
+  grpc::ServerBuilder registry_builder;
+  int registry_port = 0;
+  registry_builder.AddListeningPort(
+      "localhost:0", grpc::InsecureServerCredentials(), &registry_port);
+  registry_builder.RegisterService(service.get());
+  auto registry_server = registry_builder.BuildAndStart();
+  std::string registry_address = "localhost:" + std::to_string(registry_port);
+
+  RaidenId local_rid{"local_job", "0", "local_cache", 0};
+  RaidenId remote_rid{"remote_job", "0", "remote_cache", 0};
+
+  // 2. Setup local RaidenController & KVCacheStore
+  auto controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(
+          unit_, 10, 1, 512, orchestrator_address_, "");
+  RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
+
+  // 3. Setup remote node's backend & server
+  BackendConfig remote_config;
+  remote_config.type = "HostOffloadBackend";
+  remote_config.capacity = 100;
+  remote_config.global_registry_address = registry_address;
+  remote_config.raiden_id = remote_rid;
+
+  auto remote_backend_or =
+      HostOffloadBackend::Create(remote_config, controller.get());
+  ASSERT_OK(remote_backend_or.status());
+  auto remote_backend =
+      std::dynamic_pointer_cast<HostOffloadBackend>(*remote_backend_or);
+  ASSERT_NE(remote_backend, nullptr);
+
+  std::vector<RaidenBlockID> remote_slices = {
+      RaidenBlockID(remote_rid, 42, BlockStatus::HOST),
+  };
+  remote_backend->Insert({"load_remote_hash_1"}, remote_slices,
+                         /*on_host=*/true);
+
+  auto remote_server = KVCacheStoreServer::Create();
+  ASSERT_OK(remote_server->StartServer(remote_backend.get(), controller.get(),
+                                       "127.0.0.1"));
+
+  auto channel =
+      grpc::CreateChannel(registry_address, grpc::InsecureChannelCredentials());
+  auto registry_client =
+      std::make_shared<global_registry::GlobalRegistryClient>(channel);
+  ASSERT_OK(registry_client->RegisterStore(
+      remote_rid, remote_server->GetServerAddress(), orchestrator_address_));
+
+  // 4. Create store and insert remote block entry
+  KVCacheStore store(10, std::move(controller), registry_address, local_rid,
+                     std::nullopt, /*store_server_ip=*/"127.0.0.1");
+
+  std::vector<std::string> hashes = {"load_remote_hash_1"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(remote_rid, 42, BlockStatus::REMOTE)};
+
+  ASSERT_TRUE(store.Insert(hashes, slices, /*on_host=*/false).first);
+  ASSERT_TRUE(store.Pin(hashes));
+
+  // 5. Load remote block into local device block 5
+  absl::Status status = store.Load(hashes, {5});
+  ASSERT_TRUE(status.ok()) << status.message();
+
+  // 6. Poll for completion
+  bool done = false;
+  for (int attempt = 0; attempt < 100; ++attempt) {
+    auto [load_done, load_failed, load_pending] = store.PollLoadStatus();
+    ASSERT_TRUE(load_failed.empty());
+    if (!load_done.empty()) {
+      EXPECT_THAT(load_done,
+                  ::testing::UnorderedElementsAre("load_remote_hash_1"));
+      done = true;
+      break;
+    }
+    absl::SleepFor(absl::Milliseconds(10));
+  }
+  ASSERT_TRUE(done);
+
+  // 7. Verify status in store is updated to HBM and device_block_id is 5
+  auto lookup_res = store.Lookup(hashes);
+  ASSERT_TRUE(lookup_res.ok());
+  ASSERT_EQ(lookup_res->size(), 1);
+  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::HBM);
+  EXPECT_EQ((*lookup_res)[0].second.host_block_id, -1);
+  EXPECT_EQ((*lookup_res)[0].second.device_block_id, 5);
+  EXPECT_EQ((*lookup_res)[0].second.raiden_id, local_rid);
+}
+
+TEST_F(KVCacheStoreEmbeddedControllerTest, LoadUnpinnedRemoteBlockFails) {
+  auto controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(
+          unit_, 10, 1, 512, orchestrator_address_, "");
+  RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
+
+  RaidenId local_rid{"local_job", "0", "local_cache", 0};
+  RaidenId remote_rid{"remote_job", "0", "remote_cache", 0};
+  KVCacheStore store(10, std::move(controller), "", local_rid, std::nullopt,
+                     /*store_server_ip=*/"127.0.0.1");
+
+  std::vector<std::string> hashes = {"unpinned_remote_hash"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(remote_rid, /*host_block_id=*/-1, /*device_block_id=*/-1,
+                    BlockStatus::REMOTE)};
+  ASSERT_TRUE(store.Insert(hashes, slices, /*on_host=*/false).first);
+
+  absl::Status status = store.Load(hashes, {0});
+  EXPECT_TRUE(absl::IsFailedPrecondition(status)) << status;
+  EXPECT_THAT(status.message(), ::testing::HasSubstr("is not pinned"));
+}
+
 TEST_F(KVCacheStoreEmbeddedControllerTest, SaveMultiWorkerSuccess) {
   auto test_server_0 = ::tpu_raiden::controller::CreateTestWorkerServer();
   auto test_server_1 = ::tpu_raiden::controller::CreateTestWorkerServer();
