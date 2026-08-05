@@ -15,6 +15,7 @@
 #ifndef THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_CORE_CONTROLLER_WORKER_REGISTRY_H_
 #define THIRD_PARTY_TPU_RAIDEN_TPU_RAIDEN_CORE_CONTROLLER_WORKER_REGISTRY_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -27,6 +28,7 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
 #include "tpu_raiden/core/controller/worker_service_client.h"
 #include "tpu_raiden/core/raiden_transfer_endpoint.h"
 #include "tpu_raiden/proto/worker_service.pb.h"
@@ -77,6 +79,10 @@ class WorkerRegistry {
 
   // Retrieves all registered workers.
   std::vector<WorkerRegistration> GetRegisteredWorkers() const;
+
+  // Blocks until at least `count` workers are registered, or `timeout`
+  // elapses. Returns true iff the count was reached.
+  bool AwaitWorkerCount(size_t count, absl::Duration timeout) const;
 
   // Retrieves a specific worker registration by worker ID.
   absl::StatusOr<WorkerRegistration> GetWorker(

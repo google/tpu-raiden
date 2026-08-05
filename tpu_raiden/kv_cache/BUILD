@@ -421,7 +421,6 @@ cc_test(
         ":lru_cache",
         ":raiden_id",
         "//tpu_raiden/core:kv_manager_holder",
-        "//tpu_raiden/core/controller:controller_client",
         "//tpu_raiden/core/controller:orchestrator_service_client",
         "//tpu_raiden/core/controller:raiden_controller",
         "//tpu_raiden/core/controller:raiden_orchestrator",

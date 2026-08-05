@@ -75,13 +75,25 @@ class RaidenController {
   // on every registering worker for the Legacy Physical/BufferProto mode
   // (Allocate/AllocateBuffers below). `preprovision_worker_buffers` = false
   // skips that pre-creation.
+  //
+  // `expected_worker_count` > 0 blocks construction until that many workers
+  // have registered with this controller (via dynamic registration or the
+  // `worker_addresses` argument), and throws std::runtime_error if they have
+  // not all arrived within RAIDEN_EXPECTED_WORKERS_TIMEOUT_S seconds (default
+  // 120). Leave it 0 when workers register only after construction returns.
+  //
+  // TODO(b/537858523): Refactor RaidenController construction to use a static
+  // Create() factory method returning
+  // absl::StatusOr<std::unique_ptr<RaidenController>> to avoid exceptions.
+  //
   // TODO(b/542288634): Remove preprovision_worker_buffers and legacy
   // Physical/BufferProto mode.
   RaidenController(const rpc::RaidenIdProto& unit, int num_blocks,
                    int num_shards, int64_t shard_size_bytes,
                    absl::string_view raiden_orchestrator_address = "",
                    absl::string_view raiden_controller_address = "",
-                   bool preprovision_worker_buffers = true);
+                   bool preprovision_worker_buffers = true,
+                   int expected_worker_count = 0);
 
   // Constructs a RaidenController for multiple worker addresses.
   // It will also start the ControllerServer to allow dynamic registrations
@@ -91,7 +103,8 @@ class RaidenController {
                    int num_blocks, int num_shards, int64_t shard_size_bytes,
                    absl::string_view raiden_orchestrator_address = "",
                    absl::string_view raiden_controller_address = "",
-                   bool preprovision_worker_buffers = true);
+                   bool preprovision_worker_buffers = true,
+                   int expected_worker_count = 0);
   // Destructor automatically calls DeleteBuffers to clean up all pre-created
   // buffers on the registered workers.
   ~RaidenController();
@@ -233,7 +246,10 @@ class RaidenController {
 
   void Init(absl::Span<const std::string> worker_addresses,
             absl::string_view raiden_orchestrator_address,
-            absl::string_view raiden_controller_address);
+            absl::string_view raiden_controller_address,
+            int expected_worker_count);
+
+  void Cleanup();
 
   absl::Status InitializeWorkerBuffers(
       core::controller::WorkerRegistration& reg);

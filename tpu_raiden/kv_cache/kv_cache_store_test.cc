@@ -49,7 +49,6 @@
 #include "grpcpp/support/status.h"
 #include "grpcpp/support/sync_stream.h"
 #include "xla/tsl/concurrency/future.h"
-#include "tpu_raiden/core/controller/controller_client.h"
 #include "tpu_raiden/core/controller/orchestrator_service_client.h"
 #include "tpu_raiden/core/controller/raiden_controller.h"
 #include "tpu_raiden/core/controller/raiden_orchestrator.h"
@@ -411,10 +410,9 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
 class LookupFailingRegistryService final
     : public global_registry::GlobalRegistryService::Service {
  public:
-  grpc::Status Register(
-      grpc::ServerContext* context,
-      const global_registry::RegisterRequest* request,
-      global_registry::RegisterResponse* response) override {
+  grpc::Status Register(grpc::ServerContext* context,
+                        const global_registry::RegisterRequest* request,
+                        global_registry::RegisterResponse* response) override {
     return delegate_.Register(context, request, response);
   }
   grpc::Status Lookup(grpc::ServerContext* context,
@@ -431,8 +429,7 @@ class LookupFailingRegistryService final
   grpc::Status PullOwned(
       grpc::ServerContext* context,
       const global_registry::PullOwnedRequest* request,
-      grpc::ServerWriter<global_registry::PullOwnedResponse>* writer)
-      override {
+      grpc::ServerWriter<global_registry::PullOwnedResponse>* writer) override {
     return delegate_.PullOwned(context, request, writer);
   }
   grpc::Status RegisterStore(
@@ -492,7 +489,8 @@ TEST(KVCacheStoreTest, GlobalLookupRegistryDown) {
   server->Shutdown();
 }
 
-// --- ReadRemote All-or-Nothing validate & pin block hashes at the src controller: source-side ValidateAndPinHostBlocks ---
+// --- ReadRemote All-or-Nothing validate & pin block hashes at the src
+// controller: source-side ValidateAndPinHostBlocks ---
 
 TEST(KVCacheStoreTest, ValidateAndPinHostBlocksSuccessReDerivesIdsAndPins) {
   KVCacheStore store(4, "", {}, /*num_shards=*/1, /*shard_size_bytes=*/512, "",
@@ -531,9 +529,8 @@ TEST(KVCacheStoreTest, ValidateAndPinHostBlocksWrongStatusFailedPrecondition) {
                      /*store_server_ip=*/"127.0.0.1");
   RaidenId rid{"src_job", "0", "src_cache", 0};
   std::vector<std::string> hashes = {"remote_h"};
-  std::vector<RaidenBlockID> slices = {
-      RaidenBlockID(rid, /*host_block_id=*/-1, /*device_block_id=*/-1,
-                    BlockStatus::REMOTE)};
+  std::vector<RaidenBlockID> slices = {RaidenBlockID(
+      rid, /*host_block_id=*/-1, /*device_block_id=*/-1, BlockStatus::REMOTE)};
   ASSERT_TRUE(store.Insert(hashes, slices, /*on_host=*/false).first);
 
   auto ids_or = store.ValidateAndPinHostBlocks(hashes);

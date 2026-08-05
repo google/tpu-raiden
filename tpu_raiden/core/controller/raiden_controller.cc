@@ -29,6 +29,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -181,8 +182,15 @@ void CheckTimingTripleOnce() {
 
 void RaidenController::Init(absl::Span<const std::string> worker_addresses,
                             absl::string_view raiden_orchestrator_address,
-                            absl::string_view raiden_controller_address) {
-  // Publish ourselves to in-flight reads (cleared in the destructor).
+                            absl::string_view raiden_controller_address,
+                            int expected_worker_count) {
+  // If Init fails (e.g. timeout or exception during worker/orchestrator
+  // registration), ensure any registered callbacks and singleton references
+  // are detached so late registrations or in-flight operations do not invoke
+  // callbacks on a destroyed RaidenController.
+  absl::Cleanup init_cleanup = [this] { Cleanup(); };
+
+  // Publish ourselves to in-flight reads (cleared in the destructor / Cleanup).
   {
     absl::MutexLock lock(&lifetime_->mu);
     lifetime_->ctrl = this;
@@ -264,13 +272,36 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
           "Failed to register with orchestrator: ", status.message()));
     }
   }
+
+  // 5. Wait for expected workers to register (if requested)
+  if (expected_worker_count > 0) {
+    int timeout_s = 120;
+    if (const char* env_timeout =
+            std::getenv("RAIDEN_EXPECTED_WORKERS_TIMEOUT_S")) {
+      int parsed = 0;
+      if (absl::SimpleAtoi(env_timeout, &parsed) && parsed > 0) {
+        timeout_s = parsed;
+      }
+    }
+    if (!worker_registry_->AwaitWorkerCount(
+            static_cast<size_t>(expected_worker_count),
+            absl::Seconds(timeout_s))) {
+      size_t actual = worker_registry_->GetRegisteredWorkers().size();
+      throw std::runtime_error(absl::StrCat(
+          "RaidenController timed out waiting for workers: expected ",
+          expected_worker_count, " worker(s) within ", timeout_s, "s, got ",
+          actual));
+    }
+  }
+
+  std::move(init_cleanup).Cancel();
 }
 
 RaidenController::RaidenController(
     const rpc::RaidenIdProto& unit, int num_blocks, int num_shards,
     int64_t shard_size_bytes, absl::string_view raiden_orchestrator_address,
     absl::string_view raiden_controller_address,
-    bool preprovision_worker_buffers)
+    bool preprovision_worker_buffers, int expected_worker_count)
     : unit_(unit),
       num_shards_(num_shards),
       shard_size_bytes_(shard_size_bytes),
@@ -280,7 +311,7 @@ RaidenController::RaidenController(
       block_manager_(
           std::make_unique<kv_cache::LogicalBlockManager>(num_blocks)) {
   Init(/*worker_addresses=*/{}, raiden_orchestrator_address,
-       raiden_controller_address);
+       raiden_controller_address, expected_worker_count);
 }
 
 RaidenController::RaidenController(
@@ -289,7 +320,7 @@ RaidenController::RaidenController(
     int num_shards, int64_t shard_size_bytes,
     absl::string_view raiden_orchestrator_address,
     absl::string_view raiden_controller_address,
-    bool preprovision_worker_buffers)
+    bool preprovision_worker_buffers, int expected_worker_count)
     : unit_(unit),
       num_shards_(num_shards),
       shard_size_bytes_(shard_size_bytes),
@@ -298,11 +329,11 @@ RaidenController::RaidenController(
       worker_registry_(std::make_shared<core::controller::WorkerRegistry>()),
       block_manager_(
           std::make_unique<kv_cache::LogicalBlockManager>(num_blocks)) {
-  Init(worker_addresses, raiden_orchestrator_address,
-       raiden_controller_address);
+  Init(worker_addresses, raiden_orchestrator_address, raiden_controller_address,
+       expected_worker_count);
 }
 
-RaidenController::~RaidenController() {
+void RaidenController::Cleanup() {
   // Detach in-flight reads FIRST. A ReadRemote continuation holds lifetime_->mu
   // for as long as it touches this controller, so after this block either the
   // continuation has finished or it will see a null ctrl and fail the read
@@ -343,6 +374,8 @@ RaidenController::~RaidenController() {
     }
   }
 }
+
+RaidenController::~RaidenController() { Cleanup(); }
 
 absl::Status RaidenController::InitializeWorkerBuffers(
     core::controller::WorkerRegistration& reg) {

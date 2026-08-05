@@ -132,7 +132,7 @@ absl::StatusOr<std::unique_ptr<KVCacheStore>> KVCacheStore::Create(
     int num_shards, int64_t shard_size_bytes,
     absl::string_view raiden_orchestrator_address,
     absl::string_view store_server_ip, int raiden_controller_port,
-    std::optional<KVCacheMetadata> metadata) {
+    std::optional<KVCacheMetadata> metadata, int expected_worker_count) {
   if (backend_configs.empty()) {
     return absl::InvalidArgumentError("backend_configs must not be empty");
   }
@@ -192,7 +192,8 @@ absl::StatusOr<std::unique_ptr<KVCacheStore>> KVCacheStore::Create(
   auto store = absl::WrapUnique(new KVCacheStore(
       std::move(backends), effective_raiden_id, num_shards, shard_size_bytes,
       raiden_orchestrator_address, store_server_ip, raiden_controller_port,
-      global_registry_address, KVCacheStore::CreateTag{}));
+      global_registry_address, expected_worker_count,
+      KVCacheStore::CreateTag{}));
 
   if (store->raiden_controller_ != nullptr) {
     RETURN_IF_ERROR(
@@ -211,12 +212,12 @@ absl::StatusOr<std::unique_ptr<KVCacheStore>> KVCacheStore::Create(
     int num_shards, int64_t shard_size_bytes,
     absl::string_view raiden_orchestrator_address,
     absl::string_view store_server_ip, int raiden_controller_port,
-    std::optional<KVCacheMetadata> metadata) {
+    std::optional<KVCacheMetadata> metadata, int expected_worker_count) {
   return KVCacheStore::Create(absl::MakeConstSpan(&config, 1), capacity,
                               global_registry_address, raiden_id, num_shards,
                               shard_size_bytes, raiden_orchestrator_address,
                               store_server_ip, raiden_controller_port,
-                              std::move(metadata));
+                              std::move(metadata), expected_worker_count);
 }
 
 KVCacheStore::KVCacheStore(
@@ -224,7 +225,8 @@ KVCacheStore::KVCacheStore(
     RaidenId raiden_id, int num_shards, int64_t shard_size_bytes,
     absl::string_view raiden_orchestrator_address,
     absl::string_view store_server_ip, int raiden_controller_port,
-    absl::string_view global_registry_address, CreateTag)
+    absl::string_view global_registry_address, int expected_worker_count,
+    CreateTag)
     : backends_(std::move(backends)),
       raiden_id_(std::move(raiden_id)),
       store_server_ip_(store_server_ip),
@@ -265,7 +267,7 @@ KVCacheStore::KVCacheStore(
             unit_proto, cap, num_shards, shard_size_bytes,
             raiden_orchestrator_address,
             ComposeControllerAddress(store_server_ip, raiden_controller_port),
-            /*preprovision_worker_buffers=*/false);
+            /*preprovision_worker_buffers=*/false, expected_worker_count);
   }
   // Deliberately does NOT wire the controller here (see CreateTag) -- the
   // caller (Create()) does that itself so a publish failure can return a
@@ -277,11 +279,12 @@ KVCacheStore::KVCacheStore(
     RaidenId raiden_id, int num_shards, int64_t shard_size_bytes,
     absl::string_view raiden_orchestrator_address,
     absl::string_view store_server_ip, int raiden_controller_port,
-    absl::string_view global_registry_address)
+    absl::string_view global_registry_address, int expected_worker_count)
     : KVCacheStore(std::move(backends), std::move(raiden_id), num_shards,
                    shard_size_bytes, raiden_orchestrator_address,
                    store_server_ip, raiden_controller_port,
-                   global_registry_address, CreateTag{}) {
+                   global_registry_address, expected_worker_count,
+                   CreateTag{}) {
   if (raiden_controller_) {
     if (absl::Status s = SetRaidenController(raiden_controller_.get());
         !s.ok()) {
@@ -301,21 +304,20 @@ KVCacheStore::KVCacheStore(std::shared_ptr<KVCacheStoreBackend> backend,
                            absl::string_view raiden_orchestrator_address,
                            absl::string_view store_server_ip,
                            int raiden_controller_port,
-                           absl::string_view global_registry_address)
+                           absl::string_view global_registry_address,
+                           int expected_worker_count)
     : KVCacheStore(
           std::vector<std::shared_ptr<KVCacheStoreBackend>>{std::move(backend)},
           std::move(raiden_id), num_shards, shard_size_bytes,
           raiden_orchestrator_address, store_server_ip, raiden_controller_port,
-          global_registry_address) {}
+          global_registry_address, expected_worker_count) {}
 
-KVCacheStore::KVCacheStore(size_t capacity,
-                           absl::string_view global_registry_address,
-                           RaidenId raiden_id, int num_shards,
-                           int64_t shard_size_bytes,
-                           absl::string_view raiden_orchestrator_address,
-                           absl::string_view store_server_ip,
-                           int raiden_controller_port,
-                           std::optional<KVCacheMetadata> metadata)
+KVCacheStore::KVCacheStore(
+    size_t capacity, absl::string_view global_registry_address,
+    RaidenId raiden_id, int num_shards, int64_t shard_size_bytes,
+    absl::string_view raiden_orchestrator_address,
+    absl::string_view store_server_ip, int raiden_controller_port,
+    std::optional<KVCacheMetadata> metadata, int expected_worker_count)
     : raiden_id_(raiden_id),
       store_server_ip_(store_server_ip),
       write_through_pool_(std::make_unique<::tpu_raiden::NumaThreadPool>(4)) {
@@ -343,7 +345,7 @@ KVCacheStore::KVCacheStore(size_t capacity,
             unit_proto, capacity, num_shards, shard_size_bytes,
             raiden_orchestrator_address,
             ComposeControllerAddress(store_server_ip, raiden_controller_port),
-            /*preprovision_worker_buffers=*/false);
+            /*preprovision_worker_buffers=*/false, expected_worker_count);
   }
 
   // registry_client_ is assigned a few lines above, and must be: a backend
