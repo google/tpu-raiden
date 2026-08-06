@@ -32,6 +32,7 @@
 #include <gtest/gtest.h>
 #include "absl/base/thread_annotations.h"
 #include "absl/status/status.h"
+#include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
@@ -503,6 +504,65 @@ TEST(KVCacheStoreTest, GlobalLookupRegistryDown) {
   EXPECT_EQ((*lookup_res)[0].second.raiden_id.job_name, "local_job");
 
   server->Shutdown();
+}
+
+TEST(KVCacheStoreTest, Tier0BackendRegistersKVTransferSpec) {
+  auto service = std::make_unique<global_registry::GlobalRegistryServiceImpl>();
+  grpc::ServerBuilder builder;
+  int port = 0;
+  builder.AddListeningPort("localhost:0", grpc::InsecureServerCredentials(),
+                           &port);
+  builder.RegisterService(service.get());
+  auto server = builder.BuildAndStart();
+  std::string server_address = "localhost:" + std::to_string(port);
+
+  RaidenId store_id{"store_job", "0", "kv_cache", 0};
+  KVCacheStore store(50, server_address, store_id, /*num_shards=*/1,
+                     /*shard_size_bytes=*/512, "",
+                     /*store_server_ip=*/"127.0.0.1");
+
+  auto* backend = dynamic_cast<HostOffloadBackend*>(store.backend().get());
+  ASSERT_NE(backend, nullptr);
+  ASSERT_TRUE(backend
+                  ->RegisterKVTransferSpec({.block_array_bytes = {4096, 512},
+                                            .num_kv_shards = 2,
+                                            .num_workers = 2})
+                  .ok());
+
+  // The registry now serves the registered spec.
+  auto channel =
+      grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials());
+  global_registry::GlobalRegistryClient registry_client(channel);
+  auto spec = registry_client.GetKVTransferSpec();
+  ASSERT_TRUE(spec.ok()) << spec.status();
+  ASSERT_EQ(spec->block_arrays_size(), 2);
+  EXPECT_EQ(spec->block_arrays(0).block_bytes(), 4096);
+  EXPECT_EQ(spec->block_arrays(1).block_bytes(), 512);
+  EXPECT_EQ(spec->num_kv_shards(), 2);
+  EXPECT_EQ(spec->num_workers(), 2);
+
+  // Registering the same spec again is a no-op; a differing one is rejected.
+  EXPECT_TRUE(backend
+                  ->RegisterKVTransferSpec({.block_array_bytes = {4096, 512},
+                                            .num_kv_shards = 2,
+                                            .num_workers = 2})
+                  .ok());
+  EXPECT_TRUE(absl::IsInvalidArgument(
+      backend->RegisterKVTransferSpec({.block_array_bytes = {4096, 512},
+                                       .num_kv_shards = 4,
+                                       .num_workers = 2})));
+
+  server->Shutdown();
+}
+
+TEST(KVCacheStoreTest, KVTransferSpecWithoutRegistryFailsPrecondition) {
+  KVCacheStore store(50, "", {}, /*num_shards=*/1,
+                     /*shard_size_bytes=*/512, "",
+                     /*store_server_ip=*/"127.0.0.1");
+  auto* backend = dynamic_cast<HostOffloadBackend*>(store.backend().get());
+  ASSERT_NE(backend, nullptr);
+  EXPECT_TRUE(absl::IsFailedPrecondition(backend->RegisterKVTransferSpec(
+      {.block_array_bytes = {4096}, .num_kv_shards = 1, .num_workers = 1})));
 }
 
 // --- ReadRemote All-or-Nothing validate & pin block hashes at the src controller: source-side ValidateAndPinHostBlocks ---

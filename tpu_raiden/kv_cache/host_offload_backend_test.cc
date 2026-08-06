@@ -198,6 +198,60 @@ TEST(HostOffloadBackendTest, LookupReturnsRemoteDescriptors) {
   server->Shutdown();
 }
 
+
+TEST(HostOffloadBackendTest, CreateRegistersKVTransferSpecFromConfig) {
+  auto service = std::make_unique<global_registry::GlobalRegistryServiceImpl>();
+  grpc::ServerBuilder builder;
+  int port = 0;
+  builder.AddListeningPort("localhost:0", grpc::InsecureServerCredentials(),
+                           &port);
+  builder.RegisterService(service.get());
+  auto server = builder.BuildAndStart();
+  std::string server_address = "localhost:" + std::to_string(port);
+
+  BackendConfig config;
+  config.type = "HostOffloadBackend";
+  config.capacity = 100;
+  config.global_registry_address = server_address;
+  config.raiden_id = RaidenId{"node_job", "0", "data", 0};
+  config.kv_transfer_spec = KVTransferSpecConfig{
+      .block_array_bytes = {4096, 512}, .num_kv_shards = 2, .num_workers = 2};
+
+  auto backend_or = HostOffloadBackend::Create(config);
+  ASSERT_OK(backend_or.status());
+
+  // The registry now serves the registered spec.
+  auto channel =
+      grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials());
+  global_registry::GlobalRegistryClient registry_client(channel);
+  auto spec = registry_client.GetKVTransferSpec();
+  ASSERT_TRUE(spec.ok()) << spec.status();
+  ASSERT_EQ(spec->block_arrays_size(), 2);
+  EXPECT_EQ(spec->block_arrays(0).block_bytes(), 4096);
+  EXPECT_EQ(spec->block_arrays(1).block_bytes(), 512);
+  EXPECT_EQ(spec->num_kv_shards(), 2);
+  EXPECT_EQ(spec->num_workers(), 2);
+
+  // Creating another backend with the identical spec is a no-op validation;
+  // a differing spec fails creation.
+  EXPECT_TRUE(HostOffloadBackend::Create(config).ok());
+  config.kv_transfer_spec->num_kv_shards = 4;
+  EXPECT_TRUE(
+      absl::IsInvalidArgument(HostOffloadBackend::Create(config).status()));
+
+  server->Shutdown();
+}
+
+TEST(HostOffloadBackendTest, KVTransferSpecWithoutRegistryFailsCreation) {
+  BackendConfig config;
+  config.type = "HostOffloadBackend";
+  config.capacity = 100;
+  config.kv_transfer_spec = KVTransferSpecConfig{
+      .block_array_bytes = {4096}, .num_kv_shards = 1, .num_workers = 1};
+  EXPECT_TRUE(absl::IsFailedPrecondition(
+      HostOffloadBackend::Create(config).status()));
+}
+
 TEST(HostOffloadBackendTest, ServerLifecycleAndControllerInitialization) {
   auto service = std::make_unique<global_registry::GlobalRegistryServiceImpl>();
   grpc::ServerBuilder builder;

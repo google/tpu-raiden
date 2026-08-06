@@ -183,6 +183,15 @@ class KVCacheManager:
     """Returns the active gRPC worker service port."""
     return self._impl.get_raiden_worker_port()
 
+  @property
+  def num_block_arrays(self) -> int:
+    """Returns the number of KV cache block arrays this manager holds."""
+    return self._impl.num_block_arrays
+
+  def block_bytes(self, block_array_idx: int) -> int:
+    """Returns the bytes one block occupies in the given array on one shard."""
+    return self._impl.block_bytes(block_array_idx)
+
   def get_local_endpoints(self) -> List[Dict[str, Any]]:
     """Returns the active Raiden endpoint descriptors."""
     return self._impl.get_local_endpoints()

@@ -222,6 +222,9 @@ NB_MODULE(_tpu_raiden_host, m) {
       .def_prop_ro("num_layers", &HostKVCacheManager::num_layers)
       .def_prop_ro("num_shards", &HostKVCacheManager::num_shards)
       .def_prop_ro("slice_byte_size", &HostKVCacheManager::slice_byte_size)
+      .def_prop_ro("num_block_arrays", &HostKVCacheManager::num_block_arrays)
+      .def("block_bytes", &HostKVCacheManager::block_bytes,
+           nb::arg("block_array_idx"))
       .def_prop_ro("transfer_address", &HostKVCacheManager::transfer_address)
       .def("get_local_endpoints",
            [](const HostKVCacheManager& self) {

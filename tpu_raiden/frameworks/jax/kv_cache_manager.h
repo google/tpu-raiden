@@ -100,6 +100,8 @@ class NumaAwareKVCacheManager {
   size_t num_layers() const;
   size_t num_shards() const;
   size_t slice_byte_size() const;
+  size_t num_block_arrays() const;
+  size_t block_bytes(size_t block_array_idx) const;
 
   std::optional<int> local_port() const;
   int local_control_port() const;
@@ -293,6 +295,10 @@ class KVCacheManager {
   size_t num_layers() const { return numa_manager_->num_layers(); }
   size_t num_shards() const { return numa_manager_->num_shards(); }
   size_t slice_byte_size() const { return numa_manager_->slice_byte_size(); }
+  size_t num_block_arrays() const { return numa_manager_->num_block_arrays(); }
+  size_t block_bytes(size_t block_array_idx) const {
+    return numa_manager_->block_bytes(block_array_idx);
+  }
 
   std::optional<int> local_port() const { return numa_manager_->local_port(); }
   int local_control_port() const { return numa_manager_->local_control_port(); }

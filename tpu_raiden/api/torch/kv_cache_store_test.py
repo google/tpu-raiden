@@ -323,6 +323,17 @@ class KVCacheStoreTest(absltest.TestCase):
     res = controller.lookup(hashes, enable_global=True)
     self.assertEmpty(res)
 
+  def test_register_kv_transfer_spec_without_registry_raises(self):
+    # The binding surfaces the C++ FailedPrecondition as a RuntimeError; the
+    # registry-backed registration path is covered by the C++ store test.
+    controller = kv_cache_store.KVCacheStore(
+        capacity=20, num_shards=1, store_server_ip="127.0.0.1"
+    )
+    with self.assertRaisesRegex(RuntimeError, "no global registry"):
+      controller.register_kv_transfer_spec(
+          [4096], num_kv_shards=1, num_workers=1
+      )
+
   def test_insert_and_lock_release_and_delete(self):
     controller = kv_cache_store.KVCacheStore(
         capacity=2, num_shards=1, store_server_ip="127.0.0.1"

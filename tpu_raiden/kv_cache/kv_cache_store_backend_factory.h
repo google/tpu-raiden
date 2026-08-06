@@ -38,6 +38,17 @@
 namespace tpu_raiden {
 namespace kv_cache {
 
+// The deployment's KVTransferSpec (see global_registry.proto), registered
+// with the global registry when a backend that supports it is created.
+struct KVTransferSpecConfig {
+  // Bytes one block occupies in each block array, on one shard.
+  std::vector<uint64_t> block_array_bytes;
+  // Device shards each block array is split across on a serving host.
+  int num_kv_shards = 0;
+  // Transfer workers on the serving hosts, node ids [0, num_workers).
+  int num_workers = 0;
+};
+
 struct BackendConfig {
   std::string type;
   size_t capacity = 0;
@@ -46,6 +57,7 @@ struct BackendConfig {
   std::optional<KVCacheMetadata> metadata = std::nullopt;
   std::vector<BackendConfig> sub_backends;
   absl::flat_hash_map<std::string, std::string> properties;
+  std::optional<KVTransferSpecConfig> kv_transfer_spec = std::nullopt;
 
   std::string GetProperty(absl::string_view key,
                           absl::string_view default_val = "") const;

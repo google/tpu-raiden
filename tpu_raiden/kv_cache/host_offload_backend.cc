@@ -111,9 +111,13 @@ absl::StatusOr<std::shared_ptr<KVCacheStoreBackend>> HostOffloadBackend::Create(
     registry_client = std::make_shared<
         ::tpu_raiden::kv_cache::global_registry::GlobalRegistryClient>(channel);
   }
-  return std::make_shared<HostOffloadBackend>(
+  auto backend = std::make_shared<HostOffloadBackend>(
       config.capacity, config.metadata, config.raiden_id,
       /*raiden_controller=*/nullptr, std::move(registry_client));
+  if (config.kv_transfer_spec.has_value()) {
+    RETURN_IF_ERROR(backend->RegisterKVTransferSpec(*config.kv_transfer_spec));
+  }
+  return backend;
 }
 
 absl::StatusOr<std::shared_ptr<KVCacheStoreBackend>> HostOffloadBackend::Create(
@@ -134,9 +138,13 @@ absl::StatusOr<std::shared_ptr<KVCacheStoreBackend>> HostOffloadBackend::Create(
   // KVCacheStore::EnsureStoreServerAndRegister's job -- starting one here
   // would race it and could bind before the owning store has decided whether
   // a registry exists at all.
-  return std::make_shared<HostOffloadBackend>(
+  auto backend = std::make_shared<HostOffloadBackend>(
       config.capacity, config.metadata, config.raiden_id, controller,
       std::move(registry_client));
+  if (config.kv_transfer_spec.has_value()) {
+    RETURN_IF_ERROR(backend->RegisterKVTransferSpec(*config.kv_transfer_spec));
+  }
+  return backend;
 }
 
 absl::Status HostOffloadBackend::StartServer(absl::string_view server_address) {
@@ -1103,6 +1111,27 @@ tsl::Future<> HostOffloadBackend::Load(
   }
 
   return ctrl->TransferBuffers(src_buffers, dst_buffers);
+}
+
+absl::Status HostOffloadBackend::RegisterKVTransferSpec(
+    const KVTransferSpecConfig& config) {
+  std::shared_ptr<global_registry::GlobalRegistryClient> registry_client;
+  {
+    absl::MutexLock lock(mutex_);
+    registry_client = registry_client_;
+  }
+  if (registry_client == nullptr) {
+    return absl::FailedPreconditionError(
+        "HostOffloadBackend has no global registry configured; cannot "
+        "register a KVTransferSpec.");
+  }
+  global_registry::KVTransferSpec spec;
+  for (uint64_t bytes : config.block_array_bytes) {
+    spec.add_block_arrays()->set_block_bytes(static_cast<int64_t>(bytes));
+  }
+  spec.set_num_kv_shards(static_cast<int32_t>(config.num_kv_shards));
+  spec.set_num_workers(static_cast<int32_t>(config.num_workers));
+  return registry_client->RegisterKVTransferSpec(spec);
 }
 
 void HostOffloadBackend::SetMetadataEntry(absl::string_view hash,

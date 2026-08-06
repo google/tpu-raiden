@@ -394,6 +394,15 @@ size_t NumaAwareKVCacheManager::slice_byte_size() const {
   return sub_managers_.empty() ? 0 : sub_managers_[0]->slice_byte_size();
 }
 
+size_t NumaAwareKVCacheManager::num_block_arrays() const {
+  return sub_managers_.empty() ? 0 : sub_managers_[0]->num_block_arrays();
+}
+
+size_t NumaAwareKVCacheManager::block_bytes(size_t block_array_idx) const {
+  return sub_managers_.empty() ? 0
+                               : sub_managers_[0]->block_bytes(block_array_idx);
+}
+
 std::optional<int> NumaAwareKVCacheManager::local_port() const {
   return sub_managers_.empty() ? std::nullopt : sub_managers_[0]->local_port();
 }

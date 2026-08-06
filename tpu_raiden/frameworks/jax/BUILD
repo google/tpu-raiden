@@ -143,6 +143,7 @@ nanobind_extension(
         ":raw_transfer_jax",
         ":weight_synchronizer_jax",
         "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/kv_cache:host_offload_backend",
         "//tpu_raiden/kv_cache:kv_cache_store",
         "//tpu_raiden/kv_cache:kv_cache_store_wrapper",
         "//tpu_raiden/weight_sync:weight_synchronizer_base",

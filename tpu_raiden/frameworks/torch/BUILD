@@ -202,6 +202,7 @@ nanobind_extension(
         ":torch_nanobind_utils",
         ":weight_synchronizer_torch",
         "//tpu_raiden/core:raw_transfer_core",
+        "//tpu_raiden/kv_cache:host_offload_backend",
         "//tpu_raiden/kv_cache:kv_cache_manager_base",
         "//tpu_raiden/kv_cache:kv_cache_store",
         "//tpu_raiden/kv_cache:kv_cache_store_wrapper",

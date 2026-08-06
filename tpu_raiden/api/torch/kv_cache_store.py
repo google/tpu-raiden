@@ -329,6 +329,22 @@ class KVCacheStore:
     """Releases previously pinned block hashes, making them eligible for LRU eviction when capacity is exceeded."""
     self._impl.release(block_hashes)
 
+  def register_kv_transfer_spec(
+      self,
+      block_array_bytes: list[int],
+      num_kv_shards: int,
+      num_workers: int,
+  ) -> None:
+    """Registers the deployment's KVTransferSpec with the global registry.
+
+    The first registered spec wins; later calls validate against it
+    (idempotent). Raises RuntimeError on mismatch or when the store has no
+    global registry configured.
+    """
+    self._impl.register_kv_transfer_spec(
+        block_array_bytes, num_kv_shards, num_workers
+    )
+
   def read_remote(
       self,
       block_hashes: list[bytes],

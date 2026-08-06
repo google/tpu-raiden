@@ -112,6 +112,15 @@ class KVCacheManager:
     return self._impl.get_raiden_worker_port()
 
   @property
+  def num_block_arrays(self) -> int:
+    """Returns the number of KV cache block arrays this manager holds."""
+    return self._impl.num_block_arrays
+
+  def block_bytes(self, block_array_idx: int) -> int:
+    """Returns the bytes one block occupies in the given array on one shard."""
+    return self._impl.block_bytes(block_array_idx)
+
+  @property
   def is_listener_active(self) -> bool:
     """Returns True if the worker gRPC service listener is active."""
     return self.get_raiden_worker_port() > 0

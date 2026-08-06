@@ -39,6 +39,7 @@
 #include "tpu_raiden/frameworks/jax/nb_statusor.h"  // IWYU pragma: keep
 #include "tpu_raiden/frameworks/jax/raw_transfer_internal.h"
 #include "tpu_raiden/frameworks/jax/weight_synchronizer.h"
+#include "tpu_raiden/kv_cache/host_offload_backend.h"
 #include "tpu_raiden/kv_cache/kv_cache_store.h"
 #include "tpu_raiden/kv_cache/kv_cache_store_wrapper.h"
 
@@ -223,6 +224,12 @@ NB_MODULE(_tpu_raiden_jax, m) {
                    &tpu_raiden::kv_cache::jax::KVCacheManager::num_shards)
       .def_prop_ro("slice_byte_size",
                    &tpu_raiden::kv_cache::jax::KVCacheManager::slice_byte_size)
+      .def_prop_ro(
+          "num_block_arrays",
+          &tpu_raiden::kv_cache::jax::KVCacheManager::num_block_arrays)
+      .def("block_bytes",
+           &tpu_raiden::kv_cache::jax::KVCacheManager::block_bytes,
+           nb::arg("block_array_idx"))
       .def_prop_ro(
           "local_control_port",
           &tpu_raiden::kv_cache::jax::KVCacheManager::local_control_port)
@@ -555,6 +562,35 @@ NB_MODULE(_tpu_raiden_jax, m) {
              }
              return std::make_tuple(py_done, py_failed, py_pending);
            })
+      .def(
+          "register_kv_transfer_spec",
+          [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
+             const std::vector<uint64_t>& block_array_bytes,
+             size_t num_kv_shards, size_t num_workers) {
+            auto* backend = dynamic_cast<tpu_raiden::kv_cache::
+                                             HostOffloadBackend*>(
+                self->backend().get());
+            if (backend == nullptr) {
+              throw std::runtime_error(
+                  "KVCacheStore register_kv_transfer_spec failed: requires a "
+                  "HostOffloadBackend at tier 0");
+            }
+            absl::Status status = backend->RegisterKVTransferSpec(
+                {.block_array_bytes = block_array_bytes,
+                 .num_kv_shards = static_cast<int>(num_kv_shards),
+                 .num_workers = static_cast<int>(num_workers)});
+            if (!status.ok()) {
+              throw std::runtime_error(
+                  absl::StrCat(
+                      "KVCacheStore register_kv_transfer_spec failed: ",
+                      status.message()));
+            }
+          },
+          nb::arg("block_array_bytes"), nb::arg("num_kv_shards"),
+          nb::arg("num_workers"),
+          "Registers the deployment's KVTransferSpec with the global "
+          "registry, or validates it against the already-registered one. "
+          "Raises on mismatch or when the store has no global registry.")
       .def("poll_load_status",
            [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
              auto [done, failed, pending] = self->PollLoadStatus();

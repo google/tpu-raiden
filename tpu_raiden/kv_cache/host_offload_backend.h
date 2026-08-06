@@ -133,6 +133,12 @@ class HostOffloadBackend : public KVCacheStoreBackend {
                      absl::Span<const std::string> block_hashes,
                      absl::Span<const int32_t> device_block_ids = {}) override;
 
+  // Registers the deployment's KVTransferSpec with the global registry, or
+  // validates it against the already-registered one (first-wins, idempotent;
+  // see global_registry.proto). Called by Create() when the BackendConfig
+  // carries a spec. Requires a global registry.
+  absl::Status RegisterKVTransferSpec(const KVTransferSpecConfig& spec);
+
   // --- Remote write (WriteRemote); see KVCacheStoreBackend for why each of
   // these exists rather than reusing Lookup/Insert/Delete.
   std::vector<std::string> AlreadyPresentHostResident(
