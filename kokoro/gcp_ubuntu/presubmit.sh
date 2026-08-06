@@ -98,6 +98,8 @@ fi
 BAZEL_COMMAND_FLAGS=(
   "--cxxopt=-std=c++20"
   "--host_cxxopt=-std=c++20"
+  "--cxxopt=-DGLOOP_I_ACKNOWLEDGE_THAT_GLOOP_DOES_NOT_SUPPORT_LIBSTDCXX"
+  "--host_cxxopt=-DGLOOP_I_ACKNOWLEDGE_THAT_GLOOP_DOES_NOT_SUPPORT_LIBSTDCXX"
   "--remote_cache=https://storage.googleapis.com/${CACHE_BUCKET}"
   "--google_default_credentials"
   "--remote_download_outputs=toplevel"

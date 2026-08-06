@@ -17,3 +17,4 @@ build:ci --remote_local_fallback
 # targets set per-target and the flags kokoro presubmit passes globally.
 build --cxxopt=-std=c++20
 build --host_cxxopt=-std=c++20
+build --cxxopt=-DGLOOP_I_ACKNOWLEDGE_THAT_GLOOP_DOES_NOT_SUPPORT_LIBSTDCXX

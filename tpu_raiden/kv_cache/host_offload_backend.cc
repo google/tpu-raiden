@@ -34,6 +34,7 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
+#include "gloop/util/status/ret_check.h"
 #include "grpcpp/create_channel.h"
 #include "grpcpp/security/credentials.h"
 #include "xla/tsl/concurrency/future.h"
@@ -145,10 +146,8 @@ absl::Status HostOffloadBackend::StartServer(absl::string_view server_address) {
     absl::MutexLock lock(mutex_);
     ctrl = raiden_controller_;
   }
-  if (ctrl == nullptr) {
-    return absl::FailedPreconditionError(
-        "Cannot start KVCacheStoreServer without a RaidenController.");
-  }
+  RET_CHECK(ctrl != nullptr)
+      << "Cannot start KVCacheStoreServer without a RaidenController.";
   if (server_address.empty() || server_address == "[::]" ||
       server_address == "::" || server_address == "0.0.0.0" ||
       server_address == "0:0:0:0:0:0:0:0") {
