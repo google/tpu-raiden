@@ -68,6 +68,9 @@ grpc::Status RaidenControllerServiceImpl::RegisterWorker(
       .raiden_worker_endpoint = request->raiden_worker_endpoint(),
       .raiden_transfer_endpoints = std::move(eps),
       .node_id = request->node_id(),
+      .block_array_bytes = {request->block_array_bytes().begin(),
+                            request->block_array_bytes().end()},
+      .num_kv_shards = request->num_kv_shards(),
   };
 
   std::shared_ptr<WorkerRegistry> registry;

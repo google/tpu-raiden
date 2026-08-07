@@ -49,7 +49,8 @@ absl::Status RaidenControllerClient::RegisterWorker(
     absl::string_view worker_id, absl::string_view raiden_worker_endpoint,
     const std::vector<::tpu_raiden::RaidenTransferEndpoint>&
         raiden_transfer_endpoints,
-    int64_t node_id) {
+    int64_t node_id, const std::vector<uint64_t>& block_array_bytes,
+    int32_t num_kv_shards) {
   ::tpu_raiden::proto::RegisterWorkerRequest request;
   request.set_worker_id(std::string(worker_id));
   request.set_raiden_worker_endpoint(std::string(raiden_worker_endpoint));
@@ -61,6 +62,10 @@ absl::Status RaidenControllerClient::RegisterWorker(
       desc->add_shards(shard);
     }
   }
+  for (uint64_t bytes : block_array_bytes) {
+    request.add_block_array_bytes(static_cast<int64_t>(bytes));
+  }
+  request.set_num_kv_shards(num_kv_shards);
 
   ::tpu_raiden::proto::RegisterWorkerResponse response;
   grpc::ClientContext context;
