@@ -109,6 +109,7 @@ cc_library(
         "//tpu_raiden/proto:worker_service_cc_proto",
         "//tpu_raiden/rpc:raiden_service_cc_proto",
         "@com_github_grpc_grpc//:grpc++",
+        "@com_google_absl//absl/cleanup",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
@@ -153,6 +154,7 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/time",
     ],
 )
 
@@ -247,6 +249,7 @@ cc_test(
     local_defines = ["ABSL_DEFINE_UNQUALIFIED_STATUS_TESTING_MACROS"],
     deps = [
         ":controller_client",
+        ":controller_server",
         ":orchestrator_service_client",
         ":raiden_controller",
         ":raiden_orchestrator",
@@ -316,6 +319,7 @@ cc_test(
         "//tpu_raiden/core:raiden_transfer_endpoint",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_matchers",
+        "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],

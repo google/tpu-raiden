@@ -154,9 +154,11 @@ TEST(HostOffloadBackendTest, LookupReturnsRemoteDescriptors) {
   unit_proto.set_data_name(local_node_id.data_name);
   unit_proto.set_data_replica_idx(local_node_id.data_replica_idx);
 
-  controller::RaidenController controller(unit_proto, /*num_blocks=*/100,
-                                          /*num_shards=*/1,
-                                          /*shard_size_bytes=*/1024);
+  ASSERT_OK_AND_ASSIGN(
+      auto controller,
+      controller::RaidenController::Create(unit_proto, /*num_blocks=*/100,
+                                           /*num_shards=*/1,
+                                           /*shard_size_bytes=*/1024));
 
   BackendConfig config;
   config.type = "HostOffloadBackend";
@@ -164,7 +166,7 @@ TEST(HostOffloadBackendTest, LookupReturnsRemoteDescriptors) {
   config.global_registry_address = server_address;
   config.raiden_id = local_node_id;
 
-  auto backend_or = HostOffloadBackend::Create(config, &controller);
+  auto backend_or = HostOffloadBackend::Create(config, controller.get());
   ASSERT_OK(backend_or.status());
   auto backend = *backend_or;
   EXPECT_EQ(backend->name(), "HostOffloadBackend");
@@ -208,9 +210,11 @@ TEST(HostOffloadBackendTest,
   unit_proto.set_data_name(local_node_id.data_name);
   unit_proto.set_data_replica_idx(local_node_id.data_replica_idx);
 
-  controller::RaidenController controller(unit_proto, /*num_blocks=*/100,
-                                          /*num_shards=*/1,
-                                          /*shard_size_bytes=*/1024);
+  ASSERT_OK_AND_ASSIGN(
+      auto controller,
+      controller::RaidenController::Create(unit_proto, /*num_blocks=*/100,
+                                           /*num_shards=*/1,
+                                           /*shard_size_bytes=*/1024));
 
   BackendConfig config;
   config.type = "HostOffloadBackend";
@@ -218,7 +222,7 @@ TEST(HostOffloadBackendTest,
   config.global_registry_address = server_address;
   config.raiden_id = local_node_id;
 
-  auto backend_or = HostOffloadBackend::Create(config, &controller);
+  auto backend_or = HostOffloadBackend::Create(config, controller.get());
   ASSERT_OK(backend_or.status());
   auto backend = *backend_or;
 
@@ -303,11 +307,13 @@ TEST(HostOffloadBackendTest, ServerLifecycleAndControllerInitialization) {
   unit_proto.set_data_name(node_id.data_name);
   unit_proto.set_data_replica_idx(node_id.data_replica_idx);
 
-  controller::RaidenController controller(unit_proto, /*num_blocks=*/100,
-                                          /*num_shards=*/1,
-                                          /*shard_size_bytes=*/1024);
+  ASSERT_OK_AND_ASSIGN(
+      auto controller,
+      controller::RaidenController::Create(unit_proto, /*num_blocks=*/100,
+                                           /*num_shards=*/1,
+                                           /*shard_size_bytes=*/1024));
 
-  auto backend_or = HostOffloadBackend::Create(config, &controller);
+  auto backend_or = HostOffloadBackend::Create(config, controller.get());
   ASSERT_OK(backend_or.status());
   auto backend = std::dynamic_pointer_cast<HostOffloadBackend>(*backend_or);
   ASSERT_NE(backend, nullptr);
@@ -315,7 +321,8 @@ TEST(HostOffloadBackendTest, ServerLifecycleAndControllerInitialization) {
   auto store_server = KVCacheStoreServer::Create();
   // A wildcard bind reports no publishable address,
   // so bind a real, dialable host.
-  ASSERT_OK(store_server->StartServer(backend.get(), &controller, "127.0.0.1"));
+  ASSERT_OK(
+      store_server->StartServer(backend.get(), controller.get(), "127.0.0.1"));
   EXPECT_GT(store_server->GetGrpcPort(), 0);
   EXPECT_FALSE(store_server->GetServerAddress().empty());
   store_server->Shutdown();
@@ -329,10 +336,12 @@ TEST(HostOffloadBackendTest, StartServerStripsControllerPort) {
   unit_proto.set_data_name(node_id.data_name);
   unit_proto.set_data_replica_idx(node_id.data_replica_idx);
 
-  controller::RaidenController controller(
-      unit_proto, /*num_blocks=*/100, /*num_shards=*/1,
-      /*shard_size_bytes=*/1024, /*raiden_orchestrator_address=*/"",
-      /*raiden_controller_address=*/"127.0.0.1:12345");
+  ASSERT_OK_AND_ASSIGN(
+      auto controller,
+      controller::RaidenController::Create(
+          unit_proto, /*num_blocks=*/100, /*num_shards=*/1,
+          /*shard_size_bytes=*/1024, /*raiden_orchestrator_address=*/"",
+          /*raiden_controller_address=*/"127.0.0.1:12345"));
 
   BackendConfig config;
   config.type = "HostOffloadBackend";
@@ -340,15 +349,15 @@ TEST(HostOffloadBackendTest, StartServerStripsControllerPort) {
   config.global_registry_address = "localhost:0";
   config.raiden_id = node_id;
 
-  auto backend_or = HostOffloadBackend::Create(config, &controller);
+  auto backend_or = HostOffloadBackend::Create(config, controller.get());
   ASSERT_OK(backend_or.status());
   auto backend = std::dynamic_pointer_cast<HostOffloadBackend>(*backend_or);
   ASSERT_NE(backend, nullptr);
 
   auto store_server = KVCacheStoreServer::Create();
-  std::string ctrl_addr = controller.controller_address();
+  std::string ctrl_addr = controller->controller_address();
   std::string target_host = ctrl_addr.substr(0, ctrl_addr.rfind(':'));
-  ASSERT_OK(store_server->StartServer(backend.get(), &controller, target_host));
+  ASSERT_OK(store_server->StartServer(backend.get(), controller.get(), target_host));
   EXPECT_GT(store_server->GetGrpcPort(), 0);
   EXPECT_NE(store_server->GetGrpcPort(), 12345);
   store_server->Shutdown();
@@ -423,17 +432,19 @@ TEST(HostOffloadBackendTest, EndToEndFetchRPC) {
   dst_unit_proto.set_data_name(dst_raiden_id.data_name);
   dst_unit_proto.set_data_replica_idx(dst_raiden_id.data_replica_idx);
 
-  controller::RaidenController dst_controller(
-      dst_unit_proto, /*num_blocks=*/100, /*num_shards=*/1,
-      /*shard_size_bytes=*/1024, orchestrator_address,
-      /*raiden_controller_address=*/"");
+  ASSERT_OK_AND_ASSIGN(
+      auto dst_controller,
+      controller::RaidenController::Create(
+          dst_unit_proto, /*num_blocks=*/100, /*num_shards=*/1,
+          /*shard_size_bytes=*/1024, orchestrator_address,
+          /*raiden_controller_address=*/""));
 
   BackendConfig dst_config;
   dst_config.type = "HostOffloadBackend";
   dst_config.capacity = 100;
   dst_config.global_registry_address = reg_address;
   dst_config.raiden_id = dst_raiden_id;
-  auto backend_or = HostOffloadBackend::Create(dst_config, &dst_controller);
+  auto backend_or = HostOffloadBackend::Create(dst_config, dst_controller.get());
   ASSERT_OK(backend_or.status());
   auto backend = std::dynamic_pointer_cast<HostOffloadBackend>(*backend_or);
   ASSERT_NE(backend, nullptr);
@@ -446,7 +457,7 @@ TEST(HostOffloadBackendTest, EndToEndFetchRPC) {
                   /*on_host=*/true);
 
   core::controller::RaidenControllerClient dst_controller_client(
-      dst_controller.controller_address());
+      dst_controller->controller_address());
   ASSERT_OK(dst_controller_client.RegisterWorker(
       "dst_worker_0", test_worker_server->server_address,
       {{test_worker_server->server_address, {}}}));
@@ -454,8 +465,8 @@ TEST(HostOffloadBackendTest, EndToEndFetchRPC) {
   auto store_server = KVCacheStoreServer::Create();
   // A wildcard bind reports no publishable address,
   // so bind a real, dialable host.
-  ASSERT_OK(
-      store_server->StartServer(backend.get(), &dst_controller, "127.0.0.1"));
+  ASSERT_OK(store_server->StartServer(backend.get(), dst_controller.get(),
+                                      "127.0.0.1"));
   EXPECT_GT(store_server->GetGrpcPort(), 0);
 
   // 7. Issue Fetch RPC using KVCacheStoreClient
@@ -467,7 +478,7 @@ TEST(HostOffloadBackendTest, EndToEndFetchRPC) {
   std::vector<int32_t> host_ids = {201, 202};
   auto fetch_res = client
                        .Fetch(hashes, /*device_block_ids=*/{}, host_ids,
-                              dst_controller.unit())
+                              dst_controller->unit())
                        .Await();
   ASSERT_OK(fetch_res.status());
   EXPECT_THAT(fetch_res->done_block_hashes(),
@@ -488,16 +499,18 @@ TEST(HostOffloadBackendTest, LoadMismatchedDeviceBlockCount) {
   unit_proto.set_data_name(node_id.data_name);
   unit_proto.set_data_replica_idx(node_id.data_replica_idx);
 
-  controller::RaidenController controller(unit_proto, /*num_blocks=*/100,
-                                          /*num_shards=*/1,
-                                          /*shard_size_bytes=*/1024);
+  ASSERT_OK_AND_ASSIGN(
+      auto controller,
+      controller::RaidenController::Create(unit_proto, /*num_blocks=*/100,
+                                           /*num_shards=*/1,
+                                           /*shard_size_bytes=*/1024));
   BackendConfig config;
   config.type = "HostOffloadBackend";
   config.capacity = 100;
   config.global_registry_address = server_address;
   config.raiden_id = node_id;
 
-  auto backend_or = HostOffloadBackend::Create(config, &controller);
+  auto backend_or = HostOffloadBackend::Create(config, controller.get());
   ASSERT_OK(backend_or.status());
   auto backend = std::dynamic_pointer_cast<HostOffloadBackend>(*backend_or);
   ASSERT_NE(backend, nullptr);
@@ -546,10 +559,12 @@ TEST(HostOffloadBackendTest, LoadSuccess) {
   local_unit.set_data_name(local_node_id.data_name);
   local_unit.set_data_replica_idx(local_node_id.data_replica_idx);
 
-  controller::RaidenController controller(
-      local_unit, /*num_blocks=*/100, /*num_shards=*/1,
-      /*shard_size_bytes=*/1024, orchestrator_address,
-      /*raiden_controller_address=*/"");
+  ASSERT_OK_AND_ASSIGN(
+      auto controller,
+      controller::RaidenController::Create(
+          local_unit, /*num_blocks=*/100, /*num_shards=*/1,
+          /*shard_size_bytes=*/1024, orchestrator_address,
+          /*raiden_controller_address=*/""));
 
   // Setup fake server for remote node to process Fetch
   BackendConfig remote_config;
@@ -559,7 +574,7 @@ TEST(HostOffloadBackendTest, LoadSuccess) {
   remote_config.raiden_id = remote_node_id;
 
   auto remote_backend_or =
-      HostOffloadBackend::Create(remote_config, &controller);
+      HostOffloadBackend::Create(remote_config, controller.get());
   ASSERT_OK(remote_backend_or.status());
   auto remote_backend =
       std::dynamic_pointer_cast<HostOffloadBackend>(*remote_backend_or);
@@ -573,7 +588,7 @@ TEST(HostOffloadBackendTest, LoadSuccess) {
   auto remote_server = KVCacheStoreServer::Create();
   // A wildcard bind reports no publishable address,
   // so bind a real, dialable host -- this test publishes it below.
-  ASSERT_OK(remote_server->StartServer(remote_backend.get(), &controller,
+  ASSERT_OK(remote_server->StartServer(remote_backend.get(), controller.get(),
                                        "127.0.0.1"));
 
   ASSERT_OK(registry_client->RegisterStore(
@@ -585,7 +600,8 @@ TEST(HostOffloadBackendTest, LoadSuccess) {
   local_config.global_registry_address = server_address;
   local_config.raiden_id = local_node_id;
 
-  auto local_backend_or = HostOffloadBackend::Create(local_config, &controller);
+  auto local_backend_or =
+      HostOffloadBackend::Create(local_config, controller.get());
   ASSERT_OK(local_backend_or.status());
   auto backend =
       std::dynamic_pointer_cast<HostOffloadBackend>(*local_backend_or);
@@ -599,7 +615,7 @@ TEST(HostOffloadBackendTest, LoadSuccess) {
       KVManagerHolder(dst_transfer_mock.get()));
 
   core::controller::RaidenControllerClient controller_client(
-      controller.controller_address());
+      controller->controller_address());
   ASSERT_OK(controller_client.RegisterWorker(
       "worker_0", test_worker_server->server_address,
       {{test_worker_server->server_address, {}}}));
@@ -622,9 +638,11 @@ TEST(HostOffloadBackendTest, LoadLocalSuccess) {
   unit_proto.set_data_name(node_id.data_name);
   unit_proto.set_data_replica_idx(node_id.data_replica_idx);
 
-  controller::RaidenController controller(unit_proto, /*num_blocks=*/100,
-                                          /*num_shards=*/1,
-                                          /*shard_size_bytes=*/1024);
+  ASSERT_OK_AND_ASSIGN(
+      auto controller,
+      controller::RaidenController::Create(unit_proto, /*num_blocks=*/100,
+                                           /*num_shards=*/1,
+                                           /*shard_size_bytes=*/1024));
   auto test_worker_server = controller::CreateTestWorkerServer();
   auto transfer_mock =
       std::make_unique<controller::ShardAwareMockTransferManager>();
@@ -632,7 +650,7 @@ TEST(HostOffloadBackendTest, LoadLocalSuccess) {
       KVManagerHolder(transfer_mock.get()));
 
   core::controller::RaidenControllerClient controller_client(
-      controller.controller_address());
+      controller->controller_address());
   ASSERT_OK(controller_client.RegisterWorker(
       "worker_0", test_worker_server->server_address,
       {{test_worker_server->server_address, {}}}));
@@ -642,7 +660,7 @@ TEST(HostOffloadBackendTest, LoadLocalSuccess) {
   config.capacity = 100;
   config.raiden_id = node_id;
 
-  auto backend_or = HostOffloadBackend::Create(config, &controller);
+  auto backend_or = HostOffloadBackend::Create(config, controller.get());
   ASSERT_OK(backend_or.status());
   auto backend = std::dynamic_pointer_cast<HostOffloadBackend>(*backend_or);
   ASSERT_NE(backend, nullptr);
@@ -663,15 +681,17 @@ TEST(HostOffloadBackendTest, LoadLocalMissingBlockError) {
   unit_proto.set_data_name(node_id.data_name);
   unit_proto.set_data_replica_idx(node_id.data_replica_idx);
 
-  controller::RaidenController controller(unit_proto, /*num_blocks=*/100,
-                                          /*num_shards=*/1,
-                                          /*shard_size_bytes=*/1024);
+  ASSERT_OK_AND_ASSIGN(
+      auto controller,
+      controller::RaidenController::Create(unit_proto, /*num_blocks=*/100,
+                                           /*num_shards=*/1,
+                                           /*shard_size_bytes=*/1024));
   BackendConfig config;
   config.type = "HostOffloadBackend";
   config.capacity = 100;
   config.raiden_id = node_id;
 
-  auto backend_or = HostOffloadBackend::Create(config, &controller);
+  auto backend_or = HostOffloadBackend::Create(config, controller.get());
   ASSERT_OK(backend_or.status());
   auto backend = std::dynamic_pointer_cast<HostOffloadBackend>(*backend_or);
   ASSERT_NE(backend, nullptr);
@@ -689,15 +709,17 @@ TEST(HostOffloadBackendTest, LoadLocalNonHostBlockError) {
   unit_proto.set_data_name(node_id.data_name);
   unit_proto.set_data_replica_idx(node_id.data_replica_idx);
 
-  controller::RaidenController controller(unit_proto, /*num_blocks=*/100,
-                                          /*num_shards=*/1,
-                                          /*shard_size_bytes=*/1024);
+  ASSERT_OK_AND_ASSIGN(
+      auto controller,
+      controller::RaidenController::Create(unit_proto, /*num_blocks=*/100,
+                                           /*num_shards=*/1,
+                                           /*shard_size_bytes=*/1024));
   BackendConfig config;
   config.type = "HostOffloadBackend";
   config.capacity = 100;
   config.raiden_id = node_id;
 
-  auto backend_or = HostOffloadBackend::Create(config, &controller);
+  auto backend_or = HostOffloadBackend::Create(config, controller.get());
   ASSERT_OK(backend_or.status());
   auto backend = std::dynamic_pointer_cast<HostOffloadBackend>(*backend_or);
   ASSERT_NE(backend, nullptr);
@@ -720,15 +742,17 @@ TEST(HostOffloadBackendTest, StoreServerOverride) {
   local_unit.set_data_name(local_node_id.data_name);
   local_unit.set_data_replica_idx(local_node_id.data_replica_idx);
 
-  controller::RaidenController controller(
-      local_unit, /*num_blocks=*/100, /*num_shards=*/1,
-      /*shard_size_bytes=*/1024, /*raiden_orchestrator_address=*/"",
-      /*raiden_controller_address=*/"");
+  ASSERT_OK_AND_ASSIGN(
+      auto controller,
+      controller::RaidenController::Create(
+          local_unit, /*num_blocks=*/100, /*num_shards=*/1,
+          /*shard_size_bytes=*/1024, /*raiden_orchestrator_address=*/"",
+          /*raiden_controller_address=*/""));
 
   BackendConfig config;
   config.type = "HostOffloadBackend";
   config.capacity = 100;
-  auto backend_or = HostOffloadBackend::Create(config, &controller);
+  auto backend_or = HostOffloadBackend::Create(config, controller.get());
   ASSERT_OK(backend_or.status());
   auto backend = std::dynamic_pointer_cast<HostOffloadBackend>(*backend_or);
   ASSERT_NE(backend, nullptr);
@@ -829,16 +853,19 @@ TEST(HostOffloadBackendWriteRemoteTest, InsertAllOrNothingRespectsPinnedSpace) {
 // block, so a rollback that only erased would leak one block per attempt.
 TEST(HostOffloadBackendWriteRemoteTest, RollbackInsertErasesAndFreesBlocks) {
   RaidenId id{"job", "0", "data", 0};
-  controller::RaidenController controller(ToProto(id), /*num_blocks=*/4,
-                                          /*num_shards=*/1,
-                                          /*shard_size_bytes=*/1024);
-  HostOffloadBackend backend(/*capacity=*/8, std::nullopt, id, &controller);
+  ASSERT_OK_AND_ASSIGN(
+      auto controller,
+      controller::RaidenController::Create(ToProto(id), /*num_blocks=*/4,
+                                           /*num_shards=*/1,
+                                           /*shard_size_bytes=*/1024));
+  HostOffloadBackend backend(/*capacity=*/8, std::nullopt, id,
+                             controller.get());
 
-  auto ids_or = controller.AllocateBlockIds(4);
+  auto ids_or = controller->AllocateBlockIds(4);
   ASSERT_TRUE(ids_or.ok()) << ids_or.status().ToString();
   std::vector<int32_t> ids(ids_or->begin(), ids_or->end());
   // The pool is now empty, which is what makes the free observable.
-  EXPECT_FALSE(controller.AllocateBlockIds(1).ok());
+  EXPECT_FALSE(controller->AllocateBlockIds(1).ok());
 
   std::vector<std::string> hashes = {"a", "b", "c", "d"};
   std::vector<RaidenBlockID> slices;
@@ -851,7 +878,7 @@ TEST(HostOffloadBackendWriteRemoteTest, RollbackInsertErasesAndFreesBlocks) {
 
   EXPECT_TRUE(backend.AlreadyPresentHostResident(hashes).empty());
   EXPECT_EQ(backend.GetSize(), 0);
-  auto reallocated = controller.AllocateBlockIds(4);
+  auto reallocated = controller->AllocateBlockIds(4);
   EXPECT_TRUE(reallocated.ok())
       << "rollback erased the entries but never returned their blocks: "
       << reallocated.status().ToString();

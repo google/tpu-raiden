@@ -504,7 +504,7 @@ NB_MODULE(_tpu_raiden_torch, m) {
 
   nb::class_<tpu_raiden::kv_cache::KVCacheStoreWrapper>(m, "KVCacheStore")
       .def(nb::init<size_t, std::string, tpu_raiden::kv_cache::RaidenId, int,
-                    int64_t, std::string, std::string, int>(),
+                    int64_t, std::string, std::string, int, int>(),
            nb::arg("capacity"), nb::arg("global_registry_address") = "",
            nb::arg("raiden_id") = tpu_raiden::kv_cache::RaidenId(),
            // No defaults: every KVCacheStore has a controller and a
@@ -512,7 +512,15 @@ NB_MODULE(_tpu_raiden_torch, m) {
            // valid values a caller can fall into by omission.
            nb::arg("num_shards"), nb::arg("shard_size_bytes") = 0,
            nb::arg("raiden_orchestrator_address") = "",
-           nb::arg("store_server_ip"), nb::arg("raiden_controller_port") = 0)
+           nb::arg("store_server_ip"), nb::arg("raiden_controller_port") = 0,
+           // When expected_worker_count > 0, constructor blocks until that
+           // many workers have registered with the controller (times out and
+           // throws after RAIDEN_EXPECTED_WORKERS_TIMEOUT_S, default 120s).
+           nb::arg("expected_worker_count") = 0,
+           // Release the GIL during construction so concurrent in-process
+           // Python threads (e.g., worker registration threads) can run and
+           // avoid deadlocking on the expected_worker_count barrier.
+           nb::call_guard<nb::gil_scoped_release>())
       .def_prop_ro(
           "raiden_id",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
