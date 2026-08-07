@@ -315,6 +315,7 @@ cc_library(
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:span",
+        "@gloop//gloop/util/status:ret_check",
         "@xla//xla/tsl/concurrency:future",
     ],
     alwayslink = 1,
