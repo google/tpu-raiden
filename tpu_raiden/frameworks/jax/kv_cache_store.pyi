@@ -43,6 +43,7 @@ class KVCacheStore:
       raiden_orchestrator_address: str = '',
       store_server_ip: str,
       raiden_controller_port: int = 0,
+      expected_worker_count: int = 0,
   ) -> None: ...
 
   @property
