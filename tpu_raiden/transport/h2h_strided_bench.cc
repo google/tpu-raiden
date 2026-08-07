@@ -65,6 +65,8 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
+#include "tpu_raiden/transport/lib/chunk.h"
+#include "tpu_raiden/transport/lib/chunk_serializer.h"
 #include "tpu_raiden/transport/peregrine/src/api/socket_util.h"
 
 namespace {
@@ -72,6 +74,11 @@ namespace {
 using ::peregrine::ReadExact;
 using ::peregrine::WriteExact;
 using ::peregrine::WriteVExact;
+using ::tpu_raiden::transport::lib::ChunkHeader;
+using ::tpu_raiden::transport::lib::DeserializeChunkHeader;
+using ::tpu_raiden::transport::lib::kChunkHeaderSize;
+using ::tpu_raiden::transport::lib::kOpBufferPush;
+using ::tpu_raiden::transport::lib::SerializeChunkHeader;
 
 // ---------------------------------------------------------------------------
 // Qwen3.5-397B-A17B geometry (fp8 KV, hybrid unified block pool).
@@ -85,9 +92,7 @@ constexpr size_t kHeadPairBytes = 2 * kHeadDim * kItemSize;              // 512
 constexpr size_t kTokenStride = 2 * kNumKvHeads * kHeadDim * kItemSize;  // 1024
 constexpr int kPcpSize = 8;
 
-constexpr uint8_t kOpBufferPush = 5;
 constexpr uint64_t kMagicUuid = 0x51E135;
-constexpr size_t kHeaderSize = 32;
 constexpr size_t kHelloSize = 32;  // 8 x uint32 LE
 const char* const kVariantNames[2] = {"strided", "contig"};
 
@@ -119,18 +124,20 @@ uint8_t FillPattern(int layer, int head) {
   return static_cast<uint8_t>((0x40 + head * 100 + layer) % 251);
 }
 
-void PackHeader(uint8_t* h, uint8_t variant, uint16_t layer, uint16_t block,
-                uint16_t iter, uint32_t payload) {
-  std::memset(h, 0, kHeaderSize);
-  h[0] = kOpBufferPush;
-  h[1] = variant;
-  std::memcpy(h + 2, &layer, 2);
-  std::memcpy(h + 4, &block, 2);
-  std::memcpy(h + 6, &iter, 2);
-  // offset 8: remote_id (0)
-  std::memcpy(h + 12, &payload, 4);
-  // offset 16: unused (0)
-  std::memcpy(h + 20, &kMagicUuid, 8);
+std::string PackHeader(uint8_t variant, uint16_t layer, uint16_t block,
+                       uint32_t payload) {
+  ChunkHeader header = {
+      .version = 1,
+      .op = kOpBufferPush,
+      .flags = variant,
+      .buffer_id = layer,
+      .reserved = block,
+      .remote_id = 0,
+      .local_id = 0,
+      .count_or_size = payload,
+      .uuid = kMagicUuid,
+  };
+  return SerializeChunkHeader(header);
 }
 
 void CheckOk(const absl::Status& s, const char* what) {
@@ -300,16 +307,16 @@ int RunSource(const std::string& peer, const Geometry& g, int iters, int warmup,
       std::vector<std::thread> threads;
       threads.reserve(streams);
       for (int i = 0; i < streams; ++i) {
-        threads.emplace_back([&, i, v, it]() {
-          uint8_t header[kHeaderSize];
+        threads.emplace_back([&, i, v]() {
           const BlockPlan* base = plans[v].data() + parts[i].offset;
           for (int s = 0; s < scale; ++s) {
             for (size_t m = 0; m < parts[i].count; ++m) {
               const BlockPlan& plan = base[m];
-              PackHeader(header, static_cast<uint8_t>(v), plan.layer,
-                         plan.block, static_cast<uint16_t>(it),
-                         static_cast<uint32_t>(g.payload_per_block));
-              absl::Status st = WriteExact(fds[i], header, kHeaderSize);
+              const std::string header_bytes =
+                  PackHeader(static_cast<uint8_t>(v), plan.layer, plan.block,
+                             static_cast<uint32_t>(g.payload_per_block));
+              absl::Status st =
+                  WriteExact(fds[i], header_bytes.data(), header_bytes.size());
               if (st.ok()) {
                 st = WriteVExact(fds[i], absl::MakeConstSpan(plan.iov));
               }
@@ -397,21 +404,28 @@ void Verify(const Geometry& g, int variant, int dest_rank, int layer,
 int ReceiveStream(int fd, const Geometry& g, int iters, int warmup,
                   int dest_rank, int scale, uint32_t msgs_this_stream,
                   std::atomic<bool>* failed) {
-  uint8_t header[kHeaderSize];
+  std::vector<char> header_buf(kChunkHeaderSize);
   std::vector<uint8_t> payload(g.payload_per_block);
   const uint8_t ack = 1;
   for (int it = 0; it < warmup + iters && !*failed; ++it) {
     for (int v = 0; v < 2; ++v) {
       for (uint32_t m = 0; m < msgs_this_stream * scale; ++m) {
-        absl::Status st = ReadExact(fd, header, kHeaderSize);
+        absl::Status st = ReadExact(fd, header_buf.data(), kChunkHeaderSize);
         uint32_t size = 0;
-        uint64_t uuid = 0;
+        uint16_t layer = 0;
         if (st.ok()) {
-          std::memcpy(&size, header + 12, 4);
-          std::memcpy(&uuid, header + 20, 8);
-          if (header[0] != kOpBufferPush || header[1] != v ||
-              uuid != kMagicUuid || size != g.payload_per_block) {
-            st = absl::InternalError("bad header");
+          absl::StatusOr<ChunkHeader> parsed_header = DeserializeChunkHeader(
+              absl::string_view(header_buf.data(), kChunkHeaderSize));
+          if (!parsed_header.ok()) {
+            st = parsed_header.status();
+          } else {
+            const ChunkHeader& h = *parsed_header;
+            size = h.count_or_size;
+            layer = h.buffer_id;
+            if (h.op != kOpBufferPush || h.flags != v || h.uuid != kMagicUuid ||
+                size != g.payload_per_block) {
+              st = absl::InternalError("bad header");
+            }
           }
         }
         if (st.ok()) {
@@ -424,8 +438,6 @@ int ReceiveStream(int fd, const Geometry& g, int iters, int warmup,
           return 1;
         }
         if (it == 0) {
-          uint16_t layer;
-          std::memcpy(&layer, header + 2, 2);
           Verify(g, v, dest_rank, layer, payload);
         }
       }
