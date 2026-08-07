@@ -180,11 +180,11 @@ void CheckTimingTripleOnce() {
 
 }  // namespace
 
-void RaidenController::Init(absl::Span<const std::string> worker_addresses,
-                            absl::string_view raiden_orchestrator_address,
-                            absl::string_view raiden_controller_address,
-                            int expected_worker_count) {
-  // If Init fails (e.g. timeout or exception during worker/orchestrator
+absl::Status RaidenController::Init(
+    absl::Span<const std::string> worker_addresses,
+    absl::string_view raiden_orchestrator_address,
+    absl::string_view raiden_controller_address, int expected_worker_count) {
+  // If Init fails (e.g. timeout during worker/orchestrator
   // registration), ensure any registered callbacks and singleton references
   // are detached so late registrations or in-flight operations do not invoke
   // callbacks on a destroyed RaidenController.
@@ -254,9 +254,10 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
     absl::Status status = worker_registry_->RegisterWorker(
         worker_id, worker_addresses[i], /*raiden_transfer_endpoints=*/{});
     if (!status.ok()) {
-      throw std::runtime_error(absl::StrCat("Failed to register static worker ",
-                                            worker_addresses[i], ": ",
-                                            status.message()));
+      return absl::Status(
+          status.code(),
+          absl::StrCat("Failed to register static worker ", worker_addresses[i],
+                       ": ", status.message()));
     }
   }
 
@@ -268,8 +269,10 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
     absl::Status status = orchestrator_client_->RegisterController(
         unit_, raiden_controller_address_);
     if (!status.ok()) {
-      throw std::runtime_error(absl::StrCat(
-          "Failed to register with orchestrator: ", status.message()));
+      return absl::Status(
+          status.code(),
+          absl::StrCat("Failed to register with orchestrator: ",
+                       status.message()));
     }
   }
 
@@ -287,7 +290,7 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
             static_cast<size_t>(expected_worker_count),
             absl::Seconds(timeout_s))) {
       size_t actual = worker_registry_->GetRegisteredWorkers().size();
-      throw std::runtime_error(absl::StrCat(
+      return absl::DeadlineExceededError(absl::StrCat(
           "RaidenController timed out waiting for workers: expected ",
           expected_worker_count, " worker(s) within ", timeout_s, "s, got ",
           actual));
@@ -295,13 +298,13 @@ void RaidenController::Init(absl::Span<const std::string> worker_addresses,
   }
 
   std::move(init_cleanup).Cancel();
+  return absl::OkStatus();
 }
 
-RaidenController::RaidenController(
-    const rpc::RaidenIdProto& unit, int num_blocks, int num_shards,
-    int64_t shard_size_bytes, absl::string_view raiden_orchestrator_address,
-    absl::string_view raiden_controller_address,
-    bool preprovision_worker_buffers, int expected_worker_count)
+RaidenController::RaidenController(const rpc::RaidenIdProto& unit,
+                                   int num_blocks, int num_shards,
+                                   int64_t shard_size_bytes,
+                                   bool preprovision_worker_buffers)
     : unit_(unit),
       num_shards_(num_shards),
       shard_size_bytes_(shard_size_bytes),
@@ -309,28 +312,36 @@ RaidenController::RaidenController(
       preprovision_worker_buffers_(preprovision_worker_buffers),
       worker_registry_(std::make_shared<core::controller::WorkerRegistry>()),
       block_manager_(
-          std::make_unique<kv_cache::LogicalBlockManager>(num_blocks)) {
-  Init(/*worker_addresses=*/{}, raiden_orchestrator_address,
-       raiden_controller_address, expected_worker_count);
+          std::make_unique<kv_cache::LogicalBlockManager>(num_blocks)) {}
+
+absl::StatusOr<std::unique_ptr<RaidenController>> RaidenController::Create(
+    const rpc::RaidenIdProto& unit, int num_blocks, int num_shards,
+    int64_t shard_size_bytes, absl::string_view raiden_orchestrator_address,
+    absl::string_view raiden_controller_address,
+    bool preprovision_worker_buffers, int expected_worker_count) {
+  return Create(unit, /*worker_addresses=*/{}, num_blocks, num_shards,
+                shard_size_bytes, raiden_orchestrator_address,
+                raiden_controller_address, preprovision_worker_buffers,
+                expected_worker_count);
 }
 
-RaidenController::RaidenController(
+absl::StatusOr<std::unique_ptr<RaidenController>> RaidenController::Create(
     const rpc::RaidenIdProto& unit,
     absl::Span<const std::string> worker_addresses, int num_blocks,
     int num_shards, int64_t shard_size_bytes,
     absl::string_view raiden_orchestrator_address,
     absl::string_view raiden_controller_address,
-    bool preprovision_worker_buffers, int expected_worker_count)
-    : unit_(unit),
-      num_shards_(num_shards),
-      shard_size_bytes_(shard_size_bytes),
-      num_total_blocks_(num_blocks),
-      preprovision_worker_buffers_(preprovision_worker_buffers),
-      worker_registry_(std::make_shared<core::controller::WorkerRegistry>()),
-      block_manager_(
-          std::make_unique<kv_cache::LogicalBlockManager>(num_blocks)) {
-  Init(worker_addresses, raiden_orchestrator_address, raiden_controller_address,
-       expected_worker_count);
+    bool preprovision_worker_buffers, int expected_worker_count) {
+  std::unique_ptr<RaidenController> controller(
+      new RaidenController(unit, num_blocks, num_shards, shard_size_bytes,
+                           preprovision_worker_buffers));
+  absl::Status status =
+      controller->Init(worker_addresses, raiden_orchestrator_address,
+                       raiden_controller_address, expected_worker_count);
+  if (!status.ok()) {
+    return status;
+  }
+  return controller;
 }
 
 void RaidenController::Cleanup() {

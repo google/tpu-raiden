@@ -262,12 +262,16 @@ KVCacheStore::KVCacheStore(
     // The store's block ids resolve against the manager's own pool, so the
     // legacy physical-buffer pre-provisioning would allocate that pool a
     // second time on the worker.
-    raiden_controller_ =
-        std::make_unique<::tpu_raiden::controller::RaidenController>(
-            unit_proto, cap, num_shards, shard_size_bytes,
-            raiden_orchestrator_address,
-            ComposeControllerAddress(store_server_ip, raiden_controller_port),
-            /*preprovision_worker_buffers=*/false, expected_worker_count);
+    auto controller = ::tpu_raiden::controller::RaidenController::Create(
+        unit_proto, cap, num_shards, shard_size_bytes,
+        raiden_orchestrator_address,
+        ComposeControllerAddress(store_server_ip, raiden_controller_port),
+        /*preprovision_worker_buffers=*/false, expected_worker_count);
+    if (!controller.ok()) {
+      LOG(FATAL) << "KVCacheStore failed to initialize RaidenController: "
+                 << controller.status().message();
+    }
+    raiden_controller_ = std::move(*controller);
   }
   // Deliberately does NOT wire the controller here (see CreateTag) -- the
   // caller (Create()) does that itself so a publish failure can return a
@@ -340,12 +344,17 @@ KVCacheStore::KVCacheStore(
     unit_proto.set_data_name(raiden_id_.data_name);
     unit_proto.set_data_replica_idx(raiden_id_.data_replica_idx);
 
-    raiden_controller_ =
-        std::make_unique<::tpu_raiden::controller::RaidenController>(
-            unit_proto, capacity, num_shards, shard_size_bytes,
-            raiden_orchestrator_address,
-            ComposeControllerAddress(store_server_ip, raiden_controller_port),
-            /*preprovision_worker_buffers=*/false, expected_worker_count);
+    auto controller = ::tpu_raiden::controller::RaidenController::Create(
+        unit_proto, capacity, num_shards, shard_size_bytes,
+        raiden_orchestrator_address,
+        ComposeControllerAddress(store_server_ip, raiden_controller_port),
+        /*preprovision_worker_buffers=*/false, expected_worker_count);
+    if (!controller.ok()) {
+      LOG(FATAL) << "KVCacheStore failed to initialize RaidenController: "
+                 << controller.status().message()
+                 << " Use KVCacheStore::Create() for a recoverable error.";
+    }
+    raiden_controller_ = std::move(*controller);
   }
 
   // registry_client_ is assigned a few lines above, and must be: a backend

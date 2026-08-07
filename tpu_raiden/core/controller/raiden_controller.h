@@ -60,7 +60,7 @@ struct RemoteReadState;
 // and synchronizing them with remote transfer workers via WorkerService gRPC.
 class RaidenController {
  public:
-  // Constructs a RaidenController for the given unit.
+  // Creates a RaidenController for the given unit.
   // The RaidenController sets up its own ControllerService and local
   // LogicalBlockManager. Workers will dynamically register with it.
   //
@@ -76,35 +76,33 @@ class RaidenController {
   // (Allocate/AllocateBuffers below). `preprovision_worker_buffers` = false
   // skips that pre-creation.
   //
-  // `expected_worker_count` > 0 blocks construction until that many workers
+  // `expected_worker_count` > 0 blocks initialization until that many workers
   // have registered with this controller (via dynamic registration or the
-  // `worker_addresses` argument), and throws std::runtime_error if they have
-  // not all arrived within RAIDEN_EXPECTED_WORKERS_TIMEOUT_S seconds (default
-  // 120). Leave it 0 when workers register only after construction returns.
-  //
-  // TODO(b/537858523): Refactor RaidenController construction to use a static
-  // Create() factory method returning
-  // absl::StatusOr<std::unique_ptr<RaidenController>> to avoid exceptions.
+  // `worker_addresses` argument), and returns a DeadlineExceeded error if they
+  // have not all arrived within RAIDEN_EXPECTED_WORKERS_TIMEOUT_S seconds
+  // (default 120). Leave it 0 when workers register only after initialization
+  // returns.
   //
   // TODO(b/542288634): Remove preprovision_worker_buffers and legacy
   // Physical/BufferProto mode.
-  RaidenController(const rpc::RaidenIdProto& unit, int num_blocks,
-                   int num_shards, int64_t shard_size_bytes,
-                   absl::string_view raiden_orchestrator_address = "",
-                   absl::string_view raiden_controller_address = "",
-                   bool preprovision_worker_buffers = true,
-                   int expected_worker_count = 0);
+  static absl::StatusOr<std::unique_ptr<RaidenController>> Create(
+      const rpc::RaidenIdProto& unit, int num_blocks, int num_shards,
+      int64_t shard_size_bytes,
+      absl::string_view raiden_orchestrator_address = "",
+      absl::string_view raiden_controller_address = "",
+      bool preprovision_worker_buffers = true, int expected_worker_count = 0);
 
-  // Constructs a RaidenController for multiple worker addresses.
+  // Creates a RaidenController for multiple worker addresses.
   // It will also start the ControllerServer to allow dynamic registrations
   // and resolve peers.
-  RaidenController(const rpc::RaidenIdProto& unit,
-                   absl::Span<const std::string> worker_addresses,
-                   int num_blocks, int num_shards, int64_t shard_size_bytes,
-                   absl::string_view raiden_orchestrator_address = "",
-                   absl::string_view raiden_controller_address = "",
-                   bool preprovision_worker_buffers = true,
-                   int expected_worker_count = 0);
+  static absl::StatusOr<std::unique_ptr<RaidenController>> Create(
+      const rpc::RaidenIdProto& unit,
+      absl::Span<const std::string> worker_addresses, int num_blocks,
+      int num_shards, int64_t shard_size_bytes,
+      absl::string_view raiden_orchestrator_address = "",
+      absl::string_view raiden_controller_address = "",
+      bool preprovision_worker_buffers = true, int expected_worker_count = 0);
+
   // Destructor automatically calls DeleteBuffers to clean up all pre-created
   // buffers on the registered workers.
   ~RaidenController();
@@ -244,10 +242,14 @@ class RaidenController {
       absl::Span<const Buffer> staging_host_buffers = {},
       absl::Span<const int64_t> copy_sizes = {});
 
-  void Init(absl::Span<const std::string> worker_addresses,
-            absl::string_view raiden_orchestrator_address,
-            absl::string_view raiden_controller_address,
-            int expected_worker_count);
+  RaidenController(const rpc::RaidenIdProto& unit, int num_blocks,
+                   int num_shards, int64_t shard_size_bytes,
+                   bool preprovision_worker_buffers);
+
+  absl::Status Init(absl::Span<const std::string> worker_addresses,
+                    absl::string_view raiden_orchestrator_address,
+                    absl::string_view raiden_controller_address,
+                    int expected_worker_count);
 
   void Cleanup();
 
