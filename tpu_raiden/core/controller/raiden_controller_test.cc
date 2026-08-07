@@ -43,6 +43,7 @@
 #include "xla/tsl/concurrency/future.h"
 #include "tpu_raiden/core/buffer.h"
 #include "tpu_raiden/core/controller/controller_client.h"
+#include "tpu_raiden/core/controller/controller_server.h"
 #include "tpu_raiden/core/controller/orchestrator_service_client.h"
 #include "tpu_raiden/core/controller/raiden_orchestrator.h"
 #include "tpu_raiden/core/controller/test_util.h"
@@ -260,6 +261,63 @@ TEST_F(RaidenControllerTest, ConstructorThrowsOnBufferCreationFailure) {
             "");
       },
       std::runtime_error);
+}
+
+TEST_F(RaidenControllerTest, ExpectedWorkerCountSatisfiedByStaticWorkers) {
+  // Statically supplied workers register during Init, so the barrier is
+  // already met when the wait runs and construction returns promptly.
+  RaidenController controller(
+      unit_, std::vector<std::string>{test_server_->server_address},
+      /*num_blocks=*/5, /*num_shards=*/2,
+      /*shard_size_bytes=*/512, orchestrator_address_, "",
+      /*preprovision_worker_buffers=*/true, /*expected_worker_count=*/1);
+  EXPECT_EQ(controller.worker_registry()->GetRegisteredWorkers().size(), 1);
+}
+
+// TODO(b/537858523): Migrate exception-based timeout assertions to StatusOr
+// error checks once RaidenController adopts the Create() factory method.
+TEST_F(RaidenControllerTest, ExpectedWorkerCountTimesOut) {
+  setenv("RAIDEN_EXPECTED_WORKERS_TIMEOUT_S", "1", /*overwrite=*/1);
+  try {
+    RaidenController controller(
+        unit_, std::vector<std::string>{test_server_->server_address},
+        /*num_blocks=*/5, /*num_shards=*/2,
+        /*shard_size_bytes=*/512, orchestrator_address_, "",
+        /*preprovision_worker_buffers=*/true, /*expected_worker_count=*/2);
+    unsetenv("RAIDEN_EXPECTED_WORKERS_TIMEOUT_S");
+    FAIL() << "construction should have thrown on the worker barrier";
+  } catch (const std::runtime_error& e) {
+    unsetenv("RAIDEN_EXPECTED_WORKERS_TIMEOUT_S");
+    EXPECT_THAT(e.what(), testing::HasSubstr("expected 2 worker(s)"));
+    EXPECT_THAT(e.what(), testing::HasSubstr("got 1"));
+  }
+}
+
+TEST_F(RaidenControllerTest,
+       ExpectedWorkerCountTimeoutCleansUpRegistryAndCallbacks) {
+  setenv("RAIDEN_EXPECTED_WORKERS_TIMEOUT_S", "1", /*overwrite=*/1);
+  EXPECT_THROW(
+      {
+        RaidenController controller(
+            unit_, std::vector<std::string>{test_server_->server_address},
+            /*num_blocks=*/5, /*num_shards=*/2,
+            /*shard_size_bytes=*/512, orchestrator_address_, "",
+            /*preprovision_worker_buffers=*/true, /*expected_worker_count=*/2);
+      },
+      std::runtime_error);
+  unsetenv("RAIDEN_EXPECTED_WORKERS_TIMEOUT_S");
+
+  // After the constructor threw due to timeout, the callback capturing the
+  // destroyed controller must be detached, and the singleton server must not
+  // invoke callbacks on dangling memory when a late worker registers.
+  auto& server = core::controller::ControllerServer::GetInstance();
+  core::controller::RaidenControllerClient client(
+      absl::StrCat("localhost:", server.GetGrpcPort()));
+  auto status = client.RegisterWorker(
+      "late_worker", test_server_->server_address,
+      {::tpu_raiden::RaidenTransferEndpoint{test_server_->server_address, {}}},
+      /*node_id=*/0);
+  EXPECT_TRUE(status.ok()) << status.message();
 }
 
 TEST_F(RaidenControllerTest, RegisterWorkerFailsOnBufferCreationFailure) {

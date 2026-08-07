@@ -15,12 +15,15 @@
 #include "tpu_raiden/core/controller/worker_registry.h"
 
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/status/status.h"
 #include "absl/status/status_matchers.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "tpu_raiden/core/raiden_transfer_endpoint.h"
 
 namespace tpu_raiden {
@@ -68,6 +71,33 @@ TEST(WorkerRegistryTest, GetNonExistentWorkerFails) {
   WorkerRegistry registry;
   auto worker_or = registry.GetWorker("non_existent");
   EXPECT_THAT(worker_or.status(), StatusIs(absl::StatusCode::kNotFound));
+}
+
+TEST(WorkerRegistryTest, AwaitWorkerCountReturnsImmediatelyWhenSatisfied) {
+  WorkerRegistry registry;
+  EXPECT_TRUE(registry.AwaitWorkerCount(0, absl::ZeroDuration()));
+
+  ABSL_ASSERT_OK(registry.RegisterWorker("worker_0", "localhost:10001",
+                                         {{"localhost:10002", {0}}}));
+  EXPECT_TRUE(registry.AwaitWorkerCount(1, absl::ZeroDuration()));
+}
+
+TEST(WorkerRegistryTest, AwaitWorkerCountTimesOut) {
+  WorkerRegistry registry;
+  EXPECT_FALSE(registry.AwaitWorkerCount(1, absl::Milliseconds(50)));
+}
+
+TEST(WorkerRegistryTest, AwaitWorkerCountWakesOnRegistration) {
+  WorkerRegistry registry;
+  std::thread registrar([&registry] {
+    absl::SleepFor(absl::Milliseconds(50));
+    EXPECT_TRUE(registry
+                    .RegisterWorker("worker_0", "localhost:10001",
+                                    {{"localhost:10002", {0}}})
+                    .ok());
+  });
+  EXPECT_TRUE(registry.AwaitWorkerCount(1, absl::Seconds(10)));
+  registrar.join();
 }
 
 }  // namespace
