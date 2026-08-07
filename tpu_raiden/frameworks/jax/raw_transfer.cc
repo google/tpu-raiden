@@ -38,11 +38,7 @@ class PjRtClient;
 #include "tpu_raiden/core/raw_transfer_impl.h"
 #include "tpu_raiden/core/status_macros.h"
 #include "tpu_raiden/frameworks/jax/jax_utils.h"
-#ifndef WITHOUT_PYTHON
 #include <nanobind/nanobind.h>
-#else
-#include "tpu_raiden/frameworks/jax/mock_nanobind.h"
-#endif
 #include "tpu_raiden/frameworks/jax/raw_transfer_internal.h"
 
 namespace raiden {

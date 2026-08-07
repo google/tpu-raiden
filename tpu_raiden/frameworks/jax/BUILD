@@ -73,7 +73,6 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        ":mock_nanobind",
         "//tpu_raiden/core:raw_transfer_core",
         "@jax//jaxlib:py_client",
         "@nanobind",
@@ -297,20 +296,9 @@ cc_library(
 
 # Removed _weight_synchronizer (consolidated into _tpu_raiden_jax)
 
-cc_library(
-    name = "mock_nanobind",
-    hdrs = [
-        "mock_nanobind.h",
-    ],
-    copts = ["-fexceptions"],
-    features = ["-use_header_modules"],
-    visibility = ["//visibility:private"],
-)
-
 nanobind_extension(
     name = "_raw_transfer",
     srcs = [
-        "mock_nanobind.h",
         "raw_transfer.cc",
         "raw_transfer_internal.h",
     ],
@@ -438,7 +426,6 @@ cc_library(
     features = ["-use_header_modules"],
     deps = [
         ":jax_utils",
-        ":mock_nanobind",
         "//tpu_raiden/core:raw_transfer_core",
         "//tpu_raiden/core:raw_transfer_impl",
         "//tpu_raiden/core:status_macros",
@@ -456,57 +443,6 @@ cc_library(
         "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",  # buildcleaner: keep
         "@xla//xla/python:nb_numpy",
         "@xla//xla/python:types",
-    ],
-)
-
-cc_library(
-    name = "raw_transfer_jax_mock",
-    srcs = ["raw_transfer.cc"],
-    hdrs = [
-        "jax_utils.h",
-        "mock_nanobind.h",
-        "raw_transfer_internal.h",
-    ],
-    copts = [
-        "-fexceptions",
-        "-Wno-unused-variable",
-    ],
-    defines = ["WITHOUT_PYTHON"],
-    features = ["-use_header_modules"],
-    deps = [
-        "//tpu_raiden/core:raw_transfer_core",
-        "//tpu_raiden/core:raw_transfer_impl",
-        "//tpu_raiden/core:status_macros",
-        "@com_google_absl//absl/log",
-        "@com_google_absl//absl/status:statusor",
-        "@com_google_absl//absl/strings",
-        "@com_google_absl//absl/strings:string_view",
-        "@com_google_absl//absl/types:span",
-        "@xla//xla:shape_util",
-        "@xla//xla/pjrt:pjrt_layout",
-        "@xla//xla/pjrt:raw_buffer",
-        "@xla//xla/pjrt:status_casters",
-        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_external",  # buildcleaner: keep
-    ],
-)
-
-cc_test(
-    name = "raw_transfer_test",
-    srcs = ["raw_transfer_test.cc"],
-    copts = ["-fexceptions"],
-    features = ["-use_header_modules"],
-    deps = [
-        ":raw_transfer_jax_mock",
-        "//tpu_raiden/core:raw_transfer_core",
-        "@com_google_absl//absl/log:check",
-        "@xla//xla/pjrt:common_pjrt_client",
-        "@xla//xla/pjrt:pjrt_client",
-        "@xla//xla/pjrt:raw_buffer",
-        "@xla//xla/pjrt/plugin/xla_cpu:xla_cpu_pjrt_client",
-        "@xla//xla/stream_executor/host:host_platform",
-        "@xla//xla/tsl/platform:statusor",
-        "@xla//xla/tsl/platform:test",
-        "@xla//xla/tsl/platform:test_main",
     ],
 )
 

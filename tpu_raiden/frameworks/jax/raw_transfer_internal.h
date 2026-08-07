@@ -20,11 +20,7 @@
 
 #include "absl/status/statusor.h"  // IWYU pragma: keep
 #include "tpu_raiden/core/raw_transfer_impl.h"  // IWYU pragma: keep
-#ifndef WITHOUT_PYTHON
 #include <nanobind/nanobind.h>
-#else
-#include "tpu_raiden/frameworks/jax/mock_nanobind.h"
-#endif
 
 namespace nb = nanobind;
 
