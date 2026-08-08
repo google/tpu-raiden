@@ -55,6 +55,27 @@ TEST(ControllerServerTest, StartServerAndGetPortWorks) {
             "localhost:10002");
 }
 
+TEST(ControllerServerTest, RegisterWorkerCarriesBlockGeometry) {
+  auto server = ControllerServer::Create();
+  ABSL_ASSERT_OK(server->StartServer(""));
+  std::string server_address =
+      "localhost:" + std::to_string(server->GetGrpcPort());
+  RaidenControllerClient client(server_address);
+
+  ABSL_ASSERT_OK(client.RegisterWorker(
+      "worker_geo", "localhost:10001",
+      {::tpu_raiden::RaidenTransferEndpoint{"localhost:10002", {}}},
+      /*node_id=*/1, /*block_array_bytes=*/{4096, 8192},
+      /*num_kv_shards=*/4));
+
+  auto worker_or = server->GetWorkerRegistry()->GetWorker("worker_geo");
+  ABSL_ASSERT_OK(worker_or);
+  ASSERT_EQ(worker_or->block_array_bytes.size(), 2);
+  EXPECT_EQ(worker_or->block_array_bytes[0], 4096);
+  EXPECT_EQ(worker_or->block_array_bytes[1], 8192);
+  EXPECT_EQ(worker_or->num_kv_shards, 4);
+}
+
 TEST(ControllerServerTest, SingletonIsReused) {
   auto& server1 = ControllerServer::GetInstance();
   ABSL_ASSERT_OK(server1.StartServer(""));

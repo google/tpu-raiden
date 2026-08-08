@@ -46,6 +46,12 @@ struct WorkerRegistration {
   // their destination peer worker during ReadRemote. Must be unique per
   // controller (enforced at registration).
   int64_t node_id = 0;
+  // Bytes one block occupies on one shard, one entry per KV cache block array
+  // of this worker's host. Empty when the worker did not report its geometry.
+  std::vector<uint64_t> block_array_bytes;
+  // Device shards each block array is split across on this worker's host. 0
+  // when the worker did not report its geometry.
+  int32_t num_kv_shards = 0;
 };
 
 // Thread-safe registry for worker node registrations in the controller plane.

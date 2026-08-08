@@ -40,10 +40,10 @@ service RaidenControllerService {
   // the source reclaims the pins and the commit-time verdict turns the read
   // into a discard + retry rather than silent corruption.
   rpc AcquireReadLease(AcquireReadLeaseRequest)
-      returns (AcquireReadLeaseResponse) {  }
-  rpc RenewReadLease(RenewReadLeaseRequest) returns (RenewReadLeaseResponse) {  }
+      returns (AcquireReadLeaseResponse) {}
+  rpc RenewReadLease(RenewReadLeaseRequest) returns (RenewReadLeaseResponse) {}
   rpc ReleaseReadLease(ReleaseReadLeaseRequest)
-      returns (ReleaseReadLeaseResponse) {  }
+      returns (ReleaseReadLeaseResponse) {}
 }
 
 // The source's answer to the only question that gates a commit: was the pin
@@ -84,7 +84,8 @@ message AcquireReadLeaseResponse {
   // destination worker can pair with the source worker holding its shards.
   // These are DATA-plane endpoints -- the pull speaks the block-transport
   // protocol, not the control protocol.
-  repeated .tpu_raiden.proto.RaidenWorkerEndpointsProto src_worker_endpoints = 3;
+  repeated .tpu_raiden.proto.RaidenWorkerEndpointsProto src_worker_endpoints =
+      3;
   // The TTL actually granted, after clamping.
   int64 granted_ttl_ms = 4;
 }
@@ -121,10 +122,15 @@ message RegisterWorkerRequest {
   // controller to match source workers to their destination peer worker during
   // ReadRemote. Must be unique per controller.
   int64 node_id = 4;
+  // Bytes one block occupies on one shard, one entry per KV cache block array
+  // of this worker's host (see KVTransferSpec.BlockArray in
+  // global_registry.proto).
+  repeated int64 block_array_bytes = 5;
+  // Device shards each block array is split across on this worker's host.
+  int32 num_kv_shards = 6;
 }
 
 message RegisterWorkerResponse {
   bool success = 1;
   string error_message = 2;
 }
-

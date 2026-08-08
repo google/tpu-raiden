@@ -1040,9 +1040,16 @@ void KVCacheManager::StartGrpcServer(
       absl::StrAppend(&transfer_endpoints_log, local_eps[i].endpoint);
     }
 
+    std::vector<uint64_t> block_array_bytes;
+    block_array_bytes.reserve(numa_manager_->num_block_arrays());
+    for (size_t i = 0; i < numa_manager_->num_block_arrays(); ++i) {
+      block_array_bytes.push_back(numa_manager_->block_bytes(i));
+    }
+
     core::controller::RaidenControllerClient client(*raiden_controller_address);
-    status = client.RegisterWorker(w_id, worker_endpoint, local_eps,
-                                   numa_manager_->node_id());
+    status = client.RegisterWorker(
+        w_id, worker_endpoint, local_eps, numa_manager_->node_id(),
+        block_array_bytes, static_cast<int32_t>(numa_manager_->num_shards()));
     if (!status.ok()) {
       LOG(ERROR) << "Failed to register worker with controller: "
                  << status.message();

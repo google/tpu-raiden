@@ -17,6 +17,7 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -39,20 +40,27 @@ class RaidenControllerClient {
 
   // Registers a worker with the controller. node_id is the worker's unique
   // mesh node identifier (used for source<->destination worker matching).
+  // block_array_bytes and num_kv_shards describe the host's KV block geometry
+  // (see RegisterWorkerRequest); leave them defaulted to register without it.
   absl::Status RegisterWorker(
       absl::string_view worker_id, absl::string_view raiden_worker_endpoint,
       const std::vector<::tpu_raiden::RaidenTransferEndpoint>&
           raiden_transfer_endpoints,
-      int64_t node_id = 0);
+      int64_t node_id = 0,
+      const std::vector<uint64_t>& block_array_bytes = {},
+      int32_t num_kv_shards = 0);
 
   // Alias for snake_case callers.
   absl::Status register_worker(
       absl::string_view worker_id, absl::string_view raiden_worker_endpoint,
       const std::vector<::tpu_raiden::RaidenTransferEndpoint>&
           raiden_transfer_endpoints,
-      int64_t node_id = 0) {
+      int64_t node_id = 0,
+      const std::vector<uint64_t>& block_array_bytes = {},
+      int32_t num_kv_shards = 0) {
     return RegisterWorker(worker_id, raiden_worker_endpoint,
-                          raiden_transfer_endpoints, node_id);
+                          raiden_transfer_endpoints, node_id,
+                          block_array_bytes, num_kv_shards);
   }
 
  private:
