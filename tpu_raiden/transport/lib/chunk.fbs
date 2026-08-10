@@ -1,0 +1,43 @@
+namespace tpu_raiden.transport.lib.flatbuf;
+
+// Do not change.
+enum Constant:uint16 {
+  MAGIC = 0x4452,  // 'RD' in little endian.
+}
+
+struct ChunkHeader {
+  // Two fixed fields. Do not change.
+  magic:uint16;
+  ver:uint16;
+
+  // The following fields can change.
+  // When they do, the `ver` field must be incremented in the new serializer.
+  // LINT.IfChange
+  op:uint8;
+  flags:uint8;
+  buffer_id:uint16;
+  reserved:uint16;
+  metadata_size:uint16;
+  remote_id:uint32;
+  local_id:uint32;
+  count_or_size:uint32;
+  uuid:uint64;
+  v2_flags:uint64;
+
+  // Paddings to keep the header size always 64 bytes.
+  padding0:uint64;
+  padding1:uint64;
+  padding2:uint64;
+// LINT.ThenChange(chunk.h)
+}
+
+struct ChunkMetadata {
+  // The following fields can change.
+  // When they do, the `ver` field in ChunkHeader must be incremented.
+  // LINT.IfChange
+  layer_idx:uint32;
+  dst_shard_idx:uint32;
+  dst_offset_bytes:uint32;
+  size_bytes:uint32;
+// LINT.ThenChange(chunk.h)
+}

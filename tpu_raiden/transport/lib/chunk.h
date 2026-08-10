@@ -24,25 +24,33 @@ inline constexpr uint8_t kOpBufferPush = 5;
 inline constexpr uint8_t kOpBufferPushBatched = 7;
 
 // Compact 32-byte binary chunk header layout.
-// TODO(swasthi): serialization using flatbuffer.
-// TODO(swasthi): add version field to prevent breaking changes.
 struct alignas(8) ChunkHeader {
+  // LINT.IfChange
+  uint16_t version;  // Header version
   uint8_t op;     // OP code. See kOp* constants.
   uint8_t flags;  // Holds major_order or protocol flags
   uint16_t buffer_id;      // Multidimensional Buffer / Layer ID coordinate
   uint16_t reserved;       // Holds parallelism/expected chunks count
-  uint16_t padding;        // Unused padding to align fields
+  uint16_t metadata_size;  // Size of metadata item in bytes for batch push
   uint32_t remote_id;      // Remote block ID or linear memory offset
   uint32_t local_id;       // Local block ID or target shard index
   uint32_t count_or_size;  // Number of blocks or continuous payload bytes
   uint64_t uuid;           // Globally unique transaction routing ID
+  uint64_t v2_flags;
+  // LINT.ThenChange(chunk.fbs)
+
+  bool operator==(const ChunkHeader&) const = default;
 };
 
 struct ChunkMetadata {
+  // LINT.IfChange
   uint32_t layer_idx;
   uint32_t dst_shard_idx;
   uint32_t dst_offset_bytes;
   uint32_t size_bytes;
+  // LINT.ThenChange(chunk.fbs)
+
+  bool operator==(const ChunkMetadata&) const = default;
 };
 
 }  // namespace tpu_raiden::transport::lib
