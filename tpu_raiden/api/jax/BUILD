@@ -21,8 +21,29 @@ py_library(
     srcs = ["kv_cache_manager.py"],
     visibility = ["//visibility:public"],
     deps = [
+        # Framework-neutral despite living under api/torch: pure dataclasses,
+        # no torch import. Shared rather than duplicated so the JAX and torch
+        # pool descriptors cannot drift.
+        "//tpu_raiden/api/torch:pool_layout",
         "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
         "//tpu_raiden/frameworks/jax:jax_test_utils",
+    ],
+)
+
+py_test(
+    name = "kv_cache_manager_pool_test",
+    srcs = ["kv_cache_manager_pool_test.py"],
+    args = ["--device_type=cpu"],
+    tags = [
+        "cpu:2",
+    ],
+    deps = [
+        ":kv_cache_manager_jax_py",
+        "//tpu_raiden/api/torch:pool_layout",
+        "@com_google_absl_py//absl/flags",
+        "@com_google_absl_py//absl/testing:absltest",
+        "@jax//jax",
+        "@pypi//numpy",
     ],
 )
 
