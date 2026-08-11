@@ -99,11 +99,23 @@ JAX_DEPS = [
 # //tpu_raiden/kv_cache:kv_cache_store -> //kv_cache/global_registry.
 
 # Torch native extensions + public API (require the torch_tpu module at build).
+# gpc_launcher additionally bundles the global_registry_server and
+# raiden_orchestrator_main binaries as package data.
 TORCH_DEPS = [
     "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",
     "//tpu_raiden/api/torch:kv_cache_manager_torch_py",
     "//tpu_raiden/api/torch:weight_synchronizer_torch_py",
+    "//tpu_raiden/kv_cache/global_registry:gpc_launcher",
 ]
+
+TORCH_ENTRY_POINTS = {
+    "console_scripts": [
+        "global_registry_server = " +
+        "tpu_raiden.kv_cache.global_registry.gpc_launcher:global_registry_main",
+        "raiden_orchestrator_main = " +
+        "tpu_raiden.kv_cache.global_registry.gpc_launcher:orchestrator_main",
+    ],
+}
 
 # Two separate wheels, one per framework, so the JAX and Torch stacks can be
 # pinned and installed independently (e.g. sglang/vLLM consume tpu_raiden_torch
@@ -148,6 +160,7 @@ py_package(
 raiden_framework_wheel(
     name = "raiden_torch_wheel",
     distribution = "tpu_raiden_torch",
+    entry_points = TORCH_ENTRY_POINTS,
     package = ":raiden_torch_package",
     requires = TORCH_REQUIRES,
     version = WHEEL_VERSION,
