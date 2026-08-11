@@ -38,7 +38,7 @@ git_override(
 bazel_dep(name = "xla")
 git_override(
     module_name = "xla",
-    commit = "5a9e73cbd92530cac2ac36f4736a774b2412afe2",
+    commit = "6ca7e1eed83adad68f40b707a7400364be924112",
     patch_strip = 1,
     patches = [
         "//:third_party/xla/future_sfinae.patch",
