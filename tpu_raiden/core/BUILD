@@ -232,6 +232,10 @@ cc_library(
         "-Wno-unused-variable",
     ],
     features = ["-use_header_modules"],
+    visibility = [
+        "//:internal",
+        "//third_party/neptune/runtime/serving/google/experimental/raiden:__pkg__",  # For JSV integration.
+    ],
     deps = [
         ":xla_raw_transfer_headers",
         "@com_google_absl//absl/log:check",
