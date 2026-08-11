@@ -16,6 +16,7 @@ load("@com_github_grpc_grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
 load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+load("@rules_python//python:defs.bzl", "py_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -116,5 +117,18 @@ cc_test(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest_main",
+    ],
+)
+
+# Console-script launchers for the GPC control plane. The binaries ride along
+# as data at their source paths, so the tpu_raiden_torch wheel (which pulls
+# this target) ships them inside the package and pip installs are sufficient
+# to run the registry/orchestrator — see //ci/wheel:BUILD.bazel.
+py_library(
+    name = "gpc_launcher",
+    srcs = ["gpc_launcher.py"],
+    data = [
+        ":global_registry_server",
+        "//tpu_raiden/core/controller:raiden_orchestrator_main",
     ],
 )
