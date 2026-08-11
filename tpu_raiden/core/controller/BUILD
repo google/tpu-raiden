@@ -13,6 +13,7 @@
 # limitations under the License.
 
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+load("@rules_python//python:defs.bzl", "py_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -381,5 +382,18 @@ cc_test(
         "//tpu_raiden/rpc:raiden_service_cc_proto",
         "@com_github_grpc_grpc//:grpc++",
         "@com_google_googletest//:gtest_main",
+    ],
+)
+
+# Console-script launchers for the control-plane binaries bundled in the
+# tpu_raiden_torch wheel. The binaries ride along as data at their source
+# paths, so pip installs are sufficient to run the registry/orchestrator
+# — see //ci/wheel:BUILD.bazel.
+py_library(
+    name = "binary_launcher",
+    srcs = ["binary_launcher.py"],
+    data = [
+        ":raiden_orchestrator_main",
+        "//tpu_raiden/kv_cache/global_registry:global_registry_server",
     ],
 )
