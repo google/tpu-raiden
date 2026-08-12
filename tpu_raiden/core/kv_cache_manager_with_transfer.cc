@@ -87,6 +87,7 @@
 #include "tpu_raiden/core/tpu_utils.h"
 #include "tpu_raiden/kv_cache/kv_cache_manager_base.h"
 #include "tpu_raiden/kv_cache/pool_layout.h"
+#include "tpu_raiden/telemetry/metrics_api.h"
 #include "tpu_sync/transport/block_transport.h"
 #include "tpu_sync/transport/block_transport_delegate.h"
 
@@ -1198,6 +1199,8 @@ absl::Status KVCacheManagerWithTransfer::PoolReshardPush(
       plan.transfer_pool_indices_size() * peers.size();
   state->plan = plan;
   state->deadline = DeadlineFromNow();
+  state->start_time = std::chrono::steady_clock::now();
+  state->d2h_start_time = std::chrono::steady_clock::now();
   {
     absl::MutexLock lock(mu_);
     if (active_pool_reshard_sends_.contains(plan.uuid())) {
@@ -1206,6 +1209,12 @@ absl::Status KVCacheManagerWithTransfer::PoolReshardPush(
           absl::StrCat("pool reshard send UUID already active: ", plan.uuid()));
     }
     active_pool_reshard_sends_[plan.uuid()] = state;
+    ::tpu_raiden::telemetry::MetricLabel active_label{.key = "direction",
+                                                      .value = "OUTBOUND"};
+    ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore().SetGauge(
+        ::tpu_raiden::telemetry::metric_names::kActiveTransfers,
+        {&active_label, 1},
+        static_cast<double>(active_pool_reshard_sends_.size()));
   }
 
   // Multi-tag plans scope each pool's staging and pushes to its group's
@@ -1263,6 +1272,23 @@ absl::Status KVCacheManagerWithTransfer::PoolReshardPush(
       if (!status_or.ok()) {
         FinishPoolReshardSend(uuid, status_or.status());
         return;
+      }
+      {
+        absl::MutexLock lock(mu_);
+        if (auto it = active_pool_reshard_sends_.find(uuid);
+            it != active_pool_reshard_sends_.end()) {
+          double d2h_s =
+              std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                            it->second->d2h_start_time)
+                  .count();
+          ::tpu_raiden::telemetry::MetricLabel d2h_label{.key = "stage",
+                                                         .value = "D2H"};
+          ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore()
+              .ObserveHistogram(
+                  ::tpu_raiden::telemetry::metric_names::kStageLatencySeconds,
+                  {&d2h_label, 1}, d2h_s);
+          it->second->network_start_time = std::chrono::steady_clock::now();
+        }
       }
       StartPoolReshardPush(uuid, pool_idx);
     });
@@ -1332,6 +1358,22 @@ void KVCacheManagerWithTransfer::StartPoolReshardPush(uint64_t uuid,
         {peer}, src_ids, dst_ids, state->parallelism,
         transport::MajorOrder::kLayerMajor, uuid, static_cast<int>(pool_idx),
         [this, uuid](absl::StatusOr<std::vector<int>> result) {
+          {
+            absl::MutexLock lock(mu_);
+            if (auto it = active_pool_reshard_sends_.find(uuid);
+                it != active_pool_reshard_sends_.end()) {
+              double net_s = std::chrono::duration<double>(
+                                 std::chrono::steady_clock::now() -
+                                 it->second->network_start_time)
+                                 .count();
+              ::tpu_raiden::telemetry::MetricLabel net_label{
+                  .key = "stage", .value = "NETWORK"};
+              ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore()
+                  .ObserveHistogram(::tpu_raiden::telemetry::metric_names::
+                                        kStageLatencySeconds,
+                                    {&net_label, 1}, net_s);
+            }
+          }
           FinishPoolReshardSend(
               uuid, result.ok() ? absl::OkStatus() : result.status());
         });
@@ -1341,24 +1383,53 @@ void KVCacheManagerWithTransfer::StartPoolReshardPush(uint64_t uuid,
 void KVCacheManagerWithTransfer::FinishPoolReshardSend(
     uint64_t uuid, const absl::Status& status) {
   bool finished = false;
+  std::shared_ptr<PoolReshardSendEntry> state;
   {
     absl::MutexLock lock(mu_);
     auto it = active_pool_reshard_sends_.find(uuid);
     if (it == active_pool_reshard_sends_.end()) return;
-    auto& state = *it->second;
-    if (state.finalizing) return;
+    state = it->second;
+    if (state->finalizing) return;
     if (!status.ok()) {
       LOG(ERROR) << "Pool reshard send failed uuid=" << uuid
-                 << " req_id=" << state.req_id << ": " << status;
-      state.failed = true;
-      state.finalizing = true;
+                 << " req_id=" << state->req_id << ": " << status;
+      state->failed = true;
+      state->finalizing = true;
       finished = true;
-    } else if (--state.remaining_pool_peer_pushes == 0) {
-      state.finalizing = true;
+    } else if (--state->remaining_pool_peer_pushes == 0) {
+      state->finalizing = true;
       finished = true;
     }
   }
-  if (finished) {
+  if (finished && state) {
+    double duration_s =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      state->start_time)
+            .count();
+    ::tpu_raiden::telemetry::MetricLabel duration_labels[] = {
+        {.key = "direction", .value = "OUTBOUND"},
+        {.key = "status", .value = status.ok() ? "OK" : "ERROR"}};
+    ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore()
+        .ObserveHistogram(
+            ::tpu_raiden::telemetry::metric_names::kTransferDurationSeconds,
+            duration_labels, duration_s);
+
+    if (!status.ok()) {
+      std::string error_type = "ABORTED";
+      if (absl::IsDeadlineExceeded(status)) {
+        error_type = "TIMEOUT";
+      } else if (absl::IsResourceExhausted(status)) {
+        error_type = "OOM";
+      }
+      ::tpu_raiden::telemetry::MetricLabel failure_labels[] = {
+          {.key = "direction", .value = "OUTBOUND"},
+          {.key = "error_type", .value = error_type}};
+      ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore()
+          .IncrementCounter(
+              ::tpu_raiden::telemetry::metric_names::kTransferFailuresTotal,
+              failure_labels, 1);
+    }
+
     absl::Status unregister = UnregisterActivePlan(uuid);
     if (!unregister.ok() && !absl::IsNotFound(unregister)) {
       LOG(ERROR) << "Failed to unregister pool reshard sender plan " << uuid
@@ -1374,6 +1445,13 @@ void KVCacheManagerWithTransfer::FinishPoolReshardSend(
       done_sending_.insert(it->second->req_id);
     }
     active_pool_reshard_sends_.erase(it);
+
+    ::tpu_raiden::telemetry::MetricLabel active_label{.key = "direction",
+                                                      .value = "OUTBOUND"};
+    ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore().SetGauge(
+        ::tpu_raiden::telemetry::metric_names::kActiveTransfers,
+        {&active_label, 1},
+        static_cast<double>(active_pool_reshard_sends_.size()));
   }
 }
 
@@ -1428,6 +1506,11 @@ absl::Status KVCacheManagerWithTransfer::PoolReshardRegisterRecv(
   {
     absl::MutexLock lock(mu_);
     active_recv_entries_[plan.uuid()] = std::move(recv_entry);
+    ::tpu_raiden::telemetry::MetricLabel active_label{.key = "direction",
+                                                      .value = "INBOUND"};
+    ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore().SetGauge(
+        ::tpu_raiden::telemetry::metric_names::kActiveTransfers,
+        {&active_label, 1}, static_cast<double>(active_recv_entries_.size()));
   }
   return absl::OkStatus();
 }
@@ -1894,6 +1977,18 @@ KVCacheManagerWithTransfer::AcquireSlotLocked() {
   }
   Slot slot = free_slots_.front();
   free_slots_.pop_front();
+  if (num_slots_ > 0) {
+    size_t occupied_slots = num_slots_ - free_slots_.size();
+    size_t bytes_per_slot = 0;
+    if (!all_slots_.empty()) {
+      bytes_per_slot = all_slots_[0].block_ids.size() * bytes_per_block();
+    }
+    ::tpu_raiden::telemetry::MetricLabel label{.key = "buffer_type",
+                                               .value = "STAGING"};
+    ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore().SetGauge(
+        ::tpu_raiden::telemetry::metric_names::kBufferOccupancyBytes,
+        {&label, 1}, static_cast<double>(occupied_slots * bytes_per_slot));
+  }
   return slot;
 }
 
@@ -1902,6 +1997,18 @@ void KVCacheManagerWithTransfer::ReleaseSlotLocked(int64_t slot_idx) {
     return;
   }
   free_slots_.push_back(all_slots_[slot_idx]);
+  if (num_slots_ > 0) {
+    size_t occupied_slots = num_slots_ - free_slots_.size();
+    size_t bytes_per_slot = 0;
+    if (!all_slots_.empty()) {
+      bytes_per_slot = all_slots_[0].block_ids.size() * bytes_per_block();
+    }
+    ::tpu_raiden::telemetry::MetricLabel label{.key = "buffer_type",
+                                               .value = "STAGING"};
+    ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore().SetGauge(
+        ::tpu_raiden::telemetry::metric_names::kBufferOccupancyBytes,
+        {&label, 1}, static_cast<double>(occupied_slots * bytes_per_slot));
+  }
 }
 
 void KVCacheManagerWithTransfer::ReleaseEntrySlotLocked(
@@ -2719,6 +2826,13 @@ void KVCacheManagerWithTransfer::LaunchEligiblePoolH2ds(uint64_t uuid) {
     }
   }
   for (auto& [pool_idx, chip_block_ids] : to_launch) {
+    {
+      absl::MutexLock lock(mu_);
+      if (auto it = active_recv_entries_.find(uuid);
+          it != active_recv_entries_.end()) {
+        it->second.h2d_start_time = std::chrono::steady_clock::now();
+      }
+    }
     auto future_or = H2dPoolBlocks(pool_idx, chip_block_ids);
     if (!future_or.ok()) {
       FinishPoolReshardRecvPool(uuid, pool_idx, future_or.status());
@@ -2743,20 +2857,37 @@ void KVCacheManagerWithTransfer::LaunchEligiblePoolH2ds(uint64_t uuid) {
 void KVCacheManagerWithTransfer::FinishPoolReshardRecvPool(
     uint64_t uuid, size_t pool_idx, const absl::Status& status) {
   bool finished = false;
+  RecvEntry entry_copy;
+  bool found = false;
   {
     absl::MutexLock lock(mu_);
     auto it = active_recv_entries_.find(uuid);
     if (it == active_recv_entries_.end()) return;
     RecvEntry& entry = it->second;
     if (entry.reshard_finalizing) return;
+
+    double h2d_s = std::chrono::duration<double>(
+                       std::chrono::steady_clock::now() - entry.h2d_start_time)
+                       .count();
+    ::tpu_raiden::telemetry::MetricLabel h2d_label{.key = "stage",
+                                                   .value = "H2D"};
+    ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore()
+        .ObserveHistogram(
+            ::tpu_raiden::telemetry::metric_names::kStageLatencySeconds,
+            {&h2d_label, 1}, h2d_s);
+
     if (!status.ok()) {
       entry.reshard_finalizing = true;
       finished = true;
+      entry_copy = entry;
+      found = true;
     } else {
       entry.completed_pool_indices.insert(pool_idx);
       if (entry.completed_pool_indices == entry.expected_pool_indices) {
         entry.reshard_finalizing = true;
         finished = true;
+        entry_copy = entry;
+        found = true;
       }
     }
   }
@@ -2764,7 +2895,35 @@ void KVCacheManagerWithTransfer::FinishPoolReshardRecvPool(
     // A completed upload may unblock deferred higher-order-rank pools.
     LaunchEligiblePoolH2ds(uuid);
   }
-  if (finished) {
+  if (finished && found) {
+    double duration_s =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                      entry_copy.start_time)
+            .count();
+    ::tpu_raiden::telemetry::MetricLabel duration_labels[] = {
+        {.key = "direction", .value = "INBOUND"},
+        {.key = "status", .value = status.ok() ? "OK" : "ERROR"}};
+    ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore()
+        .ObserveHistogram(
+            ::tpu_raiden::telemetry::metric_names::kTransferDurationSeconds,
+            duration_labels, duration_s);
+
+    if (!status.ok()) {
+      std::string error_type = "ABORTED";
+      if (absl::IsDeadlineExceeded(status)) {
+        error_type = "TIMEOUT";
+      } else if (absl::IsResourceExhausted(status)) {
+        error_type = "OOM";
+      }
+      ::tpu_raiden::telemetry::MetricLabel failure_labels[] = {
+          {.key = "direction", .value = "INBOUND"},
+          {.key = "error_type", .value = error_type}};
+      ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore()
+          .IncrementCounter(
+              ::tpu_raiden::telemetry::metric_names::kTransferFailuresTotal,
+              failure_labels, 1);
+    }
+
     absl::Status unregister = UnregisterActivePlan(uuid);
     if (!unregister.ok() && !absl::IsNotFound(unregister)) {
       LOG(ERROR) << "Failed to unregister pool reshard receiver plan " << uuid
@@ -2780,6 +2939,12 @@ void KVCacheManagerWithTransfer::FinishPoolReshardRecvPool(
       it->second.network_completed = true;
       done_recving_.insert(it->second.req_id);
     }
+
+    ::tpu_raiden::telemetry::MetricLabel active_label{.key = "direction",
+                                                      .value = "INBOUND"};
+    ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore().SetGauge(
+        ::tpu_raiden::telemetry::metric_names::kActiveTransfers,
+        {&active_label, 1}, static_cast<double>(active_recv_entries_.size()));
   }
 }
 

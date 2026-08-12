@@ -211,6 +211,11 @@ class BlockTransport final {
 
   lib::RawBufferTransport raw_transport_;
   std::vector<std::thread> socket_workers_;
+
+  // Tracks active in-flight transfer operations for telemetry.
+  std::atomic<int64_t> active_transfers_{0};
+  void IncrementActiveTransfers();
+  void DecrementActiveTransfers();
 };
 
 }  // namespace transport

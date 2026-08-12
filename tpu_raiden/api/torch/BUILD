@@ -28,7 +28,6 @@ py_library(
     deps = [
         ":torch_abi",
         "@torch_tpu//torch_tpu",
-        "@torch_tpu//torch_tpu:_loader",
     ],
 )
 
@@ -46,6 +45,7 @@ py_library(
         ":pool_layout",
         ":torch_abi",
         ":torch_tpu_common_loader",
+        "//tpu_raiden/api:telemetry",
         "//tpu_raiden/frameworks/torch:_tpu_raiden_torch",
         "//tpu_sync/rpc:raiden_service_py_pb2",
     ],
@@ -57,6 +57,7 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":pool_layout",
+        "//tpu_raiden/api:telemetry",
         "//tpu_raiden/frameworks/torch:_tpu_raiden_host",
         "//tpu_sync/rpc:raiden_service_py_pb2",
     ],

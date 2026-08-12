@@ -54,6 +54,7 @@ cc_library(
         ":buffer_push_task",
         "//tpu_raiden/core:status_macros",
         "//tpu_raiden/core:tsl_platform_headers",
+        "//tpu_raiden/telemetry:metrics_api",
         "//tpu_sync/transport/lib:chunk",
         "//tpu_sync/transport/lib:chunk_serializer",
         "//tpu_sync/transport/lib:raw_buffer_transport",
@@ -68,6 +69,7 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/synchronization",
+        "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:span",
     ],
 )

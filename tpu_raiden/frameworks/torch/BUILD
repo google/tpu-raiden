@@ -205,6 +205,7 @@ nanobind_extension(
         "//tpu_raiden/kv_cache:kv_cache_manager_base",
         "//tpu_raiden/kv_cache:kv_cache_store",
         "//tpu_raiden/kv_cache:kv_cache_store_wrapper",
+        "//tpu_raiden/telemetry/python:telemetry_binding",
         "//tpu_raiden/weight_sync:weight_synchronizer_base",
         "//tpu_sync/rpc:raiden_service_cc_proto",
         "@com_google_absl//absl/status",

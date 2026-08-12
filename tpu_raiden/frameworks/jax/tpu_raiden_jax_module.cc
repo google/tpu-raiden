@@ -41,6 +41,7 @@
 #include "tpu_raiden/frameworks/jax/weight_synchronizer.h"
 #include "tpu_raiden/kv_cache/kv_cache_store.h"
 #include "tpu_raiden/kv_cache/kv_cache_store_wrapper.h"
+#include "tpu_raiden/telemetry/python/telemetry_binding.h"
 
 namespace nb = nanobind;
 
@@ -656,4 +657,5 @@ NB_MODULE(_tpu_raiden_jax, m) {
              return std::make_tuple(py_done, py_failed, py_pending, py_existing,
                                     py_unregistered);
            });
+  ::tpu_raiden::telemetry::BindTelemetryApi(m);
 }

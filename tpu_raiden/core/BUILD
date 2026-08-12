@@ -357,6 +357,7 @@ cc_library(
         ":tpu_utils",
         "//tpu_raiden/kv_cache:kv_cache_manager_base",
         "//tpu_raiden/kv_cache:pool_layout",
+        "//tpu_raiden/telemetry:metrics_api",
         "//tpu_sync/transport:block_transport",
         "//tpu_sync/transport:block_transport_delegate",
         "@com_google_absl//absl/container:flat_hash_map",

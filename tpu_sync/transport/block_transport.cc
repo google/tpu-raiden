@@ -45,11 +45,14 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "tpu_raiden/core/status_macros.h"
-#include "tpu_sync/transport/lib/chunk_serializer.h"
+#include "tpu_raiden/telemetry/metrics_api.h"
 #include "tpu_sync/transport/block_transport_delegate.h"
 #include "tpu_sync/transport/lib/chunk.h"
+#include "tpu_sync/transport/lib/chunk_serializer.h"
 #include "tpu_sync/transport/lib/raw_buffer_transport.h"
 #include "tpu_sync/transport/peregrine/src/api/socket_util.h"
 
@@ -188,6 +191,20 @@ BlockTransport::~BlockTransport() {
   for (auto& t : socket_workers_) {
     if (t.joinable()) t.join();
   }
+}
+
+void BlockTransport::IncrementActiveTransfers() {
+  int64_t val = active_transfers_.fetch_add(1, std::memory_order_relaxed) + 1;
+  ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore().SetGauge(
+      ::tpu_raiden::telemetry::metric_names::kActiveTransfers, {},
+      static_cast<double>(val));
+}
+
+void BlockTransport::DecrementActiveTransfers() {
+  int64_t val = active_transfers_.fetch_sub(1, std::memory_order_relaxed) - 1;
+  ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore().SetGauge(
+      ::tpu_raiden::telemetry::metric_names::kActiveTransfers, {},
+      static_cast<double>(std::max<int64_t>(0, val)));
 }
 
 void BlockTransport::SocketWorkerLoop() {
@@ -379,6 +396,14 @@ absl::Status BlockTransport::HandleIncomingPush(
         if (expected_size > 0) {
           RETURN_IF_ERROR(ReadVExact(client_fd, ToIovec(chunks)));
         }
+        {
+          ::tpu_raiden::telemetry::MetricLabel label{.key = "interface",
+                                                     .value = "TPU_ICI"};
+          ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore()
+              .IncrementCounter(
+                  ::tpu_raiden::telemetry::metric_names::kReceivedBytesTotal,
+                  {&label, 1}, expected_size);
+        }
         return absl::OkStatus();
       }));
 
@@ -507,6 +532,7 @@ absl::Status BlockTransport::HandleIncomingPull(
   {
     absl::MutexLock lock(active_sends_mu_);
     active_sends_[header.uuid] = state;
+    IncrementActiveTransfers();
   }
 
   TriggerNextSendStep(state);
@@ -519,6 +545,7 @@ void BlockTransport::TriggerNextSendStep(
     {
       absl::MutexLock lock(active_sends_mu_);
       active_sends_.erase(state->uuid);
+      DecrementActiveTransfers();
     }
     return;
   }
@@ -537,6 +564,7 @@ void BlockTransport::TriggerNextSendStep(
           shutdown(state->client_fd, SHUT_RDWR);
           absl::MutexLock lock(active_sends_mu_);
           active_sends_.erase(state->uuid);
+          DecrementActiveTransfers();
           return;
         }
 
@@ -551,6 +579,7 @@ void BlockTransport::TriggerNextSendStep(
             shutdown(state->client_fd, SHUT_RDWR);
             absl::MutexLock lock(active_sends_mu_);
             active_sends_.erase(state->uuid);
+            DecrementActiveTransfers();
             return;
           }
           absl::Status s = ValidateChunks(block_delegate_, l, sh, chunks);
@@ -559,6 +588,7 @@ void BlockTransport::TriggerNextSendStep(
             shutdown(state->client_fd, SHUT_RDWR);
             absl::MutexLock lock(active_sends_mu_);
             active_sends_.erase(state->uuid);
+            DecrementActiveTransfers();
             return;
           }
 
@@ -569,6 +599,7 @@ void BlockTransport::TriggerNextSendStep(
             shutdown(state->client_fd, SHUT_RDWR);
             absl::MutexLock lock(active_sends_mu_);
             active_sends_.erase(state->uuid);
+            DecrementActiveTransfers();
             return;
           }
           if (total_size > 0) {
@@ -579,7 +610,17 @@ void BlockTransport::TriggerNextSendStep(
             shutdown(state->client_fd, SHUT_RDWR);
             absl::MutexLock lock(active_sends_mu_);
             active_sends_.erase(state->uuid);
+            DecrementActiveTransfers();
             return;
+          }
+
+          {
+            ::tpu_raiden::telemetry::MetricLabel label{.key = "interface",
+                                                       .value = "TPU_ICI"};
+            ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore()
+                .IncrementCounter(
+                    ::tpu_raiden::telemetry::metric_names::kSentBytesTotal,
+                    {&label, 1}, total_size);
           }
 
           state->current_step++;
@@ -824,6 +865,9 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
     return;
   }
 
+  const absl::Time start_time = absl::Now();
+  IncrementActiveTransfers();
+  auto active_guard = absl::MakeCleanup([this] { DecrementActiveTransfers(); });
   auto status_or_fd = raw_transport_.conn_pool().Borrow(peer, local_ip);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
@@ -928,7 +972,15 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
 
         RETURN_IF_ERROR(WriteExact(fd, &total_size, sizeof(total_size)));
         if (total_size > 0) {
-          return WriteVExact(fd, ToIovec(chunks));
+          RETURN_IF_ERROR(WriteVExact(fd, ToIovec(chunks)));
+        }
+        {
+          ::tpu_raiden::telemetry::MetricLabel label{.key = "interface",
+                                                     .value = "TPU_ICI"};
+          ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore()
+              .IncrementCounter(
+                  ::tpu_raiden::telemetry::metric_names::kSentBytesTotal,
+                  {&label, 1}, total_size);
         }
         return absl::OkStatus();
       });
@@ -944,6 +996,22 @@ void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,
     return;
   }
 
+  {
+    double duration_s = absl::ToDoubleSeconds(absl::Now() - start_time);
+    ::tpu_raiden::telemetry::MetricLabel duration_labels[] = {
+        {.key = "interface", .value = "TPU_ICI"}};
+    ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore()
+        .ObserveHistogram(
+            ::tpu_raiden::telemetry::metric_names::kTransferDurationSeconds,
+            duration_labels, duration_s);
+    ::tpu_raiden::telemetry::MetricLabel stage_labels[] = {
+        {.key = "stage", .value = "transfer"}};
+    ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore()
+        .ObserveHistogram(
+            ::tpu_raiden::telemetry::metric_names::kStageLatencySeconds,
+            stage_labels, duration_s);
+  }
+
   ok_to_pool = true;
 }
 
@@ -956,6 +1024,9 @@ void BlockTransport::H2hReadWorker(
     const std::vector<uint8_t*>& explicit_dst_ptrs,
     std::vector<absl::Status>& statuses, MajorOrder major_order,
     BlockReceivedCallback on_block_received, uint64_t uuid) {
+  const absl::Time start_time = absl::Now();
+  IncrementActiveTransfers();
+  auto active_guard = absl::MakeCleanup([this] { DecrementActiveTransfers(); });
   auto status_or_fd = raw_transport_.conn_pool().Borrow(peer, local_ip);
   if (!status_or_fd.ok()) {
     statuses[stream_idx] = status_or_fd.status();
@@ -1131,6 +1202,14 @@ void BlockTransport::H2hReadWorker(
           if (expected_size > 0) {
             RETURN_IF_ERROR(ReadVExact(fd, ToIovec(chunks)));
           }
+          {
+            ::tpu_raiden::telemetry::MetricLabel label{.key = "interface",
+                                                       .value = "TPU_ICI"};
+            ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore()
+                .IncrementCounter(
+                    ::tpu_raiden::telemetry::metric_names::kReceivedBytesTotal,
+                    {&label, 1}, expected_size);
+          }
 
           if (on_block_received != nullptr) {
             RETURN_IF_ERROR(on_block_received(l, sh, dst_id, expected_size));
@@ -1141,6 +1220,21 @@ void BlockTransport::H2hReadWorker(
       statuses[stream_idx] = s;
       return;
     }
+  }
+  {
+    double duration_s = absl::ToDoubleSeconds(absl::Now() - start_time);
+    ::tpu_raiden::telemetry::MetricLabel duration_labels[] = {
+        {.key = "interface", .value = "TPU_ICI"}};
+    ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore()
+        .ObserveHistogram(
+            ::tpu_raiden::telemetry::metric_names::kTransferDurationSeconds,
+            duration_labels, duration_s);
+    ::tpu_raiden::telemetry::MetricLabel stage_labels[] = {
+        {.key = "stage", .value = "transfer"}};
+    ::tpu_raiden::telemetry::RaidenMetricStore::GetGlobalMetricStore()
+        .ObserveHistogram(
+            ::tpu_raiden::telemetry::metric_names::kStageLatencySeconds,
+            stage_labels, duration_s);
   }
   ok_to_pool = true;
 }

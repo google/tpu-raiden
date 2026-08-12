@@ -402,6 +402,12 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     // Multi-tag plans: each pool uploads only its own group's destination
     // block ids (the flat chip_block_ids list concatenates all groups).
     std::map<size_t, std::vector<int64_t>> pool_dst_block_ids;
+    std::chrono::steady_clock::time_point start_time =
+        std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point network_start_time =
+        std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point h2d_start_time =
+        std::chrono::steady_clock::now();
   };
   absl::flat_hash_map<uint64_t, RecvEntry> active_recv_entries_;
 
@@ -415,6 +421,12 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
     std::chrono::steady_clock::time_point deadline;
     rpc::StartTransferRequest plan;
     std::vector<raiden::PjRtCopyFuture> d2h_futures;
+    std::chrono::steady_clock::time_point start_time =
+        std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point d2h_start_time =
+        std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point network_start_time =
+        std::chrono::steady_clock::now();
   };
   absl::flat_hash_map<uint64_t, std::shared_ptr<PoolReshardSendEntry>>
       active_pool_reshard_sends_;

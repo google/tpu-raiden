@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_python//python:defs.bzl", "py_library")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -20,4 +20,23 @@ py_library(
     name = "common",
     srcs = ["common.py"],
     visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "telemetry",
+    srcs = ["telemetry.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_google_absl_py//absl/logging",
+    ],
+)
+
+py_test(
+    name = "telemetry_test",
+    srcs = ["telemetry_test.py"],
+    deps = [
+        ":telemetry",
+        "//tpu_raiden/telemetry/python:_telemetry_binding_test_ext",
+        "@com_google_absl_py//absl/testing:absltest",
+    ],
 )

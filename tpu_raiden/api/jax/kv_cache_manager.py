@@ -106,6 +106,10 @@ class KVCacheManager:
           raiden_controller_address=raiden_controller_address,
           worker_id=worker_id,
       )
+    # pylint: disable=g-import-not-at-top
+    from tpu_raiden.api import telemetry as _telemetry
+    # pylint: enable=g-import-not-at-top
+    _telemetry.init_raiden_telemetry()
 
   def get_raiden_worker_port(self) -> int:
     """Returns the gRPC server port if running, or 0."""

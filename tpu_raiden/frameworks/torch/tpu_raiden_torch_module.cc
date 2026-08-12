@@ -40,6 +40,7 @@
 #include "tpu_raiden/kv_cache/kv_cache_store.h"
 #include "tpu_raiden/kv_cache/kv_cache_store_wrapper.h"
 #include "tpu_sync/rpc/raiden_service.pb.h"
+#include "tpu_raiden/telemetry/python/telemetry_binding.h"
 
 namespace nb = nanobind;
 
@@ -784,4 +785,5 @@ NB_MODULE(_tpu_raiden_torch, m) {
             return self->reshard_service() ? self->reshard_service()->port()
                                            : 0;
           });
+  ::tpu_raiden::telemetry::BindTelemetryApi(m);
 }

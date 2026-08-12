@@ -21,6 +21,7 @@ py_library(
     srcs = ["kv_cache_manager.py"],
     visibility = ["//visibility:public"],
     deps = [
+        "//tpu_raiden/api:telemetry",
         "//tpu_raiden/frameworks/jax:_tpu_raiden_jax",
         "//tpu_raiden/frameworks/jax:jax_test_utils",
     ],
