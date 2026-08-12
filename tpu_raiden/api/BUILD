@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_python//python:defs.bzl", "py_library")
+load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -20,4 +20,45 @@ py_library(
     name = "common",
     srcs = ["common.py"],
     visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "telemetry",
+    srcs = ["telemetry.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":telemetry_prometheus",
+    ],
+)
+
+py_library(
+    name = "telemetry_prometheus",
+    srcs = ["telemetry_prometheus.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//third_party/py/absl/logging",
+        "//third_party/py/prometheus_client",
+    ],
+)
+
+py_test(
+    name = "telemetry_test",
+    srcs = ["telemetry_test.py"],
+    deps = [
+        ":telemetry",
+        ":telemetry_prometheus",
+        "//third_party/py/prometheus_client",
+        "//tpu_raiden/telemetry/python:_telemetry_binding_test_ext",
+        "@com_google_absl_py//absl/testing:absltest",
+    ],
+)
+
+py_test(
+    name = "telemetry_prometheus_test",
+    srcs = ["telemetry_prometheus_test.py"],
+    deps = [
+        ":telemetry_prometheus",
+        "//third_party/py/prometheus_client",
+        "@com_google_absl_py//absl/testing:absltest",
+    ],
 )
