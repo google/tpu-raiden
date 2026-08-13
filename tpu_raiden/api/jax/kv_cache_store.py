@@ -150,6 +150,8 @@ class KVCacheStore:
       store_server_ip: str,
       shard_size_bytes: int = 0,
       raiden_controller_port: int = 0,
+      expected_worker_count: int = 0,
+      kv_pool_group: str = "",
   ):
     """Creates a KVCacheStore.
 
@@ -171,6 +173,11 @@ class KVCacheStore:
       raiden_controller_port: Port for this store's RaidenController; 0 lets
         gRPC choose. Note that the IP address of the controller reuses
         store_server_ip.
+      expected_worker_count: When > 0, constructor blocks until that many
+        workers have registered with the controller (times out and throws after
+        RAIDEN_EXPECTED_WORKERS_TIMEOUT_S, default 120s).
+      kv_pool_group: KV pool group this store's KVTransferSpec is published
+        under in global registry; empty falls back to raiden_id.job_name.
     """
     raw_raiden_id = _impl.RaidenId()
     if raiden_id is not None:
@@ -183,6 +190,8 @@ class KVCacheStore:
         shard_size_bytes=shard_size_bytes,
         store_server_ip=store_server_ip,
         raiden_controller_port=raiden_controller_port,
+        expected_worker_count=expected_worker_count,
+        kv_pool_group=kv_pool_group,
     )
 
   @property

@@ -34,8 +34,10 @@
 #include "absl/types/span.h"
 #include "xla/future.h"
 #include "xla/layout.h"
+#include "xla/pjrt/pjrt_client.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/statusor.h"
+#include "tpu_sync/core/host_memory_allocator.h"
 #include "tpu_sync/core/raiden_manager_base.h"
 #include "tpu_sync/core/raw_transfer_core.h"
 #include "tpu_sync/rpc/raiden_service.pb.h"
@@ -89,6 +91,21 @@ WeightSynchronizerBase::WeightSynchronizerBase(
   shard_factor_ = 1;
   major_dim_size_ = 1;
 
+  xla::PjRtClient* client = nullptr;
+  if (first_handle.buffer) {
+    client = const_cast<xla::PjRtClient*>(first_handle.buffer->client());
+  } else if (first_handle.device) {
+    client = const_cast<xla::PjRtClient*>(first_handle.device->client());
+  }
+
+  std::unique_ptr<HostMemoryAllocator> host_allocator;
+  if (client) {
+    auto alloc = HostMemoryAllocator::Create(client);
+    if (alloc.ok()) {
+      host_allocator = *std::move(alloc);
+    }
+  }
+
   size_t shard_idx = 0;
   layers_.reserve(num_layers_);
   buffer_holds_.reserve(num_layers_);
@@ -123,18 +140,30 @@ WeightSynchronizerBase::WeightSynchronizerBase(
         shard_info.host_size = alloc_size;
         shard_idx++;
       } else {
-        void* ptr = nullptr;
         if (alloc_size > 0) {
-          if (posix_memalign(&ptr, 64, alloc_size) != 0) {
-            throw std::runtime_error("Failed to allocate host weights buffer");
+          if (host_allocator && dst_buffer.device) {
+            auto alloc = host_allocator->AllocateDmaMappedForDevice(
+                alloc_size, dst_buffer.device);
+            if (alloc.ok()) {
+              shard_info.host_ptr = (*alloc).ptr;
+              shard_info.host_size = alloc_size;
+              shard_info.host_owner = (*alloc).owner;
+            }
           }
-          std::memset(ptr, 0, alloc_size);
+          if (shard_info.host_ptr == nullptr) {
+            void* ptr = nullptr;
+            if (posix_memalign(&ptr, 64, alloc_size) != 0) {
+              throw std::runtime_error(
+                  "Failed to allocate host weights buffer");
+            }
+            std::memset(ptr, 0, alloc_size);
+            shard_info.owned_host_buffer =
+                std::unique_ptr<uint8_t[], void (*)(void*)>(
+                    static_cast<uint8_t*>(ptr), [](void* p) { free(p); });
+            shard_info.host_ptr = shard_info.owned_host_buffer.get();
+            shard_info.host_size = alloc_size;
+          }
         }
-        shard_info.owned_host_buffer =
-            std::unique_ptr<uint8_t[], void (*)(void*)>(
-                static_cast<uint8_t*>(ptr), [](void* p) { free(p); });
-        shard_info.host_ptr = shard_info.owned_host_buffer.get();
-        shard_info.host_size = alloc_size;
       }
 
       hold_info.push_back(dst_buffer);

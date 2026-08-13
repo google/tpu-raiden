@@ -875,6 +875,45 @@ class KVCacheStoreTest(absltest.TestCase):
     self.assertCountEqual(done, [binary_hash])
     self.assertEmpty(failed)
 
+  def test_expected_worker_count_zero_does_not_block(self):
+    """The default must stay non-blocking."""
+    start = time.time()
+    store = kv_cache_store.KVCacheStore(
+        capacity=4,
+        num_shards=1,
+        store_server_ip="127.0.0.1",
+        expected_worker_count=0,
+        kv_pool_group="test_group",
+    )
+    self.assertLess(time.time() - start, 30.0)
+    self.assertTrue(store.raiden_controller_address)
+    self.assertEqual(store.capacity(), 4)
+
+  def test_expected_worker_count_times_out_when_no_worker_registers(self):
+    """Workers that never arrive must fail AT CONSTRUCTION with timeout."""
+    orig = os.environ.get("RAIDEN_EXPECTED_WORKERS_TIMEOUT_S")
+    os.environ["RAIDEN_EXPECTED_WORKERS_TIMEOUT_S"] = "2"
+    try:
+      start = time.time()
+      with self.assertRaises(RuntimeError) as cm:
+        kv_cache_store.KVCacheStore(
+            capacity=4,
+            num_shards=1,
+            store_server_ip="127.0.0.1",
+            expected_worker_count=1,
+        )
+      elapsed = time.time() - start
+    finally:
+      if orig is not None:
+        os.environ["RAIDEN_EXPECTED_WORKERS_TIMEOUT_S"] = orig
+      else:
+        os.environ.pop("RAIDEN_EXPECTED_WORKERS_TIMEOUT_S", None)
+
+    self.assertIn("timed out waiting for", str(cm.exception).lower())
+    self.assertIn("worker", str(cm.exception).lower())
+    self.assertGreaterEqual(elapsed, 2.0)
+    self.assertLess(elapsed, 60.0)
+
 
 if __name__ == "__main__":
   absltest.main()

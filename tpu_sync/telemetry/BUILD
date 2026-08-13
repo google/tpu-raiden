@@ -38,3 +38,27 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_library(
+    name = "metrics_3p_prometheus_exporter",
+    srcs = ["prometheus_exporter.cc"],
+    hdrs = ["prometheus_exporter.h"],
+    deps = [
+        ":metrics_api",
+        "@com_github_jupp0r_prometheus_cpp//core",
+        "@com_google_absl//absl/base:no_destructor",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "prometheus_exporter_test",
+    srcs = ["prometheus_exporter_test.cc"],
+    deps = [
+        ":metrics_3p_prometheus_exporter",
+        ":metrics_api",
+        "@com_google_absl//absl/strings",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
