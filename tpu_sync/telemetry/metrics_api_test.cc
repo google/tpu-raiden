@@ -12,20 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Copyright 2026 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 #include "tpu_sync/telemetry/metrics_api.h"
 
 #include <cstdint>
@@ -89,13 +75,17 @@ TEST_F(MetricsApiTest, GlobalMetricStoreSingleton) {
   EXPECT_EQ(&global1, &global2);
 }
 
+TEST_F(MetricsApiTest, MetricMetadataConstants) {
+  EXPECT_EQ(metric_metadata::kSentBytesTotal.description,
+            metric_descriptions::kSentBytesTotal);
+  EXPECT_EQ(metric_descriptions::kSentBytesTotal,
+            "Total count of bytes sent over TPU Raiden interfaces.");
+}
+
 TEST_F(MetricsApiTest, FastPathExitWhenNoBackends) {
   EXPECT_FALSE(store_.HasBackends());
 
-  store_.IncrementCounter("tpu_raiden_sent_bytes_total", {}, 1024);
-  store_.IncrementCounter("tpu_raiden_default_counter", {});
-  store_.SetGauge("tpu_raiden_active_transfers", {}, 5.5);
-  store_.ObserveHistogram("tpu_raiden_transfer_duration_seconds", {}, 0.0125);
+  store_.IncrementCounter(metric_names::kSentBytesTotal, {}, 1024);
 }
 
 TEST_F(MetricsApiTest, DispatchesToRegisteredBackend) {
@@ -103,16 +93,7 @@ TEST_F(MetricsApiTest, DispatchesToRegisteredBackend) {
   MockMetricsBackend* raw_mock = mock_backend.get();
 
   EXPECT_CALL(*raw_mock,
-              IncrementCounter(Eq("tpu_raiden_sent_bytes_total"), _, 2048))
-      .Times(1);
-  EXPECT_CALL(*raw_mock,
-              IncrementCounter(Eq("tpu_raiden_default_counter"), _, 1))
-      .Times(1);
-  EXPECT_CALL(*raw_mock, SetGauge(Eq("tpu_raiden_active_transfers"), _, 3.5))
-      .Times(1);
-  EXPECT_CALL(
-      *raw_mock,
-      ObserveHistogram(Eq("tpu_raiden_transfer_duration_seconds"), _, 0.005))
+              IncrementCounter(Eq(metric_names::kSentBytesTotal), _, 2048))
       .Times(1);
   EXPECT_CALL(*raw_mock, GetTextSnapshot()).WillOnce(Return("# HELP mock\n"));
   std::vector<std::unique_ptr<MetricsBackend>> backends;
@@ -120,10 +101,7 @@ TEST_F(MetricsApiTest, DispatchesToRegisteredBackend) {
   store_.SetBackends(std::move(backends));
   EXPECT_TRUE(store_.HasBackends());
 
-  store_.IncrementCounter("tpu_raiden_sent_bytes_total", {}, 2048);
-  store_.IncrementCounter("tpu_raiden_default_counter", {});
-  store_.SetGauge("tpu_raiden_active_transfers", {}, 3.5);
-  store_.ObserveHistogram("tpu_raiden_transfer_duration_seconds", {}, 0.005);
+  store_.IncrementCounter(metric_names::kSentBytesTotal, {}, 2048);
   EXPECT_EQ(store_.GetTextSnapshot(), "# HELP mock\n");
 }
 

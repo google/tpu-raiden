@@ -17,6 +17,7 @@
 import os
 import socket
 import subprocess
+import threading
 import time
 import unittest
 import uuid
@@ -27,6 +28,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+resources = None
 from tpu_raiden.api.jax import kv_cache_manager
 from tpu_raiden.api.jax import kv_cache_store
 
@@ -1274,6 +1276,102 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         failed, "expected ReadRemote to fail (source block not host-resident)"
     )
     del manager_a, manager_b, store_a, store_b
+
+  def test_expected_worker_count_waits_for_a_concurrent_registration(self):
+    """The barrier replaces the sleep-and-hope idiom.
+
+    Every other test here builds the store, builds the manager, then sleeps and
+    hopes registration landed. With expected_worker_count the store constructor
+    IS the wait: it returns only once the worker is registered, so the transfer
+    below needs no sleep at all.
+
+    This also covers the binding releasing the GIL. The worker registers from
+    another Python thread, so a constructor that held the GIL while blocking
+    would starve that thread and time out instead.
+    """
+    os.environ["ENABLE_MULTI_NUMA"] = "0"
+    tpu_sharding = self.setup_shardings()
+    num_blocks = 2
+    shape = (num_blocks, 128, 8, 8, 128)
+    host_data = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+    tpu_cache = jax.device_put(jnp.array(host_data), tpu_sharding)
+    jax.block_until_ready(tpu_cache)
+
+    controller_port = find_free_port()
+    block_elements = 128 * 8 * 8 * 128
+    shard_size_bytes = (block_elements * 4) // self.num_devices
+
+    # The manager is what registers the worker, and it can only be built once
+    # the controller address is known -- which is why the port is fixed here
+    # rather than left to gRPC.
+    registration_delay_s = 2.0
+    built = {}
+
+    def build_manager_after_a_delay():
+      time.sleep(registration_delay_s)
+      built["manager"] = kv_cache_manager.KVCacheManager(
+          kv_caches=[tpu_cache],
+          local_control_port=0,
+          max_blocks=num_blocks,
+          num_slots=2,
+          unsafe_skip_buffer_lock=self.skip_lock,
+          raiden_worker_port=0,
+          raiden_controller_address=f"localhost:{controller_port}",
+          worker_id="worker_0",
+      )
+
+    worker_thread = threading.Thread(target=build_manager_after_a_delay)
+    worker_thread.start()
+    try:
+      rid = kv_cache_store.RaidenId("barrier_job", "0", "barrier_cache", 0)
+      start = time.time()
+      store = kv_cache_store.KVCacheStore(
+          capacity=num_blocks,
+          raiden_id=rid,
+          num_shards=self.num_devices,
+          shard_size_bytes=shard_size_bytes,
+          store_server_ip="localhost",
+          raiden_controller_port=controller_port,
+          expected_worker_count=1,
+      )
+      elapsed = time.time() - start
+    finally:
+      worker_thread.join(timeout=180)
+
+    self.assertFalse(worker_thread.is_alive())
+    # It really waited for the registration rather than returning early and
+    # getting lucky.
+    self.assertGreaterEqual(elapsed, registration_delay_s)
+
+    # And the store is usable IMMEDIATELY -- no sleep between here and a
+    # transfer. That is the property the barrier exists to provide, and it is
+    # what fails if the constructor returns before the worker is registered.
+    hashes = [b"barrier_hash_0", b"barrier_hash_1"]
+    slices = [
+        kv_cache_store.RaidenBlockID(
+            rid,
+            host_block_id=-1,
+            device_block_id=i,
+            status=kv_cache_store.BlockStatus.HBM,
+        )
+        for i in range(num_blocks)
+    ]
+    inserted, _ = store.insert(hashes, slices, on_host=False)
+    self.assertTrue(inserted)
+    self.assertTrue(store.pin(hashes))
+    self.assertTrue(store.save(hashes))
+
+    deadline = time.time() + 60
+    done = []
+    while time.time() < deadline:
+      done, failed, _ = store.poll_save_status()
+      self.assertEmpty(failed)
+      if done:
+        break
+      time.sleep(0.01)
+    self.assertCountEqual(done, hashes)
+    store.release(hashes)
+    del built
 
 
 if __name__ == "__main__":

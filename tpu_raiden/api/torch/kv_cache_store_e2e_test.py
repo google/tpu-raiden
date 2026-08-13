@@ -17,6 +17,7 @@
 import os
 import socket
 import subprocess
+import threading
 import time
 import uuid
 
@@ -26,6 +27,7 @@ import numpy as np
 import torch
 import torch_tpu
 
+resources = None
 from tpu_raiden.api.torch import kv_cache_manager
 from tpu_raiden.api.torch import kv_cache_store
 
@@ -925,6 +927,80 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
       )
     finally:
       del manager_a, manager_b, store_a, store_b
+
+  def test_expected_worker_count_waits_for_a_concurrent_registration(self):
+    """The barrier replaces the sleep-and-hope idiom."""
+    tpu_cache = torch.zeros(
+        (2, 128, 8, 8, 128), dtype=torch.float32, device="tpu"
+    )
+    controller_port = find_free_port()
+    num_blocks = 2
+    block_elements = 128 * 8 * 8 * 128
+    shard_size_bytes = (block_elements * 4) // self.num_devices
+
+    registration_delay_s = 2.0
+    built = {}
+
+    def build_manager_after_a_delay():
+      time.sleep(registration_delay_s)
+      built["manager"] = kv_cache_manager.KVCacheManager(
+          kv_caches=[tpu_cache],
+          local_control_port=0,
+          max_blocks=num_blocks,
+          num_slots=2,
+          unsafe_skip_buffer_lock=self.skip_lock,
+          raiden_worker_port=0,
+          raiden_controller_address=f"localhost:{controller_port}",
+          worker_id="worker_0",
+      )
+
+    worker_thread = threading.Thread(target=build_manager_after_a_delay)
+    worker_thread.start()
+    try:
+      rid = kv_cache_store.RaidenId("barrier_job", "0", "barrier_cache", 0)
+      start = time.time()
+      store = kv_cache_store.KVCacheStore(
+          capacity=num_blocks,
+          raiden_id=rid,
+          num_shards=self.num_devices,
+          shard_size_bytes=shard_size_bytes,
+          store_server_ip="localhost",
+          raiden_controller_port=controller_port,
+          expected_worker_count=1,
+      )
+      elapsed = time.time() - start
+    finally:
+      worker_thread.join(timeout=180)
+
+    self.assertFalse(worker_thread.is_alive())
+    self.assertGreaterEqual(elapsed, registration_delay_s)
+
+    hashes = [b"barrier_hash_0", b"barrier_hash_1"]
+    slices = [
+        kv_cache_store.RaidenBlockID(
+            rid,
+            host_block_id=-1,
+            device_block_id=i,
+            status=kv_cache_store.BlockStatus.HBM,
+        )
+        for i in range(num_blocks)
+    ]
+    inserted, _ = store.insert(hashes, slices, on_host=False)
+    self.assertTrue(inserted)
+    self.assertTrue(store.pin(hashes))
+    self.assertTrue(store.save(hashes))
+
+    deadline = time.time() + 60
+    done = []
+    while time.time() < deadline:
+      done, failed, _ = store.poll_save_status()
+      self.assertEmpty(failed)
+      if done:
+        break
+      time.sleep(0.01)
+    self.assertCountEqual(done, hashes)
+    store.release(hashes)
+    del built
 
 
 if __name__ == "__main__":
