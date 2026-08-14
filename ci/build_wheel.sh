@@ -35,6 +35,10 @@ WHEEL_VERSION_EXTRAS="${WHEEL_VERSION_EXTRAS:-.dev$(date +%Y%m%d%H%M%S)}"
 export WHEEL_VERSION_EXTRAS
 echo "WHEEL_VERSION_EXTRAS: ${WHEEL_VERSION_EXTRAS}"
 
+ENABLE_TELEMETRY="${ENABLE_TELEMETRY:-false}"
+export ENABLE_TELEMETRY
+echo "ENABLE_TELEMETRY: ${ENABLE_TELEMETRY}"
+
 RAIDEN_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
 if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain 2>/dev/null)" ]]; then
   RAIDEN_COMMIT="${RAIDEN_COMMIT}-dirty"
@@ -159,9 +163,16 @@ fi
 # is unique per build and appears verbatim in the filename, so scope to it.
 WHEEL_GLOB="${WHEEL_DIST}-*${WHEEL_VERSION_EXTRAS}-*.whl"
 
+BAZEL_TELEMETRY_FLAGS=()
+if [[ "${ENABLE_TELEMETRY,,}" =~ ^(true|1|yes)$ ]]; then
+  echo "===> Enabling Prometheus C++ Telemetry in wheel build..."
+  BAZEL_TELEMETRY_FLAGS+=("--define=tpu_raiden_enable_telemetry=true")
+fi
+
 cd /workspace
 ./build.sh "${BUILD_MODE}" "${WHEEL_TARGET}" \
-  --repo_env=WHEEL_VERSION_EXTRAS="${WHEEL_VERSION_EXTRAS}"
+  --repo_env=WHEEL_VERSION_EXTRAS="${WHEEL_VERSION_EXTRAS}" \
+  "${BAZEL_TELEMETRY_FLAGS[@]+"${BAZEL_TELEMETRY_FLAGS[@]}"}"
 
 mkdir -p /workspace/dist
 cp /cache/output_base/execroot/_main/bazel-out/k8-opt/bin/ci/wheel/${WHEEL_GLOB} /workspace/dist/
@@ -222,6 +233,7 @@ docker run --rm \
   "${DOCKER_MOUNTS[@]}" \
   -w /workspace \
   -e WHEEL_VERSION_EXTRAS="${WHEEL_VERSION_EXTRAS}" \
+  -e ENABLE_TELEMETRY="${ENABLE_TELEMETRY}" \
   -e RAIDEN_EXTRA_TORCH_ABIS="${RAIDEN_EXTRA_TORCH_ABIS:-}" \
   -e BUILD_MODE="${BUILD_MODE}" \
   "${CONTAINER_IMAGE}" \
