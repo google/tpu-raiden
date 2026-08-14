@@ -277,7 +277,9 @@ cc_library(
     hdrs = ["kv_cache_store_backend.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":lru_cache",
         ":raiden_id",
+        "@com_google_absl//absl/functional:any_invocable",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",

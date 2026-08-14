@@ -185,17 +185,79 @@ class LRUCache {
     if (it == map_.end()) {
       return nullptr;
     }
-    if (it->second->pin_count == 0) {
-      if (it->second->location == NodeLocation::kLru) {
-        pinned_list_.splice(pinned_list_.begin(), lru_list_, it->second);
-      } else if (it->second->location == NodeLocation::kCandidate) {
-        pinned_list_.splice(pinned_list_.begin(), evict_candidate_list_,
-                            it->second);
-      }
-      it->second->location = NodeLocation::kPinned;
-    }
-    it->second->pin_count++;
+    PinNode(it->second);
     return &(it->second->value);
+  }
+
+  // A stable, pinned reference to one entry, for callers that resolve a key
+  // once and then need to reach its value repeatedly without paying for the
+  // lookup again.
+  //
+  // What makes this safe is the pin the handle holds, not the iterator itself.
+  // Nodes live in std::list, and the only operations that move them between
+  // the lru / pinned / candidate lists are splices, which preserve iterators;
+  // Put on an existing key assigns the value in place rather than recreating
+  // the node. So a node's address is stable, and the single thing that would
+  // invalidate it -- Erase -- cannot run while the entry is pinned, because
+  // every eviction and deletion path skips pinned entries.
+  //
+  // Move-only, so the pin has exactly one owner. Release it with
+  // ReleaseHandle exactly once; a moved-from or default-constructed handle is
+  // empty and safe to release again.
+  class Handle {
+   public:
+    Handle() = default;
+
+    Handle(const Handle&) = delete;
+    Handle& operator=(const Handle&) = delete;
+
+    Handle(Handle&& other) noexcept
+        : it_(other.it_), valid_(std::exchange(other.valid_, false)) {}
+    Handle& operator=(Handle&& other) noexcept {
+      if (this != &other) {
+        it_ = other.it_;
+        valid_ = std::exchange(other.valid_, false);
+      }
+      return *this;
+    }
+
+    bool valid() const { return valid_; }
+
+    // The entry's value, for in-place mutation. Only valid() handles may be
+    // dereferenced.
+    Value* value() const { return &(it_->value); }
+
+   private:
+    friend class LRUCache;
+    explicit Handle(typename std::list<CacheNode>::iterator it)
+        : it_(it), valid_(true) {}
+
+    typename std::list<CacheNode>::iterator it_;
+    bool valid_ = false;
+  };
+
+  // Resolves `key`, pins it, and returns a handle that stays valid until it is
+  // released. This is the only probe the caller pays; reaching the value
+  // afterwards costs a dereference. Returns an empty handle if the key is
+  // absent, which the caller must treat as failure -- there is nothing to
+  // hold onto.
+  Handle AcquireHandle(const Key& key) {
+    auto it = map_.find(key);
+    if (it == map_.end()) {
+      return Handle();
+    }
+    PinNode(it->second);
+    return Handle(it->second);
+  }
+
+  // Drops the pin AcquireHandle took and empties the handle. No-op on an
+  // empty one, so unwinding a partially acquired batch needs no bookkeeping.
+  void ReleaseHandle(Handle& handle) {
+    if (!handle.valid_) {
+      return;
+    }
+    UnpinNode(handle.it_);
+    handle.valid_ = false;
   }
 
   // Increments the reference pin count for the given key.
@@ -211,14 +273,7 @@ class LRUCache {
     if (it == map_.end()) {
       return false;
     }
-    if (it->second->pin_count > 0) {
-      it->second->pin_count--;
-      if (it->second->pin_count == 0) {
-        // Move from pinned_list_ to lru_list_ (promote to MRU)
-        lru_list_.splice(lru_list_.begin(), pinned_list_, it->second);
-        it->second->location = NodeLocation::kLru;
-      }
-    }
+    UnpinNode(it->second);
     return true;
   }
 
@@ -330,6 +385,35 @@ class LRUCache {
     CacheNode(Key k, Value v, int p, NodeLocation loc = NodeLocation::kLru)
         : key(std::move(k)), value(std::move(v)), pin_count(p), location(loc) {}
   };
+
+  // The pin/unpin mechanics, by node rather than by key. Both the key-based
+  // API (GetAndPin/Unpin) and the handle-based one route through these so the
+  // list bookkeeping has one definition -- a pinned node must be in
+  // pinned_list_, and an unpinned one must not be, or eviction will look in
+  // the wrong place.
+  void PinNode(typename std::list<CacheNode>::iterator node_it) {
+    if (node_it->pin_count == 0) {
+      if (node_it->location == NodeLocation::kLru) {
+        pinned_list_.splice(pinned_list_.begin(), lru_list_, node_it);
+      } else if (node_it->location == NodeLocation::kCandidate) {
+        pinned_list_.splice(pinned_list_.begin(), evict_candidate_list_,
+                            node_it);
+      }
+      node_it->location = NodeLocation::kPinned;
+    }
+    node_it->pin_count++;
+  }
+
+  void UnpinNode(typename std::list<CacheNode>::iterator node_it) {
+    if (node_it->pin_count > 0) {
+      node_it->pin_count--;
+      if (node_it->pin_count == 0) {
+        // Move from pinned_list_ to lru_list_ (promote to MRU)
+        lru_list_.splice(lru_list_.begin(), pinned_list_, node_it);
+        node_it->location = NodeLocation::kLru;
+      }
+    }
+  }
 
   void Promote(typename std::list<CacheNode>::iterator node_it) {
     if (node_it->pin_count > 0) {

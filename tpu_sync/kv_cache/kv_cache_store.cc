@@ -1053,6 +1053,7 @@ absl::Status KVCacheStore::Load(absl::Span<const std::string> block_hashes,
   }
 
   RaidenId remote_id;
+  std::vector<BlockHandle> handles;
   {
     absl::MutexLock lock(mutex_);
     auto lookup_or = backend()->Lookup(block_hashes);
@@ -1104,6 +1105,16 @@ absl::Status KVCacheStore::Load(absl::Span<const std::string> block_hashes,
     for (const auto& hash : block_hashes) {
       loading_hashes_.insert(hash);
     }
+    // Take our own pin on each entry that exists locally, so the poller can
+    // record the outcome through the handle instead of looking the hashes up
+    // again. The pin is independent of the caller's, so an early release
+    // cannot get the entry evicted mid-transfer. A hash with no local entry --
+    // the normal case for a remote source -- yields an empty handle, and the
+    // poller creates the entry instead.
+    handles.reserve(block_hashes.size());
+    for (const auto& hash : block_hashes) {
+      handles.push_back(backend()->AcquireBlockHandle(hash));
+    }
   }
 
   tsl::Future<> future = backend()->Load(
@@ -1120,6 +1131,8 @@ absl::Status KVCacheStore::Load(absl::Span<const std::string> block_hashes,
             std::vector<std::string>(block_hashes.begin(), block_hashes.end()),
         .device_block_ids =
             std::vector<int>(device_block_ids.begin(), device_block_ids.end()),
+        .handles = std::move(handles),
+        .from_remote = !remote_id.empty(),
     });
   }
 
@@ -1142,6 +1155,7 @@ absl::Status KVCacheStore::Load(absl::Span<const std::string> block_hashes,
   }
 
   RaidenId remote_id;
+  std::vector<BlockHandle> handles;
   {
     absl::MutexLock lock(mutex_);
 
@@ -1182,6 +1196,16 @@ absl::Status KVCacheStore::Load(absl::Span<const std::string> block_hashes,
     for (const auto& hash : block_hashes) {
       loading_hashes_.insert(hash);
     }
+    // Take our own pin on each entry that exists locally, so the poller can
+    // record the outcome through the handle instead of looking the hashes up
+    // again. The pin is independent of the caller's, so an early release
+    // cannot get the entry evicted mid-transfer. A hash with no local entry --
+    // the normal case for a remote source -- yields an empty handle, and the
+    // poller creates the entry instead.
+    handles.reserve(block_hashes.size());
+    for (const auto& hash : block_hashes) {
+      handles.push_back(backend()->AcquireBlockHandle(hash));
+    }
   }
 
   tsl::Future<> future = backend()->Load(
@@ -1199,6 +1223,8 @@ absl::Status KVCacheStore::Load(absl::Span<const std::string> block_hashes,
             std::vector<std::string>(block_hashes.begin(), block_hashes.end()),
         .device_block_ids =
             std::vector<int>(device_block_ids.begin(), device_block_ids.end()),
+        .handles = std::move(handles),
+        .from_remote = !remote_id.empty(),
     });
   }
 
@@ -1924,37 +1950,60 @@ void KVCacheStore::PollLoadsInternal(std::vector<LoadState> ready_loads) {
     absl::Status status = state.future.Await();
     absl::MutexLock lock(mutex_);
     if (status.ok()) {
-      auto lookup_or = backend()->Lookup(state.block_hashes);
-      if (lookup_or.ok()) {
-        const auto& slices = lookup_or.value();
-        std::vector<std::string> update_hashes;
-        std::vector<RaidenBlockID> update_slices;
-        for (size_t i = 0; i < state.block_hashes.size(); ++i) {
-          const auto& hash = state.block_hashes[i];
-          if (i < slices.size()) {
-            RaidenBlockID block = slices[i].second;
-            block.device_block_id = state.device_block_ids[i];
-            if (block.status == BlockStatus::REMOTE) {
-              block.raiden_id = raiden_id_;
-              block.host_block_id = -1;
-              block.status = BlockStatus::HBM;
+      // Entries this load has to CREATE rather than update: a remote source
+      // whose hash has no local entry yet. Everything else is reached through
+      // the handle taken at submit time, which is why there is no lookup here
+      // -- resolving these hashes again is what used to fall through to the
+      // global registry and block the poll path with the store mutex held.
+      std::vector<std::string> new_hashes;
+      std::vector<RaidenBlockID> new_slices;
+      for (size_t i = 0; i < state.block_hashes.size(); ++i) {
+        const auto& hash = state.block_hashes[i];
+        const bool have_entry =
+            i < state.handles.size() && state.handles[i].valid();
+        if (have_entry) {
+          // In place, through the pin this operation holds. Nothing is copied
+          // and nothing is re-inserted; the fields not touched here --
+          // raiden_id, and host_block_id on the local path -- keep the values
+          // they already had.
+          backend()->MutateBlockHandle(state.handles[i], [&](RaidenBlockID* entry) {
+            entry->device_block_id = state.device_block_ids[i];
+            if (state.from_remote) {
+              // The fetch's landing blocks are freed once the bytes reach HBM,
+              // so no host copy survives and the entry stops pointing at the
+              // peer.
+              entry->raiden_id = raiden_id_;
+              entry->host_block_id = -1;
+              entry->status = BlockStatus::HBM;
             } else {
-              block.status = BlockStatus::HOST_AND_HBM;
+              entry->status = BlockStatus::HOST_AND_HBM;
             }
-            update_hashes.push_back(hash);
-            update_slices.push_back(block);
-          }
-          done_loads_.push_back(hash);
+          });
+        } else if (state.from_remote) {
+          // No local entry to update, so record one. Every field is already
+          // known; none of it has to be asked for.
+          new_hashes.push_back(hash);
+          new_slices.push_back(RaidenBlockID(raiden_id_, /*host_block_id=*/-1,
+                                             state.device_block_ids[i],
+                                             BlockStatus::HBM));
         }
-        if (!update_hashes.empty()) {
-          backend()->Insert(update_hashes, update_slices, /*on_host=*/true);
-        }
+        done_loads_.push_back(hash);
+      }
+      if (!new_hashes.empty()) {
+        backend()->Insert(new_hashes, new_slices, /*on_host=*/true);
       }
     } else {
       LOG(ERROR) << "Async Load failed: " << status.ToString();
       for (const auto& hash : state.block_hashes) {
         failed_loads_.push_back(hash);
       }
+    }
+    // Unconditional, and last: every exit above must give the operation's pins
+    // back, or a failed transfer leaves the entry pinned forever and its LRU
+    // slot unusable. Releasing also promotes the entry to MRU once the last
+    // pin goes, which is what the re-insert used to do.
+    for (auto& handle : state.handles) {
+      backend()->ReleaseBlockHandle(handle);
     }
     for (const auto& hash : state.block_hashes) {
       loading_hashes_.erase(hash);

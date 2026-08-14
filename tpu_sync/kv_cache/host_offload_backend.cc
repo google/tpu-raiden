@@ -526,6 +526,24 @@ void HostOffloadBackend::Release(absl::Span<const std::string> block_hashes) {
   pending_eviction_counts_.erase(GetSortedHashes(block_hashes));
 }
 
+BlockHandle HostOffloadBackend::AcquireBlockHandle(
+    const std::string& block_hash) {
+  absl::MutexLock lock(mutex_);
+  return lru_cache_.AcquireHandle(block_hash);
+}
+
+void HostOffloadBackend::ReleaseBlockHandle(BlockHandle& handle) {
+  absl::MutexLock lock(mutex_);
+  lru_cache_.ReleaseHandle(handle);
+}
+
+void HostOffloadBackend::MutateBlockHandle(BlockHandle& handle, absl::AnyInvocable<void(RaidenBlockID*)> mutator) {
+  absl::MutexLock lock(mutex_);
+  if (handle.valid()) {
+    mutator(handle.value());
+  }
+}
+
 int HostOffloadBackend::GetPinCount(const std::string& hash) const {
   absl::MutexLock lock(mutex_);
   return lru_cache_.GetPinCount(hash);

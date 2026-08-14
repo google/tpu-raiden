@@ -23,9 +23,11 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/functional/any_invocable.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "xla/tsl/concurrency/future.h"
+#include "tpu_sync/kv_cache/lru_cache.h"
 #include "tpu_sync/kv_cache/raiden_id.h"
 
 namespace tpu_raiden {
@@ -76,6 +78,18 @@ struct RaidenBlockID {
 
 using BlockSliceList = std::vector<std::pair<std::string, RaidenBlockID>>;
 
+// A pinned, stable reference to one entry in a backend's index.
+//
+// For callers that resolve a hash once and then need to reach its entry again
+// later -- an async operation that must record its outcome when it completes.
+// Looking the hash up a second time is what this avoids, which matters because
+// that lookup can fall through to the global registry and become a blocking
+// RPC.
+//
+// The pin the handle holds is what keeps it valid, so it must be released
+// exactly once. See LRUCache::Handle.
+using BlockHandle = LRUCache<std::string, RaidenBlockID>::Handle;
+
 // Options controlling lookup behavior across storage backends.
 struct LookupOptions {
   // Controls whether the lookup is allowed to query the global registry.
@@ -113,6 +127,28 @@ class KVCacheStoreBackend {
   virtual absl::StatusOr<BlockSliceList> Lookup(
       absl::Span<const std::string> block_hashes,
       const LookupOptions& options = {}) = 0;
+
+  // Resolves one hash and pins it, returning a handle that reaches the entry
+  // without probing again. The pin is the handle's own reference, independent
+  // of any the caller holds, so the entry cannot be evicted or deleted while
+  // the handle is alive -- an async operation can therefore rely on it even if
+  // the caller releases early.
+  //
+  // Returns an empty handle if the hash is absent, or from a backend with no
+  // index to hand one out of. Callers must treat that as failure: there is
+  // nothing to hold.
+  virtual BlockHandle AcquireBlockHandle(const std::string& block_hash) {
+    return BlockHandle();
+  }
+
+  // Drops the pin AcquireBlockHandle took and empties the handle. No-op on an
+  // empty handle, so unwinding a partly acquired batch needs no bookkeeping.
+  virtual void ReleaseBlockHandle(BlockHandle& handle) {}
+
+  // Executes a mutator on the block handle under the backend's internal lock.
+  // This is required to safely mutate fields like status or raiden_id without
+  // introducing data races with concurrent readers (e.g. peer gRPC lookups).
+  virtual void MutateBlockHandle(BlockHandle& handle, absl::AnyInvocable<void(RaidenBlockID*)> mutator) {}
 
   // Asynchronously loads KV cache blocks to device (HBM), either from local
   // host DRAM or from the peer named by `remote_id`.

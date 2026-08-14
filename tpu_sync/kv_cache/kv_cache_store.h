@@ -486,6 +486,17 @@ class KVCacheStore {
     tsl::Future<> future;
     std::vector<std::string> block_hashes;
     std::vector<int> device_block_ids;
+    // One per hash, pinned at submit time so the poller can record the result
+    // without resolving the hashes again -- that second lookup is what falls
+    // through to the global registry and blocks. Empty for a hash with no
+    // local entry, which is the normal case for a remote source: there is
+    // nothing here yet, so the poller creates it.
+    std::vector<BlockHandle> handles;
+    // Whether the bytes came from a peer. Decides what the entry means when
+    // the load lands: a local source ends HOST_AND_HBM with its host copy
+    // intact, a remote one ends HBM with no host copy, because the fetch's
+    // landing blocks are freed.
+    bool from_remote = false;
   };
 
   struct RemoteReadState {

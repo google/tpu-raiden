@@ -115,6 +115,10 @@ class HostOffloadBackend : public KVCacheStoreBackend {
   // KVCacheStore::EnsureStoreServerAndRegister's job.
   absl::Status StartServer(absl::string_view server_address);
 
+  BlockHandle AcquireBlockHandle(const std::string& block_hash) override;
+  void ReleaseBlockHandle(BlockHandle& handle) override;
+  void MutateBlockHandle(BlockHandle& handle, absl::AnyInvocable<void(RaidenBlockID*)> mutator) override;
+
   // Loads KV cache blocks from local host DRAM (if `remote_id` is empty or
   // matches this backend's id) or from the specified peer. See KVCacheStoreBackend
   // for the argument contract.

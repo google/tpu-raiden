@@ -1453,6 +1453,170 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, LoadWithSlicesSuccess) {
   EXPECT_THAT(mock_mgr.last_dst_offsets, ::testing::ElementsAre(2, 3));
 }
 
+// --- The operation's own pin -------------------------------------------
+//
+// Load resolves each hash once, at submit time, and holds a pin on the entry
+// so the poller can record the outcome without resolving it again. These
+// guard the two things that go wrong if that bookkeeping slips: a pin that is
+// never given back, and an entry that is not protected after all.
+
+TEST_F(KVCacheStoreEmbeddedControllerTest, PollGivesBackTheLoadsOwnPin) {
+  ::tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(
+      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+
+  auto controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(unit_, 10, 1,
+                                                                   512, "");
+  RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
+
+  RaidenId rid{"test_job", "0", "test_cache", 0};
+  KVCacheStore store(10, std::move(controller), "", rid, std::nullopt,
+                     /*store_server_ip=*/"127.0.0.1");
+
+  std::vector<std::string> hashes = {"hash_1"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, 0, -1, BlockStatus::HOST)};
+  ASSERT_TRUE(store.Insert(hashes, slices, true).first);
+  ASSERT_TRUE(store.Pin(hashes));
+  ASSERT_EQ(store.GetPinCount("hash_1"), 1);
+
+  ASSERT_OK(store.Load(hashes, slices, {2}));
+  // While the load is in flight the entry carries two references: the
+  // caller's and the operation's.
+  EXPECT_EQ(store.GetPinCount("hash_1"), 2);
+
+  while (true) {
+    auto [done, failed, pending] = store.PollLoadStatus();
+    ASSERT_TRUE(failed.empty());
+    if (!done.empty()) break;
+    absl::SleepFor(absl::Milliseconds(10));
+  }
+
+  // Only the caller's pin is left. A poller that forgot to release would leave
+  // this at 2 and the entry would never become evictable.
+  EXPECT_EQ(store.GetPinCount("hash_1"), 1);
+  store.Release(hashes);
+  EXPECT_EQ(store.GetPinCount("hash_1"), 0);
+}
+
+TEST_F(KVCacheStoreEmbeddedControllerTest, FailedLoadAlsoGivesBackItsPin) {
+  // No worker is registered, so the transfer fails rather than completing.
+  // That is the cheapest way to reach the poller's failure path; what it does
+  // there is what matters.
+  auto controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(unit_, 10, 1,
+                                                                   512, "");
+
+  RaidenId rid{"test_job", "0", "test_cache", 0};
+  KVCacheStore store(10, std::move(controller), "", rid, std::nullopt,
+                     /*store_server_ip=*/"127.0.0.1");
+
+  std::vector<std::string> hashes = {"hash_1"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, 0, -1, BlockStatus::HOST)};
+  ASSERT_TRUE(store.Insert(hashes, slices, true).first);
+  ASSERT_TRUE(store.Pin(hashes));
+  ASSERT_OK(store.Load(hashes, slices, {2}));
+
+  while (true) {
+    auto [done, failed, pending] = store.PollLoadStatus();
+    if (!failed.empty()) break;
+    ASSERT_TRUE(done.empty()) << "the transfer was supposed to fail";
+    absl::SleepFor(absl::Milliseconds(10));
+  }
+
+  // The failure path has to release too, or every failed transfer permanently
+  // costs one LRU slot.
+  EXPECT_EQ(store.GetPinCount("hash_1"), 1);
+}
+
+TEST_F(KVCacheStoreEmbeddedControllerTest, LoadSurvivesTheCallerReleasingEarly) {
+  ::tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(
+      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+
+  auto controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(unit_, 10, 1,
+                                                                   512, "");
+  RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
+
+  RaidenId rid{"test_job", "0", "test_cache", 0};
+  KVCacheStore store(10, std::move(controller), "", rid, std::nullopt,
+                     /*store_server_ip=*/"127.0.0.1");
+
+  std::vector<std::string> hashes = {"hash_1"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, 0, -1, BlockStatus::HOST)};
+  ASSERT_TRUE(store.Insert(hashes, slices, true).first);
+  ASSERT_TRUE(store.Pin(hashes));
+  ASSERT_OK(store.Load(hashes, slices, {2}));
+
+  // The caller breaks the documented contract and unpins while the transfer is
+  // still in flight. The operation's own pin is what has to carry it: without
+  // one, the entry becomes evictable here and the poller would be recording
+  // its result into a slot that may already belong to someone else.
+  store.Release(hashes);
+  EXPECT_EQ(store.GetPinCount("hash_1"), 1);
+
+  while (true) {
+    auto [done, failed, pending] = store.PollLoadStatus();
+    ASSERT_TRUE(failed.empty());
+    if (!done.empty()) break;
+    absl::SleepFor(absl::Milliseconds(10));
+  }
+
+  EXPECT_EQ(store.GetPinCount("hash_1"), 0);
+  // And the result still landed on the right entry.
+  auto res = store.Lookup(hashes, /*enable_global=*/false);
+  ASSERT_OK(res.status());
+  ASSERT_EQ(res->size(), 1u);
+  EXPECT_EQ((*res)[0].second.status, BlockStatus::HOST_AND_HBM);
+  EXPECT_EQ((*res)[0].second.host_block_id, 0);
+  EXPECT_EQ((*res)[0].second.device_block_id, 2);
+}
+
+TEST_F(KVCacheStoreEmbeddedControllerTest, LoadUpdatesTheEntryInPlace) {
+  ::tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(
+      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+
+  auto controller =
+      std::make_unique<::tpu_raiden::controller::RaidenController>(unit_, 10, 1,
+                                                                   512, "");
+  RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
+
+  RaidenId rid{"test_job", "0", "test_cache", 0};
+  KVCacheStore store(10, std::move(controller), "", rid, std::nullopt,
+                     /*store_server_ip=*/"127.0.0.1");
+
+  std::vector<std::string> hashes = {"hash_1"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, 7, -1, BlockStatus::HOST)};
+  ASSERT_TRUE(store.Insert(hashes, slices, true).first);
+  ASSERT_TRUE(store.Pin(hashes));
+  ASSERT_OK(store.Load(hashes, slices, {2}));
+
+  while (true) {
+    auto [done, failed, pending] = store.PollLoadStatus();
+    ASSERT_TRUE(failed.empty());
+    if (!done.empty()) break;
+    absl::SleepFor(absl::Milliseconds(10));
+  }
+  store.Release(hashes);
+
+  // The poller writes through to the entry rather than rebuilding it, so the
+  // fields it does not touch keep their values: the host copy is still block
+  // 7, and the entry still belongs to this node.
+  auto res = store.Lookup(hashes, /*enable_global=*/false);
+  ASSERT_OK(res.status());
+  ASSERT_EQ(res->size(), 1u);
+  EXPECT_EQ((*res)[0].second.status, BlockStatus::HOST_AND_HBM);
+  EXPECT_EQ((*res)[0].second.host_block_id, 7);
+  EXPECT_EQ((*res)[0].second.device_block_id, 2);
+  EXPECT_EQ((*res)[0].second.raiden_id, rid);
+}
+
 TEST_F(KVCacheStoreEmbeddedControllerTest, LoadWithSlicesSizeMismatch) {
   auto controller =
       std::make_unique<::tpu_raiden::controller::RaidenController>(unit_, 10, 1,

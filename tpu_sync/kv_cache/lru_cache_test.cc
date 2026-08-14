@@ -17,6 +17,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -386,6 +387,184 @@ TEST(LRUCacheTest, GetAndPinBasic) {
   EXPECT_EQ(*val2, "two");
   EXPECT_EQ(cache.GetPinCount(2), 1);
   EXPECT_TRUE(cache.Contains(2));
+}
+
+// --- Handles -------------------------------------------------------------
+//
+// A handle is a stable, pinned reference to one entry. The tests below are
+// mostly about the "stable" half: they subject a held handle to every
+// operation that moves a node around internally and check it still reaches the
+// right value. If any of these fail, the callers that keep handles across an
+// async operation are reading freed or wrong memory.
+
+TEST(LRUCacheTest, AcquireHandleReadsAndPins) {
+  LRUCache<int, std::string> cache(2);
+  cache.Put(1, "one");
+
+  auto handle = cache.AcquireHandle(1);
+  ASSERT_TRUE(handle.valid());
+  EXPECT_EQ(*handle.value(), "one");
+  EXPECT_EQ(cache.GetPinCount(1), 1);
+
+  cache.ReleaseHandle(handle);
+  EXPECT_FALSE(handle.valid());
+  EXPECT_EQ(cache.GetPinCount(1), 0);
+}
+
+TEST(LRUCacheTest, AcquireHandleOnMissingKeyIsEmpty) {
+  LRUCache<int, std::string> cache(2);
+  auto handle = cache.AcquireHandle(99);
+  EXPECT_FALSE(handle.valid());
+  // Releasing an empty handle is a no-op, so unwinding a partial batch does
+  // not need to track which acquisitions succeeded.
+  cache.ReleaseHandle(handle);
+  EXPECT_FALSE(handle.valid());
+}
+
+TEST(LRUCacheTest, HandleWritesAreVisibleThroughTheCache) {
+  LRUCache<int, std::string> cache(2);
+  cache.Put(1, "one");
+
+  auto handle = cache.AcquireHandle(1);
+  ASSERT_TRUE(handle.valid());
+  *handle.value() = "mutated";
+
+  // The whole point: the write lands in the entry itself, not in a copy.
+  ASSERT_NE(cache.Peek(1), nullptr);
+  EXPECT_EQ(*cache.Peek(1), "mutated");
+  cache.ReleaseHandle(handle);
+}
+
+TEST(LRUCacheTest, HandleSurvivesPromotionAndOtherInsertions) {
+  LRUCache<int, std::string> cache(4);
+  cache.Put(1, "one");
+  auto handle = cache.AcquireHandle(1);
+  ASSERT_TRUE(handle.valid());
+
+  // Promotions splice the node between lists; insertions grow the map and can
+  // rehash it. Neither may disturb a node's address.
+  cache.Put(2, "two");
+  cache.Put(3, "three");
+  (void)cache.Get(2);
+  (void)cache.Get(3);
+  cache.Put(4, "four");
+
+  EXPECT_EQ(*handle.value(), "one");
+  cache.ReleaseHandle(handle);
+}
+
+TEST(LRUCacheTest, HandleSurvivesPutOnTheSameKey) {
+  LRUCache<int, std::string> cache(2);
+  cache.Put(1, "one");
+  auto handle = cache.AcquireHandle(1);
+  ASSERT_TRUE(handle.valid());
+
+  // Put on an existing key assigns the value in place rather than recreating
+  // the node, so the handle must observe the new value, not a stale one.
+  cache.Put(1, "replaced");
+  EXPECT_EQ(*handle.value(), "replaced");
+  cache.ReleaseHandle(handle);
+}
+
+TEST(LRUCacheTest, HandlePinBlocksEvictionAndSurvivesPressure) {
+  LRUCache<int, std::string> cache(2);
+  cache.Put(1, "one");
+  cache.Put(2, "two");
+
+  auto handle = cache.AcquireHandle(1);
+  ASSERT_TRUE(handle.valid());
+
+  // 1 is pinned by the handle, so filling the cache must evict 2 instead.
+  auto evicted = cache.Put(3, "three");
+  ASSERT_TRUE(evicted.has_value());
+  EXPECT_EQ(evicted->first, 2);
+  EXPECT_EQ(*handle.value(), "one");
+
+  cache.ReleaseHandle(handle);
+  // Only after release does 1 become evictable again.
+  EXPECT_EQ(cache.GetPinCount(1), 0);
+}
+
+TEST(LRUCacheTest, HandlePinIsIndependentOfCallerPins) {
+  LRUCache<int, std::string> cache(2);
+  cache.Put(1, "one");
+
+  // This is the property the async callers rely on: a handle's pin is its own
+  // reference, so someone else unpinning cannot make the entry evictable
+  // while the handle is still held.
+  ASSERT_TRUE(cache.Pin(1));
+  auto handle = cache.AcquireHandle(1);
+  ASSERT_TRUE(handle.valid());
+  EXPECT_EQ(cache.GetPinCount(1), 2);
+
+  EXPECT_TRUE(cache.Unpin(1));
+  EXPECT_EQ(cache.GetPinCount(1), 1);
+  EXPECT_EQ(*handle.value(), "one");
+
+  cache.ReleaseHandle(handle);
+  EXPECT_EQ(cache.GetPinCount(1), 0);
+}
+
+TEST(LRUCacheTest, HandleRescuesAnEvictionCandidate) {
+  LRUCache<int, std::string> cache(2);
+  cache.Put(1, "one");
+  cache.Put(2, "two");
+  ASSERT_TRUE(cache.Pin(1));
+  auto evicted = cache.Put(3, "three");
+  ASSERT_TRUE(evicted.has_value());
+  ASSERT_EQ(evicted->first, 2);
+  ASSERT_FALSE(cache.Contains(2));  // 2 is a candidate, still holding its block
+
+  // Acquiring pins it, which pulls it back out of the candidate list -- the
+  // same rescue GetAndPin performs.
+  auto handle = cache.AcquireHandle(2);
+  ASSERT_TRUE(handle.valid());
+  EXPECT_EQ(*handle.value(), "two");
+  EXPECT_TRUE(cache.Contains(2));
+  cache.ReleaseHandle(handle);
+}
+
+TEST(LRUCacheTest, HandleMoveTransfersTheSinglePin) {
+  LRUCache<int, std::string> cache(2);
+  cache.Put(1, "one");
+
+  auto handle = cache.AcquireHandle(1);
+  ASSERT_TRUE(handle.valid());
+  EXPECT_EQ(cache.GetPinCount(1), 1);
+
+  // Move must transfer ownership, not duplicate it: one acquire, one release,
+  // whatever the handle's storage does in between.
+  auto moved = std::move(handle);
+  EXPECT_TRUE(moved.valid());
+  EXPECT_FALSE(handle.valid());  // NOLINT(bugprone-use-after-move)
+  EXPECT_EQ(cache.GetPinCount(1), 1);
+  EXPECT_EQ(*moved.value(), "one");
+
+  // Releasing the moved-from handle must not drop the live pin.
+  cache.ReleaseHandle(handle);  // NOLINT(bugprone-use-after-move)
+  EXPECT_EQ(cache.GetPinCount(1), 1);
+
+  cache.ReleaseHandle(moved);
+  EXPECT_EQ(cache.GetPinCount(1), 0);
+}
+
+TEST(LRUCacheTest, HandlesSurviveBeingCarriedInAVector) {
+  LRUCache<int, std::string> cache(8);
+  for (int i = 0; i < 4; ++i) cache.Put(i, std::string("v") + std::to_string(i));
+
+  // Callers keep one handle per block in a vector that gets moved between
+  // structures; a reallocation there must not disturb the pins.
+  std::vector<LRUCache<int, std::string>::Handle> handles;
+  for (int i = 0; i < 4; ++i) handles.push_back(cache.AcquireHandle(i));
+  auto carried = std::move(handles);
+
+  for (int i = 0; i < 4; ++i) {
+    ASSERT_TRUE(carried[i].valid());
+    EXPECT_EQ(*carried[i].value(), std::string("v") + std::to_string(i));
+    EXPECT_EQ(cache.GetPinCount(i), 1);
+  }
+  for (auto& h : carried) cache.ReleaseHandle(h);
+  for (int i = 0; i < 4; ++i) EXPECT_EQ(cache.GetPinCount(i), 0);
 }
 
 }  // namespace
