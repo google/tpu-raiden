@@ -338,10 +338,10 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::H2dLayer(
           tpu_raiden::weight_sync::GetTiledBufferElements(shard_hold.shape) *
           itemsize;
       auto temp_buffer =
-          std::make_shared<std::vector<uint8_t>>(physical_bytes);
+          std::make_shared_for_overwrite<uint8_t[]>(physical_bytes);
       auto tile_start = absl::Now();
       auto status = tpu_raiden::weight_sync::TileBuffer(
-          shard_info.host_ptr, temp_buffer->data(), shard_hold.shape,
+          shard_info.host_ptr, temp_buffer.get(), shard_hold.shape,
           *xla_layout);
       if (!status.ok()) {
         return status;
@@ -358,7 +358,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::H2dLayer(
       }
 
       xla::Future<> future = shard_hold.CopyRawHostToDevice(
-          temp_buffer->data(), 0, physical_bytes);
+          temp_buffer.get(), 0, physical_bytes);
       xla::Future<> mapped_future = future.Map([temp_buffer]() {});
       shard_futures.push_back(std::move(mapped_future));
     } else {
@@ -443,8 +443,8 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2hLayer(
           tpu_raiden::weight_sync::GetTiledBufferElements(shard_hold.shape) *
           itemsize;
       auto temp_buffer =
-          std::make_shared<std::vector<uint8_t>>(physical_bytes);
-      uint8_t* temp_buffer_ptr = temp_buffer->data();
+          std::make_shared_for_overwrite<uint8_t[]>(physical_bytes);
+      uint8_t* temp_buffer_ptr = temp_buffer.get();
 
       xla::Future<> copy_future =
           shard_hold.CopyRawDeviceToHost(temp_buffer_ptr, 0, physical_bytes);
@@ -454,7 +454,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2hLayer(
            layout = *xla_layout, physical_bytes]() -> absl::Status {
             auto detile_start = absl::Now();
             absl::Status status = tpu_raiden::weight_sync::DetileBuffer(
-                temp_buffer->data(), dst_host_ptr, shape, layout);
+                temp_buffer.get(), dst_host_ptr, shape, layout);
             double detile_time_ms =
                 absl::ToDoubleMilliseconds(absl::Now() - detile_start);
             if (status.ok()) {
