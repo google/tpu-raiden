@@ -54,6 +54,8 @@
 #include "tpu_sync/transport/lib/chunk_serializer.h"
 #include "tpu_sync/transport/lib/raw_buffer_transport.h"
 #include "tpu_sync/transport/peregrine/src/api/socket_util.h"
+#include "tpu_sync/transport/socket_transport_adapter.h"
+#include "tpu_sync/transport/transport_adapter.h"
 
 ABSL_FLAG(size_t, raiden_transport_coalesce_window_bytes, 0,
           "Maximum size in bytes of the host-side coalescing buffer used "
@@ -199,7 +201,9 @@ BlockTransport::BlockTransport(BlockTransportDelegate* delegate, int local_port,
           [this](int client_fd, const lib::ChunkHeader& header) {
             return HandleCustomRequest(client_fd, header);
           },
-          absl::GetFlag(FLAGS_raiden_transport_coalesce_window_bytes)) {
+          absl::GetFlag(FLAGS_raiden_transport_coalesce_window_bytes)),
+      transport_adapter_(
+          std::make_unique<SocketTransportAdapter>(&raw_transport_)) {
   socket_workers_.reserve(parallelism_);
   for (int i = 0; i < parallelism_; ++i) {
     socket_workers_.push_back(
@@ -670,6 +674,8 @@ absl::StatusOr<std::vector<int>> BlockTransport::SyncPush(
     const std::vector<int>& src_block_ids,
     const std::vector<int>& dst_block_ids, int parallelism,
     MajorOrder major_order, uint64_t uuid, int layer_idx) {
+  // TODO(swasthi): Build requests via BuildBlockRequests and dispatch through
+  // transport_adapter_->Post().
   auto promise =
       std::make_shared<std::promise<absl::StatusOr<std::vector<int>>>>();
   auto future = promise->get_future();
@@ -822,6 +828,8 @@ absl::StatusOr<std::vector<int>> BlockTransport::SyncPullInternal(
     return absl::InvalidArgumentError("explicit_dst_ptrs size mismatch");
   }
 
+  // TODO(swasthi): Build requests via BuildBlockRequests and dispatch through
+  // transport_adapter_->Post().
   std::vector<int> allocated_ids;
   if (!local_block_ids.empty()) {
     if (local_block_ids.size() != local_blocks) {
@@ -879,6 +887,17 @@ absl::StatusOr<std::vector<int>> BlockTransport::SyncPullInternal(
   }
 
   return allocated_ids;
+}
+
+absl::StatusOr<std::vector<Request>> BlockTransport::BuildBlockRequests(
+    absl::string_view peer, absl::string_view local_ip, size_t block_offset,
+    size_t block_count, const std::vector<int>& src_block_ids,
+    const std::vector<int>& dst_block_ids, MajorOrder major_order,
+    uint64_t uuid, int layer_idx, int parallelism,
+    const std::vector<uint8_t*>& explicit_dst_ptrs) {
+  // TODO(swasthi): Extract memory address resolution logic from H2hWriteWorker
+  // and H2hReadWorker to build TransportAdapter::Request.
+  return absl::UnimplementedError("BuildBlockRequests not implemented yet");
 }
 
 void BlockTransport::H2hWriteWorker(int stream_idx, absl::string_view peer,

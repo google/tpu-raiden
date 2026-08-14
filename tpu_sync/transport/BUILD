@@ -38,6 +38,38 @@ cc_library(
 )
 
 cc_library(
+    name = "transport_adapter",
+    hdrs = ["transport_adapter.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "socket_transport_adapter",
+    srcs = ["socket_transport_adapter.cc"],
+    hdrs = ["socket_transport_adapter.h"],
+    copts = [
+        "-fno-strict-aliasing",
+        "-fexceptions",
+    ],
+    features = ["-use_header_modules"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":transport_adapter",
+        "//tpu_sync/transport/lib:raw_buffer_transport",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+cc_library(
     name = "block_transport",
     srcs = ["block_transport.cc"],
     hdrs = ["block_transport.h"],
@@ -50,6 +82,8 @@ cc_library(
     deps = [
         ":block_transport_delegate",
         ":buffer_push_task",
+        ":socket_transport_adapter",
+        ":transport_adapter",
         "//tpu_sync/core:status_macros",
         "//tpu_sync/core:tsl_platform_headers",
         "//tpu_sync/telemetry:metrics_api",

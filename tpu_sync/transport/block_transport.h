@@ -36,6 +36,7 @@
 #include "tpu_sync/transport/buffer_push_task.h"
 #include "tpu_sync/transport/lib/chunk.h"
 #include "tpu_sync/transport/lib/raw_buffer_transport.h"
+#include "tpu_sync/transport/transport_adapter.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -152,6 +153,14 @@ class BlockTransport final {
                       MajorOrder major_order, uint64_t uuid = 0,
                       int layer_idx = -1, int parallelism = 1);
 
+  // Builds a batch of Requests for block push/pull.
+  absl::StatusOr<std::vector<Request>> BuildBlockRequests(
+      absl::string_view peer, absl::string_view local_ip, size_t block_offset,
+      size_t block_count, const std::vector<int>& src_block_ids,
+      const std::vector<int>& dst_block_ids, MajorOrder major_order,
+      uint64_t uuid = 0, int layer_idx = -1, int parallelism = 1,
+      const std::vector<uint8_t*>& explicit_dst_ptrs = {});
+
   void H2hReadWorker(int stream_idx, absl::string_view peer,
                      absl::string_view local_ip, size_t local_block_offset,
                      size_t local_block_count, size_t remote_block_offset,
@@ -223,6 +232,7 @@ class BlockTransport final {
   std::atomic<bool> scheduler_stopping_;
 
   lib::RawBufferTransport raw_transport_;
+  std::unique_ptr<TransportAdapter> transport_adapter_;
   std::vector<std::thread> socket_workers_;
 };
 
