@@ -63,6 +63,70 @@ bool IsStandardRowMajorTiled(const xla::Shape& shape,
   return true;
 }
 
+// --- BF16 {Tile(8,128),Tile(2,1)} fast detile (PR-E) ---------------------
+// Real bf16 weights carry a nested layout {Tile(8,128), Tile(2,1)} rather
+// than the single-tile layout IsStandardRowMajorTiled() fast-paths, so they
+// otherwise fall through to the scalar ForEachIndexNoStatus() detile. The
+// inner Tile(2,1) interleaves pairs of adjacent rows: within each 8x128 tile
+// the physical element order is [rowpair(4)][col(128)][parity(2)], i.e. the
+// two rows of a pair are stored with a fixed stride of 2. This is a pure
+// fixed-stride-2 row de-interleave, so it can be done with tight contiguous
+// output writes and one strided read per element -- byte-exact with, but far
+// faster than, the scalar per-element index-math fallback.
+//
+// Matches ONLY BF16, rank-2, standard row-major (minor_to_major = {1,0}),
+// tiles == {Tile(8,128), Tile(2,1)}. Every other layout returns false and
+// falls through to the existing paths unchanged.
+bool IsBf16SubTiled_8_128_2_1(const xla::Shape& shape,
+                              const xla::Layout& layout) {
+  if (shape.element_type() != xla::PrimitiveType::BF16) return false;
+  if (shape.dimensions().size() != 2) return false;
+  if (layout.minor_to_major().size() != 2) return false;
+  if (layout.minor_to_major(0) != 1 || layout.minor_to_major(1) != 0) {
+    return false;
+  }
+  if (layout.tiles().size() != 2) return false;
+  const xla::Tile& t0 = layout.tiles(0);
+  const xla::Tile& t1 = layout.tiles(1);
+  if (t0.dimensions().size() != 2 || t1.dimensions().size() != 2) return false;
+  if (t0.dimension(0) != 8 || t0.dimension(1) != 128) return false;
+  if (t1.dimension(0) != 2 || t1.dimension(1) != 1) return false;
+  return true;
+}
+
+// Byte-exact fast detile for the BF16 {Tile(8,128),Tile(2,1)} layout. The
+// caller has already verified the layout via IsBf16SubTiled_8_128_2_1().
+void DetileBufferBf16SubTiled(const uint8_t* src_tiled, uint8_t* dst_linear,
+                              int64_t H, int64_t W) {
+  constexpr int64_t kTileH = 8;
+  constexpr int64_t kTileW = 128;
+  constexpr int64_t kTileElems = kTileH * kTileW;  // 1024
+  const int64_t col_tiles = (W + kTileW - 1) / kTileW;
+  const uint16_t* src = reinterpret_cast<const uint16_t*>(src_tiled);
+  uint16_t* dst = reinterpret_cast<uint16_t*>(dst_linear);
+
+  for (int64_t r = 0; r < H; ++r) {
+    const int64_t tr = r / kTileH;
+    const int64_t rin = r % kTileH;
+    const int64_t rowpair = rin / 2;   // 0..3
+    const int64_t parity = rin % 2;    // 0..1
+    uint16_t* dst_row = dst + r * W;
+    for (int64_t tc = 0; tc < col_tiles; ++tc) {
+      const int64_t c0 = tc * kTileW;
+      const int64_t cw = std::min<int64_t>(kTileW, W - c0);
+      const int64_t tile_index = tr * col_tiles + tc;
+      // Physical base of this row's elements within the tile:
+      //   tile_index*1024 + rowpair*256 + parity, then stride 2 across cols.
+      const uint16_t* src_row =
+          src + tile_index * kTileElems + rowpair * (kTileW * 2) + parity;
+      uint16_t* out = dst_row + c0;
+      for (int64_t cin = 0; cin < cw; ++cin) {
+        out[cin] = src_row[cin * 2];
+      }
+    }
+  }
+}
+
 // Dispatches row copy operations to compile-time specialized fixed-width
 // vector copy loops for common TPU tile row sizes (FP8, BF16, FP32 with tile_W
 // 128 or 8), falling back to generic std::memcpy for arbitrary dimensions.
@@ -560,6 +624,15 @@ absl::Status DetileBuffer(const uint8_t* src_tiled, uint8_t* dst_linear,
 
   if (IsStandardRowMajorTiled(shape, layout)) {
     return DetileBufferNDOptimized(src_tiled, dst_linear, shape, layout);
+  }
+
+  // Fast byte-exact path for the real bf16 weight layout
+  // {Tile(8,128), Tile(2,1)}, which otherwise hits the scalar fallback below.
+  // Auto-dispatched (no env gate); any non-matching layout falls through.
+  if (IsBf16SubTiled_8_128_2_1(shape, layout)) {
+    DetileBufferBf16SubTiled(src_tiled, dst_linear, shape.dimensions(0),
+                             shape.dimensions(1));
+    return absl::OkStatus();
   }
 
   int64_t itemsize =
