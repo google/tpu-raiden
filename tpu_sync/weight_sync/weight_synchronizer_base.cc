@@ -420,7 +420,37 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2hLayer(
   const auto& layer_holds = buffer_holds_[layer_idx];
   size_t layer_size = block_bytes(layer_idx);
 
-  std::vector<xla::Future<raiden::BufferHolder>> shard_futures_to_join;
+  // BUG4 fix: route the D2H completion through the canonical PJRT event path
+  // (the same path the KV cache uses via raiden::IssueD2hShard ->
+  // CopyRawDeviceToHostEvent / supports_event()). The legacy xla::Future path
+  // (shard_hold.CopyRawDeviceToHost + PjRtCopyFuture::FromFuture) can report
+  // readiness before the device->host copy has actually landed for C-API (TPU)
+  // buffers under concurrency, so a subsequent detile (or the caller) reads
+  // silent zeros while d2h() still returns success. We therefore:
+  //   1. issue every shard's copy (into a 64-byte-aligned temp for tiled
+  //      shards, or directly into the destination for untiled shards) through
+  //      raiden::IssueD2hShard, collecting per-shard PjRtCopyFutures;
+  //   2. Await() the aggregated copy so the PJRT_Event completion is observed
+  //      before any host read;
+  //   3. detile AFTER the await, so the detile only ever reads bytes the
+  //      device actually delivered.
+  // No signature/API change; correctness only.
+
+  // Records a tiled shard whose temp buffer must be detiled after the copy
+  // completes. Untiled shards copy straight into the destination and need no
+  // post-processing.
+  struct PendingDetile {
+    std::shared_ptr<uint8_t> temp;  // 64-byte-aligned copy staging buffer
+    uint8_t* dst;
+    xla::Shape shape;
+    xla::Layout layout;
+    size_t physical_bytes;
+  };
+
+  std::vector<raiden::PjRtCopyFuture> shard_copy_futures;
+  shard_copy_futures.reserve(num_shards_);
+  std::vector<PendingDetile> pending_detiles;
+
   for (size_t i = 0; i < num_shards_; ++i) {
     const auto& shard_info = layer_info.shards[i];
     const auto& shard_hold = layer_holds[i];
@@ -435,51 +465,73 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2hLayer(
       is_tiled = false;
     }
 
-    std::vector<xla::Future<>> shard_futures;
     if (is_tiled) {
       int64_t itemsize = xla::ShapeUtil::ByteSizeOfPrimitiveType(
           shard_hold.shape.element_type());
       size_t physical_bytes =
           tpu_raiden::weight_sync::GetTiledBufferElements(shard_hold.shape) *
           itemsize;
-      auto temp_buffer =
-          std::make_shared_for_overwrite<uint8_t[]>(physical_bytes);
-      uint8_t* temp_buffer_ptr = temp_buffer.get();
 
-      xla::Future<> copy_future =
-          shard_hold.CopyRawDeviceToHost(temp_buffer_ptr, 0, physical_bytes);
+      // 64-byte-aligned temp staging buffer for the raw device->host copy.
+      constexpr size_t kAlign = 64;
+      size_t alloc_bytes = ((physical_bytes + kAlign - 1) / kAlign) * kAlign;
+      void* raw = std::aligned_alloc(kAlign, alloc_bytes == 0 ? kAlign
+                                                              : alloc_bytes);
+      if (raw == nullptr) {
+        return absl::ResourceExhaustedError(absl::StrCat(
+            "WeightSynchronizer D2hLayer: failed to allocate ", alloc_bytes,
+            " byte aligned staging buffer"));
+      }
+      std::shared_ptr<uint8_t> temp_buffer(static_cast<uint8_t*>(raw),
+                                           [](uint8_t* p) { std::free(p); });
 
-      xla::Future<> detile_future = copy_future.Map(
-          [this, temp_buffer, dst_host_ptr, shape = shard_hold.shape,
-           layout = *xla_layout, physical_bytes]() -> absl::Status {
-            auto detile_start = absl::Now();
-            absl::Status status = tpu_raiden::weight_sync::DetileBuffer(
-                temp_buffer.get(), dst_host_ptr, shape, layout);
-            double detile_time_ms =
-                absl::ToDoubleMilliseconds(absl::Now() - detile_start);
-            if (status.ok()) {
-              absl::MutexLock lock(metrics_mu_);
-              metrics_.last_detiling_time_ms =
-                  std::max(metrics_.last_detiling_time_ms, detile_time_ms);
-              metrics_.total_detiling_time_ms =
-                  std::max(metrics_.total_detiling_time_ms, detile_time_ms);
-              metrics_.last_detiled_bytes += physical_bytes;
-              metrics_.total_detiled_bytes += physical_bytes;
-            }
-            return status;
-          });
-
-      shard_futures.push_back(std::move(detile_future));
+      TF_ASSIGN_OR_RETURN(
+          raiden::PjRtCopyFuture f,
+          raiden::IssueD2hShard(
+              shard_hold,
+              {raiden::D2hCopy{temp_buffer.get(), 0,
+                               static_cast<int64_t>(physical_bytes)}}));
+      shard_copy_futures.push_back(std::move(f));
+      pending_detiles.push_back(PendingDetile{
+          std::move(temp_buffer), dst_host_ptr, shard_hold.shape, *xla_layout,
+          physical_bytes});
     } else {
-      xla::Future<> future =
-          shard_hold.CopyRawDeviceToHost(dst_host_ptr, 0, layer_size);
-      shard_futures.push_back(std::move(future));
+      TF_ASSIGN_OR_RETURN(
+          raiden::PjRtCopyFuture f,
+          raiden::IssueD2hShard(
+              shard_hold, {raiden::D2hCopy{dst_host_ptr, 0,
+                                           static_cast<int64_t>(layer_size)}}));
+      shard_copy_futures.push_back(std::move(f));
     }
-    shard_futures_to_join.push_back(raiden::CreateBufferFuture(
-        std::move(shard_futures), shard_hold.c_hold, shard_hold.common_hold));
   }
-  return raiden::PjRtCopyFuture::FromFuture(
-      xla::JoinFutures(absl::MakeSpan(shard_futures_to_join)));
+
+  // Await the raw copies via the event path before touching host memory.
+  raiden::PjRtCopyFuture copy_future =
+      raiden::JoinPjRtCopyFutures(absl::MakeSpan(shard_copy_futures));
+  TF_RETURN_IF_ERROR(copy_future.Await());
+
+  // Detile AFTER the device->host copy has completed.
+  for (auto& pd : pending_detiles) {
+    auto detile_start = absl::Now();
+    absl::Status status = tpu_raiden::weight_sync::DetileBuffer(
+        pd.temp.get(), pd.dst, pd.shape, pd.layout);
+    if (!status.ok()) {
+      return status;
+    }
+    double detile_time_ms =
+        absl::ToDoubleMilliseconds(absl::Now() - detile_start);
+    absl::MutexLock lock(metrics_mu_);
+    metrics_.last_detiling_time_ms =
+        std::max(metrics_.last_detiling_time_ms, detile_time_ms);
+    metrics_.total_detiling_time_ms =
+        std::max(metrics_.total_detiling_time_ms, detile_time_ms);
+    metrics_.last_detiled_bytes += pd.physical_bytes;
+    metrics_.total_detiled_bytes += pd.physical_bytes;
+  }
+
+  // The copies are already awaited; hand back a ready future that keeps the
+  // buffer holds alive (same holds the copy_future carries).
+  return copy_future;
 }
 
 absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2h(
