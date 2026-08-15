@@ -2078,6 +2078,44 @@ class RaidenController:
                     slices,
                 )
 
+            # RAIDEN-LANDING PR-B / BUG2 FULL-COVERAGE GUARD (fail-closed).
+            # Rebased onto CURRENT HEAD 48673af (was authored on 627d82f; the
+            # 6f93cf2 change edits the chunk-emission region BELOW this point, not
+            # this plan-entry guard, so it re-applies cleanly here).
+            # MEASURED ON SILICON (627d82f, TPU7x): a destination variable registered
+            # with no matching source is SILENTLY left stale (dst={w0,w1}, src={w0}
+            # -> w0 lands, w1 keeps its pre-transfer value, success=True, no raise).
+            # The WeightSynchronizer contract is FULL-STATE sync (BUG2_SYNC_SET_
+            # CONTRACT.md): every registered destination variable must have source
+            # coverage. Invariant (v1) = every var in the declared destination sync
+            # set has a matching source var by name; a per-byte/slice coverage tally
+            # is the documented follow-up (and is what would ALSO catch BUG4's
+            # rank-1 byte-drop; name-coverage alone does NOT catch BUG4). Raise
+            # rather than publish a partial policy.
+            _src_var_names = set()
+            for _su in src_units:
+              with self._lock:
+                _svars = self._registered_variables.get(_su)
+              if _svars:
+                _src_var_names.update(getattr(v, "name", None) for v in _svars)
+              else:
+                _src_var_names.add(_su.data_name)
+            for _du in dst_units:
+              _dvars = dst_vars_by_unit.get(_du, [])
+              for _dv in _dvars:
+                _dname = getattr(_dv, "name", None)
+                if _dname is not None and _dname not in _src_var_names:
+                  raise ValueError(
+                      "Raiden WeightSynchronizer transfer would leave a registered "
+                      f"destination variable STALE: '{_dname}' (on unit {_du}) has "
+                      "no matching source variable. Source declared "
+                      f"{sorted(n for n in _src_var_names if n)}. Publishing this "
+                      "transfer would silently update only part of the policy "
+                      "(measured 627d82f, TPU7x: unmatched dst kept its stale value "
+                      "with success=True). Register a source for every destination "
+                      "variable in the sync set, or remove the unmatched destination."
+                  )
+
             # 3. Generate plan (Intersection)
             for src_unit in src_units:
               with self._lock:
