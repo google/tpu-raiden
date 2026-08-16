@@ -20,15 +20,16 @@
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <atomic>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "xla/future.h"
 #include "xla/layout.h"
@@ -483,31 +484,96 @@ struct PjRtCopyFuture {
     return status;
   }
 
+  // Countdown shared by one PJRT_Event_OnReady registration per event. The
+  // bundle references keep the PJRT events alive (their bundle destructor
+  // destroys them) until the last callback has fired; the first error wins.
+  struct EventJoinState {
+    explicit EventJoinState(xla::Promise<> p) : promise(std::move(p)) {}
+    xla::Promise<> promise;
+    std::atomic<size_t> pending{0};
+    absl::Mutex mu;
+    absl::Status first_error ABSL_GUARDED_BY(mu);
+    std::vector<std::shared_ptr<PjRtEventBundle>> bundles;
+
+    void RecordError(absl::Status s) {
+      absl::MutexLock lock(&mu);
+      if (first_error.ok()) first_error = std::move(s);
+    }
+    void CountDown() {
+      if (pending.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+      absl::Status final_status;
+      {
+        absl::MutexLock lock(&mu);
+        final_status = first_error;
+      }
+      if (final_status.ok()) {
+        promise.Set();
+      } else {
+        promise.Set(std::move(final_status));
+      }
+    }
+  };
+  struct EventJoinCtx {
+    std::shared_ptr<EventJoinState> state;
+    const PJRT_Api* c_api;
+  };
+
   template <typename F>
   void OnReady(F&& f) {
     if (!future.IsValid() && !event_bundles.empty()) {
       auto [promise, fut] = xla::MakePromise();
       future = fut;
-      std::thread([promise = std::move(promise),
-                   bundles = event_bundles]() mutable {
-        for (const auto& b : bundles) {
+      // Register a PJRT completion callback per event instead of parking a
+      // detached thread in PJRT_Event_Await: a per-layer awaiter thread per
+      // in-flight transfer crashed decode ranks under sustained receive load
+      // (thread-churn segfault in pthread_detach on the push-handler path).
+      auto state = std::make_shared<EventJoinState>(std::move(promise));
+      state->bundles = event_bundles;
+      for (const auto& b : event_bundles) {
+        if (!b || !b->c_api) continue;
+        for (PJRT_Event* e : b->events) {
+          if (e != nullptr) {
+            state->pending.fetch_add(1, std::memory_order_relaxed);
+          }
+        }
+      }
+      if (state->pending.load(std::memory_order_relaxed) == 0) {
+        state->promise.Set();
+      } else {
+        // One extra count held across registration so a callback firing
+        // inline cannot complete the join before every event is registered.
+        state->pending.fetch_add(1, std::memory_order_relaxed);
+        for (const auto& b : event_bundles) {
           if (!b || !b->c_api) continue;
           for (PJRT_Event* e : b->events) {
-            if (e != nullptr) {
-              PJRT_Event_Await_Args aw;
-              aw.struct_size = PJRT_Event_Await_Args_STRUCT_SIZE;
-              aw.extension_start = nullptr;
-              aw.event = e;
-              PJRT_Error* err = b->c_api->PJRT_Event_Await(&aw);
-              if (err != nullptr) {
-                promise.Set(PjrtErrorToStatusLocal(b->c_api, err));
-                return;
+            if (e == nullptr) continue;
+            auto* ctx = new EventJoinCtx{state, b->c_api};
+            PJRT_Event_OnReady_Args oa;
+            oa.struct_size = PJRT_Event_OnReady_Args_STRUCT_SIZE;
+            oa.extension_start = nullptr;
+            oa.event = e;
+            oa.user_arg = ctx;
+            oa.callback = +[](PJRT_Error* error, void* user_arg) {
+              auto* cb_ctx = static_cast<EventJoinCtx*>(user_arg);
+              if (error != nullptr) {
+                cb_ctx->state->RecordError(
+                    PjrtErrorToStatusLocal(cb_ctx->c_api, error));
               }
+              cb_ctx->state->CountDown();
+              delete cb_ctx;
+            };
+            PJRT_Error* rerr = b->c_api->PJRT_Event_OnReady(&oa);
+            if (rerr != nullptr) {
+              // The callback will never fire for this event; settle its
+              // share of the countdown here.
+              state->RecordError(PjrtErrorToStatusLocal(b->c_api, rerr));
+              state->CountDown();
+              delete ctx;
             }
           }
         }
-        promise.Set();
-      }).detach();
+        state->CountDown();  // drop the registration guard
+      }
     }
 
     if (future.IsValid()) {
