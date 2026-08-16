@@ -15,6 +15,7 @@
 #include "tpu_sync/weight_sync/tiling_utils.h"
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -777,6 +778,45 @@ TEST(TilingUtilsTest, SpecializedRowBytes_MultiBatch_AllTypes) {
                              reinterpret_cast<uint8_t*>(dst_linear.data()),
                              shape, shape.layout()).ok());
     EXPECT_EQ(dst_linear, src_linear);
+  }
+}
+
+
+// PR-E: exercises the fast byte-exact DetileBuffer path for the real bf16
+// weight layout {Tile(8,128), Tile(2,1)} on shapes that are NOT tile-aligned
+// (H not a multiple of 8, W not a multiple of 128), which the scalar fallback
+// previously handled. The tiled buffer is produced by the (scalar) TileBuffer
+// and inverted by DetileBuffer, so equality proves the fast detile matches the
+// canonical index-math result bit-for-bit, including padded tiles.
+TEST(TilingUtilsTest, Bf16SubTiledFastPathByteExact) {
+  for (const auto& hw : std::vector<std::pair<int64_t, int64_t>>{
+           {16, 256}, {8, 128}, {24, 384}, {17, 257}, {10, 130}, {1, 128}}) {
+    const int64_t H = hw.first;
+    const int64_t W = hw.second;
+    xla::Shape shape = xla::ShapeUtil::MakeShapeWithDenseLayout(
+        xla::PrimitiveType::BF16, {H, W}, {1, 0},
+        {xla::Tile({8, 128}), xla::Tile({2, 1})});
+
+    const int64_t num_elements = H * W;
+    std::vector<uint16_t> src_linear(num_elements);
+    for (int64_t i = 0; i < num_elements; ++i) {
+      src_linear[i] = static_cast<uint16_t>(i * 7 + 1);
+    }
+    const int64_t tiled_elems = GetTiledBufferElements(shape);
+    std::vector<uint8_t> dst_tiled(tiled_elems * sizeof(uint16_t), 0);
+    ASSERT_TRUE(TileBuffer(reinterpret_cast<const uint8_t*>(src_linear.data()),
+                           dst_tiled.data(), shape, shape.layout())
+                    .ok());
+
+    std::vector<uint16_t> dst_linear(num_elements, 0);
+    ASSERT_TRUE(DetileBuffer(dst_tiled.data(),
+                             reinterpret_cast<uint8_t*>(dst_linear.data()),
+                             shape, shape.layout())
+                    .ok());
+    for (int64_t i = 0; i < num_elements; ++i) {
+      EXPECT_EQ(dst_linear[i], src_linear[i])
+          << "H=" << H << " W=" << W << " mismatch at " << i;
+    }
   }
 }
 
