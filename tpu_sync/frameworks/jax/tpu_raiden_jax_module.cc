@@ -701,12 +701,13 @@ NB_MODULE(_tpu_raiden_jax, m) {
           "read_remote",
           [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self,
              const std::vector<nb::bytes>& block_hashes,
+             const std::vector<tpu_raiden::kv_cache::RaidenBlockID>& slices,
              const std::vector<int32_t>& device_block_ids) -> bool {
             auto hashes = ToStdStringVector(block_hashes);
-            return self->ReadRemote(hashes, device_block_ids).ok();
+            return self->ReadRemote(hashes, slices, device_block_ids).ok();
           },
-          nb::arg("block_hashes"),
-          nb::arg("device_block_ids") = std::vector<int32_t>())
+          nb::arg("block_hashes"), nb::arg("slices"),
+          nb::arg("device_block_ids"))
       .def("poll_remote_read_status",
            [](tpu_raiden::kv_cache::KVCacheStoreWrapper& self) {
              // Released around the C++ call ONLY. The subsequent nb::bytes

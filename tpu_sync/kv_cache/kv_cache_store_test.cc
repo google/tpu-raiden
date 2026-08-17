@@ -125,6 +125,16 @@ using TestHostOffloadBackend = HostOffloadBackendTest::Backend;
 
 namespace {
 
+// Observes what is resident WITHOUT acquiring it. The application-level
+// Lookup pins what it returns, which is right for a caller that goes on to
+// load or save the answer but wrong for a case that is asserting on pin counts
+// or eviction candidates -- there the pin is the thing under test, and a
+// lookup taking one of its own would be measuring itself.
+absl::StatusOr<BlockSliceList> PeekLookup(
+    KVCacheStore& store, const std::vector<std::string>& block_hashes) {
+  return store.Lookup(block_hashes, LookupOptions{.enable_global = false});
+}
+
 // Publishes a peer so a remote read can resolve its controller. The store
 // server address is required by the registry but a read never dials it -- it
 // speaks to the controller.
@@ -185,6 +195,12 @@ TEST(KVCacheStoreTest, BasicTests) {
   ASSERT_TRUE(lookup_res_early.ok());
   EXPECT_EQ(lookup_res_early->size(), 1);
   EXPECT_EQ((*lookup_res_early)[0].first, "4001");
+
+  // Lookup pins what it returns, and this test only inspects the answers
+  // rather than going on to load or save them, so it gives the pins back
+  // itself. "4001" was returned by both lookups, so it holds two.
+  controller.Release({"4001", "4002"});
+  controller.Release({"4001"});
 
   // 3. Delete
   controller.Delete(hashes, slices);
@@ -347,7 +363,8 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
 
   // Case 1: Full local hit, no global hit
   {
-    auto lookup_res = store.Lookup({"local_only_hash"});
+    auto lookup_res = store.Lookup({"local_only_hash"},
+                                   /*enable_global=*/true);
     ASSERT_TRUE(lookup_res.ok());
     ASSERT_EQ(lookup_res->size(), 1);
     EXPECT_EQ((*lookup_res)[0].first, "local_only_hash");
@@ -358,7 +375,7 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
   // Case 2: Both local and global has the same hit, but we return local hit
   // results
   {
-    auto lookup_res = store.Lookup({"shared_hash"});
+    auto lookup_res = store.Lookup({"shared_hash"}, /*enable_global=*/true);
     ASSERT_TRUE(lookup_res.ok());
     ASSERT_EQ(lookup_res->size(), 1);
     EXPECT_EQ((*lookup_res)[0].first, "shared_hash");
@@ -369,7 +386,8 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
 
   // Case 3: No local hit, only global hits
   {
-    auto lookup_res = store.Lookup({"global_hash_1", "global_hash_2"});
+    auto lookup_res = store.Lookup({"global_hash_1", "global_hash_2"},
+                                   /*enable_global=*/true);
     ASSERT_TRUE(lookup_res.ok());
     ASSERT_EQ(lookup_res->size(), 2);
 
@@ -400,7 +418,8 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
   // It should return both local and global
   {
     auto lookup_res =
-        store.Lookup({"local_only_hash", "global_hash_1", "global_hash_2"});
+        store.Lookup({"local_only_hash", "global_hash_1", "global_hash_2"},
+                     /*enable_global=*/true);
     ASSERT_TRUE(lookup_res.ok());
     ASSERT_EQ(lookup_res->size(), 3);
 
@@ -422,7 +441,8 @@ TEST(KVCacheStoreTest, GlobalLookupFallback) {
   // It should stop at the first miss in registry
   {
     auto lookup_res = store.Lookup(
-        {"local_only_hash", "global_hash_1", "missing_hash", "global_hash_2"});
+        {"local_only_hash", "global_hash_1", "missing_hash", "global_hash_2"},
+        /*enable_global=*/true);
     ASSERT_TRUE(lookup_res.ok());
     ASSERT_EQ(lookup_res->size(), 2);  // local_only_hash, global_hash_1
     EXPECT_EQ((*lookup_res)[0].first, "local_only_hash");
@@ -728,7 +748,7 @@ TEST(KVCacheStoreTest, LookupCapLimitWithGlobal) {
   // Lookup 3 hashes, but capacity is 2. It should only return 2.
   std::vector<std::string> lookup_hashes = {"global_hash_1", "global_hash_2",
                                             "global_hash_3"};
-  auto lookup_res = store.Lookup(lookup_hashes);
+  auto lookup_res = store.Lookup(lookup_hashes, /*enable_global=*/true);
   ASSERT_TRUE(lookup_res.ok());
   EXPECT_EQ(lookup_res->size(), 2);
   EXPECT_EQ((*lookup_res)[0].first, "global_hash_1");
@@ -771,7 +791,7 @@ TEST(KVCacheStoreTest, LookupCapLimitMixed) {
   // global).
   std::vector<std::string> lookup_hashes = {"local_hash_1", "global_hash_2",
                                             "global_hash_3"};
-  auto lookup_res = store.Lookup(lookup_hashes);
+  auto lookup_res = store.Lookup(lookup_hashes, /*enable_global=*/true);
   ASSERT_TRUE(lookup_res.ok());
   EXPECT_EQ(lookup_res->size(), 2);
   EXPECT_EQ((*lookup_res)[0].first, "local_hash_1");
@@ -887,11 +907,11 @@ TEST(KVCacheStoreTest, ReleaseAndDelete) {
   // remote_1 and remote_2 should be unpinned and deleted (since REMOTE)
   EXPECT_EQ(store.GetPinCount("remote_1"), 0);
   EXPECT_EQ(store.GetPinCount("remote_2"), 0);
-  EXPECT_EQ(store.Lookup({"remote_1"})->size(), 0);
-  EXPECT_EQ(store.Lookup({"remote_2"})->size(), 0);
+  EXPECT_EQ(PeekLookup(store, {"remote_1"})->size(), 0);
+  EXPECT_EQ(PeekLookup(store, {"remote_2"})->size(), 0);
 
   // local_1 and local_2 should be restored to the cache!
-  auto lookup_res = store.Lookup({"local_1", "local_2"});
+  auto lookup_res = PeekLookup(store, {"local_1", "local_2"});
   ASSERT_TRUE(lookup_res.ok());
   EXPECT_EQ(lookup_res->size(), 2);
 
@@ -901,7 +921,7 @@ TEST(KVCacheStoreTest, ReleaseAndDelete) {
   auto res_non_remote = store.ReleaseAndDelete({"local_1"});
   EXPECT_EQ(res_non_remote, 0);
   EXPECT_EQ(store.GetPinCount("local_1"), 0);
-  EXPECT_EQ(store.Lookup({"local_1"})->size(), 1);
+  EXPECT_EQ(PeekLookup(store, {"local_1"})->size(), 1);
 
   // Test remote block pinned twice: after one ReleaseAndDelete, pin count is 1
   // so it should NOT be deleted!
@@ -911,7 +931,7 @@ TEST(KVCacheStoreTest, ReleaseAndDelete) {
   auto res_pinned = store.ReleaseAndDelete({"remote_1"});
   EXPECT_EQ(res_pinned, 0);  // 0 deleted because pin count was 2 -> 1
   EXPECT_EQ(store.GetPinCount("remote_1"), 1);
-  EXPECT_EQ(store.Lookup({"remote_1"})->size(), 1);
+  EXPECT_EQ(PeekLookup(store, {"remote_1"})->size(), 1);
   store.Release({"remote_1"});
   store.Delete({"remote_1"}, {remote_slices[0]});
 
@@ -1469,7 +1489,11 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, LoadWithSlicesSizeMismatch) {
   EXPECT_THAT(std::string(status.message()), ::testing::HasSubstr("mismatch"));
 }
 
-TEST_F(KVCacheStoreEmbeddedControllerTest, LoadWithSlicesUnpinnedSucceeds) {
+// The slices form used to accept an unpinned local block, while the no-slices
+// form required a pin -- one signature, two pin contracts. It requires the pin
+// now, for the same reason the other form always did: a successful local load
+// CONSUMES one, so there has to be one to consume.
+TEST_F(KVCacheStoreEmbeddedControllerTest, LoadWithSlicesUnpinnedFails) {
   ::tpu_raiden::controller::MockTransferManager mock_mgr;
   test_server_->service->SetTransferManager(
       ::tpu_raiden::KVManagerHolder(&mock_mgr));
@@ -1488,7 +1512,59 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, LoadWithSlicesUnpinnedSucceeds) {
   ASSERT_TRUE(store.Insert(hashes, slices, true).first);
 
   absl::Status status = store.Load(hashes, slices, {2});
-  EXPECT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(status.code(), absl::StatusCode::kFailedPrecondition);
+  EXPECT_THAT(std::string(status.message()),
+              ::testing::HasSubstr("not pinned"));
+
+  // With the pin the caller was supposed to hold, it goes through.
+  ASSERT_TRUE(store.Pin(hashes));
+  EXPECT_TRUE(store.Load(hashes, slices, {2}).ok());
+}
+
+// A successful local load consumes the caller's pin, so the caller never
+// releases after a load. A failed one does not: giving up is the caller's
+// decision, and an entry silently unpinned under a retry would be evictable
+// while the caller still believed it held it.
+TEST_F(KVCacheStoreEmbeddedControllerTest, LocalLoadConsumesTheCallerPin) {
+  ::tpu_raiden::controller::MockTransferManager mock_mgr;
+  test_server_->service->SetTransferManager(
+      ::tpu_raiden::KVManagerHolder(&mock_mgr));
+
+  auto controller =
+      *::tpu_raiden::controller::RaidenController::Create(unit_, 10, 1,
+                                                                   512, "");
+  RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
+
+  RaidenId rid{"test_job", "0", "test_cache", 0};
+  KVCacheStore store(10, std::move(controller), "", rid, std::nullopt,
+                     /*store_server_ip=*/"127.0.0.1");
+
+  std::vector<std::string> hashes = {"hash_1"};
+  std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(rid, 0, -1, BlockStatus::HOST)};
+  ASSERT_TRUE(store.Insert(hashes, slices, true).first);
+  ASSERT_TRUE(store.Pin(hashes));
+  ASSERT_EQ(store.GetPinCount("hash_1"), 1);
+
+  ASSERT_OK(store.Load(hashes, {2}));
+
+  bool done = false;
+  for (int attempt = 0; attempt < 100 && !done; ++attempt) {
+    auto [load_done, load_failed, load_pending] = store.PollLoadStatus();
+    ASSERT_TRUE(load_failed.empty());
+    if (!load_done.empty()) done = true;
+    if (!done) absl::SleepFor(absl::Milliseconds(10));
+  }
+  ASSERT_TRUE(done);
+
+  EXPECT_EQ(store.GetPinCount("hash_1"), 0)
+      << "a successful local load must consume the caller's pin";
+  // The entry survives the unpin and carries the load's result.
+  auto after = PeekLookup(store, hashes);
+  ASSERT_TRUE(after.ok());
+  ASSERT_EQ(after->size(), 1);
+  EXPECT_EQ((*after)[0].second.status, BlockStatus::HOST_AND_HBM);
+  EXPECT_EQ((*after)[0].second.device_block_id, 2);
 }
 
 TEST_F(KVCacheStoreEmbeddedControllerTest, LoadWithSlicesAlreadyLoadingFails) {
@@ -1607,13 +1683,14 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, LoadWithSlicesRemoteSuccess) {
   }
   ASSERT_TRUE(done);
 
-  auto lookup_res = store.Lookup(hashes);
+  // Nothing is recorded for a peer source, so the entry this test inserted up
+  // front is left exactly as it was: still REMOTE, still naming the peer.
+  auto lookup_res = PeekLookup(store, hashes);
   ASSERT_TRUE(lookup_res.ok());
   ASSERT_EQ(lookup_res->size(), 1);
-  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::HBM);
-  EXPECT_EQ((*lookup_res)[0].second.host_block_id, -1);
-  EXPECT_EQ((*lookup_res)[0].second.device_block_id, 5);
-  EXPECT_EQ((*lookup_res)[0].second.raiden_id, local_rid);
+  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::REMOTE);
+  EXPECT_EQ((*lookup_res)[0].second.host_block_id, 42);
+  EXPECT_EQ((*lookup_res)[0].second.raiden_id, remote_rid);
 }
 
 TEST_F(KVCacheStoreEmbeddedControllerTest, LoadRemoteSuccess) {
@@ -1690,14 +1767,96 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, LoadRemoteSuccess) {
   }
   ASSERT_TRUE(done);
 
-  // 7. Verify status in store is updated to HBM and device_block_id is 5
-  auto lookup_res = store.Lookup(hashes);
+  // 7. A load from a peer records NOTHING. This entry was put here by the
+  // caller before the load, and the load leaves it exactly as it found it --
+  // still REMOTE, still naming the peer's block 42. Promoting it to HBM with
+  // host_block_id -1, as this used to, produced an entry describing no local
+  // residency that Evict could not reclaim and nothing could delete.
+  auto lookup_res = PeekLookup(store, hashes);
   ASSERT_TRUE(lookup_res.ok());
   ASSERT_EQ(lookup_res->size(), 1);
-  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::HBM);
-  EXPECT_EQ((*lookup_res)[0].second.host_block_id, -1);
-  EXPECT_EQ((*lookup_res)[0].second.device_block_id, 5);
-  EXPECT_EQ((*lookup_res)[0].second.raiden_id, local_rid);
+  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::REMOTE);
+  EXPECT_EQ((*lookup_res)[0].second.host_block_id, 42);
+  EXPECT_EQ((*lookup_res)[0].second.raiden_id, remote_rid);
+}
+
+// The flow the API actually serves for a peer source: lookup() resolves the
+// hash through the registry and hands back a REMOTE slice, load() takes that
+// slice directly. Nothing is inserted before, and -- the point of this case --
+// nothing is left after. The local cache is untouched from start to finish.
+TEST_F(KVCacheStoreEmbeddedControllerTest, LoadRemoteWithSlicesRecordsNothing) {
+  auto registry_server = global_registry::CreateTestGlobalRegistryServer();
+  std::string registry_address = registry_server->server_address;
+
+  RaidenId local_rid{"local_job", "0", "local_cache", 0};
+  RaidenId remote_rid{"remote_job", "0", "remote_cache", 0};
+
+  auto controller =
+      *::tpu_raiden::controller::RaidenController::Create(unit_, 10, 1,
+                                                                   512, "");
+  RegisterAndInitWorker(*controller, "worker_0", test_server_->server_address);
+
+  BackendConfig remote_config;
+  remote_config.type = "HostOffloadBackend";
+  remote_config.capacity = 100;
+  remote_config.global_registry_address = registry_address;
+  remote_config.raiden_id = remote_rid;
+
+  auto remote_backend_or =
+      HostOffloadBackend::Create(remote_config, controller.get());
+  ASSERT_OK(remote_backend_or.status());
+  auto remote_backend =
+      std::dynamic_pointer_cast<HostOffloadBackend>(*remote_backend_or);
+  ASSERT_NE(remote_backend, nullptr);
+  remote_backend->Insert({"slice_load_hash"},
+                         {RaidenBlockID(remote_rid, 42, BlockStatus::HOST)},
+                         /*on_host=*/true);
+
+  auto remote_server = KVCacheStoreServer::Create();
+  ASSERT_OK(remote_server->StartServer(remote_backend.get(), controller.get(),
+                                       "127.0.0.1"));
+  auto channel =
+      grpc::CreateChannel(registry_address, grpc::InsecureChannelCredentials());
+  auto registry_client =
+      std::make_shared<global_registry::GlobalRegistryClient>(channel);
+  ASSERT_OK(registry_client->RegisterStore(remote_rid,
+                                           remote_server->GetServerAddress(),
+                                           controller->controller_address()));
+
+  KVCacheStore store(10, std::move(controller), registry_address, local_rid,
+                     std::nullopt, /*store_server_ip=*/"127.0.0.1");
+
+  std::vector<std::string> hashes = {"slice_load_hash"};
+
+  // The registry answers, but a registry-only hit never enters the local index
+  // and is never pinned -- so this load has no caller pin to consume either.
+  auto resolved = store.Lookup(hashes, /*enable_global=*/true);
+  ASSERT_TRUE(resolved.ok());
+  ASSERT_EQ(resolved->size(), 1);
+  EXPECT_EQ((*resolved)[0].second.status, BlockStatus::REMOTE);
+  EXPECT_TRUE(PeekLookup(store, hashes)->empty())
+      << "a registry-only hit must not have entered the local index";
+
+  std::vector<RaidenBlockID> slices = {(*resolved)[0].second};
+  ASSERT_OK(store.Load(hashes, slices, {5}));
+
+  bool done = false;
+  for (int attempt = 0; attempt < 100 && !done; ++attempt) {
+    auto [load_done, load_failed, load_pending] = store.PollLoadStatus();
+    ASSERT_TRUE(load_failed.empty());
+    if (!load_done.empty()) {
+      EXPECT_THAT(load_done, ::testing::UnorderedElementsAre("slice_load_hash"));
+      done = true;
+      break;
+    }
+    absl::SleepFor(absl::Milliseconds(10));
+  }
+  ASSERT_TRUE(done);
+
+  // The whole point: the bytes are in device block 5 and the cache is as empty
+  // as it was before the load.
+  EXPECT_TRUE(PeekLookup(store, hashes)->empty())
+      << "a load from a peer must leave no local entry";
 }
 
 TEST_F(KVCacheStoreEmbeddedControllerTest, LoadUnpinnedRemoteBlockFails) {
@@ -1994,6 +2153,9 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, EvictByHashesHostAndHbmToErased) {
     ASSERT_TRUE(lookup_res.ok());
     ASSERT_EQ(lookup_res->size(), 2);
   }
+  // ...and give back the pins that check took, or the evict below has nothing
+  // it is allowed to reclaim.
+  store.Release({"hash_1", "hash_2"});
 
   // 5. Check locked blocks on controller
   auto* controller_ptr = KVCacheStoreTest::GetController(store);
@@ -2224,9 +2386,11 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ProactiveEvictionWithCandidates) {
   }
   store.Release(hashes);
 
-  // Verify both are HOST_AND_HBM
+  // Verify both are HOST_AND_HBM. Observed rather than looked up: this case is
+  // about which block evicts first, and a pin/unpin round trip moves a node
+  // through the pinned list and back, which reorders the very LRU under test.
   {
-    auto lookup_res = store.Lookup({"hash_B", "hash_A"});
+    auto lookup_res = PeekLookup(store, {"hash_B", "hash_A"});
     ASSERT_TRUE(lookup_res.ok());
     ASSERT_EQ(lookup_res->size(), 2);
     EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::HOST_AND_HBM);
@@ -2358,14 +2522,14 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteSuccess) {
   KVCacheStore store(10, std::move(dst_controller), registry_address, rid,
                      std::nullopt, /*store_server_ip=*/"127.0.0.1");
 
-  // Insert and pin remote block in local store
+  // The source coordinates come from the CALLER now: nothing is inserted into
+  // the local LRU, and the hash need not be known locally at all.
   std::vector<std::string> hashes = {"hash_0"};
   std::vector<RaidenBlockID> slices = {
       RaidenBlockID(src_raiden_id, 42, BlockStatus::REMOTE)};
-  ASSERT_TRUE(store.InsertAndLock(hashes, slices, true));
+  const std::vector<int32_t> device_blocks = {7};
 
-  // Trigger ReadRemote
-  absl::Status status = store.ReadRemote(hashes);
+  absl::Status status = store.ReadRemote(hashes, slices, device_blocks);
   ASSERT_TRUE(status.ok()) << status.message();
 
   // Poll for completion
@@ -2383,41 +2547,95 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteSuccess) {
   }
   ASSERT_TRUE(done);
   // The DESTINATION's worker executed the pull, against the source's
-  // authoritative block id (42, from the verify hook) and into the landing
-  // block the store allocated.
-  EXPECT_EQ(dst_transfer_mock_->vector_h2h_read_calls, 1);
+  // authoritative block id (42, from the verify hook), through the host
+  // staging block the store allocated, and into the CALLER's device block.
+  EXPECT_EQ(dst_transfer_mock_->vector_h2d_read_calls, 1);
   EXPECT_THAT(dst_transfer_mock_->last_src_offsets, ::testing::ElementsAre(42));
-  EXPECT_THAT(dst_transfer_mock_->last_dst_offsets, ::testing::ElementsAre(0));
+  EXPECT_THAT(dst_transfer_mock_->last_staging_offsets,
+              ::testing::ElementsAre(0));
+  EXPECT_THAT(dst_transfer_mock_->last_dst_offsets, ::testing::ElementsAre(7));
 
-  // Verify status in LRU is HOST, host_block_id is 0
+  // A successful read leaves NO local record: the bytes are in the caller's
+  // device block and nowhere else. A later local lookup is still a miss.
   auto lookup_res = store.Lookup(hashes);
   ASSERT_TRUE(lookup_res.ok());
-  ASSERT_EQ(lookup_res->size(), 1);
-  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::HOST);
-  EXPECT_EQ((*lookup_res)[0].second.host_block_id, 0);
+  EXPECT_TRUE(lookup_res->empty());
 
-  // Verify registration in global registry (need to poll registry since
-  // registration is async)
+  // ...and nothing is advertised to the registry. There is no host-resident
+  // copy here to serve to a peer, so publishing one would advertise a block
+  // this node does not have.
   auto channel =
       grpc::CreateChannel(registry_address, grpc::InsecureChannelCredentials());
   global_registry::GlobalRegistryClient registry_client(channel);
+  auto registry_lookup = registry_client.Lookup(hashes);
+  ASSERT_TRUE(registry_lookup.ok());
+  EXPECT_TRUE(registry_lookup->empty())
+      << "read_remote must not advertise the read block to the registry";
 
-  bool registered = false;
-  std::vector<global_registry::KVBlockMetadata> metadata_results;
-  for (int attempt = 0; attempt < 100; ++attempt) {
-    auto lookup_res = registry_client.Lookup(hashes);
-    if (lookup_res.ok() && lookup_res->size() == 1) {
-      metadata_results = *std::move(lookup_res);
-      registered = true;
-      break;
-    }
-    absl::SleepFor(absl::Milliseconds(10));
+  registry_server->Shutdown();
+}
+
+// The host blocks a read stages through are a hop, not a destination. Nothing
+// in the LRU points at them, so if the poller did not return them to the pool
+// each read would burn one host block permanently. Reading more blocks in
+// total than the pool holds only works if every read gives its staging back.
+TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteReturnsStagingOnSuccess) {
+  auto service = std::make_unique<global_registry::GlobalRegistryServiceImpl>();
+  grpc::ServerBuilder registry_builder;
+  int registry_port = 0;
+  registry_builder.AddListeningPort(
+      "localhost:0", grpc::InsecureServerCredentials(), &registry_port);
+  registry_builder.RegisterService(service.get());
+  auto registry_server = registry_builder.BuildAndStart();
+  std::string registry_address = "localhost:" + std::to_string(registry_port);
+
+  auto src_controller_server = core::controller::CreateTestControllerServer();
+  kv_cache::RaidenId src_raiden_id{"src_job", "0", "src_data", 0};
+  ASSERT_OK(PublishPeerController(registry_address, src_raiden_id,
+                                  src_controller_server->server_address));
+  {
+    auto st = src_controller_server->client->RegisterWorker(
+        "worker_0", "src_worker_0_addr", {{"src_worker_0_transfer", {}}});
+    ASSERT_TRUE(st.ok()) << st.message();
   }
-  ASSERT_TRUE(registered)
-      << "Block hashes were not registered in global registry";
+  src_controller_server->service->SetReadRemoteHooks(
+      [&](absl::Span<const std::string> h)
+          -> absl::StatusOr<std::vector<int32_t>> {
+        return std::vector<int32_t>(h.size(), 42);
+      },
+      [&](absl::Span<const std::string> /*h*/) {});
 
-  EXPECT_EQ(metadata_results[0].raiden_id().job_name(), rid.job_name);
-  EXPECT_EQ(metadata_results[0].block_id(), 0);
+  // A deliberately small host pool: three reads of two blocks each cannot fit
+  // in four blocks unless each read's staging is reclaimed.
+  constexpr int kHostBlocks = 4;
+  auto dst_controller = MakeController(kHostBlocks);
+  RegisterAndInitWorker(*dst_controller, "worker_0",
+                        test_server_->server_address);
+  RaidenId rid{"dst_job", "0", "dst_cache", 0};
+  KVCacheStore store(kHostBlocks, std::move(dst_controller), registry_address,
+                     rid, std::nullopt, /*store_server_ip=*/"127.0.0.1");
+
+  const std::vector<RaidenBlockID> slices = {
+      RaidenBlockID(src_raiden_id, 42, BlockStatus::REMOTE),
+      RaidenBlockID(src_raiden_id, 43, BlockStatus::REMOTE)};
+
+  for (int round = 0; round < 3; ++round) {
+    std::vector<std::string> hashes = {absl::StrCat("hash_", round, "_a"),
+                                       absl::StrCat("hash_", round, "_b")};
+    absl::Status status = store.ReadRemote(hashes, slices, {7, 8});
+    ASSERT_TRUE(status.ok())
+        << "round " << round << " failed to launch: " << status.message()
+        << " -- staging blocks from an earlier round were not reclaimed";
+
+    bool done = false;
+    for (int attempt = 0; attempt < 200 && !done; ++attempt) {
+      auto [done_hashes, failed_hashes, pending] = store.PollRemoteReadStatus();
+      ASSERT_TRUE(failed_hashes.empty());
+      if (done_hashes.size() == hashes.size()) done = true;
+      if (!done) absl::SleepFor(absl::Milliseconds(10));
+    }
+    ASSERT_TRUE(done) << "round " << round << " never completed";
+  }
 
   registry_server->Shutdown();
 }
@@ -2440,16 +2658,15 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteWithoutRegistryFails) {
   std::vector<std::string> hashes = {"hash_0"};
   std::vector<RaidenBlockID> slices = {
       RaidenBlockID(src_raiden_id, 42, BlockStatus::REMOTE)};
-  ASSERT_TRUE(store.InsertAndLock(hashes, slices, true));
 
-  absl::Status status = store.ReadRemote(hashes);
+  absl::Status status = store.ReadRemote(hashes, slices, {7});
   EXPECT_EQ(status.code(), absl::StatusCode::kFailedPrecondition);
   EXPECT_THAT(std::string(status.message()),
               ::testing::HasSubstr("global registry"));
-  EXPECT_EQ(dst_transfer_mock_->vector_h2h_read_calls, 0);
-  // Rejected cleanly: the same hashes are admissible again, and the landing
+  EXPECT_EQ(dst_transfer_mock_->vector_h2d_read_calls, 0);
+  // Rejected cleanly: the same hashes are admissible again, and the staging
   // blocks went back to the pool.
-  EXPECT_EQ(store.ReadRemote(hashes).code(),
+  EXPECT_EQ(store.ReadRemote(hashes, slices, {7}).code(),
             absl::StatusCode::kFailedPrecondition);
 }
 
@@ -2473,12 +2690,11 @@ TEST_F(KVCacheStoreEmbeddedControllerTest,
   std::vector<std::string> hashes = {"hash_0"};
   std::vector<RaidenBlockID> slices = {
       RaidenBlockID(src_raiden_id, 42, BlockStatus::REMOTE)};
-  ASSERT_TRUE(store.InsertAndLock(hashes, slices, true));
 
-  absl::Status status = store.ReadRemote(hashes);
+  absl::Status status = store.ReadRemote(hashes, slices, {7});
   EXPECT_EQ(status.code(), absl::StatusCode::kFailedPrecondition);
   EXPECT_THAT(std::string(status.message()), ::testing::HasSubstr("src_job"));
-  EXPECT_EQ(dst_transfer_mock_->vector_h2h_read_calls, 0);
+  EXPECT_EQ(dst_transfer_mock_->vector_h2d_read_calls, 0);
 }
 
 // The peer's controller address is cached, so a repeat read costs no registry
@@ -2528,8 +2744,7 @@ TEST_F(KVCacheStoreEmbeddedControllerTest,
     std::vector<std::string> hashes = {hash};
     std::vector<RaidenBlockID> slices = {
         RaidenBlockID(src_raiden_id, 42, BlockStatus::REMOTE)};
-    EXPECT_TRUE(store.InsertAndLock(hashes, slices, true));
-    EXPECT_TRUE(store.ReadRemote(hashes).ok());
+    EXPECT_TRUE(store.ReadRemote(hashes, slices, {7}).ok());
     for (int attempt = 0; attempt < 300; ++attempt) {
       auto [done, failed, pending] = store.PollRemoteReadStatus();
       if (!done.empty()) return true;
@@ -2641,28 +2856,15 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteFailure) {
   KVCacheStore store(2, std::move(dst_controller), registry_address, rid,
                      std::nullopt, /*store_server_ip=*/"127.0.0.1");
 
-  // Fill cache with two local blocks
-  std::vector<std::string> local_hashes = {"local_1", "local_2"};
-  std::vector<RaidenBlockID> local_slices = {
-      RaidenBlockID(rid, -1, BlockStatus::HOST),
-      RaidenBlockID(rid, -1, BlockStatus::HOST)};
-  ASSERT_TRUE(store.Insert(local_hashes, local_slices, true).first);
-
-  // Unpin local_1 so it is evictable
-  store.Release({"local_1"});
-
-  // Insert and pin remote block (evicts local_1)
   std::vector<std::string> hashes = {"hash_0"};
   std::vector<RaidenBlockID> slices = {
       RaidenBlockID(src_raiden_id, 42, BlockStatus::REMOTE)};
-  ASSERT_TRUE(store.InsertAndLock(hashes, slices, true));
 
   // The transfer now runs on the DESTINATION, so that is where the failure is
   // injected.
   dst_transfer_mock_->fail_transfers = true;
 
-  // Trigger ReadRemote
-  absl::Status status = store.ReadRemote(hashes);
+  absl::Status status = store.ReadRemote(hashes, slices, {7});
   ASSERT_TRUE(status.ok()) << status.message();
 
   // Poll for failure
@@ -2680,29 +2882,22 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteFailure) {
   }
   ASSERT_TRUE(failed);
 
-  // Verify hash_0 is still REMOTE
+  // A failed read leaves NOTHING to clean up. There is no entry to delete and
+  // no candidate to restore -- the read never touched the LRU. This is the
+  // whole point of taking the source coordinates as an argument: the old
+  // design stranded a REMOTE entry here that only release_and_delete could
+  // remove.
   {
     auto lookup_res = store.Lookup(hashes);
     ASSERT_TRUE(lookup_res.ok());
-    ASSERT_EQ(lookup_res->size(), 1);
-    EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::REMOTE);
+    EXPECT_TRUE(lookup_res->empty());
   }
 
-  // Caller calls ReleaseAndDelete to clean up failed remote read
-  size_t deleted = store.ReleaseAndDelete(hashes);
-  EXPECT_EQ(deleted, 1);
-
-  // Verify hash_0 is deleted, local_1 is restored
-  {
-    auto lookup_res = store.Lookup(hashes);
-    ASSERT_TRUE(lookup_res.ok());
-    EXPECT_EQ(lookup_res->size(), 0);
-  }
-  {
-    auto lookup_res = store.Lookup({"local_1"});
-    ASSERT_TRUE(lookup_res.ok());
-    EXPECT_EQ(lookup_res->size(), 1);
-  }
+  // The staging blocks went back to the pool, so the read can be retried. If
+  // the failure path leaked them this second launch would be the one to fail.
+  dst_transfer_mock_->fail_transfers = false;
+  EXPECT_TRUE(store.ReadRemote(hashes, slices, {7}).ok())
+      << "a failed read must return its staging blocks";
 
   registry_server->Shutdown();
 }
@@ -2746,9 +2941,8 @@ TEST_F(KVCacheStoreEmbeddedControllerTest,
   std::vector<std::string> hashes = {"hash_0"};
   std::vector<RaidenBlockID> slices = {
       RaidenBlockID(src_raiden_id, 42, BlockStatus::REMOTE)};
-  ASSERT_TRUE(store.InsertAndLock(hashes, slices, true));
 
-  ASSERT_TRUE(store.ReadRemote(hashes).ok());
+  ASSERT_TRUE(store.ReadRemote(hashes, slices, {7}).ok());
 
   bool failed = false;
   for (int attempt = 0; attempt < 100; ++attempt) {
@@ -2766,77 +2960,15 @@ TEST_F(KVCacheStoreEmbeddedControllerTest,
   // The block_hash flowed to the source and the transfer was never dispatched.
   EXPECT_THAT(validated, ::testing::ElementsAre("hash_0"));
   EXPECT_FALSE(transfer_ran);
-  // The block is still REMOTE on the destination (not promoted to HOST).
+  // Nothing was recorded locally, on this path as on every other.
   auto lookup_res = store.Lookup(hashes);
   ASSERT_TRUE(lookup_res.ok());
-  ASSERT_EQ(lookup_res->size(), 1);
-  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::REMOTE);
+  EXPECT_TRUE(lookup_res->empty());
 }
 
 // The source verify hook accepts the hash -> the transfer runs and the
 // destination block is promoted to HOST. Confirms the block_hashes reach the
 // source verify path on the success flow.
-TEST_F(KVCacheStoreEmbeddedControllerTest,
-       ReadRemoteSourceVerifySuccessTransfers) {
-  auto src_controller_server = core::controller::CreateTestControllerServer();
-  ::tpu_sync::rpc::RaidenIdProto src_unit;
-  src_unit.set_job_name("src_job");
-  src_unit.set_job_replica_id("0");
-  src_unit.set_data_name("src_data");
-  src_unit.set_data_replica_idx(0);
-  kv_cache::RaidenId src_raiden_id{"src_job", "0", "src_data", 0};
-  ASSERT_OK(PublishPeerController(registry_address_, src_raiden_id,
-                                  src_controller_server->server_address));
-
-  std::vector<std::string> validated, unpinned;
-  src_controller_server->service->SetReadRemoteHooks(
-      [&](absl::Span<const std::string> h)
-          -> absl::StatusOr<std::vector<int32_t>> {
-        validated.assign(h.begin(), h.end());
-        return std::vector<int32_t>{42};  // authoritative source id
-      },
-      [&](absl::Span<const std::string> h) {
-        unpinned.assign(h.begin(), h.end());
-      });
-  // NOTE: the source no longer transfers anything. Under the pull design
-  // the DESTINATION's own worker (test_server_, backed by a mock transfer
-  // manager) executes the copy; the source only leases.
-
-  auto dst_controller = MakeController();
-  RegisterAndInitWorker(*dst_controller, "worker_0",
-                        test_server_->server_address);
-  RaidenId rid{"dst_job", "0", "dst_cache", 0};
-  KVCacheStore store(2, std::move(dst_controller), registry_address_, rid,
-                     std::nullopt,
-                     /*store_server_ip=*/"127.0.0.1");
-
-  std::vector<std::string> hashes = {"hash_0"};
-  std::vector<RaidenBlockID> slices = {
-      RaidenBlockID(src_raiden_id, 42, BlockStatus::REMOTE)};
-  ASSERT_TRUE(store.InsertAndLock(hashes, slices, true));
-
-  ASSERT_TRUE(store.ReadRemote(hashes).ok());
-
-  bool done = false;
-  for (int attempt = 0; attempt < 100; ++attempt) {
-    auto [done_hashes, failed_hashes, pending_hashes] =
-        store.PollRemoteReadStatus();
-    ASSERT_TRUE(failed_hashes.empty());
-    if (!done_hashes.empty()) {
-      EXPECT_THAT(done_hashes, ::testing::ElementsAre("hash_0"));
-      done = true;
-      break;
-    }
-    absl::SleepFor(absl::Milliseconds(10));
-  }
-  ASSERT_TRUE(done);
-  EXPECT_THAT(validated, ::testing::ElementsAre("hash_0"));
-  EXPECT_THAT(unpinned, ::testing::ElementsAre("hash_0"));
-  auto lookup_res = store.Lookup(hashes);
-  ASSERT_TRUE(lookup_res.ok());
-  ASSERT_EQ(lookup_res->size(), 1);
-  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::HOST);
-}
 
 TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteDuplicateFails) {
   auto src_controller_server = core::controller::CreateTestControllerServer();
@@ -2893,14 +3025,13 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteDuplicateFails) {
   std::vector<std::string> hashes = {"hash_0"};
   std::vector<RaidenBlockID> slices = {
       RaidenBlockID(src_raiden_id, 42, BlockStatus::REMOTE)};
-  ASSERT_TRUE(store.InsertAndLock(hashes, slices, true));
 
   // First call succeeds
-  absl::Status status1 = store.ReadRemote(hashes);
+  absl::Status status1 = store.ReadRemote(hashes, slices, {7});
   ASSERT_TRUE(status1.ok()) << status1.message();
 
   // Second call fails with FailedPreconditionError
-  absl::Status status2 = store.ReadRemote(hashes);
+  absl::Status status2 = store.ReadRemote(hashes, slices, {8});
   EXPECT_FALSE(status2.ok());
   EXPECT_EQ(status2.code(), absl::StatusCode::kFailedPrecondition);
   EXPECT_THAT(status2.message(), ::testing::HasSubstr("already reading"));
@@ -2956,22 +3087,20 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteAllocationFailureAborts) {
   ASSERT_TRUE(save_done);
 
   // Now, 1 host block is allocated, free = 0. And local_1 remains pinned.
-  // Insert and pin remote block hash_0
   kv_cache::RaidenId src_raiden_id{"src_job", "0", "src_cache", 0};
   std::vector<std::string> hashes = {"hash_0"};
   std::vector<RaidenBlockID> slices = {
       RaidenBlockID(src_raiden_id, 42, BlockStatus::REMOTE)};
-  ASSERT_TRUE(store.InsertAndLock(hashes, slices, true));
 
-  // ReadRemote should fail because allocation of host block fails (0 free, 0
-  // evictable)
-  absl::Status status = store.ReadRemote(hashes);
+  // ReadRemote should fail because allocation of the staging block fails
+  // (0 free, 0 evictable)
+  absl::Status status = store.ReadRemote(hashes, slices, {7});
   EXPECT_FALSE(status.ok());
   EXPECT_EQ(status.code(), absl::StatusCode::kResourceExhausted);
 
   // Verify hash_0 is NOT in reading_hashes_ (so calling it again doesn't report
   // duplicate)
-  absl::Status status2 = store.ReadRemote(hashes);
+  absl::Status status2 = store.ReadRemote(hashes, slices, {7});
   EXPECT_EQ(status2.code(), absl::StatusCode::kResourceExhausted);
 
   registry_server->Shutdown();
@@ -3065,15 +3194,14 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteMultipleSources) {
   KVCacheStore store(10, std::move(dst_controller), registry_address, rid,
                      std::nullopt, /*store_server_ip=*/"127.0.0.1");
 
-  // Insert and pin remote block hash_0 and hash_1
+  // hash_0 lives on one peer and hash_1 on another; the caller names both.
   std::vector<std::string> hashes = {"hash_0", "hash_1"};
   std::vector<RaidenBlockID> slices = {
       RaidenBlockID(src_raiden_id_1, 10, BlockStatus::REMOTE),
       RaidenBlockID(src_raiden_id_2, 20, BlockStatus::REMOTE)};
-  ASSERT_TRUE(store.InsertAndLock(hashes, slices, true));
 
   // Trigger ReadRemote for both
-  absl::Status status = store.ReadRemote(hashes);
+  absl::Status status = store.ReadRemote(hashes, slices, {7, 8});
   ASSERT_TRUE(status.ok()) << status.message();
 
   // A batch spanning two peers takes one lease per peer and joins the futures,
@@ -3096,12 +3224,10 @@ TEST_F(KVCacheStoreEmbeddedControllerTest, ReadRemoteMultipleSources) {
   }
   ASSERT_TRUE(done);
 
-  // Verify both statuses are HOST
+  // Neither peer's block is recorded locally, however many peers were involved.
   auto lookup_res = store.Lookup(hashes);
   ASSERT_TRUE(lookup_res.ok());
-  ASSERT_EQ(lookup_res->size(), 2);
-  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::HOST);
-  EXPECT_EQ((*lookup_res)[1].second.status, BlockStatus::HOST);
+  EXPECT_TRUE(lookup_res->empty());
 
   registry_server->Shutdown();
 }
@@ -3162,95 +3288,6 @@ TEST_F(KVCacheStoreEmbeddedControllerTest,
                           ::testing::FieldsAre(1, "hash_2", 1)));
 }
 
-TEST_F(KVCacheStoreEmbeddedControllerTest,
-       ReadRemoteSetsMetadataEntriesOnCompletion) {
-  // Same setup as ReadRemoteSuccess: registry, src controller with a
-  // successful H2H callback, dest store — here with a metadata table attached.
-  auto service = std::make_unique<global_registry::GlobalRegistryServiceImpl>();
-  grpc::ServerBuilder registry_builder;
-  int registry_port = 0;
-  registry_builder.AddListeningPort(
-      "localhost:0", grpc::InsecureServerCredentials(), &registry_port);
-  registry_builder.RegisterService(service.get());
-  auto registry_server = registry_builder.BuildAndStart();
-  std::string registry_address = "localhost:" + std::to_string(registry_port);
-
-  auto src_controller_server = core::controller::CreateTestControllerServer();
-
-  ::tpu_sync::rpc::RaidenIdProto src_unit;
-  src_unit.set_job_name("src_job");
-  src_unit.set_job_replica_id("0");
-  src_unit.set_data_name("src_data");
-  src_unit.set_data_replica_idx(0);
-
-  kv_cache::RaidenId src_raiden_id{"src_job", "0", "src_data", 0};
-
-  ASSERT_OK(PublishPeerController(registry_address, src_raiden_id,
-                                  src_controller_server->server_address));
-
-  auto worker_status = src_controller_server->client->RegisterWorker(
-      "worker_0", "src_worker_0_addr", {{"src_worker_0_transfer", {}}});
-  ASSERT_TRUE(worker_status.ok()) << worker_status.message();
-
-  // Every read is now validated at the source by construction -- there is no
-  // longer any RPC that transfers without verifying and pinning first. Grant
-  // the lease and echo back authoritative ids.
-  src_controller_server->service->SetReadRemoteHooks(
-      [&](absl::Span<const std::string> h)
-          -> absl::StatusOr<std::vector<int32_t>> {
-        return std::vector<int32_t>(h.size(), 42);
-      },
-      [&](absl::Span<const std::string> /*h*/) {});
-  // NOTE: the source no longer transfers anything. Under the pull design
-  // the DESTINATION's own worker (test_server_, backed by a mock transfer
-  // manager) executes the copy; the source only leases.
-
-  auto dst_controller = MakeController();
-  RegisterAndInitWorker(*dst_controller, "worker_0",
-                        test_server_->server_address);
-
-  MetadataRegion metadata_region(10);
-  auto metadata_or = KVCacheMetadata::Format(metadata_region.span(), 10);
-  ASSERT_TRUE(metadata_or.ok());
-
-  RaidenId rid{"dst_job", "0", "dst_cache", 0};
-  KVCacheStore store(10, std::move(dst_controller), registry_address, rid,
-                     *metadata_or, /*store_server_ip=*/"127.0.0.1");
-
-  std::vector<std::string> hashes = {"hash_0"};
-  std::vector<RaidenBlockID> slices = {
-      RaidenBlockID(src_raiden_id, 42, BlockStatus::REMOTE)};
-  ASSERT_TRUE(store.InsertAndLock(hashes, slices, true));
-
-  // InsertAndLock has already called SetMetadataEntry for the slice, but its
-  // REMOTE status fails the same data-lives-in-local-host-memory filter: a
-  // REMOTE entry owns no local data and must stay out of the table.
-  EXPECT_THAT(metadata_or->ValidEntries(), ::testing::IsEmpty());
-
-  absl::Status status = store.ReadRemote(hashes);
-  ASSERT_TRUE(status.ok()) << status.message();
-
-  // Poll for completion
-  bool done = false;
-  for (int attempt = 0; attempt < 100; ++attempt) {
-    auto [done_hashes, failed_hashes, pending_hashes] =
-        store.PollRemoteReadStatus();
-    ASSERT_TRUE(failed_hashes.empty());
-    if (!done_hashes.empty()) {
-      done = true;
-      break;
-    }
-    absl::SleepFor(absl::Milliseconds(10));
-  }
-  ASSERT_TRUE(done);
-
-  // Read completion lands the remote data on local host block 0, which is
-  // when the binding enters the table.
-  EXPECT_THAT(metadata_or->ValidEntries(),
-              ElementsAre(::testing::FieldsAre(0, "hash_0", 0)));
-
-  registry_server->Shutdown();
-}
 
 TEST(KVCacheStoreTest, RecoverFromLocalManifestRebuildsLruCache) {
   RaidenId rid{"manifest_job", "0", "kv_cache", 0};
@@ -4452,6 +4489,125 @@ TEST_F(RemoteWriteSourceTest, TheOfferAsksForLessThanTheSourceWillHold) {
             absl::ToInt64Milliseconds(absl::Seconds(25)));
 }
 
+// Polling a remote write means asking the destination, which cannot be done
+// holding the store's lock. Every public poll entry point drives that ask, and
+// so does the background loop, so several can be in it at once. If the poller
+// works off a copy of the active list rather than claiming entries, two of
+// them settle the same operation: the internal pin is released twice -- the
+// second release landing on whatever now owns that block -- and every hash is
+// reported to the caller twice.
+TEST_F(RemoteWriteSourceTest, ConcurrentPollsSettleAnOfferExactlyOnce) {
+  RaidenId src{"rw_src_race", "0", "kv", 0};
+  RaidenId dst{"rw_dst_race", "0", "kv", 0};
+  auto src_store = MakeStore(src);
+  Populate(*src_store, src, {"a", "b"});
+  StartFakeDestination(dst);
+
+  proto::PollWriteRemoteResponse verdict;
+  verdict.set_state(proto::PollWriteRemoteResponse::COMMITTED);
+  verdict.add_committed_hashes("a");
+  verdict.add_committed_hashes("b");
+  fake_destination_.SetPollResponse(verdict);
+
+  ASSERT_TRUE(src_store->WriteRemote({"a", "b"}, dst).ok());
+
+  // PollSaveStatus drives the write poller as a side effect (they share
+  // PollFuturesInternal), so these four threads plus the background loop are
+  // five callers racing into it.
+  std::atomic<bool> stop{false};
+  std::vector<std::thread> drivers;
+  for (int t = 0; t < 4; ++t) {
+    drivers.emplace_back([&]() {
+      while (!stop.load(std::memory_order_relaxed)) {
+        (void)src_store->PollSaveStatus();
+      }
+    });
+  }
+
+  std::vector<std::string> settled;
+  const auto drain = [&]() {
+    auto [done, failed, pending, existing, unregistered] =
+        src_store->PollRemoteWriteStatus();
+    settled.insert(settled.end(), done.begin(), done.end());
+    settled.insert(settled.end(), failed.begin(), failed.end());
+  };
+  for (int i = 0; i < 300 && settled.size() < 2; ++i) {
+    drain();
+    absl::SleepFor(absl::Milliseconds(10));
+  }
+  // Keep draining after both arrive: a duplicate settle shows up late, and
+  // stopping at the first two hashes would never see it.
+  absl::SleepFor(absl::Milliseconds(200));
+  drain();
+
+  stop.store(true, std::memory_order_relaxed);
+  for (auto& driver : drivers) driver.join();
+
+  EXPECT_THAT(settled, ::testing::UnorderedElementsAre("a", "b"))
+      << "the offer was settled more than once";
+  // The caller's own pin survives; only the internal one was released, once.
+  EXPECT_EQ(src_store->GetPinCount("a"), 1);
+  EXPECT_EQ(src_store->GetPinCount("b"), 1);
+}
+
+// A store destroyed with an offer still outstanding must not leave its
+// internal pin behind. Backends are shared_ptrs and can outlive the store that
+// pinned into them, and nothing else knows to release that pin -- the block
+// would sit unreclaimable for the life of the backend.
+TEST_F(RemoteWriteSourceTest, DestroyingAStoreMidOfferReleasesItsInternalPin) {
+  RaidenId src{"rw_src_dtor_pin", "0", "kv", 0};
+  RaidenId dst{"rw_dst_dtor_pin", "0", "kv", 0};
+  auto src_store = MakeStore(src);
+  Populate(*src_store, src, {"a"});
+  StartFakeDestination(dst);
+
+  // The destination never reaches a verdict, so the offer stays outstanding.
+  proto::PollWriteRemoteResponse verdict;
+  verdict.set_state(proto::PollWriteRemoteResponse::PENDING);
+  fake_destination_.SetPollResponse(verdict);
+
+  ASSERT_TRUE(src_store->WriteRemote({"a"}, dst).ok());
+  // Populate's pin plus the offer's internal one.
+  EXPECT_EQ(src_store->GetPinCount("a"), 2);
+
+  // Outlive the store, exactly as a caller sharing a backend would.
+  std::shared_ptr<KVCacheStoreBackend> backend = src_store->backend();
+  src_store.reset();
+
+  EXPECT_EQ(backend->GetPinCount("a"), 1)
+      << "the offer's internal pin outlived the store that took it";
+}
+
+// The same drain must not WAIT for those offers. An offer goes terminal only
+// when the destination answers or the ~30s HOLD expires, so waiting would turn
+// destroying a store behind a dead peer into a half-minute stall.
+TEST_F(RemoteWriteSourceTest, DestroyingAStoreMidOfferDoesNotWaitForTheHold) {
+  RaidenId src{"rw_src_dtor_fast", "0", "kv", 0};
+  RaidenId dst{"rw_dst_dtor_fast", "0", "kv", 0};
+  auto src_store = MakeStore(src);
+  Populate(*src_store, src, {"a"});
+  StartFakeDestination(dst);
+
+  proto::PollWriteRemoteResponse verdict;
+  verdict.set_state(proto::PollWriteRemoteResponse::PENDING);
+  fake_destination_.SetPollResponse(verdict);
+
+  ASSERT_TRUE(src_store->WriteRemote({"a"}, dst).ok());
+  {
+    auto [done, failed, pending, existing, unregistered] =
+        src_store->PollRemoteWriteStatus();
+    ASSERT_THAT(pending, ::testing::ElementsAre("a"));
+  }
+
+  const absl::Time before = absl::Now();
+  src_store.reset();
+  const absl::Duration took = absl::Now() - before;
+
+  // The HOLD is 30s; anything near it means the drain waited.
+  EXPECT_LT(took, absl::Seconds(10))
+      << "destruction blocked on the remote write's hold window";
+}
+
 // A destination that vanished after registering. The source must get a prompt
 // error rather than waiting, and must drop the cached client so a restarted
 // peer is reachable.
@@ -4787,7 +4943,8 @@ std::unique_ptr<StoreInterleaveFixture> MakeStoreInterleaveFixture(
 TEST(KVCacheStoreTest, LookupInterleavesLocalAndRemoteThroughTheStore) {
   auto f = MakeStoreInterleaveFixture();
 
-  auto res = f->store->Lookup({"r1", "l1", "r2", "l2", "nowhere"});
+  auto res = f->store->Lookup({"r1", "l1", "r2", "l2", "nowhere"},
+                              /*enable_global=*/true);
   ASSERT_TRUE(res.ok());
   ASSERT_EQ(res->size(), 4);
 
@@ -4836,7 +4993,7 @@ TEST(KVCacheStoreTest, LookupInterleavedDisabledThroughTheStore) {
   ASSERT_EQ(legacy->size(), 1);
   EXPECT_EQ((*legacy)[0].first, "r1");
 
-  auto interleaved = f->store->Lookup({"r1", "l1"});
+  auto interleaved = f->store->Lookup({"r1", "l1"}, /*enable_global=*/true);
   ASSERT_TRUE(interleaved.ok());
   ASSERT_EQ(interleaved->size(), 2);
   EXPECT_EQ((*interleaved)[1].first, "l1");

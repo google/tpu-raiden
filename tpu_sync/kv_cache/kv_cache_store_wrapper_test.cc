@@ -120,6 +120,7 @@ TEST_F(KVCacheStoreWrapperTest, ColdStartCreatesMetadataTable) {
   auto wrapper = MakeWrapper(/*capacity=*/4, /*num_shards=*/1);
   EXPECT_TRUE(MetadataSegmentExists("_metadata"));
   auto lookup_or = (*wrapper)->Lookup({"host_1"});
+  (*wrapper)->Release({"host_1"});
   ASSERT_TRUE(lookup_or.ok());
   EXPECT_THAT(*lookup_or, IsEmpty());
 }
@@ -142,6 +143,7 @@ TEST_F(KVCacheStoreWrapperTest, RecoversHostBlocksAfterRestart) {
   wrapper = MakeWrapper(/*capacity=*/4, /*num_shards=*/1);
 
   auto lookup_or = (*wrapper)->Lookup({"host_1", "host_2"});
+  (*wrapper)->Release({"host_1", "host_2"});
   ASSERT_TRUE(lookup_or.ok());
   ASSERT_EQ(lookup_or->size(), 2);
   EXPECT_EQ((*lookup_or)[0].first, "host_1");
@@ -162,6 +164,7 @@ TEST_F(KVCacheStoreWrapperTest, ModelUidMismatchColdStarts) {
   wrapper = MakeWrapper(/*capacity=*/4, /*num_shards=*/1);
 
   auto lookup_or = (*wrapper)->Lookup({"host_1"});
+  (*wrapper)->Release({"host_1"});
   ASSERT_TRUE(lookup_or.ok());
   EXPECT_THAT(*lookup_or, IsEmpty());
 }

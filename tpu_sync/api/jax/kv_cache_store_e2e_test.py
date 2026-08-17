@@ -261,6 +261,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
 
     # Verify status in store is HBM
     lookup_res = store.lookup(hashes)
+    store.release(hashes)
     self.assertLen(lookup_res, 2)
     self.assertEqual(lookup_res[0][1].status, kv_cache_store.BlockStatus.HBM)
     self.assertEqual(lookup_res[0][1].device_block_id, 0)
@@ -290,10 +291,10 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         time.sleep(0.01)
 
     # Release them so we can test pinning before load
-    store.release(hashes)
 
     # Verify status in store is updated to HOST_AND_HBM
     lookup_res = store.lookup(hashes)
+    store.release(hashes)
     self.assertLen(lookup_res, 2)
     self.assertEqual(
         lookup_res[0][1].status, kv_cache_store.BlockStatus.HOST_AND_HBM
@@ -340,7 +341,6 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         time.sleep(0.01)
 
     # Release at the very end
-    store.release(hashes)
 
     # 9. Verify device memory contains the original random data
     np.testing.assert_array_equal(np.asarray(tpu_cache), expected_ref)
@@ -517,7 +517,6 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     data_a = manager_a._impl.read_host_memory(0, 0, 16)
     print(f"DEBUG: Job A host memory (layer 0, shard 0) after Save: {data_a}")
 
-    store_a.release(hashes)
 
     # 5. Job B calls Lookup (enable_global=True)
     # Give some time for registry propagation
@@ -540,6 +539,7 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
 
     # Verify correct source host block IDs
     lookup_res_a = store_a.lookup(hashes)
+    store_a.release(hashes)
     self.assertEqual(
         lookup_res_b[0][1].host_block_id, lookup_res_a[0][1].host_block_id
     )
@@ -577,12 +577,11 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         if not done:
           time.sleep(0.01)
     else:
-      # 6. Job B controller calls insert_and_lock for the remote slices
-      self.assertTrue(store_b.insert_and_lock(hashes, slices_b, on_host=True))
-  
-      # 7. Job B calls ReadRemote
-      self.assertTrue(store_b.read_remote(hashes))
-  
+      # 6. Job B reads straight from Job A into its own device blocks. The
+      # source coordinates come from the lookup answer, so nothing needs to be
+      # inserted into Job B's cache first.
+      self.assertTrue(store_b.read_remote(hashes, slices_b, [0, 1]))
+
       if not expect_read_success:
         # Strict node_id matching: the producer worker's node_id must equal the
         # consumer (destination) worker's node_id. A mismatch makes the source
@@ -611,40 +610,15 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         if not done:
           time.sleep(0.01)
   
-      data_b = manager_b._impl.read_host_memory(0, 0, 16)
-      print(
-          "DEBUG: Job B host memory (layer 0, shard 0) after ReadRemote:"
-          f" {data_b}"
-      )
-  
-      # 8. Verify Job B's LRU block status becomes HOST
-      lookup_res_b_after = store_b.lookup(hashes)
-      self.assertLen(lookup_res_b_after, 2)
-      self.assertEqual(
-          lookup_res_b_after[0][1].status, kv_cache_store.BlockStatus.HOST
-      )
-      self.assertEqual(
-          lookup_res_b_after[1][1].status, kv_cache_store.BlockStatus.HOST
-      )
-  
-      # 9. Job B controller calls Load to transfer data to TPU blocks
-      self.assertTrue(store_b.load(hashes, [0, 1]))
-  
-      # Wait for Load completion
-      done = False
-      while not done:
-        load_done, load_failed, _ = store_b.poll_load_status()
-        if load_failed:
-          raise RuntimeError(f"Job B Load failed: {load_failed}")
-        if len(load_done) == 2:
-          done = True
-        if not done:
-          time.sleep(0.01)
+      # 8. The read is already in HBM -- there is no second Load step, and no
+      # local record of it either. Job B's cache is still a miss for these
+      # hashes: the bytes live only in the device blocks it named.
+      self.assertEmpty(store_b.lookup(hashes))
 
-    store_b.release(hashes)
 
-    # 10. Verify byte-exact match on Job B TPU devices
-    np.testing.assert_array_equal(np.asarray(tpu_cache_b), host_data_a)
+    # 9. Verify byte-exact match on Job B TPU devices. The DMA landed behind
+    # JAX's back, so the buffer has to be re-read rather than np.asarray'd.
+    np.testing.assert_array_equal(self._reread_device(tpu_cache_b), host_data_a)
 
   # =========================================================================
   # ReadRemote to HBM (receiver-initiated pull straight into device memory)
@@ -777,7 +751,6 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     self.assertTrue(store_a.pin(hashes))
     store_a.save(hashes)
     self._await_terminal(store_a.poll_save_status, len(hashes), "Job A save")
-    store_a.release(hashes)
 
     # --- Job B: discover the blocks as REMOTE. -----------------------------
     time.sleep(0.5)
@@ -796,28 +769,27 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
       self._await_terminal(
           store_b.poll_load_status, len(hashes), "Job B peer-fetch load"
       )
+      # A load from a peer records nothing locally: no host copy was kept, so
+      # there is no residency to describe. The bytes are in the device blocks
+      # the caller named and the cache is a miss for these hashes.
+      self.assertEmpty(store_b.lookup(hashes))
     else:
-      # insert_and_lock pins the entries; the contract requires holding those
-      # pins until poll_remote_read_status reports the hashes terminal.
-      self.assertTrue(
-          store_b.insert_and_lock(hashes, [b for _, b in lookup_b], on_host=True)
-      )
-  
       # --- The thing under test: pull straight into HBM. ---------------------
-      self.assertTrue(store_b.read_remote(hashes, dst_device_blocks))
+      # No insert first: the lookup answer IS the source coordinate, and the
+      # read takes no pin because it records nothing.
+      self.assertTrue(
+          store_b.read_remote(
+              hashes, [b for _, b in lookup_b], dst_device_blocks
+          )
+      )
       self._await_terminal(
           store_b.poll_remote_read_status, len(hashes), "Job B read_remote"
       )
 
-    # The batch commits as a unit into HOST_AND_HBM: the bytes are in the
-    # caller's device blocks AND in the host landing blocks that were the
-    # staging hop.
-    after = store_b.lookup(hashes)
-    self.assertLen(after, 2)
-    for i, (_, blk) in enumerate(after):
-      expected_status = kv_cache_store.BlockStatus.HBM if use_slices else kv_cache_store.BlockStatus.HOST_AND_HBM
-      self.assertEqual(blk.status, expected_status)
-      self.assertEqual(blk.device_block_id, dst_device_blocks[i])
+      # The bytes are in the caller's device blocks and nowhere else. The host
+      # blocks the transfer staged through went straight back to the pool, so
+      # there is no local entry and a later local lookup is still a miss.
+      self.assertEmpty(store_b.lookup(hashes))
 
     # --- Byte-exact verification of device memory. -------------------------
     actual_b = self._reread_device(tpu_cache_b)
@@ -838,25 +810,26 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
       )
 
     if use_slices:
-      store_b.release(hashes)
       return
 
-    # --- The host copy left behind by the staging hop must be usable. ------
-    # load() the same hashes into the sentinel blocks; if the staging blocks
-    # did not really hold the data, this produces garbage.
-    self.assertTrue(store_b.load(hashes, sentinel_blocks))
-    self._await_terminal(store_b.poll_load_status, len(hashes), "Job B load")
-    store_b.release(hashes)
+    # --- No host copy is left behind. --------------------------------------
+    # The staging blocks were handed back, so the read is not a way to warm
+    # the local cache. A later local load() of the same hashes has nothing to
+    # read from and is refused; the caller that wants a host copy must save()
+    # what it pulled. This is the deliberate cost of read_remote leaving no
+    # local record.
+    self.assertFalse(
+        store_b.load(hashes, sentinel_blocks),
+        "read_remote must not leave a host copy behind",
+    )
 
-    reloaded = self._reread_device(tpu_cache_b)
-    for src_blk, dst_blk in zip(src_device_blocks, sentinel_blocks):
+    # The sentinel blocks are therefore untouched, as they were before.
+    unchanged = self._reread_device(tpu_cache_b)
+    for blk in sentinel_blocks:
       np.testing.assert_array_equal(
-          reloaded[dst_blk],
-          host_data_a[src_blk],
-          err_msg=(
-              f"load() into device block {dst_blk} does not byte-match source"
-              f" block {src_blk}: the pull's host staging copy is not valid"
-          ),
+          unchanged[blk],
+          host_data_b[blk],
+          err_msg=f"sentinel device block {blk} must stay untouched",
       )
 
   def _await_terminal(self, poll_fn, expected_done, what, timeout_s=120.0):
@@ -1044,10 +1017,10 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     self.assertCountEqual(done, hashes)
     self.assertEmpty(failed)
     self.assertEmpty(existing)
-    store_a.release(hashes)
 
     # 3. Job B holds them locally, host-resident, as its own.
     lookup_b = store_b.lookup(hashes, enable_global=False)
+    store_b.release(hashes)
     self.assertLen(lookup_b, len(hashes))
     for _, slice_b in lookup_b:
       self.assertEqual(slice_b.status, kv_cache_store.BlockStatus.HOST)
@@ -1062,7 +1035,6 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     self.assertTrue(store_b.pin(hashes))
     self.assertTrue(store_b.load(hashes, list(range(num_blocks))))
     self._await_terminal(store_b.poll_load_status, len(hashes), "Job B load")
-    store_b.release(hashes)
 
     np.testing.assert_array_equal(
         self._reread_device(tpu_cache_b),
@@ -1231,8 +1203,8 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     )
     time.sleep(1)
 
-    # Job B manually records a REMOTE block pointing at Job A for a hash Job A
-    # never saved, then tries to read it.
+    # Job B names a source coordinate on Job A for a hash Job A never saved,
+    # and tries to read it.
     ghost = [b"ghost_hash"]
     slices = [
         kv_cache_store.RaidenBlockID(
@@ -1242,9 +1214,8 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
             status=kv_cache_store.BlockStatus.REMOTE,
         )
     ]
-    self.assertTrue(store_b.insert_and_lock(ghost, slices, on_host=True))
 
-    self.assertTrue(store_b.read_remote(ghost))
+    self.assertTrue(store_b.read_remote(ghost, slices, [0]))
 
     failed = False
     for _ in range(500):
@@ -1343,22 +1314,16 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     )
     time.sleep(1)
 
-    # Destination records a REMOTE reference to the source's HBM-only block.
-    self.assertTrue(
-        store_b.insert_and_lock(
-            hashes,
-            [
-                kv_cache_store.RaidenBlockID(
-                    rid_a,
-                    host_block_id=0,
-                    device_block_id=-1,
-                    status=kv_cache_store.BlockStatus.REMOTE,
-                )
-            ],
-            on_host=True,
+    # Destination names the source's HBM-only block as the read source.
+    slices = [
+        kv_cache_store.RaidenBlockID(
+            rid_a,
+            host_block_id=0,
+            device_block_id=-1,
+            status=kv_cache_store.BlockStatus.REMOTE,
         )
-    )
-    self.assertTrue(store_b.read_remote(hashes))
+    ]
+    self.assertTrue(store_b.read_remote(hashes, slices, [0]))
 
     failed = False
     for _ in range(500):
@@ -1465,7 +1430,6 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         break
       time.sleep(0.01)
     self.assertCountEqual(done, hashes)
-    store.release(hashes)
     del built
 
 

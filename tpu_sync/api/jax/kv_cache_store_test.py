@@ -183,6 +183,7 @@ class KVCacheStoreTest(absltest.TestCase):
     # 2. Lookup with a partial miss at the end
     hashes_with_miss = [b"6001", b"6002", b"6003"]
     lookup_res = controller.lookup(hashes_with_miss)
+    controller.release(hashes_with_miss)
     self.assertLen(lookup_res, 2)
     self.assertEqual(lookup_res[0][0], b"6001")
     self.assertEqual(lookup_res[0][1].raiden_id.job_name, "inference_server")
@@ -191,10 +192,12 @@ class KVCacheStoreTest(absltest.TestCase):
     # Lookup with an early miss
     hashes_early_miss = [b"6001", b"6003", b"6002"]
     lookup_res_early = controller.lookup(hashes_early_miss)
+    controller.release(hashes_early_miss)
     self.assertLen(lookup_res_early, 1)
     self.assertEqual(lookup_res_early[0][0], b"6001")
 
     # 3. Delete
+    controller.release(hashes)
     controller.delete(hashes, slices)
     self.assertTrue(
         controller.insert(hashes, slices, True)[0]
@@ -230,8 +233,12 @@ class KVCacheStoreTest(absltest.TestCase):
     slice_4 = [kv_cache_store.RaidenId("inference_server", "3", "kv_cache", 0)]
     controller.insert(hash_4, slice_4, True)
 
-    self.assertEmpty(controller.lookup([b"7001", b"7002"]))
-    self.assertLen(controller.lookup([b"7002"]), 1)
+    res_old = controller.lookup([b"7001", b"7002"])
+    self.assertLen(res_old, 2)
+    controller.release([b"7001", b"7002"])
+    res = controller.lookup([b"7002"])
+    self.assertLen(res, 1)
+    controller.release([b"7002"])
 
   def test_partial_pin_rollback(self):
     controller = kv_cache_store.KVCacheStore(
@@ -261,8 +268,12 @@ class KVCacheStoreTest(absltest.TestCase):
         )[0]
     )
 
-    self.assertEmpty(controller.lookup([b"8001", b"8002"]))
-    self.assertLen(controller.lookup([b"8004", b"8005"]), 2)
+    res_old = controller.lookup([b"8001", b"8002"])
+    self.assertLen(res_old, 2)
+    controller.release([b"8001", b"8002"])
+    res = controller.lookup([b"8004", b"8005"])
+    self.assertLen(res, 2)
+    controller.release([b"8004", b"8005"])
 
   def test_large_and_arbitrary_length_hashes(self):
     controller = kv_cache_store.KVCacheStore(
@@ -281,6 +292,7 @@ class KVCacheStoreTest(absltest.TestCase):
     self.assertTrue(controller.insert(hashes, slices, True)[0])
 
     lookup_res = controller.lookup(hashes)
+    controller.release(hashes)
     self.assertLen(lookup_res, 2)
     self.assertEqual(lookup_res[0][0], large_hash)
     self.assertEqual(lookup_res[1][0], long_hash)
@@ -298,6 +310,7 @@ class KVCacheStoreTest(absltest.TestCase):
     self.assertTrue(controller.insert(hashes, slices, True)[0])
 
     res = controller.lookup(hashes, enable_global=True)
+    controller.release(hashes)
     self.assertLen(res, 1)
     self.assertEqual(res[0][0], b"local_only")
     self.assertEqual(res[0][1].raiden_id.job_name, "local_job")
@@ -321,6 +334,7 @@ class KVCacheStoreTest(absltest.TestCase):
     mock_impl.lookup.return_value = [(b"shared_hash", local_id)]
 
     res = controller.lookup([b"shared_hash"], enable_global=True)
+    controller.release([b"shared_hash"])
     self.assertLen(res, 1)
     self.assertEqual(res[0][0], b"shared_hash")
     self.assertEqual(res[0][1].raiden_id.job_name, "local_job")
@@ -344,6 +358,7 @@ class KVCacheStoreTest(absltest.TestCase):
     ]
 
     res = controller.lookup([b"global_1", b"global_2"], enable_global=True)
+    controller.release([b"global_1", b"global_2"])
     self.assertLen(res, 2)
     self.assertEqual(res[0][0], b"global_1")
     self.assertEqual(res[0][1].raiden_id.job_name, "job1")
@@ -386,6 +401,7 @@ class KVCacheStoreTest(absltest.TestCase):
     hashes = [b"9001"]
     # Should not fail, just return empty because the registry is now down.
     res = controller.lookup(hashes, enable_global=True)
+    controller.release(hashes)
     self.assertEmpty(res)
 
   def test_save_and_load_mocked(self):
@@ -456,11 +472,15 @@ class KVCacheStoreTest(absltest.TestCase):
     ]
     success = controller.insert_and_lock(remote_hashes, remote_slices, True)
     self.assertTrue(success)
-    self.assertEmpty(controller.lookup([b"local_1"]))
+    res_local = controller.lookup([b"local_1"])
+    self.assertLen(res_local, 1)
+    controller.release([b"local_1"])
 
     del_count = controller.release_and_delete(remote_hashes)
     self.assertEqual(del_count, 2)
-    self.assertLen(controller.lookup([b"local_1", b"local_2"]), 2)
+    res = controller.lookup([b"local_1", b"local_2"])
+    self.assertLen(res, 2)
+    controller.release([b"local_1", b"local_2"])
 
   def test_e2e_load(self):
     """Tests end-to-end load (H2D) on CPU."""
@@ -554,6 +574,7 @@ class KVCacheStoreTest(absltest.TestCase):
 
     # Verify LRU Status Upgrade in Store
     lookup_res1 = store.lookup([b"hash1"])
+    store.release([b"hash1"])
     self.assertLen(lookup_res1, 1)
     self.assertEqual(
         lookup_res1[0][1].status, kv_cache_store.BlockStatus.HOST_AND_HBM
@@ -562,6 +583,7 @@ class KVCacheStoreTest(absltest.TestCase):
     self.assertEqual(lookup_res1[0][1].device_block_id, 5)
 
     lookup_res2 = store.lookup([b"hash2"])
+    store.release([b"hash2"])
     self.assertLen(lookup_res2, 1)
     self.assertEqual(
         lookup_res2[0][1].status, kv_cache_store.BlockStatus.HOST_AND_HBM
@@ -680,6 +702,7 @@ class KVCacheStoreTest(absltest.TestCase):
         (hashes[1], 4, 6),
     ):
       res = store.lookup([hash_val])
+      store.release([hash_val])
       self.assertLen(res, 1)
       self.assertEqual(
           res[0][1].status, kv_cache_store.BlockStatus.HOST_AND_HBM
@@ -687,7 +710,6 @@ class KVCacheStoreTest(absltest.TestCase):
       self.assertEqual(res[0][1].host_block_id, expected_host)
       self.assertEqual(res[0][1].device_block_id, expected_device)
 
-    store.release(hashes)
 
   def test_e2e_save(self):
     """Tests end-to-end save (D2H) and load (H2D) back on TPU."""
@@ -751,7 +773,6 @@ class KVCacheStoreTest(absltest.TestCase):
         )
     ]
     self.assertTrue(store.insert([b"hash1"], slices_1, False)[0])
-    self.assertTrue(store.pin([b"hash1"]))
 
     slices_2 = [
         kv_cache_store.RaidenBlockID(
@@ -762,7 +783,6 @@ class KVCacheStoreTest(absltest.TestCase):
         )
     ]
     self.assertTrue(store.insert([b"hash2"], slices_2, False)[0])
-    self.assertTrue(store.pin([b"hash2"]))
 
     # 6. Trigger Save (D2H)
     self.assertTrue(store.save([b"hash1", b"hash2"]))
@@ -781,6 +801,7 @@ class KVCacheStoreTest(absltest.TestCase):
 
     # Verify status in LRU is HOST_AND_HBM, and host_block_id is allocated
     lookup_res1 = store.lookup([b"hash1"])
+    store.release([b"hash1"])
     self.assertLen(lookup_res1, 1)
     self.assertEqual(
         lookup_res1[0][1].status, kv_cache_store.BlockStatus.HOST_AND_HBM
@@ -789,6 +810,7 @@ class KVCacheStoreTest(absltest.TestCase):
     self.assertGreaterEqual(host_block_id1, 0)
 
     lookup_res2 = store.lookup([b"hash2"])
+    store.release([b"hash2"])
     self.assertLen(lookup_res2, 1)
     self.assertEqual(
         lookup_res2[0][1].status, kv_cache_store.BlockStatus.HOST_AND_HBM
@@ -809,6 +831,7 @@ class KVCacheStoreTest(absltest.TestCase):
     global_verified = False
     for _ in range(50):
       lookup_res = store2.lookup([b"hash1", b"hash2"], enable_global=True)
+      store2.release([b"hash1", b"hash2"])
       if len(lookup_res) == 2:
         self.assertEqual(lookup_res[0][0], b"hash1")
         self.assertEqual(

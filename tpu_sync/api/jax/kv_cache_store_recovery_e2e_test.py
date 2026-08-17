@@ -153,14 +153,13 @@ def _phase_a():
   ]
   inserted, evicted = store.insert(_HASHES, slices, on_host=False)
   assert inserted and not evicted
-  assert store.pin(_HASHES)
   store.save(_HASHES)
   _poll(store.poll_save_status, _NUM_BLOCKS, "save")
-  store.release(_HASHES)
 
   # The blocks are host-resident now; their bytes and the metadata table both
   # live in shared memory and must survive the crash below.
   lookup_res = store.lookup(_HASHES)
+  store.release(_HASHES)
   assert len(lookup_res) == _NUM_BLOCKS
   for i, (_, blk) in enumerate(lookup_res):
     assert blk.status == kv_cache_store.BlockStatus.HOST_AND_HBM, blk.status
@@ -185,6 +184,7 @@ def _phase_b(expect_recovery: bool):
   del rid
 
   lookup_res = store.lookup(_HASHES)
+  store.release(_HASHES)
   if not expect_recovery:
     assert not lookup_res, f"expected a cold start, got hits: {lookup_res}"
     print(_PHASE_B_COLD_MARKER, flush=True)
@@ -204,7 +204,6 @@ def _phase_b(expect_recovery: bool):
   assert store.pin(_HASHES)
   store.load(_HASHES, list(range(_NUM_BLOCKS)))
   _poll(store.poll_load_status, _NUM_BLOCKS, "load")
-  store.release(_HASHES)
 
   np.testing.assert_array_equal(np.asarray(tpu_cache), host_data)
   print(_PHASE_B_BYTES_MARKER, flush=True)

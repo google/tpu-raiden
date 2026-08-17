@@ -188,9 +188,10 @@ class KVCacheStore:
   def read_remote(
       self,
       block_hashes: list[bytes],
-      device_block_ids: list[int] = ...,
+      slices: list[RaidenBlockID],
+      device_block_ids: list[int],
   ) -> bool:
-    """Launches async H2H read from remote worker."""
+    """Reads REMOTE blocks from their owning peers into local HBM."""
     ...
   def poll_remote_read_status(self) -> tuple[list[bytes], list[bytes], list[bytes]]:
     """Polls status of active remote reads."""

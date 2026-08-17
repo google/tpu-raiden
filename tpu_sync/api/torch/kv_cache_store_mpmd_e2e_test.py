@@ -264,7 +264,6 @@ def _worker_save_load_main(argv):
           done = True
         if not done:
           time.sleep(0.01)
-      store.release(hashes)
 
     if rank == 0:
       print("=== [Rank 0] Loading checkpoint from Host DRAM into TPU HBM blocks [2, 3] (store.load) ===")
@@ -297,7 +296,6 @@ def _worker_save_load_main(argv):
           done = True
         if not done:
           time.sleep(0.01)
-      store.release(hashes)
 
     dist.barrier()
     try:
@@ -452,7 +450,6 @@ def _worker_read_remote_main(argv):
           done = True
         if not done:
           time.sleep(0.01)
-      store_a.release(hashes)
 
       # Wait for global registry propagation
       deadline = time.time() + 10.0
@@ -480,15 +477,14 @@ def _worker_read_remote_main(argv):
           if not done:
             time.sleep(0.01)
       else:
-        assert store_b.insert_and_lock(
-            hashes, slices_b, on_host=True
-        ), "insert_and_lock failed on store_b"
-  
+        # The read goes straight into TPU blocks [0, 1]; the slices from the
+        # lookup are the source coordinate, so there is nothing to insert and
+        # no second Load step afterwards.
         print("=== [Rank 0] Launching ReadRemote from Job A to Job B ===")
         assert store_b.read_remote(
-            hashes
+            hashes, slices_b, [0, 1]
         ), "read_remote launch failed on store_b"
-  
+
         done = False
         while not done:
           read_done, read_failed, _ = store_b.poll_remote_read_status()
@@ -498,20 +494,12 @@ def _worker_read_remote_main(argv):
             done = True
           if not done:
             time.sleep(0.01)
-  
-        # Now load blocks [0, 1] from Job B's host pool into TPU HBM
-        assert store_b.load(hashes, [0, 1]), "load failed on store_b"
-        done = False
-        while not done:
-          load_done, load_failed, _ = store_b.poll_load_status()
-          if load_failed:
-            raise RuntimeError(f"Job B Load failed: {load_failed}")
-          if len(load_done) == 2:
-            done = True
-          if not done:
-            time.sleep(0.01)
 
-      store_b.release_and_delete(hashes)
+        # The read left no local entry, so there is nothing to release here.
+        assert not store_b.lookup(hashes), "read_remote must record nothing"
+
+      if use_slices:
+        store_b.release_and_delete(hashes)
 
     dist.barrier()
     try:
@@ -693,7 +681,6 @@ def _worker_write_remote_main(argv):
           break
         time.sleep(0.01)
       assert done, "Job A WriteRemote timed out"
-      store_a.release(hashes)
 
       # Destination holds blocks locally on host DRAM
       lookup_res_b = store_b.lookup(hashes, enable_global=False)

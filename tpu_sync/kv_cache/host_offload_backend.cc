@@ -183,10 +183,19 @@ absl::StatusOr<BlockSliceList> HostOffloadBackend::Lookup(
     local_id = raiden_id_;
     for (size_t i = 0; i < block_hashes.size(); ++i) {
       const auto& hash = block_hashes[i];
-      const RaidenBlockID* existing = options.pin_found
-                                          ? lru_cache_.GetAndPin(hash)
-                                          : lru_cache_.Peek(hash);
+      // Peek in BOTH cases, so pin_found decides only whether a hit is pinned,
+      // never whether it is a hit. GetAndPin would also resurrect an eviction
+      // candidate -- it splices the node out of evict_candidate_list_ -- which
+      // would make a lookup silently un-queue a block the store had already
+      // decided to reclaim, and make the space accounting behind it wrong.
+      // Candidates are invisible to lookup; pinning must not change that.
+      const RaidenBlockID* existing = lru_cache_.Peek(hash);
       if (existing != nullptr) {
+        if (options.pin_found) {
+          // Not a candidate (Peek just proved it), so this only moves the node
+          // from the active LRU list to the pinned list.
+          lru_cache_.Pin(hash);
+        }
         local_hit[i] = true;
         continue;
       }
