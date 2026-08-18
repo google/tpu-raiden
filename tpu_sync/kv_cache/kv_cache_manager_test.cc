@@ -952,6 +952,56 @@ TEST(KVCacheManagerTest, H2dReadPipelinedSuccess) {
                           [](uint8_t v) { return v == 0x66; }));
 }
 
+TEST(KVCacheManagerTest, H2dReadBatchedPullSuccess) {
+  // More chunks than pull batches (4), so every batch carries multiple
+  // blocks and the batch boundaries (8 = 4 batches of 2) are exercised.
+  constexpr int kNumBlocks = 8;
+  TestKVCacheManager sender(/*num_layers=*/1, /*num_shards=*/1,
+                            /*slice_byte_size=*/128,
+                            /*host_blocks=*/kNumBlocks);
+  TestKVCacheManager receiver(/*num_layers=*/1, /*num_shards=*/1,
+                              /*slice_byte_size=*/128,
+                              /*host_blocks=*/kNumBlocks);
+
+  const std::optional<int> sender_port = sender.local_port();
+  ASSERT_TRUE(sender_port.has_value());
+  std::string sender_peer = absl::StrCat(sender.local_ip(), ":", *sender_port);
+
+  uint8_t* sender_buf = sender.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
+  uint8_t* receiver_buf =
+      receiver.GetHostPointer(/*layer_idx=*/0, /*shard_idx=*/0);
+  ASSERT_NE(sender_buf, nullptr);
+  ASSERT_NE(receiver_buf, nullptr);
+
+  for (int i = 0; i < kNumBlocks; ++i) {
+    std::memset(sender_buf + i * 128, 0x10 + i, 128);
+  }
+  std::memset(receiver_buf, 0, kNumBlocks * 128);
+
+  std::vector<int64_t> src_host_offsets;
+  std::vector<int64_t> dst_host_offsets;
+  std::vector<int64_t> dst_device_offsets;
+  std::vector<int64_t> copy_sizes;
+  for (int i = 0; i < kNumBlocks; ++i) {
+    src_host_offsets.push_back(i);
+    dst_host_offsets.push_back(i);
+    dst_device_offsets.push_back(i);
+    copy_sizes.push_back(1);
+  }
+
+  auto res = receiver.H2dRead(sender_peer, src_host_offsets, dst_host_offsets,
+                              dst_device_offsets, copy_sizes);
+  ASSERT_TRUE(res.ok()) << res.status().ToString();
+  EXPECT_TRUE(res->Await().ok());
+
+  for (int i = 0; i < kNumBlocks; ++i) {
+    EXPECT_TRUE(std::all_of(receiver_buf + i * 128,
+                            receiver_buf + (i + 1) * 128,
+                            [i](uint8_t v) { return v == 0x10 + i; }))
+        << "block " << i << " content mismatch";
+  }
+}
+
 TEST(KVCacheManagerTest, H2dReadCallsH2dForTpuHbmDestination) {
   TestKVCacheManager sender(/*num_layers=*/1, /*num_shards=*/1,
                             /*slice_byte_size=*/128, /*host_blocks=*/2);

@@ -37,6 +37,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
@@ -63,6 +64,50 @@
 namespace tpu_raiden {
 namespace kv_cache {
 namespace {
+
+// Reads a positive integer from an env var. Returns `fallback` if unset,
+// unparseable, or non-positive.
+int IntFromEnv(const char* name, int fallback) {
+  const char* raw = std::getenv(name);
+  if (raw == nullptr) return fallback;
+  int value = 0;
+  if (!absl::SimpleAtoi(raw, &value) || value <= 0) {
+    LOG(ERROR) << name << "=\"" << raw << "\" is not a positive integer; using "
+               << fallback;
+    return fallback;
+  }
+  return value;
+}
+
+// Remote-pull concurrency, read once per process. The two knobs multiply:
+// H2dRead splits its chunks into PullBatchCount() batches that run
+// concurrently on pull_pool_, and each batch's SyncPull opens
+// PullParallelism() connections of its own, so the peak stream count to a
+// peer is their product. Both are env-tunable so a sweep needs one build
+// rather than one per value.
+int PullBatchCount() {
+  static const int value = IntFromEnv("RAIDEN_PULL_BATCH_COUNT", 4);
+  return value;
+}
+
+int PullParallelism() {
+  static const int value = IntFromEnv("RAIDEN_PULL_PARALLELISM", 1);
+  return value;
+}
+
+// Sized to at least the batch count: a pool smaller than that queues batches
+// behind busy threads, which reads as a bogus throughput plateau in a sweep.
+size_t PullPoolSize() {
+  static const size_t value = std::max<size_t>(
+      IntFromEnv("RAIDEN_PULL_POOL_SIZE", 4), PullBatchCount());
+  return value;
+}
+
+void LogPullKnobs() {
+  LOG(INFO) << "KVCacheManagerBase remote-pull knobs: pool_size="
+            << PullPoolSize() << " batch_count=" << PullBatchCount()
+            << " parallelism=" << PullParallelism();
+}
 
 absl::Status ValidateOffsetsAndSizes(const std::vector<int64_t>& src_offsets,
                                      const std::vector<int64_t>& dst_offsets,
@@ -337,7 +382,8 @@ KVCacheManagerBase::KVCacheManagerBase(
   constexpr size_t kPoolSize = 4;
   dma_pool_ = std::make_unique<NumaThreadPool>(kPoolSize);
   push_pool_ = std::make_shared<NumaThreadPool>(kPoolSize);
-  pull_pool_ = std::make_unique<NumaThreadPool>(kPoolSize);
+  pull_pool_ = std::make_unique<NumaThreadPool>(PullPoolSize());
+  LogPullKnobs();
   InitBackgroundWorker();
 }
 
@@ -407,7 +453,8 @@ KVCacheManagerBase::KVCacheManagerBase(
   constexpr size_t kPoolSize = 4;
   dma_pool_ = std::make_unique<NumaThreadPool>(kPoolSize);
   push_pool_ = std::make_shared<NumaThreadPool>(kPoolSize);
-  pull_pool_ = std::make_unique<NumaThreadPool>(kPoolSize);
+  pull_pool_ = std::make_unique<NumaThreadPool>(PullPoolSize());
+  LogPullKnobs();
   InitTransportServer();
   InitBackgroundWorker();
 }
@@ -860,7 +907,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dRead(
     ASSIGN_OR_RETURN(
         auto h2h_fut,
         H2hReadExplicit(std::string(peer), src_block_ids, staging_block_ids,
-                        /*explicit_dst_ptrs=*/{}));
+                        /*explicit_dst_ptrs=*/{}, PullParallelism()));
     RETURN_IF_ERROR(h2h_fut.Await());
 
     return H2dSyncDispatch(dst_host_offsets_major_dim,
@@ -876,60 +923,85 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2dRead(
     }
   }
 
+  // One pull per chunk pays one full request-response round trip to the peer
+  // per chunk; SyncPull streams a whole batch of blocks over one connection.
+  // Batch the chunks into one pull per pool thread, so the wire cost is
+  // PullBatchCount() round trips instead of num_chunks, while one batch's H2D
+  // still overlaps another batch's network pull.
+  const size_t num_batches =
+      std::min(num_chunks, static_cast<size_t>(PullBatchCount()));
+
   auto state = std::make_shared<TransferPipelinedState>(
-      num_chunks, std::move(promise), std::move(all_holds));
+      num_batches, std::move(promise), std::move(all_holds));
 
   std::string peer_str(peer);
-  for (size_t i = 0; i < num_chunks; ++i) {
-    int src_block_id = src_block_ids[i];
-    int staging_block_id = staging_block_ids[i];
-    int64_t staging_offset = dst_host_offsets_major_dim[i];
-    int64_t dst_device_offset = dst_device_offsets_major_dim[i];
-    int64_t size = copy_sizes_major_dim[i];
+  const size_t base_chunks_per_batch = num_chunks / num_batches;
+  const size_t remainder = num_chunks % num_batches;
+  size_t begin = 0;
+  for (size_t b = 0; b < num_batches; ++b) {
+    const size_t end = begin + base_chunks_per_batch + (b < remainder ? 1 : 0);
 
-    pull_pool_->Schedule([this, state, peer_str, src_block_id, staging_block_id,
-                          staging_offset, dst_device_offset, size]() {
-      if (state->HasFailed()) {
-        state->MarkChunkComplete();
-        return;
-      }
+    std::vector<int> batch_src_ids(src_block_ids.begin() + begin,
+                                   src_block_ids.begin() + end);
+    std::vector<int> batch_staging_ids(staging_block_ids.begin() + begin,
+                                       staging_block_ids.begin() + end);
+    std::vector<int64_t> batch_staging_offsets(
+        dst_host_offsets_major_dim.begin() + begin,
+        dst_host_offsets_major_dim.begin() + end);
+    std::vector<int64_t> batch_device_offsets(
+        dst_device_offsets_major_dim.begin() + begin,
+        dst_device_offsets_major_dim.begin() + end);
+    std::vector<int64_t> batch_sizes(copy_sizes_major_dim.begin() + begin,
+                                     copy_sizes_major_dim.begin() + end);
+    begin = end;
 
-      auto h2h_fut_or =
-          H2hReadExplicit(peer_str, {src_block_id}, {staging_block_id},
-                          /*explicit_dst_ptrs=*/{});
-      if (!h2h_fut_or.ok()) {
-        state->SetError(h2h_fut_or.status());
-        state->MarkChunkComplete();
-        return;
-      }
+    pull_pool_->Schedule(
+        [this, state, peer_str, batch_src_ids = std::move(batch_src_ids),
+         batch_staging_ids = std::move(batch_staging_ids),
+         batch_staging_offsets = std::move(batch_staging_offsets),
+         batch_device_offsets = std::move(batch_device_offsets),
+         batch_sizes = std::move(batch_sizes)]() {
+          if (state->HasFailed()) {
+            state->MarkChunkComplete();
+            return;
+          }
 
-      absl::Status h2h_status = h2h_fut_or->Await();
-      if (!h2h_status.ok()) {
-        state->SetError(h2h_status);
-        state->MarkChunkComplete();
-        return;
-      }
+          auto h2h_fut_or =
+              H2hReadExplicit(peer_str, batch_src_ids, batch_staging_ids,
+                              /*explicit_dst_ptrs=*/{}, PullParallelism());
+          if (!h2h_fut_or.ok()) {
+            state->SetError(h2h_fut_or.status());
+            state->MarkChunkComplete();
+            return;
+          }
 
-      if (state->HasFailed()) {
-        state->MarkChunkComplete();
-        return;
-      }
+          absl::Status h2h_status = h2h_fut_or->Await();
+          if (!h2h_status.ok()) {
+            state->SetError(h2h_status);
+            state->MarkChunkComplete();
+            return;
+          }
 
-      auto h2d_fut_or =
-          H2dSyncDispatch({staging_offset}, {dst_device_offset}, {size});
-      if (!h2d_fut_or.ok()) {
-        state->SetError(h2d_fut_or.status());
-        state->MarkChunkComplete();
-        return;
-      }
+          if (state->HasFailed()) {
+            state->MarkChunkComplete();
+            return;
+          }
 
-      h2d_fut_or->OnReady([state](auto status_or) {
-        if (!status_or.ok()) {
-          state->SetError(status_or.status());
-        }
-        state->MarkChunkComplete();
-      });
-    });
+          auto h2d_fut_or = H2dSyncDispatch(batch_staging_offsets,
+                                            batch_device_offsets, batch_sizes);
+          if (!h2d_fut_or.ok()) {
+            state->SetError(h2d_fut_or.status());
+            state->MarkChunkComplete();
+            return;
+          }
+
+          h2d_fut_or->OnReady([state](auto status_or) {
+            if (!status_or.ok()) {
+              state->SetError(status_or.status());
+            }
+            state->MarkChunkComplete();
+          });
+        });
   }
 
   return raiden::PjRtCopyFuture(std::move(aggregate_future),
@@ -1142,15 +1214,24 @@ absl::StatusOr<raiden::PjRtCopyFuture> KVCacheManagerBase::H2hReadExplicit(
     const std::vector<uint8_t*>& explicit_dst_ptrs, int parallelism,
     tpu_raiden::transport::MajorOrder major_order,
     tpu_raiden::transport::BlockReceivedCallback on_block_received) {
-  absl::MutexLock lock(server_init_mu_);
-  if (!server_) {
+  // Take the transport pointer under the lock but run the pull outside it
+  // (same pattern as StartPushInternal): SyncPull blocks for the whole
+  // network transfer, and holding server_init_mu_ across it serializes every
+  // concurrent pull in the process -- including the pull_pool_ pipeline in
+  // H2dRead, which degenerates to one round trip at a time.
+  tpu_raiden::transport::BlockTransport* transport_server = nullptr;
+  {
+    absl::MutexLock lock(server_init_mu_);
+    transport_server = server_.get();
+  }
+  if (!transport_server) {
     return absl::FailedPreconditionError("Transport server is not running");
   }
   ASSIGN_OR_RETURN(
       std::vector<int> allocated_ids,
-      server_->SyncPull({peer}, src_block_ids, local_block_ids,
-                        explicit_dst_ptrs, parallelism, major_order,
-                        on_block_received, kLeaseAuthorizedPullUuid));
+      transport_server->SyncPull({peer}, src_block_ids, local_block_ids,
+                                 explicit_dst_ptrs, parallelism, major_order,
+                                 on_block_received, kLeaseAuthorizedPullUuid));
   return raiden::PjRtCopyFuture(std::vector<raiden::BufferHolder>{});
 }
 
