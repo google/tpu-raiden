@@ -3526,8 +3526,8 @@ TEST_F(StoreDiscoveryTest, StoreMonitorHeartbeatsTheRegistration) {
   config.global_registry_address = registry_address_;
   config.kv_pool_group = "groupA";
   config.evict_tier = 1;
-  config.monitor_config.enable = true;
-  config.monitor_config.heartbeat_period = absl::Milliseconds(300);
+  config.enable_store_monitor = true;
+  config.store_monitor_heartbeat_period = absl::Milliseconds(300);
 
   auto store_or = KVCacheStore::Create(config, /*capacity=*/16,
                                        registry_address_, rid,
@@ -3572,7 +3572,7 @@ TEST_F(StoreDiscoveryTest, StoreMonitorWithoutARegistryIsAnError) {
   config.type = "HostOffloadBackend";
   config.capacity = 16;
   config.raiden_id = rid;
-  config.monitor_config.enable = true;
+  config.enable_store_monitor = true;
 
   auto store_or = KVCacheStore::Create(config, /*capacity=*/16,
                                        /*global_registry_address=*/"", rid,
@@ -3972,9 +3972,7 @@ class RemoteWriteSourceTest : public StoreDiscoveryTest {
 
   // Stands the fake up and publishes it under `dst` so the source resolves it
   // through the registry exactly as it would a real peer.
-  void StartFakeDestination(const RaidenId& dst,
-                            absl::string_view kv_pool_group = "",
-                            int32_t evict_tier = 0) {
+  void StartFakeDestination(const RaidenId& dst) {
     grpc::ServerBuilder builder;
     int port = 0;
     builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(),
@@ -3984,9 +3982,7 @@ class RemoteWriteSourceTest : public StoreDiscoveryTest {
     ASSERT_NE(fake_destination_server_, nullptr);
     ASSERT_TRUE(client_
                     ->RegisterStore(dst, "127.0.0.1:" + std::to_string(port),
-                                    /*controller_address=*/"",
-                                    /*ttl=*/absl::ZeroDuration(), kv_pool_group,
-                                    evict_tier)
+                                    /*controller_address=*/"")
                     .ok());
   }
 
@@ -4483,212 +4479,6 @@ TEST_F(RemoteWriteSourceTest, AStaleButRegisteredDestinationFailsPromptly) {
   auto status = src_store->Save({"a"}, dst);
   EXPECT_FALSE(status.ok())
       << "offering to a dead peer should fail rather than hang";
-}
-
-class EvictSweepTest : public RemoteWriteSourceTest {
- protected:
-  // A store with the sweep on. With the 0.5/0.75 watermarks, pressure
-  // starts below capacity/2 free blocks and relief comes at 3/4 free.
-  absl::StatusOr<std::unique_ptr<KVCacheStore>> MakeSweepStore(
-      const RaidenId& id, absl::string_view kv_pool_group,
-      size_t capacity = kCapacity) {
-    BackendConfig config;
-    config.type = "HostOffloadBackend";
-    config.capacity = capacity;
-    config.raiden_id = id;
-    config.global_registry_address = registry_address_;
-    config.kv_pool_group = std::string(kv_pool_group);
-    config.monitor_config.enable = true;
-    config.monitor_config.enable_evict_sweep = true;
-    config.monitor_config.evict_sweep_period = absl::Milliseconds(200);
-    config.monitor_config.evict_low_watermark = 0.5;
-    config.monitor_config.evict_high_watermark = 0.75;
-    return KVCacheStore::Create(config, capacity, registry_address_, id,
-                                /*num_shards=*/1,
-                                /*shard_size_bytes=*/1024,
-                                /*store_server_ip=*/"127.0.0.1");
-  }
-
-  // Fills `store` with cold (unpinned) host blocks whose ids really come from
-  // the block manager, so the free-block count the sweep watches drops and
-  // eviction raises it back.
-  void PopulateCold(KVCacheStore& store, const RaidenId& id,
-                    const std::vector<std::string>& hashes) {
-    auto ids_or = store.raiden_controller()->AllocateBlockIds(hashes.size());
-    ASSERT_TRUE(ids_or.ok()) << ids_or.status().ToString();
-    std::vector<RaidenBlockID> slices;
-    for (size_t i = 0; i < hashes.size(); ++i) {
-      slices.push_back(RaidenBlockID(id, (*ids_or)[i], BlockStatus::HOST));
-    }
-    ASSERT_TRUE(store.InsertAndLock(hashes, slices, /*on_host=*/true));
-    store.Release(hashes);
-  }
-
-  // The sweep runs on the monitor's thread; wait until it has raised the free
-  // count to `expected_free`. Free blocks, not cache size, because eviction
-  // erases the cache entry a beat before the block id is deallocated.
-  void AwaitSweepFreed(KVCacheStore& store, int expected_free) {
-    for (int i = 0; i < 1000; ++i) {
-      if (store.raiden_controller()->block_manager()->num_free_blocks() ==
-          expected_free) {
-        break;
-      }
-      absl::SleepFor(absl::Milliseconds(10));
-    }
-    EXPECT_EQ(store.raiden_controller()->block_manager()->num_free_blocks(),
-              expected_free);
-  }
-
-  // How many of `hashes` the store still resolves locally.
-  static size_t CountResident(KVCacheStore& store,
-                              const std::vector<std::string>& hashes) {
-    size_t resident = 0;
-    for (const std::string& hash : hashes) {
-      auto found = store.backend()->Lookup({hash});
-      if (found.ok() && found->size() == 1) {
-        ++resident;
-      }
-    }
-    return resident;
-  }
-};
-
-// The main path: pressure starts an episode, the sweep fetches a same-group
-// higher-tier target from the registry and demotes LRU-cold batches to it
-// until the high watermark, freeing the local copies.
-TEST_F(EvictSweepTest, DemotesColdBlocksToAPlacementTarget) {
-  RaidenId src{"sweep_src", "0", "kv", 0};
-  RaidenId dst{"sweep_dst", "0", "kv", 0};
-  // Large enough that reaching the high watermark takes several batches of
-  // the built-in batch cap (128).
-  auto store_or = MakeSweepStore(src, "sweepgroup", /*capacity=*/600);
-  ASSERT_TRUE(store_or.ok()) << store_or.status().ToString();
-  KVCacheStore& store = **store_or;
-  ASSERT_EQ(store.raiden_controller()->block_manager()->total_blocks(), 600);
-
-  StartFakeDestination(dst, "sweepgroup", /*evict_tier=*/1);
-  proto::PollWriteRemoteResponse verdict;
-  verdict.set_state(proto::PollWriteRemoteResponse::COMMITTED);
-  fake_destination_.SetPollResponse(verdict);
-
-  // 500 of 600 blocks in use: free ratio 1/6, below the 0.5 low watermark.
-  std::vector<std::string> hashes;
-  for (int i = 0; i < 500; ++i) {
-    hashes.push_back(absl::StrCat("h", i));
-  }
-  PopulateCold(store, src, hashes);
-
-  // The deficit to the 0.75 high watermark is 350 blocks: batches of
-  // 128 + 128 + 94, each demoted and freed.
-  AwaitSweepFreed(store, 450);
-  EXPECT_EQ(fake_destination_.write_calls(), 3);
-  EXPECT_EQ(store.backend()->GetSize(), 150);
-  EXPECT_EQ(CountResident(store, hashes), 150);
-}
-
-// A target that cannot be reached is dropped for the episode and the same
-// batch goes to the next target in the ranking.
-TEST_F(EvictSweepTest, SkipsAnUnreachableTargetForTheNextOne) {
-  RaidenId src{"sweep_src_skip", "0", "kv", 0};
-  RaidenId dead{"sweep_dead", "0", "kv", 0};
-  RaidenId dst{"sweep_dst_skip", "0", "kv", 0};
-  auto store_or = MakeSweepStore(src, "skipgroup");
-  ASSERT_TRUE(store_or.ok()) << store_or.status().ToString();
-  KVCacheStore& store = **store_or;
-
-  // A dead peer, ranked first: registered at tier 1 with the most reported
-  // free blocks, but nothing listens on its address.
-  ASSERT_TRUE(client_
-                  ->RegisterStore(dead, "127.0.0.1:1",
-                                  /*controller_address=*/"",
-                                  /*ttl=*/absl::ZeroDuration(), "skipgroup",
-                                  /*evict_tier=*/1)
-                  .ok());
-  global_registry::StoreStatus roomy;
-  roomy.set_free_blocks(1000);
-  ASSERT_TRUE(client_->Heartbeat(dead, roomy).ok());
-  StartFakeDestination(dst, "skipgroup", /*evict_tier=*/1);
-  proto::PollWriteRemoteResponse verdict;
-  verdict.set_state(proto::PollWriteRemoteResponse::COMMITTED);
-  fake_destination_.SetPollResponse(verdict);
-
-  PopulateCold(store, src, {"a", "b", "c", "d", "e", "f"});
-
-  // The offer to the dead peer fails, it is dropped, and the batch lands on
-  // the live target instead.
-  AwaitSweepFreed(store, 6);
-  EXPECT_EQ(fake_destination_.write_calls(), 1);
-  EXPECT_EQ(store.backend()->GetSize(), 2);
-}
-
-// A target that accepts but then fails the transfer is dropped too; with no
-// target left, the next step falls back to dropping the blocks locally.
-TEST_F(EvictSweepTest, ATransferFailureFallsBackToLocalDrop) {
-  RaidenId src{"sweep_src_fail", "0", "kv", 0};
-  RaidenId dst{"sweep_dst_fail", "0", "kv", 0};
-  auto store_or = MakeSweepStore(src, "failgroup");
-  ASSERT_TRUE(store_or.ok()) << store_or.status().ToString();
-  KVCacheStore& store = **store_or;
-
-  StartFakeDestination(dst, "failgroup", /*evict_tier=*/1);
-  proto::PollWriteRemoteResponse verdict;
-  verdict.set_state(proto::PollWriteRemoteResponse::FAILED);
-  fake_destination_.SetPollResponse(verdict);
-
-  PopulateCold(store, src, {"a", "b", "c", "d", "e", "f"});
-
-  // One offer is accepted and fails; the target is dropped and the free
-  // count still recovers, through local drops.
-  AwaitSweepFreed(store, 6);
-  EXPECT_EQ(fake_destination_.write_calls(), 1);
-  EXPECT_EQ(store.backend()->GetSize(), 2);
-}
-
-// The bottom tier has no placement targets; under pressure the sweep drops
-// cold blocks locally instead -- the same discard the allocation path would
-// be forced into later, done early.
-TEST_F(EvictSweepTest, DropsLocallyWhenThereAreNoTargets) {
-  RaidenId src{"sweep_src_bottom", "0", "kv", 0};
-  auto store_or = MakeSweepStore(src, "sweepgroup_bottom");
-  ASSERT_TRUE(store_or.ok()) << store_or.status().ToString();
-  KVCacheStore& store = **store_or;
-
-  PopulateCold(store, src, {"a", "b", "c", "d", "e", "f"});
-
-  AwaitSweepFreed(store, 6);
-  EXPECT_EQ(store.backend()->GetSize(), 2);
-  EXPECT_EQ(fake_destination_.write_calls(), 0);
-}
-
-// The sweep flag rides on the monitor; asking for one without the other is a
-// contradiction, as are watermarks that never let the sweep stop.
-TEST_F(EvictSweepTest, SweepConfigContradictionsAreErrors) {
-  RaidenId id{"sweep_misconfigured", "0", "kv", 0};
-  BackendConfig config;
-  config.type = "HostOffloadBackend";
-  config.capacity = kCapacity;
-  config.raiden_id = id;
-  config.global_registry_address = registry_address_;
-  config.monitor_config.enable_evict_sweep = true;
-
-  auto no_monitor = KVCacheStore::Create(config, /*capacity=*/kCapacity,
-                                         registry_address_, id,
-                                         /*num_shards=*/1,
-                                         /*shard_size_bytes=*/1024,
-                                         /*store_server_ip=*/"127.0.0.1");
-  EXPECT_TRUE(absl::IsFailedPrecondition(no_monitor.status()))
-      << no_monitor.status().ToString();
-
-  config.monitor_config.enable = true;
-  config.monitor_config.evict_low_watermark = 0.5;
-  config.monitor_config.evict_high_watermark = 0.25;
-  auto inverted = KVCacheStore::Create(config, /*capacity=*/kCapacity,
-                                       registry_address_, id,
-                                       /*num_shards=*/1,
-                                       /*shard_size_bytes=*/1024,
-                                       /*store_server_ip=*/"127.0.0.1");
-  EXPECT_TRUE(absl::IsFailedPrecondition(inverted.status()))
-      << inverted.status().ToString();
 }
 
 // ---------------------------------------------------------------------------

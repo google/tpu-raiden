@@ -15,7 +15,6 @@
 #include "tpu_sync/kv_cache/kv_cache_store.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -56,8 +55,8 @@
 #include "tpu_sync/kv_cache/kv_cache_store_backend_factory.h"
 #include "tpu_sync/kv_cache/raiden_id.h"
 #include "tpu_sync/kv_cache/reshard/reshard_service.h"
-#include "tpu_sync/kv_cache/store_monitor.h"
 #include "tpu_sync/rpc/raiden_service.pb.h"
+#include "tpu_sync/kv_cache/store_monitor.h"
 
 namespace tpu_raiden {
 namespace kv_cache {
@@ -69,19 +68,6 @@ namespace {
 // from anyway -- the next heartbeat's NotFound answer makes the monitor
 // re-register.
 constexpr int kRegistrationTtlInHeartbeats = 3;
-
-// Evict-sweep defaults. The watermarks can sit this low because detection is
-// not periodic: the allocation path nudges the sweep the moment free blocks
-// dip below the low watermark, so the cushion only has to cover the demotion
-// ramp-up, not a polling interval.
-constexpr double kDefaultEvictLowWatermark = 0.03;
-constexpr double kDefaultEvictHighWatermark = 0.05;
-// Cap on one demotion batch. The batch is sized by what the high watermark
-// still needs; this cap only keeps a single sweep step short, since Stop()
-// and an interleaved heartbeat wait for at most one step.
-constexpr int kMaxEvictBatchBlocks = 128;
-// Placement targets requested per pressure episode.
-constexpr int32_t kMaxPlacementTargets = 4;
 
 // Bind-and-advertise address for this store's RaidenController.
 //
@@ -112,7 +98,8 @@ absl::Status ValidateConstructionRules(absl::string_view store_server_ip,
         "store's services. Same-host use: \"127.0.0.1\".");
   }
   if (store_server_ip == "[::]" || store_server_ip == "::" ||
-      store_server_ip == "0.0.0.0" || store_server_ip == "0:0:0:0:0:0:0:0") {
+      store_server_ip == "0.0.0.0" ||
+      store_server_ip == "0:0:0:0:0:0:0:0") {
     return absl::InvalidArgumentError(absl::StrCat(
         "store_server_ip may not be a wildcard (got \"", store_server_ip,
         "\"): a wildcard binds but cannot be published or dialled."));
@@ -170,9 +157,9 @@ MakeRaidenController(const RaidenId& raiden_id, size_t capacity, int num_shards,
 absl::StatusOr<std::unique_ptr<KVCacheStore>> KVCacheStore::Create(
     absl::Span<const BackendConfig> backend_configs, size_t capacity,
     absl::string_view global_registry_address, RaidenId raiden_id,
-    int num_shards, int64_t shard_size_bytes, absl::string_view store_server_ip,
-    int raiden_controller_port, std::optional<KVCacheMetadata> metadata,
-    int expected_worker_count) {
+    int num_shards, int64_t shard_size_bytes,
+    absl::string_view store_server_ip, int raiden_controller_port,
+    std::optional<KVCacheMetadata> metadata, int expected_worker_count) {
   if (backend_configs.empty()) {
     return absl::InvalidArgumentError("backend_configs must not be empty");
   }
@@ -252,33 +239,11 @@ absl::StatusOr<std::unique_ptr<KVCacheStore>> KVCacheStore::Create(
   // these attributes.
   store->kv_pool_group_ = effective_config0.kv_pool_group;
   store->evict_tier_ = effective_config0.evict_tier;
-  StoreMonitorConfig& monitor_config = store->monitor_config_;
-  monitor_config = effective_config0.monitor_config;
-  if (monitor_config.heartbeat_period <= absl::ZeroDuration()) {
-    monitor_config.heartbeat_period = StoreMonitor::kDefaultHeartbeatPeriod;
-  }
-  if (monitor_config.evict_low_watermark <= 0.0) {
-    monitor_config.evict_low_watermark = kDefaultEvictLowWatermark;
-  }
-  if (monitor_config.evict_high_watermark <= 0.0) {
-    monitor_config.evict_high_watermark = kDefaultEvictHighWatermark;
-  }
-  if (monitor_config.enable_evict_sweep) {
-    if (!monitor_config.enable) {
-      return absl::FailedPreconditionError(
-          "StoreMonitorConfig.enable_evict_sweep requires the monitor "
-          "(StoreMonitorConfig.enable): the sweep runs on the store "
-          "monitor's schedule.");
-    }
-    if (monitor_config.evict_high_watermark <
-            monitor_config.evict_low_watermark ||
-        monitor_config.evict_high_watermark > 1.0) {
-      return absl::FailedPreconditionError(absl::StrCat(
-          "evict watermarks must satisfy low <= high <= 1, got low=",
-          monitor_config.evict_low_watermark,
-          " high=", monitor_config.evict_high_watermark));
-    }
-  }
+  store->enable_store_monitor_ = effective_config0.enable_store_monitor;
+  store->store_monitor_heartbeat_period_ =
+      effective_config0.store_monitor_heartbeat_period > absl::ZeroDuration()
+          ? effective_config0.store_monitor_heartbeat_period
+          : StoreMonitor::kDefaultHeartbeatPeriod;
 
   if (store->raiden_controller_ != nullptr) {
     RETURN_IF_ERROR(
@@ -308,26 +273,19 @@ absl::StatusOr<std::unique_ptr<KVCacheStore>> KVCacheStore::Create(
     RETURN_IF_ERROR(host_backend->RegisterKVTransferSpecFromWorkers());
   }
 
-  if (monitor_config.enable) {
+  if (store->enable_store_monitor_) {
     // The flag promises heartbeats; a store that never registered has
     // nothing to heartbeat, so this configuration is a contradiction, not a
     // degraded mode.
     if (!store->registered_in_global_registry_) {
       return absl::FailedPreconditionError(
-          "StoreMonitorConfig.enable requires a global_registry_address: the "
+          "enable_store_monitor requires a global_registry_address: the "
           "monitor's heartbeats refresh this store's registration there.");
     }
-    StoreMonitor::Options monitor_options;
-    monitor_options.heartbeat_period = monitor_config.heartbeat_period;
-    if (monitor_config.evict_sweep_period > absl::ZeroDuration()) {
-      monitor_options.sweep_period = monitor_config.evict_sweep_period;
-    }
-    StoreMonitor::SweepFn sweep_fn;
-    if (monitor_config.enable_evict_sweep) {
-      sweep_fn = [s = store.get()] { return s->SweepOnce(); };
-    }
     store->store_monitor_ = std::make_unique<StoreMonitor>(
-        monitor_options, store->registry_client_, store->raiden_id_,
+        StoreMonitor::Options{
+            .heartbeat_period = store->store_monitor_heartbeat_period_},
+        store->registry_client_, store->raiden_id_,
         /*status_fn=*/
         [s = store.get()] {
           global_registry::StoreStatus status;
@@ -344,13 +302,11 @@ absl::StatusOr<std::unique_ptr<KVCacheStore>> KVCacheStore::Create(
               s->raiden_controller_ != nullptr
                   ? s->raiden_controller_->controller_address()
                   : "",
-              kRegistrationTtlInHeartbeats *
-                  s->monitor_config_.heartbeat_period,
+              kRegistrationTtlInHeartbeats * s->store_monitor_heartbeat_period_,
               !s->kv_pool_group_.empty() ? s->kv_pool_group_
                                          : s->raiden_id_.job_name,
               s->evict_tier_);
-        },
-        std::move(sweep_fn));
+        });
     store->store_monitor_->Start();
   }
 
@@ -360,13 +316,14 @@ absl::StatusOr<std::unique_ptr<KVCacheStore>> KVCacheStore::Create(
 absl::StatusOr<std::unique_ptr<KVCacheStore>> KVCacheStore::Create(
     const BackendConfig& config, size_t capacity,
     absl::string_view global_registry_address, RaidenId raiden_id,
-    int num_shards, int64_t shard_size_bytes, absl::string_view store_server_ip,
-    int raiden_controller_port, std::optional<KVCacheMetadata> metadata,
-    int expected_worker_count) {
-  return KVCacheStore::Create(
-      absl::MakeConstSpan(&config, 1), capacity, global_registry_address,
-      raiden_id, num_shards, shard_size_bytes, store_server_ip,
-      raiden_controller_port, std::move(metadata), expected_worker_count);
+    int num_shards, int64_t shard_size_bytes,
+    absl::string_view store_server_ip, int raiden_controller_port,
+    std::optional<KVCacheMetadata> metadata, int expected_worker_count) {
+  return KVCacheStore::Create(absl::MakeConstSpan(&config, 1), capacity,
+                              global_registry_address, raiden_id, num_shards,
+                              shard_size_bytes, store_server_ip,
+                              raiden_controller_port, std::move(metadata),
+                              expected_worker_count);
 }
 
 absl::StatusOr<std::unique_ptr<KVCacheStore>> KVCacheStore::CreateReshardStore(
@@ -390,13 +347,14 @@ absl::StatusOr<std::unique_ptr<KVCacheStore>> KVCacheStore::CreateReshardStore(
 
   // num_shards=1 gives the controller an initial partition; workers dynamically
   // register their actual shard assignments via WorkerService.
-  ASSIGN_OR_RETURN(auto store, KVCacheStore::Create(
-                                   cfg, /*capacity=*/1,
-                                   /*global_registry_address=*/"", raiden_id,
-                                   /*num_shards=*/1, /*shard_size_bytes=*/0,
-                                   store_server_ip, raiden_controller_port,
-                                   /*metadata=*/std::nullopt,
-                                   /*expected_worker_count=*/0));
+  ASSIGN_OR_RETURN(auto store,
+                   KVCacheStore::Create(
+                       cfg, /*capacity=*/1,
+                       /*global_registry_address=*/"", raiden_id,
+                       /*num_shards=*/1, /*shard_size_bytes=*/0,
+                       store_server_ip, raiden_controller_port,
+                       /*metadata=*/std::nullopt,
+                       /*expected_worker_count=*/0));
 
   // Initialize ReshardService with WorkerDelivery::Mode::kController.
   reshard::ReshardService::Options reshard_opts;
@@ -515,7 +473,8 @@ KVCacheStore::KVCacheStore(
     : raiden_id_(raiden_id),
       store_server_ip_(store_server_ip),
       write_through_pool_(std::make_unique<::tpu_raiden::NumaThreadPool>(4)) {
-  if (absl::Status v = ValidateConstructionRules(store_server_ip, num_shards);
+  if (absl::Status v = ValidateConstructionRules(store_server_ip,
+                                                 num_shards);
       !v.ok()) {
     LOG(FATAL) << "KVCacheStore construction validation failed: " << v.message()
                << " Use KVCacheStore::Create() for a recoverable error.";
@@ -575,7 +534,8 @@ KVCacheStore::KVCacheStore(
     std::unique_ptr<::tpu_raiden::controller::RaidenController>
         raiden_controller,
     absl::string_view global_registry_address, RaidenId raiden_id,
-    std::optional<KVCacheMetadata> metadata, absl::string_view store_server_ip)
+    std::optional<KVCacheMetadata> metadata,
+    absl::string_view store_server_ip)
     : raiden_id_(raiden_id),
       raiden_controller_(std::move(raiden_controller)),
       store_server_ip_(store_server_ip),
@@ -583,8 +543,7 @@ KVCacheStore::KVCacheStore(
   if (absl::Status v =
           ValidateConstructionRules(store_server_ip, /*num_shards=*/1);
       !v.ok()) {
-    LOG(FATAL) << "KVCacheStore construction validation failed: "
-               << v.message();
+    LOG(FATAL) << "KVCacheStore construction validation failed: " << v.message();
   }
   if (raiden_controller_ == nullptr) {
     LOG(FATAL) << "KVCacheStore requires a RaidenController; the "
@@ -684,9 +643,10 @@ absl::Status KVCacheStore::EnsureStoreServerAndRegister(
   if (!status.ok()) {
     store_server_ = nullptr;
     owned_store_server_.reset();
-    return absl::Status(status.code(),
-                        absl::StrCat("Failed to start KVCacheStoreServer on ",
-                                     bind_address, ": ", status.message()));
+    return absl::Status(
+        status.code(),
+        absl::StrCat("Failed to start KVCacheStoreServer on ", bind_address,
+                     ": ", status.message()));
   }
 
   // The server is the single source of truth for its own address -- it
@@ -709,16 +669,17 @@ absl::Status KVCacheStore::EnsureStoreServerAndRegister(
       raiden_id_, store_server_address_,
       raiden_controller_ != nullptr ? raiden_controller_->controller_address()
                                     : "",
-      monitor_config_.enable
-          ? kRegistrationTtlInHeartbeats * monitor_config_.heartbeat_period
+      enable_store_monitor_
+          ? kRegistrationTtlInHeartbeats * store_monitor_heartbeat_period_
           : absl::ZeroDuration(),
       !kv_pool_group_.empty() ? kv_pool_group_ : raiden_id_.job_name,
       evict_tier_);
   if (!register_status.ok()) {
     return absl::Status(
         register_status.code(),
-        absl::StrCat("Failed to publish store address ", store_server_address_,
-                     " to the global registry: ", register_status.message()));
+        absl::StrCat("Failed to publish store address ",
+                     store_server_address_, " to the global registry: ",
+                     register_status.message()));
   }
   registered_in_global_registry_ = true;
   LOG(INFO) << "KVCacheStore published at " << store_server_address_;
@@ -1556,164 +1517,11 @@ size_t KVCacheStore::Evict(const std::vector<std::string>& block_hashes) {
   return host_ids_to_deallocate.size();
 }
 
-bool KVCacheStore::SweepOnce() {
-  const int free_blocks =
-      raiden_controller_->block_manager()->num_free_blocks();
-  const int total_blocks = raiden_controller_->block_manager()->total_blocks();
-  if (total_blocks <= 0) {
-    return false;
-  }
-  const double free_ratio = static_cast<double>(free_blocks) / total_blocks;
-  // Ends the current pressure episode; the next one re-fetches targets.
-  auto end_episode = [this] {
-    sweep_active_ = false;
-    placement_targets_.clear();
-    return false;
-  };
-
-  if (!sweep_active_) {
-    // Idle and enough free blocks: nothing to do.
-    if (free_ratio >= monitor_config_.evict_low_watermark) {
-      return false;
-    }
-    // Free blocks fell below the low watermark: a pressure episode begins
-    // (it ends when they recover to the high watermark). The targets are
-    // fetched once here and reused for the whole episode, so even a long
-    // drain costs one registry read. If fleets of stores hitting pressure
-    // together ever make these per-episode reads a load problem for the
-    // registry, the fetch could be decoupled from the sweep into its own
-    // periodic task maintaining a local target list -- at the cost of
-    // staler placement data.
-    sweep_active_ = true;
-    placement_targets_.clear();
-    auto targets_or =
-        registry_client_->GetPlacementTargets(raiden_id_, kMaxPlacementTargets);
-    if (targets_or.ok()) {
-      for (const auto& info : *targets_or) {
-        placement_targets_.push_back(RaidenId{
-            info.raiden_id().job_name(), info.raiden_id().job_replica_id(),
-            info.raiden_id().data_name(),
-            static_cast<int>(info.raiden_id().data_replica_idx())});
-      }
-    } else {
-      LOG(WARNING) << "Evict sweep could not fetch placement targets: "
-                   << targets_or.status()
-                   << ". Dropping cold blocks locally instead.";
-    }
-  } else if (free_ratio >= monitor_config_.evict_high_watermark) {
-    // Recovered to the high watermark: the episode is over.
-    return end_episode();
-  }
-
-  // One batch per step, sized to what the high watermark still needs and
-  // capped so a single step stays short.
-  const int deficit =
-      static_cast<int>(
-          std::ceil(monitor_config_.evict_high_watermark * total_blocks)) -
-      free_blocks;
-  std::vector<std::string> batch;
-  {
-    absl::MutexLock lock(mutex_);
-    batch =
-        backend()->GetEvictableKeys(std::min(deficit, kMaxEvictBatchBlocks));
-  }
-  if (batch.empty()) {
-    // Everything left is pinned; nothing more this episode can free.
-    return end_episode();
-  }
-
-  // Offer the batch to the episode's targets in order. Every iteration
-  // either sends the batch or drops one target, so this ends.
-  while (!placement_targets_.empty()) {
-    const RaidenId dst = placement_targets_.front();
-    absl::Status offered = WriteRemote(batch, dst);
-    if (!offered.ok()) {
-      // Refused (peer out of free blocks) or unreachable: this target is
-      // out for the rest of the episode; try the batch on the next one.
-      LOG(INFO) << "Evict sweep target " << dst
-                << " declined a demotion batch: " << offered;
-      placement_targets_.erase(placement_targets_.begin());
-      continue;
-    }
-    const BatchWriteResult result = WaitForBatchWriteResult(batch);
-    const size_t evicted = Evict(result.freeable);
-    if (result.transfer_failed) {
-      // The peer accepted but a transfer failed; the failed blocks stay
-      // local. Drop the target so the next step retries them elsewhere.
-      placement_targets_.erase(placement_targets_.begin());
-    } else if (evicted == 0) {
-      // The peer holds the whole batch, yet nothing could be freed locally:
-      // readers pinned every block between the offer and here. Re-offering
-      // the same keys could spin without raising the free count, so end the
-      // episode; the next wake re-evaluates.
-      return end_episode();
-    }
-    return true;
-  }
-
-  // No target will take the batch (none exist, all dropped, or the registry
-  // was unreachable): drop it locally -- the same discard AllocateBlockIds
-  // would be forced into later, done early enough to keep absorbing writes.
-  if (Evict(batch) == 0) {
-    // The whole batch got pinned since it was picked: end the episode
-    // rather than spin on the same keys.
-    return end_episode();
-  }
-  return true;
-}
-
-KVCacheStore::BatchWriteResult KVCacheStore::WaitForBatchWriteResult(
-    const std::vector<std::string>& batch) {
-  // The sweep is the only WriteRemote caller, so every drained result
-  // belongs to this batch. WriteRemote's HOLD deadline guarantees each
-  // block eventually leaves `pending`.
-  absl::flat_hash_set<std::string> pending(batch.begin(), batch.end());
-  BatchWriteResult result;
-  while (!pending.empty()) {
-    auto [done, failed, still_pending, existing, unregistered] =
-        PollRemoteWriteStatus();
-    // Completed transfers: the peer holds these blocks now.
-    for (const std::string& hash : done) {
-      if (pending.erase(hash) > 0) {
-        result.freeable.push_back(hash);
-      }
-    }
-    for (const std::string& hash : failed) {
-      pending.erase(hash);
-    }
-    // `existing` annotates refusals whose bytes the peer already holds --
-    // as freeable as a completed transfer. Everything else in `failed`
-    // (including `unregistered`: landed but unfindable there) keeps its
-    // local copy.
-    for (const std::string& hash : existing) {
-      result.freeable.push_back(hash);
-    }
-    if (failed.size() > existing.size()) {
-      result.transfer_failed = true;
-    }
-    if (!pending.empty()) {
-      absl::SleepFor(absl::Milliseconds(10));
-    }
-  }
-  return result;
-}
-
 absl::StatusOr<std::vector<int>> KVCacheStore::AllocateBlockIds(int needed) {
   std::vector<std::string> hashes_to_deallocate;
-  bool request_sweep = false;
   {
     absl::MutexLock lock(mutex_);
     int free_count = raiden_controller_->block_manager()->num_free_blocks();
-    // Wake the evict sweep the moment this allocation dips below its low
-    // watermark, instead of leaving detection to the sweep's fallback
-    // period. The drop-evict below stays the last-ditch fallback for
-    // allocations the sweep has not made room for.
-    if (monitor_config_.enable_evict_sweep && store_monitor_ != nullptr) {
-      const int total = raiden_controller_->block_manager()->total_blocks();
-      request_sweep =
-          total > 0 &&
-          free_count - needed < monitor_config_.evict_low_watermark * total;
-    }
     int to_free = needed - free_count;
     if (to_free > 0) {
       hashes_to_deallocate = backend()->GetEvictableKeys(to_free);
@@ -1725,10 +1533,6 @@ absl::StatusOr<std::vector<int>> KVCacheStore::AllocateBlockIds(int needed) {
                          ", Evictable: ", hashes_to_deallocate.size()));
       }
     }
-  }
-
-  if (request_sweep) {
-    store_monitor_->RequestSweep();
   }
 
   if (!hashes_to_deallocate.empty()) {
@@ -2242,6 +2046,7 @@ void KVCacheStore::PollRemoteReadsInternal(
     }
   }
 }
+
 
 void KVCacheStore::PollFuturesInternal() {
   std::vector<SaveState> ready_saves;

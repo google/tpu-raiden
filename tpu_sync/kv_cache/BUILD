@@ -382,7 +382,6 @@ cc_library(
         ":raiden_id",
         "//tpu_sync/kv_cache/global_registry:global_registry_cc_proto",
         "//tpu_sync/kv_cache/global_registry:global_registry_client_cc",
-        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/synchronization",

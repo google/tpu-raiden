@@ -591,23 +591,6 @@ class KVCacheStore {
   // service holds it in a pointer it cannot re-seat.
   void ShutdownBackendStoreServers(KVCacheStoreServer* already_shut);
 
-  // One bounded step of the evict sweep: checks the free-block watermarks
-  // and demotes at most one batch of cold blocks to a placement target (or
-  // drops the batch locally when no target will take it). Returns true when
-  // the sweep should run again right away. The store monitor's thread is
-  // the only caller, which is why the episode state below needs no lock.
-  bool SweepOnce();
-
-  // What became of one offered batch, polled until every block is terminal.
-  struct BatchWriteResult {
-    // Blocks the peer now holds; their local copies are safe to free.
-    std::vector<std::string> freeable;
-    // At least one block's transfer failed outright; its local copy stays.
-    bool transfer_failed = false;
-  };
-  BatchWriteResult WaitForBatchWriteResult(
-      const std::vector<std::string>& batch);
-
   mutable absl::Mutex mutex_;
   std::vector<std::shared_ptr<KVCacheStoreBackend>> backends_;
   std::shared_ptr<global_registry::GlobalRegistryClient> registry_client_;
@@ -631,19 +614,11 @@ class KVCacheStore {
   // True once this store published itself, so teardown knows to unpublish.
   bool registered_in_global_registry_ = false;
 
-  // Registration identity from the tier-0 BackendConfig.
+  // Registration attributes from the tier-0 BackendConfig.
   std::string kv_pool_group_;
   int32_t evict_tier_ = 0;
-  // Monitor and sweep knobs from the tier-0 BackendConfig, with zeros
-  // resolved to the built-in defaults in Create.
-  StoreMonitorConfig monitor_config_;
-  // Pressure-episode state, touched only by SweepOnce on the monitor's
-  // thread. One episode = the run of sweep steps from free blocks falling
-  // below the low watermark until they recover to the high watermark (or
-  // nothing more can be freed); the placement targets are fetched once per
-  // episode and reused until it ends or every target has been dropped.
-  bool sweep_active_ = false;
-  std::vector<RaidenId> placement_targets_;
+  bool enable_store_monitor_ = false;
+  absl::Duration store_monitor_heartbeat_period_ = absl::ZeroDuration();
   // Constructed and started at the end of Create when enabled; stopped first
   // thing in the destructor, before anything its callbacks touch goes away.
   std::unique_ptr<StoreMonitor> store_monitor_;

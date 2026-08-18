@@ -55,32 +55,6 @@ struct KVTransferSpecConfig {
   int num_workers = 0;
 };
 
-// The knobs behind a store's StoreMonitor: the heartbeat it sends and the
-// evict sweep it schedules. Zero values mean the built-in defaults.
-struct StoreMonitorConfig {
-  // Runs a StoreMonitor thread that heartbeats the store's status to the
-  // global registry; the store's registration then carries a TTL and expires
-  // when heartbeats stop.
-  bool enable = false;
-  // Heartbeat period. Zero means the StoreMonitor default. With the monitor
-  // enabled this also sets the registration TTL, a fixed multiple of the
-  // period.
-  absl::Duration heartbeat_period = absl::ZeroDuration();
-  // Demotes cold blocks to a peer store on a higher evict_tier whenever free
-  // blocks fall below evict_low_watermark. Requires `enable`: the sweep runs
-  // on the store monitor's schedule.
-  bool enable_evict_sweep = false;
-  // Fallback period between sweep pressure checks; allocation pressure wakes
-  // the sweep immediately. Zero means the StoreMonitor default.
-  absl::Duration evict_sweep_period = absl::ZeroDuration();
-  // Free-block ratio (free / total) below which the sweep starts demoting.
-  // Zero means the default.
-  double evict_low_watermark = 0.0;
-  // Free-block ratio at which an active sweep stops; must be >= the low
-  // watermark. Zero means the default.
-  double evict_high_watermark = 0.0;
-};
-
 struct BackendConfig {
   std::string type;
   size_t capacity = 0;
@@ -95,7 +69,14 @@ struct BackendConfig {
   std::string kv_pool_group;
   // Placement tier the store registers under (see StoreInfo.evict_tier).
   int32_t evict_tier = 0;
-  StoreMonitorConfig monitor_config;
+  // Runs a StoreMonitor thread that heartbeats the store's status to the
+  // global registry; the store's registration then carries a TTL and expires
+  // when heartbeats stop.
+  bool enable_store_monitor = false;
+  // StoreMonitor heartbeat period. Zero means the StoreMonitor default. With
+  // the monitor enabled this also sets the registration TTL, a fixed multiple
+  // of the period.
+  absl::Duration store_monitor_heartbeat_period = absl::ZeroDuration();
 
   std::string GetProperty(absl::string_view key,
                           absl::string_view default_val = "") const;
