@@ -19,9 +19,8 @@
 #include <memory>
 #include <thread>  // NOLINT(build/c++11)
 
-#include "absl/base/thread_annotations.h"
 #include "absl/status/status.h"
-#include "absl/synchronization/mutex.h"
+#include "absl/synchronization/notification.h"
 #include "absl/time/time.h"
 #include "tpu_sync/kv_cache/global_registry/global_registry.pb.h"
 #include "tpu_sync/kv_cache/global_registry/global_registry_client.h"
@@ -37,47 +36,34 @@ namespace kv_cache {
 // registration (registry restart or TTL expiry); heartbeats carry no
 // coordinates, so the monitor re-registers through the callback instead.
 //
-// With a SweepFn, the same thread also schedules the store's evict sweep --
-// one thread total, a tradeoff to balance the number of threads raiden is
-// managing. The sweep runs once per sweep period, immediately when
-// NudgeSweep() is called, and step by step while the callback keeps
-// returning true; the heartbeat check is interleaved between steps, so
-// sweeping delays a heartbeat by at most one bounded step.
-//
 // Owned by KVCacheStore; deliberately talks to the store only through the
-// callbacks so it never sees store internals.
+// two callbacks so it never sees store internals.
 class StoreMonitor {
  public:
   static constexpr absl::Duration kDefaultHeartbeatPeriod = absl::Seconds(300);
-  static constexpr absl::Duration kDefaultSweepPeriod = absl::Seconds(30);
 
   struct Options {
     absl::Duration heartbeat_period = kDefaultHeartbeatPeriod;
-    absl::Duration sweep_period = kDefaultSweepPeriod;
   };
 
   // Snapshots the store's current status for one heartbeat.
   using StatusFn = std::function<global_registry::StoreStatus()>;
   // Re-publishes the store's full registration (coordinates and TTL).
   using ReregisterFn = std::function<absl::Status()>;
-  // One bounded step of evict-sweep work. Returns true if more work remains,
-  // in which case the monitor runs the next step right away; false parks the
-  // sweep until the next period or request.
-  using SweepFn = std::function<bool()>;
 
   StoreMonitor(const Options& options,
                std::shared_ptr<global_registry::GlobalRegistryClient>
                    registry_client,
                RaidenId raiden_id, StatusFn status_fn,
-               ReregisterFn reregister_fn, SweepFn sweep_fn = nullptr);
+               ReregisterFn reregister_fn);
 
-  // Stops the threads; the callbacks must outlive this call, not the object.
+  // Stops the thread; the callbacks must outlive this call, not the object.
   ~StoreMonitor();
 
   StoreMonitor(const StoreMonitor&) = delete;
   StoreMonitor& operator=(const StoreMonitor&) = delete;
 
-  // Starts the monitor thread. The first heartbeat fires one period from
+  // Starts the heartbeat thread. The first heartbeat fires one period from
   // now: the caller registers before starting the monitor, so the registry
   // is already fresh. Call at most once.
   void Start();
@@ -85,12 +71,6 @@ class StoreMonitor {
   // Stops and joins the thread. Idempotent, and terminal: a stopped monitor
   // cannot be restarted.
   void Stop();
-
-  // Request to run the sweep now instead of at its next period. Called from
-  // the store's allocation path when free blocks dip below the sweep's low
-  // watermark, so pressure is acted on immediately rather than discovered a
-  // sweep period later. No-op without a SweepFn or after Stop().
-  void RequestSweep();
 
  private:
   void Loop();
@@ -102,18 +82,12 @@ class StoreMonitor {
   const RaidenId raiden_id_;
   const StatusFn status_fn_;
   const ReregisterFn reregister_fn_;
-  const SweepFn sweep_fn_;
 
-  absl::Mutex mu_;
-  // Signaled on Stop() and RequestSweep(); the loop waits on it with a
-  // deadline, so a signal is its only early wake-up.
-  absl::CondVar cv_;
-  bool stop_ ABSL_GUARDED_BY(mu_) = false;
-  bool sweep_requested_ ABSL_GUARDED_BY(mu_) = false;
+  absl::Notification stop_;
   std::thread thread_;
 };
 
 }  // namespace kv_cache
 }  // namespace tpu_raiden
 
-#endif  // THIRD_PARTY_TPU_RAIDEN_TPU_SYNC_KV_CACHE_STORE_MONITOR_H_
+#endif  // THIRD_PARTY_TPU_RAIDEN_KV_CACHE_STORE_MONITOR_H_

@@ -14,16 +14,13 @@
 
 #include "tpu_sync/kv_cache/store_monitor.h"
 
-#include <algorithm>
+
 #include <memory>
 #include <thread>  // NOLINT(build/c++11)
 #include <utility>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "absl/synchronization/mutex.h"
-#include "absl/time/clock.h"
-#include "absl/time/time.h"
 #include "tpu_sync/kv_cache/global_registry/global_registry_client.h"
 #include "tpu_sync/kv_cache/raiden_id.h"
 
@@ -33,70 +30,31 @@ namespace kv_cache {
 StoreMonitor::StoreMonitor(
     const Options& options,
     std::shared_ptr<global_registry::GlobalRegistryClient> registry_client,
-    RaidenId raiden_id, StatusFn status_fn, ReregisterFn reregister_fn,
-    SweepFn sweep_fn)
+    RaidenId raiden_id, StatusFn status_fn, ReregisterFn reregister_fn)
     : options_(options),
       registry_client_(std::move(registry_client)),
       raiden_id_(std::move(raiden_id)),
       status_fn_(std::move(status_fn)),
-      reregister_fn_(std::move(reregister_fn)),
-      sweep_fn_(std::move(sweep_fn)) {}
+      reregister_fn_(std::move(reregister_fn)) {}
 
 StoreMonitor::~StoreMonitor() { Stop(); }
 
-void StoreMonitor::Start() { thread_ = std::thread(&StoreMonitor::Loop, this); }
+void StoreMonitor::Start() {
+  thread_ = std::thread(&StoreMonitor::Loop, this);
+}
 
 void StoreMonitor::Stop() {
-  {
-    absl::MutexLock lock(mu_);
-    stop_ = true;
-    cv_.Signal();
+  if (!stop_.HasBeenNotified()) {
+    stop_.Notify();
   }
   if (thread_.joinable()) {
     thread_.join();
   }
 }
 
-void StoreMonitor::RequestSweep() {
-  if (sweep_fn_ == nullptr) {
-    return;
-  }
-  absl::MutexLock lock(mu_);
-  sweep_requested_ = true;
-  cv_.Signal();
-}
-
 void StoreMonitor::Loop() {
-  const bool sweeping = sweep_fn_ != nullptr;
-  absl::Time next_heartbeat = absl::Now() + options_.heartbeat_period;
-  absl::Time next_sweep = absl::Now() + options_.sweep_period;
-  // True while a sweep request is pending or the last sweep step reported more
-  // work; the loop then skips the wait, but still passes the heartbeat
-  // check between steps -- so a long drain delays a heartbeat by at most
-  // one bounded step.
-  bool sweep_now = false;
-  while (true) {
-    {
-      absl::MutexLock lock(mu_);
-      const absl::Time wake =
-          sweeping ? std::min(next_heartbeat, next_sweep) : next_heartbeat;
-      while (!stop_ && !sweep_requested_ && !sweep_now && absl::Now() < wake) {
-        cv_.WaitWithDeadline(&mu_, wake);
-      }
-      if (stop_) {
-        return;
-      }
-      sweep_now = sweep_now || sweep_requested_;
-      sweep_requested_ = false;
-    }
-    if (absl::Now() >= next_heartbeat) {
-      HeartbeatOnce();
-      next_heartbeat = absl::Now() + options_.heartbeat_period;
-    }
-    if (sweeping && (sweep_now || absl::Now() >= next_sweep)) {
-      sweep_now = sweep_fn_();
-      next_sweep = absl::Now() + options_.sweep_period;
-    }
+  while (!stop_.WaitForNotificationWithTimeout(options_.heartbeat_period)) {
+    HeartbeatOnce();
   }
 }
 
