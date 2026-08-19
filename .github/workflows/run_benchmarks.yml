@@ -32,7 +32,7 @@ permissions:
 jobs: 
   run_benchmarks:
     name: Test Run
-    runs-on: linux-x86-ct5lp-224-8tpu
+    runs-on: linux-x86-n4-4
     container:
       image: node:18
     steps:
