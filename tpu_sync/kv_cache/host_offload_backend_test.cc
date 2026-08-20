@@ -153,6 +153,50 @@ TEST(HostOffloadBackendTest, InsertAndLockRollbackOnCapacityExceeded) {
   EXPECT_EQ(backend.GetPinCount("h2"), 1);
 }
 
+TEST(HostOffloadBackendTest, InsertAndLockRebindsStaleHbmEntry) {
+  // A save that fails and gives up leaves the entry in HBM pointing at a device
+  // block the caller has since reused. Re-offering the same hash must adopt the
+  // new device block: the recorded one no longer holds this block's bytes.
+  HostOffloadBackendTest::Backend backend(/*capacity=*/2);
+  RaidenId id{"job", "0", "data", 0};
+
+  RaidenBlockId first(id, /*host_block_id=*/-1, /*device_block_id=*/7,
+                      BlockStatus::HBM);
+  ASSERT_TRUE(backend.InsertAndLock({"h1"}, {first}, /*on_host=*/false));
+  backend.Release({"h1"});
+
+  RaidenBlockId second(id, /*host_block_id=*/-1, /*device_block_id=*/9,
+                       BlockStatus::HBM);
+  ASSERT_TRUE(backend.InsertAndLock({"h1"}, {second}, /*on_host=*/false));
+
+  auto lookup_res = backend.Lookup({"h1"});
+  ASSERT_TRUE(lookup_res.ok());
+  ASSERT_EQ(lookup_res->size(), 1);
+  EXPECT_EQ((*lookup_res)[0].second.device_block_id, 9);
+  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::HBM);
+}
+
+TEST(HostOffloadBackendTest, InsertAndLockKeepsHostResidentEntry) {
+  // The opposite case: a HOST entry holds real bytes, so a re-offer must pin it
+  // in place and leave its host block alone rather than adopt the caller's.
+  HostOffloadBackendTest::Backend backend(/*capacity=*/2);
+  RaidenId id{"job", "0", "data", 0};
+
+  RaidenBlockId resident(id, /*host_block_id=*/3, BlockStatus::HOST);
+  ASSERT_TRUE(backend.InsertAndLock({"h1"}, {resident}, /*on_host=*/true));
+  backend.Release({"h1"});
+
+  RaidenBlockId reoffer(id, /*host_block_id=*/-1, /*device_block_id=*/9,
+                        BlockStatus::HBM);
+  ASSERT_TRUE(backend.InsertAndLock({"h1"}, {reoffer}, /*on_host=*/false));
+
+  auto lookup_res = backend.Lookup({"h1"});
+  ASSERT_TRUE(lookup_res.ok());
+  ASSERT_EQ(lookup_res->size(), 1);
+  EXPECT_EQ((*lookup_res)[0].second.status, BlockStatus::HOST);
+  EXPECT_EQ((*lookup_res)[0].second.host_block_id, 3);
+}
+
 TEST(HostOffloadBackendTest, LookupReturnsRemoteDescriptors) {
   // Setup local gRPC registry server
   auto reg_server = global_registry::CreateTestGlobalRegistryServer();
