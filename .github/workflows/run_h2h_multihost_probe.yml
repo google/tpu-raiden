@@ -20,14 +20,15 @@ name: H2H Multi-Host Probe
 on:
   workflow_dispatch:
 
-  # workflow_dispatch only lists workflows already on the default branch, so the
-  # probe could not be launched from its own branch. This paths filter lets the
-  # PR itself run it, and fires on nothing else.
+  push:
+    branches:
+      - haochengd-google-patch-9
+
   pull_request:
-    paths:
-      - ".github/workflows/run_h2h_multihost_probe.yml"
-      - "tpu_sync/benchmarks/benchmark_registry_multihost.pbtxt"
-      - "tpu_sync/benchmarks/multihost_probe.py"
+      branches:
+      - haochengd-google-patch-9
+  schedule:
+    - cron: "0 0 * * *"  # Runs at 00:00 UTC every day
 
 permissions:
   contents: read
