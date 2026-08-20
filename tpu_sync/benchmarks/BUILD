@@ -82,3 +82,9 @@ py_binary(
         "@com_google_absl_py//absl/flags",
     ],
 )
+
+py_binary(
+    name = "multihost_probe",
+    testonly = True,
+    srcs = ["multihost_probe.py"],
+)
