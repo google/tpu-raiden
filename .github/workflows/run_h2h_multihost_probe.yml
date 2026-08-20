@@ -1,0 +1,46 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Once the probe answers whether a JobSet can be created, this file becomes the
+# post-submit multi-host H2H workflow: drop the pull_request trigger and add
+# push/main + schedule. It shares nothing with run_benchmarks.yml.
+name: H2H Multi-Host Probe
+
+on:
+  workflow_dispatch:
+
+  # workflow_dispatch only lists workflows already on the default branch, so the
+  # probe could not be launched from its own branch. This paths filter lets the
+  # PR itself run it, and fires on nothing else.
+  pull_request:
+    paths:
+      - ".github/workflows/run_h2h_multihost_probe.yml"
+      - "tpu_sync/benchmarks/benchmark_registry_multihost.pbtxt"
+      - "tpu_sync/benchmarks/multihost_probe.py"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  probe:
+    name: Probe the 4x4 v5e runner
+    uses: google-ml-infra/bap/.github/workflows/run-benchmarks.yaml@affd28b492f67c242afa8b119e590b25816b7b88
+    with:
+      registry_file: "tpu_sync/benchmarks/benchmark_registry_multihost.pbtxt"
+      ml_actions_ref: "affd28b492f67c242afa8b119e590b25816b7b88"
+      runner: "linux-x86-n2-8"
+      publish_metrics: false
+      pub_sub_gcp_project_id: "ml-oss-benchmarking-production"
+      pub_sub_gcp_topic_id: "public-results-prod"
