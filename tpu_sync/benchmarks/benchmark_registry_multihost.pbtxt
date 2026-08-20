@@ -1,0 +1,45 @@
+# Multi-host registry. Independent of benchmark_registry.pbtxt -- different
+# runner, different metrics, different baselines.
+benchmarks {
+  name: "h2h_multihost_probe"
+  description: "One-shot probe of the 4x4 v5e runner: NICs, NUMA, TPU devices, and whether the job can create a JobSet. Measures nothing, gates nothing."
+  owner: "raiden-dev"
+
+  workload {
+    action: "./ml_actions/actions/workload_executors/bazel"
+    action_inputs { key: "target" value: "//tpu_sync/benchmarks:multihost_probe" }
+    action_inputs { key: "runtime_flags" value: "" }
+  }
+
+  environment_configs {
+    id: "tpu-v5e-4x4-multihost"
+    runner_label: "linux-x86-ct5lp-4tpu-x4"
+    container_image: "us-central1-docker.pkg.dev/tpu-prod-env-multipod/tpu-raiden/ml-build:gcc12-headers"
+    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci" }
+  }
+}
+
+# Same driver the single-host gate uses, unchanged, pointed at the new node.
+# Still loopback (both roles on one node) -- one GitHub Actions job gets one
+# node, so this is not yet a cross-host number. It rides along with the probe so
+# a single dispatch also answers: does the C++ runner build and run here, does
+# the NUMA 0/1 split exist on this machine type, and what does the path do on
+# 112 vCPU / 192 GiB.
+benchmarks {
+  name: "h2h_loopback_on_4tpu_node"
+  description: "The existing single-host H2H correctness gate, run once on the 4x4 v5e node pool. Byte-integrity is the verdict; throughput is informational."
+  owner: "raiden-dev"
+
+  workload {
+    action: "./ml_actions/actions/workload_executors/bazel"
+    action_inputs { key: "target" value: "//tpu_sync/benchmarks:h2h_cpp_gate" }
+    action_inputs { key: "runtime_flags" value: "--iters=5" }
+  }
+
+  environment_configs {
+    id: "tpu-v5e-4x4-multihost"
+    runner_label: "linux-x86-ct5lp-4tpu-x4"
+    container_image: "us-central1-docker.pkg.dev/tpu-prod-env-multipod/tpu-raiden/ml-build:gcc12-headers"
+    workload_action_inputs { key: "bazel_run_flags" value: "-c opt --config=oss --config=ci" }
+  }
+}
