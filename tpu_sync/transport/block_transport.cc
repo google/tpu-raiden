@@ -15,6 +15,7 @@
 #include "tpu_sync/transport/block_transport.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
@@ -24,6 +25,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -64,6 +66,10 @@ ABSL_FLAG(size_t, raiden_transport_coalesce_window_bytes, 0,
 
 namespace tpu_raiden {
 namespace transport {
+
+BlockTransport::SendStreamState::~SendStreamState() {
+  if (client_fd >= 0) close(client_fd);
+}
 
 namespace {
 
@@ -230,24 +236,98 @@ BlockTransport::BlockTransport(BlockTransportDelegate* delegate, int local_port,
 }
 
 BlockTransport::~BlockTransport() {
-  {
-    absl::MutexLock lock(scheduler_mu_);
-    scheduler_stopping_ = true;
+  CancelPendingOperations();
+  if (!WaitForPendingOperations(std::chrono::seconds(30))) {
+    LOG(FATAL) << "BlockTransport operations did not stop after socket "
+                  "cancellation; failing closed to protect the delegate";
   }
   scheduler_cv_.SignalAll();
   for (auto& t : socket_workers_) {
     if (t.joinable()) t.join();
   }
+}
+
+void BlockTransport::CancelPendingOperations() {
   {
-    absl::MutexLock lock(active_sends_mu_);
-    for (const auto& [uuid, state] : active_sends_) {
-      if (state && state->client_fd >= 0) {
-        shutdown(state->client_fd, SHUT_RDWR);
+    absl::MutexLock lock(operations_mu_);
+    operations_stopping_ = true;
+  }
+
+  std::vector<std::unique_ptr<WriteTask>> cancelled_tasks;
+  {
+    absl::MutexLock lock(scheduler_mu_);
+    scheduler_stopping_.store(true, std::memory_order_release);
+    for (auto& [peer, queue] : peer_queues_) {
+      (void)peer;
+      while (!queue.tasks.empty()) {
+        cancelled_tasks.push_back(std::move(queue.tasks.front()));
+        queue.tasks.pop_front();
       }
     }
-    active_sends_mu_.Await(absl::Condition(
-        +[](const SendMap* s) { return s->empty(); }, &active_sends_));
   }
+  scheduler_cv_.SignalAll();
+
+  std::vector<std::shared_ptr<SendStreamState>> active_send_states;
+  {
+    absl::MutexLock lock(active_sends_mu_);
+    for (const auto& [stream, state] : active_sends_) {
+      (void)stream;
+      if (state && state->client_fd >= 0) {
+        active_send_states.push_back(state);
+      }
+    }
+  }
+  // Each state owns a duplicate of the accepted descriptor. The shared_ptr
+  // snapshot prevents that duplicate from closing/reusing between capture and
+  // shutdown, and shutdown runs before raw cancellation closes the original.
+  for (const auto& state : active_send_states) {
+    (void)shutdown(state->client_fd, SHUT_RDWR);
+  }
+  raw_transport_.CancelPendingOperations();
+
+  // Callbacks may enter manager code, so never invoke them while holding a
+  // transport mutex (or the manager's server_init_mu_).
+  for (auto& task : cancelled_tasks) {
+    if (task && task->cancel) task->cancel();
+  }
+}
+
+bool BlockTransport::WaitForPendingOperations(
+    std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  const absl::Time absl_deadline =
+      absl::Now() + absl::Milliseconds(timeout.count());
+  if (!raw_transport_.WaitForPendingOperations(timeout)) return false;
+
+  {
+    absl::MutexLock lock(operations_mu_);
+    while (active_operations_ != 0 &&
+           std::chrono::steady_clock::now() < deadline) {
+      operations_cv_.WaitWithDeadline(&operations_mu_, absl_deadline);
+    }
+    if (active_operations_ != 0) return false;
+  }
+
+  absl::MutexLock lock(active_sends_mu_);
+  while (!active_sends_.empty() &&
+         std::chrono::steady_clock::now() < deadline) {
+    active_sends_cv_.WaitWithDeadline(&active_sends_mu_, absl_deadline);
+  }
+  return active_sends_.empty();
+}
+
+bool BlockTransport::BeginOperation() {
+  absl::MutexLock lock(operations_mu_);
+  if (operations_stopping_) return false;
+  ++active_operations_;
+  return true;
+}
+
+void BlockTransport::EndOperation() {
+  absl::MutexLock lock(operations_mu_);
+  ABSL_DCHECK_GT(active_operations_, 0);
+  --active_operations_;
+  operations_cv_.SignalAll();
 }
 
 void BlockTransport::SocketWorkerLoop() {
@@ -563,8 +643,14 @@ absl::Status BlockTransport::HandleIncomingPull(
     return absl::OutOfRangeError("Requested block range exceeds int range");
   }
 
+  const int send_fd = fcntl(client_fd, F_DUPFD_CLOEXEC, 0);
+  if (send_fd < 0) {
+    return absl::InternalError(absl::StrCat(
+        "Failed to duplicate pull-response socket: ", std::strerror(errno)));
+  }
+
   auto state = std::make_shared<SendStreamState>();
-  state->client_fd = client_fd;
+  state->client_fd = send_fd;
   state->uuid = header.uuid;
   state->remote_id = static_cast<int>(header.remote_id);
   state->count_or_size = header.count_or_size;
@@ -575,7 +661,7 @@ absl::Status BlockTransport::HandleIncomingPull(
 
   {
     absl::MutexLock lock(active_sends_mu_);
-    active_sends_[header.uuid] = state;
+    active_sends_.emplace(state.get(), state);
   }
 
   TriggerNextSendStep(state);
@@ -585,10 +671,7 @@ absl::Status BlockTransport::HandleIncomingPull(
 void BlockTransport::TriggerNextSendStep(
     std::shared_ptr<SendStreamState> state) {
   if (state->current_step >= state->total_steps) {
-    {
-      absl::MutexLock lock(active_sends_mu_);
-      active_sends_.erase(state->uuid);
-    }
+    EraseActiveSend(state);
     return;
   }
 
@@ -603,9 +686,8 @@ void BlockTransport::TriggerNextSendStep(
           LOG(ERROR) << "Pull response failed at step " << state->current_step
                      << " for uuid " << state->uuid
                      << ", status: " << status.ToString();
-          shutdown(state->client_fd, SHUT_RDWR);
-          absl::MutexLock lock(active_sends_mu_);
-          active_sends_.erase(state->uuid);
+          (void)shutdown(state->client_fd, SHUT_RDWR);
+          EraseActiveSend(state);
           return;
         }
 
@@ -617,17 +699,15 @@ void BlockTransport::TriggerNextSendStep(
           if (chunks.empty()) {
             LOG(ERROR) << "No transfer chunks found for block " << block_id
                        << " and uuid " << state->uuid;
-            shutdown(state->client_fd, SHUT_RDWR);
-            absl::MutexLock lock(active_sends_mu_);
-            active_sends_.erase(state->uuid);
+            (void)shutdown(state->client_fd, SHUT_RDWR);
+            EraseActiveSend(state);
             return;
           }
           absl::Status s = ValidateChunks(block_delegate_, l, sh, chunks);
           if (!s.ok()) {
             LOG(ERROR) << "Chunks validation failed: " << s.ToString();
-            shutdown(state->client_fd, SHUT_RDWR);
-            absl::MutexLock lock(active_sends_mu_);
-            active_sends_.erase(state->uuid);
+            (void)shutdown(state->client_fd, SHUT_RDWR);
+            EraseActiveSend(state);
             return;
           }
 
@@ -637,9 +717,8 @@ void BlockTransport::TriggerNextSendStep(
           s = WriteExact(state->client_fd, s_size.data(), s_size.size());
           if (!s.ok()) {
             LOG(ERROR) << "Write size failed: " << s.ToString();
-            shutdown(state->client_fd, SHUT_RDWR);
-            absl::MutexLock lock(active_sends_mu_);
-            active_sends_.erase(state->uuid);
+            (void)shutdown(state->client_fd, SHUT_RDWR);
+            EraseActiveSend(state);
             return;
           }
           if (total_size > 0) {
@@ -647,9 +726,8 @@ void BlockTransport::TriggerNextSendStep(
           }
           if (!s.ok()) {
             LOG(ERROR) << "Write payload failed: " << s.ToString();
-            shutdown(state->client_fd, SHUT_RDWR);
-            absl::MutexLock lock(active_sends_mu_);
-            active_sends_.erase(state->uuid);
+            (void)shutdown(state->client_fd, SHUT_RDWR);
+            EraseActiveSend(state);
             return;
           }
 
@@ -664,6 +742,16 @@ void BlockTransport::TriggerNextSendStep(
           TriggerNextSendStep(state);
         });
       });
+}
+
+void BlockTransport::EraseActiveSend(
+    const std::shared_ptr<SendStreamState>& state) {
+  absl::MutexLock lock(active_sends_mu_);
+  auto it = active_sends_.find(state.get());
+  if (it != active_sends_.end() && it->second == state) {
+    active_sends_.erase(it);
+    active_sends_cv_.SignalAll();
+  }
 }
 
 void BlockTransport::ResolveStepCoordinates(
@@ -737,6 +825,10 @@ void BlockTransport::AsyncPush(
     return;
   }
   if (static_cast<int>(num_blocks) < P) P = num_blocks;
+  if (!BeginOperation()) {
+    on_complete(absl::CancelledError("BlockTransport is stopping"));
+    return;
+  }
 
   auto shared_src_block_ids = std::make_shared<std::vector<int>>(src_block_ids);
   auto shared_dst_block_ids = std::make_shared<std::vector<int>>(dst_block_ids);
@@ -744,6 +836,30 @@ void BlockTransport::AsyncPush(
   auto statuses =
       std::make_shared<std::vector<absl::Status>>(P, absl::OkStatus());
   auto remaining_workers = std::make_shared<std::atomic<int>>(P);
+  auto finish_worker = [this, allocated_ids, statuses, remaining_workers,
+                        on_complete](int stream_idx,
+                                     absl::Status status) mutable {
+    if (!status.ok()) {
+      (*statuses)[stream_idx] = std::move(status);
+    }
+    if (remaining_workers->fetch_sub(1) != 1) return;
+
+    // Keep the operation counted until the user callback returns. Manager
+    // teardown can therefore wait for every callback that captures it.
+    auto operation_cleanup = absl::MakeCleanup([this]() { EndOperation(); });
+    absl::Status final_status = absl::OkStatus();
+    for (const auto& worker_status : *statuses) {
+      if (!worker_status.ok()) {
+        final_status = worker_status;
+        break;
+      }
+    }
+    if (!final_status.ok()) {
+      on_complete(final_status);
+    } else {
+      on_complete(*allocated_ids);
+    }
+  };
 
   const size_t base_blocks_per_stream = num_blocks / P;
   const size_t remainder = num_blocks % P;
@@ -759,27 +875,13 @@ void BlockTransport::AsyncPush(
 
     auto task_run = [this, i, remote_peer, local_ip, block_offset, block_count,
                      shared_src_block_ids, shared_dst_block_ids, allocated_ids,
-                     statuses, remaining_workers, major_order, uuid, layer_idx,
-                     P, on_complete]() {
+                     statuses, major_order, uuid, layer_idx, P,
+                     finish_worker]() mutable {
       H2hWriteWorker(i, remote_peer, local_ip, block_offset, block_count,
                      *shared_src_block_ids, *shared_dst_block_ids,
                      *allocated_ids, *statuses, major_order, uuid, layer_idx,
                      P);
-
-      if (remaining_workers->fetch_sub(1) == 1) {
-        absl::Status final_status = absl::OkStatus();
-        for (const auto& s : *statuses) {
-          if (!s.ok()) {
-            final_status = s;
-            break;
-          }
-        }
-        if (!final_status.ok()) {
-          on_complete(final_status);
-        } else {
-          on_complete(*allocated_ids);
-        }
-      }
+      finish_worker(i, (*statuses)[i]);
     };
 
     auto task = std::make_unique<WriteTask>();
@@ -788,17 +890,28 @@ void BlockTransport::AsyncPush(
     task->stream_idx = i;
     task->peer = remote_peer;
     task->run = std::move(task_run);
+    task->cancel = [i, finish_worker]() mutable {
+      finish_worker(i, absl::CancelledError("BlockTransport push cancelled"));
+    };
 
+    bool queued = false;
     {
       absl::MutexLock lock(scheduler_mu_);
-      auto& pq = peer_queues_[task->peer];
-      pq.tasks.push_back(std::move(task));
-      if (std::find(active_peers_.begin(), active_peers_.end(), remote_peer) ==
-          active_peers_.end()) {
-        active_peers_.push_back(remote_peer);
+      if (!scheduler_stopping_.load(std::memory_order_acquire)) {
+        auto& pq = peer_queues_[task->peer];
+        pq.tasks.push_back(std::move(task));
+        if (std::find(active_peers_.begin(), active_peers_.end(),
+                      remote_peer) == active_peers_.end()) {
+          active_peers_.push_back(remote_peer);
+        }
+        queued = true;
       }
     }
-    scheduler_cv_.SignalAll();
+    if (queued) {
+      scheduler_cv_.SignalAll();
+    } else {
+      task->cancel();
+    }
     block_offset += block_count;
   }
 }
@@ -810,6 +923,10 @@ absl::StatusOr<std::vector<int>> BlockTransport::SyncPull(
     const std::vector<uint8_t*>& explicit_dst_ptrs, int parallelism,
     MajorOrder major_order, BlockReceivedCallback on_block_received,
     uint64_t uuid) {
+  if (!BeginOperation()) {
+    return absl::CancelledError("BlockTransport is stopping");
+  }
+  auto operation_cleanup = absl::MakeCleanup([this]() { EndOperation(); });
   auto res =
       SyncPullInternal(peers, src_block_ids, local_block_ids, explicit_dst_ptrs,
                        parallelism, major_order, on_block_received, uuid);
@@ -1374,6 +1491,10 @@ absl::Status BlockTransport::PushBuffer(absl::string_view peer,
                                         size_t dst_offset_bytes,
                                         const uint8_t* data_ptr,
                                         size_t size_bytes, uint64_t uuid) {
+  if (!BeginOperation()) {
+    return absl::CancelledError("BlockTransport is stopping");
+  }
+  auto operation_cleanup = absl::MakeCleanup([this]() { EndOperation(); });
   ASSIGN_OR_RETURN(
       auto req, BuildBufferRequest(buffer_id, dst_shard_idx, dst_offset_bytes,
                                    data_ptr, size_bytes, uuid));
@@ -1386,6 +1507,10 @@ absl::Status BlockTransport::PushBuffer(absl::string_view peer,
 
 absl::Status BlockTransport::PushBuffers(
     const std::vector<BufferPushTask>& tasks, int parallelism, uint64_t uuid) {
+  if (!BeginOperation()) {
+    return absl::CancelledError("BlockTransport is stopping");
+  }
+  auto operation_cleanup = absl::MakeCleanup([this]() { EndOperation(); });
   absl::Status status = raw_transport_.PushBuffers(tasks, parallelism, uuid);
   if (!status.ok()) {
     RecordTransferFailure(status, metric_labels::kDirectionPush);

@@ -15,6 +15,7 @@
 #include "tpu_sync/transport/lib/socket/util.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -23,7 +24,10 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <string>
@@ -40,7 +44,16 @@
 namespace tpu_raiden::transport::lib {
 
 absl::StatusOr<int> ConnectToPeer(absl::string_view peer,
-                                  absl::string_view local_ip) {
+                                  absl::string_view local_ip,
+                                  const std::atomic<bool>* cancelled,
+                                  std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  const auto is_cancelled = [cancelled]() {
+    return cancelled != nullptr && cancelled->load(std::memory_order_acquire);
+  };
+  if (is_cancelled()) {
+    return absl::CancelledError("connect cancelled");
+  }
   std::string host;
   std::string port_str;
 
@@ -69,10 +82,30 @@ absl::StatusOr<int> ConnectToPeer(absl::string_view peer,
   hints.ai_family = AF_UNSPEC;
   hints.ai_socktype = SOCK_STREAM;
 
+  // Production data endpoints are numeric. Avoid resolver latency there;
+  // hostname resolution remains inherently non-cancellable while inside
+  // getaddrinfo(), but the deadline and cancellation are checked immediately
+  // after it returns.
+  struct in_addr ipv4_addr;
+  struct in6_addr ipv6_addr;
+  if (inet_pton(AF_INET, host.c_str(), &ipv4_addr) == 1 ||
+      inet_pton(AF_INET6, host.c_str(), &ipv6_addr) == 1) {
+    hints.ai_flags |= AI_NUMERICHOST;
+  }
+
   int ret = getaddrinfo(host.c_str(), port_str.c_str(), &hints, &result);
   if (ret != 0 || result == nullptr) {
     return absl::InvalidArgumentError(absl::StrCat(
         "getaddrinfo failed for host ", host, ": ", gai_strerror(ret)));
+  }
+  if (is_cancelled()) {
+    freeaddrinfo(result);
+    return absl::CancelledError("connect cancelled during name resolution");
+  }
+  if (std::chrono::steady_clock::now() >= deadline) {
+    freeaddrinfo(result);
+    return absl::DeadlineExceededError(
+        "connect deadline exceeded during name resolution");
   }
 
   int sock_fd = -1;
@@ -126,11 +159,60 @@ absl::StatusOr<int> ConnectToPeer(absl::string_view peer,
       }
     }
 
-    if (connect(sock_fd, rp->ai_addr, rp->ai_addrlen) >= 0) {
-      break; /* Success */
+    const int original_flags = fcntl(sock_fd, F_GETFL, 0);
+    if (original_flags < 0 ||
+        fcntl(sock_fd, F_SETFL, original_flags | O_NONBLOCK) < 0) {
+      last_errno = errno;
+      close(sock_fd);
+      sock_fd = -1;
+      continue;
     }
 
-    last_errno = errno;
+    int connect_result = connect(sock_fd, rp->ai_addr, rp->ai_addrlen);
+    if (connect_result < 0 && errno != EINPROGRESS) {
+      last_errno = errno;
+      close(sock_fd);
+      sock_fd = -1;
+      continue;
+    }
+
+    bool connected = connect_result == 0;
+    while (!connected && !is_cancelled() &&
+           std::chrono::steady_clock::now() < deadline) {
+      const auto remaining =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              deadline - std::chrono::steady_clock::now());
+      const int poll_timeout =
+          static_cast<int>(std::clamp<int64_t>(remaining.count(), 1, 50));
+      struct pollfd pfd = {.fd = sock_fd, .events = POLLOUT};
+      const int poll_result = poll(&pfd, 1, poll_timeout);
+      if (poll_result < 0) {
+        if (errno == EINTR) continue;
+        last_errno = errno;
+        break;
+      }
+      if (poll_result == 0) continue;
+      int socket_error = 0;
+      socklen_t socket_error_size = sizeof(socket_error);
+      if (getsockopt(sock_fd, SOL_SOCKET, SO_ERROR, &socket_error,
+                     &socket_error_size) < 0) {
+        last_errno = errno;
+        break;
+      }
+      if (socket_error != 0) {
+        last_errno = socket_error;
+        break;
+      }
+      connected = true;
+    }
+
+    if (connected && !is_cancelled() &&
+        std::chrono::steady_clock::now() < deadline &&
+        fcntl(sock_fd, F_SETFL, original_flags) == 0) {
+      break;
+    }
+
+    if (last_errno == 0) last_errno = ETIMEDOUT;
     close(sock_fd);
     sock_fd = -1;
   }
@@ -138,6 +220,13 @@ absl::StatusOr<int> ConnectToPeer(absl::string_view peer,
   freeaddrinfo(result);
 
   if (sock_fd < 0) {
+    if (is_cancelled()) {
+      return absl::CancelledError("connect cancelled");
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      return absl::DeadlineExceededError(
+          absl::StrCat("Timed out connecting to peer ", peer));
+    }
     return absl::UnavailableError(absl::StrCat(
         "Failed to connect to peer ", peer, ": ", std::strerror(last_errno)));
   }

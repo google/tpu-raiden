@@ -346,7 +346,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::H2dLayer(
           tpu_raiden::weight_sync::GetTiledBufferElements(shard_hold.shape) *
           itemsize;
       auto temp_buffer =
-          std::make_shared_for_overwrite<uint8_t[]>(physical_bytes);
+          std::shared_ptr<uint8_t[]>(new uint8_t[physical_bytes]);
       auto tile_start = absl::Now();
       auto status = tpu_raiden::weight_sync::TileBuffer(
           shard_info.host_ptr, temp_buffer.get(), shard_hold.shape,
@@ -463,7 +463,7 @@ absl::StatusOr<raiden::PjRtCopyFuture> WeightSynchronizerBase::D2hLayer(
           tpu_raiden::weight_sync::GetTiledBufferElements(shard_hold.shape) *
           itemsize;
       auto temp_buffer =
-          std::make_shared_for_overwrite<uint8_t[]>(physical_bytes);
+          std::shared_ptr<uint8_t[]>(new uint8_t[physical_bytes]);
       uint8_t* temp_buffer_ptr = temp_buffer.get();
 
       xla::Future<> copy_future =
