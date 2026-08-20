@@ -36,6 +36,7 @@
 #include "tpu_sync/transport/block_transport_delegate.h"
 #include "tpu_sync/transport/buffer_push_task.h"
 #include "tpu_sync/transport/lib/chunk.h"
+#include "tpu_sync/transport/lib/peregrine_control_service.h"
 #include "tpu_sync/transport/lib/raw_buffer_transport.h"
 #include "tpu_sync/transport/lib/transport_adapter.h"
 
@@ -68,6 +69,12 @@ class BlockTransport final {
   // Return the bound IP address.
   // It is the first IP in `local_ips` if provided, otherwise "127.0.0.1".
   const std::string& bound_ip() const { return raw_transport_.bound_ip(); }
+
+  // Returns PeregrineService to register onto the host gRPC server.
+  ::peregrine::internal::control::PeregrineService::Service*
+  peregrine_control_service() {
+    return peregrine_control_.get();
+  }
 
   // Asynchronous Scatter-Gather Push
   void AsyncPush(
@@ -248,6 +255,7 @@ class BlockTransport final {
   std::atomic<bool> scheduler_stopping_;
 
   lib::RawBufferTransport raw_transport_;
+  std::unique_ptr<lib::PeregrineControlServiceImpl> peregrine_control_;
   std::vector<std::thread> socket_workers_;
 };
 

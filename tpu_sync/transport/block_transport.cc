@@ -54,6 +54,7 @@
 #include "tpu_sync/transport/buffer_push_task.h"
 #include "tpu_sync/transport/lib/chunk.h"
 #include "tpu_sync/transport/lib/chunk_serializer.h"
+#include "tpu_sync/transport/lib/peregrine_control_service.h"
 #include "tpu_sync/transport/lib/raw_buffer_transport.h"
 #include "tpu_sync/transport/lib/transport_adapter.h"
 #include "tpu_sync/transport/peregrine/src/api/socket_util.h"
@@ -221,7 +222,9 @@ BlockTransport::BlockTransport(BlockTransportDelegate* delegate, int local_port,
           [this](int client_fd, const lib::ChunkHeader& header) {
             return HandleCustomRequest(client_fd, header);
           },
-          absl::GetFlag(FLAGS_raiden_transport_coalesce_window_bytes)) {
+          absl::GetFlag(FLAGS_raiden_transport_coalesce_window_bytes)),
+      peregrine_control_(
+          std::make_unique<lib::PeregrineControlServiceImpl>(&raw_transport_)) {
   socket_workers_.reserve(parallelism_);
   for (int i = 0; i < parallelism_; ++i) {
     socket_workers_.push_back(
