@@ -394,6 +394,23 @@ bool HostOffloadBackend::InsertAndLock(
       }
       return false;
     }
+    // An entry that is only in HBM describes a device block and nothing else:
+    // no host bytes were ever written for it, so there is nothing here worth
+    // keeping. Its device block belongs to whoever is inserting now, and the
+    // one recorded earlier may since have been handed back and refilled with
+    // unrelated data -- a save driven from that stale id would copy the wrong
+    // bytes. Take the caller's binding, which is the only current one.
+    //
+    // HOST and HOST_AND_HBM entries are left alone: those DO hold host bytes,
+    // and the caller is re-offering a block the store already has.
+    if (i < slices.size()) {
+      RaidenBlockId* existing = lru_cache_.PeekMutable(block_hashes[i]);
+      if (existing != nullptr && existing->status == BlockStatus::HBM) {
+        ClearMetadataEntry(*existing);
+        *existing = slices[i];
+        SetMetadataEntry(block_hashes[i], slices[i]);
+      }
+    }
   }
 
   if (lru_cache_.available_space() < new_indices.size()) {
