@@ -1556,6 +1556,13 @@ void KVCacheManagerWithTransfer::StartRead(
     if (!staged.has_value()) {
       // Request larger than the staging pool can seat: surface as a recv
       // failure (the connector can recompute) rather than throwing.
+      LOG(ERROR) << "StartRead: cannot stage " << unique_local_bids.size()
+                 << " blocks for req_id=" << req_id
+                 << " (dynamic=" << dynamic_host_staging_
+                 << ", free_host_blocks="
+                 << host_block_manager_->num_free_blocks()
+                 << ", free_slots=" << free_slots_.size()
+                 << ", max_blocks=" << max_blocks_ << ")";
       failed_recving_.insert(req_id);
       return;
     }
@@ -1925,7 +1932,11 @@ KVCacheManagerWithTransfer::AcquireRecvStagingLocked(int64_t num_blocks,
   // Lock the pages so the pool's LRU cannot evict staging that is mid-flight.
   auto allocated = host_block_manager_->Allocate(static_cast<int>(num_blocks),
                                                  /*lock=*/true);
-  if (!allocated.ok()) return std::nullopt;
+  if (!allocated.ok()) {
+    LOG(ERROR) << "demand staging: Allocate(" << num_blocks
+               << ") failed: " << allocated.status();
+    return std::nullopt;
+  }
   entry->staged_host_blocks = *allocated;
   std::vector<int64_t> blocks;
   blocks.reserve(allocated->size());
@@ -2335,24 +2346,53 @@ void KVCacheManagerWithTransfer::StartPushInternal(
   // pool. Writing D2H straight to host[src_block_id] overflows the host buffer
   // once a device block id exceeds num_host_blocks.
   std::vector<int64_t> host_block_ids;
-  {
-    absl::MutexLock lock(mu_);
-    auto it = send_entries_.find(uuid);
-    if (it == send_entries_.end()) {
+  const auto stage_deadline = DeadlineFromNow();
+  while (true) {
+    {
+      absl::MutexLock lock(mu_);
+      auto it = send_entries_.find(uuid);
+      if (it == send_entries_.end()) {
+        return;  // request cancelled while waiting for staging
+      }
+      if (!dynamic_host_staging_ &&
+          static_cast<int64_t>(src_block_ids.size()) > max_blocks_) {
+        // A fixed slot can never seat this request; report the send as
+        // failed so the consumer aborts now rather than timing out.
+        LOG(ERROR) << "StartPushInternal: request " << it->second->req_id
+                   << " needs " << src_block_ids.size()
+                   << " blocks but a staging slot holds " << max_blocks_;
+        failed_recving_.insert(it->second->req_id);
+        ReleaseEntrySlotLocked(it->second);
+        send_entries_.erase(it);
+        return;
+      }
+      RecvEntry staging;
+      auto staged = AcquireRecvStagingLocked(
+          static_cast<int64_t>(src_block_ids.size()), &staging);
+      if (staged.has_value()) {
+        it->second->slot_idx = staging.slot_idx;
+        it->second->staged_host_blocks = std::move(staging.staged_host_blocks);
+        host_block_ids = std::move(*staged);
+        break;
+      }
+    }
+    // Staging exhausted: wait for in-flight sends to hand blocks back
+    // instead of reporting a send that never happened. The consumer's own
+    // deadline still bounds the total wait.
+    if (std::chrono::steady_clock::now() >= stage_deadline) {
+      absl::MutexLock lock(mu_);
+      auto it = send_entries_.find(uuid);
+      if (it != send_entries_.end()) {
+        LOG(ERROR) << "StartPushInternal: staging exhausted serving "
+                   << it->second->req_id << " (" << src_block_ids.size()
+                   << " blocks); reporting transfer failure";
+        failed_recving_.insert(it->second->req_id);
+        ReleaseEntrySlotLocked(it->second);
+        send_entries_.erase(it);
+      }
       return;
     }
-    RecvEntry staging;
-    auto staged = AcquireRecvStagingLocked(
-        static_cast<int64_t>(src_block_ids.size()), &staging);
-    if (!staged.has_value()) {
-      done_sending_.insert(it->second->req_id);
-      ReleaseEntrySlotLocked(it->second);
-      send_entries_.erase(it);
-      return;
-    }
-    it->second->slot_idx = staging.slot_idx;
-    it->second->staged_host_blocks = std::move(staging.staged_host_blocks);
-    host_block_ids = std::move(*staged);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 
   // Coalesce contiguous (device,host) block runs into a few large copies. With
