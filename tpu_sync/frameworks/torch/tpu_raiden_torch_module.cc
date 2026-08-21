@@ -253,8 +253,8 @@ NB_MODULE(_tpu_raiden_torch, m) {
           [](KVCacheManager& self, uint64_t uuid,
              const nb::bytes& request_bytes, bool is_sender) {
             tpu_sync::rpc::StartTransferRequest request;
-            if (!request.ParseFromArray(request_bytes.c_str(),
-                                        request_bytes.size())) {
+            if (!request.ParseFromString(absl::string_view(
+                    request_bytes.c_str(), request_bytes.size()))) {
               throw std::runtime_error(
                   "KVCacheManager register_active_plan failed: invalid "
                   "StartTransferRequest bytes");
