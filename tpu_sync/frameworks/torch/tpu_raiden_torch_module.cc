@@ -280,6 +280,13 @@ NB_MODULE(_tpu_raiden_torch, m) {
           },
           nb::arg("uuid"))
       .def(
+          "plan_host_blocks",
+          [](KVCacheManager& self, uint64_t uuid,
+             const std::vector<int64_t>& block_ids) {
+            return self.PlanHostBlocks(uuid, block_ids);
+          },
+          nb::arg("uuid"), nb::arg("block_ids"))
+      .def(
           "push_registered_plan",
           [](KVCacheManager& self, uint64_t uuid, const std::string& peer,
              const std::vector<int>& src_block_ids,

@@ -204,6 +204,7 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   absl::Status RegisterActivePlan(
       uint64_t uuid, const ::tpu_sync::rpc::StartTransferRequest& request,
       bool is_sender) override;
+  absl::Status UnregisterActivePlan(uint64_t uuid) override;
 
   absl::Status RegisterRecv(uint64_t uuid, const std::string& req_id,
                             int64_t expected_block_count) override;
@@ -340,6 +341,9 @@ class KVCacheManagerWithTransfer : public kv_cache::KVCacheManagerBase {
   Slot AcquireSlotLocked();
   void ReleaseSlotLocked(int64_t slot_idx);
   struct RecvEntry;  // defined below; staging helpers take it by pointer
+  // Host staging held for a sender plan, released when it is unregistered.
+  absl::flat_hash_map<uint64_t, std::vector<int>> plan_staging_
+      ABSL_GUARDED_BY(mu_);
   // Host staging for one incoming read: exactly `num_blocks` blocks under
   // demand staging, a whole fixed slot otherwise. Returns nullopt when the
   // staging pool cannot seat the request.
