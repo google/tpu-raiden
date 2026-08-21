@@ -680,9 +680,49 @@ int64_t KVCacheManagerWithTransfer::NotifyForRead(
 absl::Status KVCacheManagerWithTransfer::RegisterActivePlan(
     uint64_t uuid, const ::tpu_sync::rpc::StartTransferRequest& request,
     bool is_sender) {
+  // Under demand staging a plan's device blocks are staged in host blocks
+  // allocated for the plan, so the host mirror no longer has to span the
+  // device block space. Pool-addressed plans keep their own addressing.
+  absl::flat_hash_map<int64_t, int64_t> host_block_of;
+  std::vector<int> plan_blocks;
+  if (dynamic_host_staging_ && request.pool_groups_size() == 0) {
+    std::vector<int64_t> device_blocks;
+    absl::flat_hash_set<int64_t> seen;
+    for (const auto& [src_shard, schedule] : request.shard_push_schedules()) {
+      for (const auto& e : schedule.entries()) {
+        int64_t id = is_sender ? e.src_block_id() : e.dst_block_id();
+        if (seen.insert(id).second) device_blocks.push_back(id);
+      }
+    }
+    if (!device_blocks.empty()) {
+      absl::MutexLock lock(mu_);
+      auto allocated = host_block_manager_->Allocate(
+          static_cast<int>(device_blocks.size()), /*lock=*/true);
+      if (!allocated.ok()) {
+        return absl::ResourceExhaustedError(absl::StrCat(
+            "cannot stage ", device_blocks.size(), " blocks for plan ", uuid,
+            ": ", allocated.status().message()));
+      }
+      plan_blocks = *allocated;
+      for (size_t i = 0; i < device_blocks.size(); ++i) {
+        host_block_of[device_blocks[i]] = plan_blocks[i];
+      }
+      if (is_sender) plan_staging_[uuid] = plan_blocks;
+    }
+  }
+
   // 1. Call base class implementation to register the plan in active_plans_
-  TF_RETURN_IF_ERROR(kv_cache::KVCacheManagerBase::RegisterActivePlan(
-      uuid, request, is_sender));
+  absl::Status registered = kv_cache::KVCacheManagerBase::RegisterActivePlan(
+      uuid, request, is_sender, host_block_of);
+  if (!registered.ok()) {
+    absl::MutexLock lock(mu_);
+    if (!plan_blocks.empty()) {
+      (void)host_block_manager_->Unlock(plan_blocks);
+      (void)host_block_manager_->Deallocate(plan_blocks);
+      plan_staging_.erase(uuid);
+    }
+    return registered;
+  }
 
   // 2. If we are the receiver and the destination memory type is HBM,
   //    populate active_recv_entries_ to enable automatic H2D copy!
@@ -690,6 +730,7 @@ absl::Status KVCacheManagerWithTransfer::RegisterActivePlan(
       request.dst_mem_type() == ::tpu_sync::rpc::MEMORY_TYPE_HBM) {
     absl::MutexLock lock(mu_);
     RecvEntry recv_entry;
+    recv_entry.staged_host_blocks = std::move(plan_blocks);
     std::string req_id = request.req_id().empty()
                              ? absl::StrCat("resharded_transfer_", uuid)
                              : request.req_id();
@@ -702,8 +743,10 @@ absl::Status KVCacheManagerWithTransfer::RegisterActivePlan(
       absl::flat_hash_set<std::pair<int, int>>
           unique_transfers_from_this_source;
       for (const auto& push_entry : schedule.entries()) {
-        recv_entry.host_to_chip[push_entry.dst_block_id()] =
-            push_entry.dst_block_id();
+        const int64_t dst = push_entry.dst_block_id();
+        auto hb = host_block_of.find(dst);
+        recv_entry.host_to_chip[hb == host_block_of.end() ? dst : hb->second] =
+            dst;
         unique_transfers_from_this_source.insert(
             {push_entry.src_block_id(), push_entry.dst_block_id()});
         unique_dst_blocks.insert(push_entry.dst_block_id());
@@ -715,14 +758,22 @@ absl::Status KVCacheManagerWithTransfer::RegisterActivePlan(
     recv_entry.deadline = DeadlineFromNow();
     recv_entry.start_time = std::chrono::steady_clock::now();
 
-    // Populate h2d_copy spec for unique destination blocks
-    std::vector<int64_t> h2d_host_block_ids(unique_dst_blocks.begin(),
-                                            unique_dst_blocks.end());
-    std::vector<int64_t> h2d_local_block_ids =
-        h2d_host_block_ids;  // 1-to-1 mapping
+    // H2D reads each destination block from wherever it was staged.
+    std::vector<int64_t> h2d_local_block_ids(unique_dst_blocks.begin(),
+                                             unique_dst_blocks.end());
+    std::vector<int64_t> h2d_host_block_ids;
+    h2d_host_block_ids.reserve(h2d_local_block_ids.size());
+    for (int64_t dst : h2d_local_block_ids) {
+      auto hb = host_block_of.find(dst);
+      h2d_host_block_ids.push_back(hb == host_block_of.end() ? dst
+                                                             : hb->second);
+    }
     recv_entry.h2d_copy =
         BuildCoalescedCopySpec(h2d_host_block_ids, h2d_local_block_ids);
 
+    if (total_blocks == 0) {
+      ReleaseRecvStagingLocked(&recv_entry);
+    }
     if (total_blocks > 0) {
       active_recv_entries_[uuid] = std::move(recv_entry);
       LOG(INFO) << "RegisterActivePlan (Receiver): Populated "
@@ -1440,6 +1491,19 @@ absl::Status KVCacheManagerWithTransfer::PoolReshardRegisterRecv(
     active_recv_entries_[plan.uuid()] = std::move(recv_entry);
   }
   return absl::OkStatus();
+}
+
+absl::Status KVCacheManagerWithTransfer::UnregisterActivePlan(uint64_t uuid) {
+  {
+    absl::MutexLock lock(mu_);
+    auto it = plan_staging_.find(uuid);
+    if (it != plan_staging_.end()) {
+      (void)host_block_manager_->Unlock(it->second);
+      (void)host_block_manager_->Deallocate(it->second);
+      plan_staging_.erase(it);
+    }
+  }
+  return kv_cache::KVCacheManagerBase::UnregisterActivePlan(uuid);
 }
 
 std::vector<RaidenTransferEndpoint>

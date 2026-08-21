@@ -2209,6 +2209,35 @@ absl::Status KVCacheManagerBase::PushKVCacheResharded(
 absl::Status KVCacheManagerBase::RegisterActivePlan(
     uint64_t uuid, const ::tpu_sync::rpc::StartTransferRequest& request,
     bool is_sender) {
+  return RegisterActivePlan(uuid, request, is_sender, {});
+}
+
+std::vector<int64_t> KVCacheManagerBase::PlanHostBlocks(
+    uint64_t uuid, const std::vector<int64_t>& block_ids) const {
+  std::shared_ptr<const RegisteredPlan> plan;
+  {
+    absl::MutexLock l(plans_mu_);
+    auto it = active_plans_.find(uuid);
+    if (it != active_plans_.end()) plan = it->second;
+  }
+  std::vector<int64_t> out;
+  out.reserve(block_ids.size());
+  for (int64_t id : block_ids) {
+    if (plan != nullptr) {
+      auto it = plan->host_block_of.find(id);
+      if (it != plan->host_block_of.end()) {
+        out.push_back(it->second);
+        continue;
+      }
+    }
+    out.push_back(id);
+  }
+  return out;
+}
+
+absl::Status KVCacheManagerBase::RegisterActivePlan(
+    uint64_t uuid, const ::tpu_sync::rpc::StartTransferRequest& request,
+    bool is_sender, absl::flat_hash_map<int64_t, int64_t> host_block_of) {
   // Structural contract for pool-addressed plans. Pool selection is request
   // data resolved by the controller; raiden validates consistency (indices
   // resolve against this manager's pool table, explicit or implicit) and
@@ -2263,8 +2292,8 @@ absl::Status KVCacheManagerBase::RegisterActivePlan(
   }
   absl::MutexLock l(plans_mu_);
   if (auto [it, inserted] = active_plans_.try_emplace(
-          uuid, std::make_shared<const RegisteredPlan>(
-                    RegisteredPlan{request, is_sender}));
+          uuid, std::make_shared<const RegisteredPlan>(RegisteredPlan{
+                    request, is_sender, std::move(host_block_of)}));
       !inserted) {
     return absl::AlreadyExistsError(
         absl::StrCat("Plan with UUID ", uuid, " is already registered!"));
@@ -2402,7 +2431,18 @@ KVCacheManagerBase::GetBlockChunks(size_t layer_idx, size_t shard_idx,
 
   for (int64_t block_id : block_ids) {
     if (accumulated_bytes >= total_bytes) break;
-    size_t block_start_byte = static_cast<size_t>(block_id) * block_size_bytes;
+    // The wire names device blocks; the bytes live wherever this side staged
+    // them, which is the block's own id unless the plan says otherwise.
+    int64_t host_block = block_id;
+    if (!plan_snapshot->host_block_of.empty()) {
+      auto hb = plan_snapshot->host_block_of.find(block_id);
+      if (hb == plan_snapshot->host_block_of.end()) {
+        return {};
+      }
+      host_block = hb->second;
+    }
+    size_t block_start_byte =
+        static_cast<size_t>(host_block) * block_size_bytes;
     std::vector<tpu_raiden::transport::BlockChunk> block_resolved_chunks;
 
     if (is_sender) {
