@@ -39,6 +39,7 @@
 #include "absl/base/optimization.h"
 #include "absl/cleanup/cleanup.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/flags/flag.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -57,6 +58,7 @@
 #include "tpu_sync/transport/lib/chunk_serializer.h"
 #include "tpu_sync/transport/lib/conn/pool.h"
 #include "tpu_sync/transport/lib/raw_buffer_transport_delegate.h"
+#include "tpu_sync/transport/lib/socket/tcp_psp_helper.h"
 #include "tpu_sync/transport/peregrine/src/api/socket_util.h"
 
 namespace tpu_raiden::transport::lib {
@@ -420,11 +422,20 @@ void RawBufferTransport::ConnectionWorker(int client_fd) {
   close(client_fd);
 }
 
-absl::StatusOr<RawBufferTransport::PspPeerKey>
+absl::StatusOr<PspPeerKey>
 RawBufferTransport::RegisterPspPeer(uint32_t client_spi,
                                     absl::string_view client_key) {
-  return absl::UnimplementedError(
-      "PSP key registration is not implemented yet.");
+  if (!absl::GetFlag(FLAGS_require_psp_tcp)) {
+    return absl::InvalidArgumentError(
+        "PSP is not enabled in transport");
+  }
+  absl::MutexLock lock(psp_mu_);
+  if (stopping_ || server_fd_ < 0) {
+    return absl::FailedPreconditionError(
+        "Transport is stopping or listening socket is not initialized.");
+  }
+
+  return RegisterPspPeerKey(server_fd_, client_spi, client_key);
 }
 
 void RawBufferTransport::ListenerLoop() {
@@ -445,6 +456,12 @@ void RawBufferTransport::ListenerLoop() {
         server_fd_, reinterpret_cast<struct sockaddr*>(&client_addr), &clilen);
     if (client_fd < 0) {
       if (stopping_) break;
+      continue;
+    }
+    if (absl::GetFlag(FLAGS_require_psp_tcp) && !PspEnabled(client_fd)) {
+      close(client_fd);
+      LOG_EVERY_N_SEC(ERROR, 1)
+          << "Unencrypted TCP connection rejected on PSP listener";
       continue;
     }
 
