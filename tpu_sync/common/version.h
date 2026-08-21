@@ -20,6 +20,7 @@
 namespace tpu_sync {
 
 // Current version of the TPU Sync protocol/runtime.
+// Dummy change to test Kokoro triggering.
 inline constexpr uint32_t kCurrentVersion = 1;
 
 // Minimum version supported by the current TPU Sync build.
