@@ -140,27 +140,34 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
   def tearDown(self):
     super().tearDown()
 
-  def _run_e2e_save_and_load(self, use_slices: bool = False):
+  def _run_e2e_save_and_load(
+      self,
+      use_slices: bool = False,
+      dtype: torch.dtype = torch.float32,
+      save_blocks: tuple[int, int] = (0, 1),
+      load_blocks: tuple[int, int] = (2, 3),
+  ):
     num_blocks = 4
     shape = (num_blocks, 128, 8, 8, 128)
 
     # 1. Generate sequential distinct cache data
-    # np.arange creates unique values for each element, ensuring different
-    # values for different shards
-    host_data = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
-    tpu_cache = torch.tensor(host_data, device=self.device)
+    np_dtype = np.float32
+    if dtype == torch.float16:
+      np_dtype = np.float16
+    host_data = np.arange(np.prod(shape), dtype=np_dtype).reshape(shape)
+    tpu_cache = torch.tensor(host_data, dtype=dtype, device=self.device)
 
-    # Expected reference after loading saved blocks 0 and 1 into blocks 2 and 3: [a, b, a, b]
+    # Expected reference after loading saved blocks into load_blocks
     expected_ref = host_data.copy()
-    expected_ref[2] = host_data[0]
-    expected_ref[3] = host_data[1]
+    expected_ref[load_blocks[0]] = host_data[save_blocks[0]]
+    expected_ref[load_blocks[1]] = host_data[save_blocks[1]]
 
     # 2. Get free port for controller
     controller_port = find_free_port()
 
     # Calculate shard size in bytes
     block_elements = 128 * 8 * 8 * 128
-    shard_size_bytes = (block_elements * 4) // self.num_devices
+    shard_size_bytes = (block_elements * tpu_cache.element_size()) // self.num_devices
 
     # 3. Create KVCacheStore (Controller)
     print("=== [Step 3/9] Creating KVCacheStore (Controller) ===")
@@ -184,11 +191,6 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         num_slots=2,
         unsafe_skip_buffer_lock=self.skip_lock,
         raiden_worker_port=0,
-        # Must match the address the store's controller binds
-        # ("localhost:{controller_port}", see the KVCacheStore above); using
-        # get_local_ip() here dials a LAN IP the controller is not listening on,
-        # so RegisterWorker never lands and Save fails with "No registered
-        # workers available for TransferBuffers".
         raiden_controller_address=f"localhost:{controller_port}",
         worker_id=f"{tag}_worker_0",
     )
@@ -200,13 +202,13 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
         kv_cache_store.RaidenBlockId(
             rid,
             host_block_id=-1,
-            device_block_id=0,
+            device_block_id=save_blocks[0],
             status=kv_cache_store.BlockStatus.HBM,
         ),
         kv_cache_store.RaidenBlockId(
             rid,
             host_block_id=-1,
-            device_block_id=1,
+            device_block_id=save_blocks[1],
             status=kv_cache_store.BlockStatus.HBM,
         ),
     ]
@@ -216,18 +218,12 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     lookup_res = store.lookup(hashes, pin_found=False)
     self.assertLen(lookup_res, 2)
     self.assertEqual(lookup_res[0][1].status, kv_cache_store.BlockStatus.HBM)
-    self.assertEqual(lookup_res[0][1].device_block_id, 0)
+    self.assertEqual(lookup_res[0][1].device_block_id, save_blocks[0])
     self.assertEqual(lookup_res[1][1].status, kv_cache_store.BlockStatus.HBM)
-    self.assertEqual(lookup_res[1][1].device_block_id, 1)
+    self.assertEqual(lookup_res[1][1].device_block_id, save_blocks[1])
 
     # 6. Save HBM blocks to host memory
     print("=== [Step 6/9] Saving HBM blocks to Host DRAM (store.save) ===")
-
-    def get_slice_e2e(x):
-      return x[0, 0, 0, 0, 0:16].cpu().numpy()
-
-    print(f"DEBUG: test_e2e tpu_cache before Save: {get_slice_e2e(tpu_cache)}")
-
     store.save(hashes)
 
     # Wait for save completion
@@ -238,7 +234,6 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
       )
       if save_failed:
         raise RuntimeError(f"Async Save failed: {save_failed}")
-      # A local save never produces the remote-only outcomes.
       self.assertEmpty(save_existing)
       self.assertEmpty(save_unregistered)
       if save_done:
@@ -258,19 +253,17 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
     )
     self.assertEqual(lookup_res[1][1].host_block_id, 1)
 
-    # 7. Load from host DRAM into device HBM blocks [2, 3]
-    print("=== [Step 7/8] Loading checkpoint from Host DRAM into TPU HBM blocks [2, 3] (store.load) ===")
+    # 7. Load from host DRAM into destination device HBM blocks
+    print(f"=== [Step 7/8] Loading from Host DRAM into TPU HBM blocks {list(load_blocks)} (store.load) ===")
     if use_slices:
-      # lookup() pins the returned entries; load(..., slices=...) consumes the pin on success.
       load_slices = [entry for _, entry in store.lookup(hashes)]
       self.assertLen(load_slices, 2)
       for entry in load_slices:
         self.assertEqual(entry.status, kv_cache_store.BlockStatus.HOST_AND_HBM)
-      self.assertTrue(store.load(hashes, [2, 3], slices=load_slices))
+      self.assertTrue(store.load(hashes, list(load_blocks), slices=load_slices))
     else:
-      # lookup() pins the returned entries; load() consumes the pin on success.
       self.assertLen(store.lookup(hashes), 2)
-      self.assertTrue(store.load(hashes, [2, 3]))
+      self.assertTrue(store.load(hashes, list(load_blocks)))
 
     # Wait for load completion
     done = False
@@ -287,22 +280,66 @@ class KVCacheStoreE2ETest(parameterized.TestCase):
       torch.tpu.synchronize()
     except (AttributeError, RuntimeError):
       pass
-    # 8. Verify device memory blocks [2, 3] match saved blocks [0, 1]
-    print("=== [Step 8/8] Verifying restored TPU memory matches expected array [a, b, a, b] ===")
-    np.testing.assert_array_equal(tpu_cache.cpu().numpy(), expected_ref)
-    print("=== [SUCCESS] E2E Save/Load [0, 1] -> [2, 3] roundtrip verified on physical TPU! ===")
+    # 8. Verify device memory matches expected reference
+    print("=== [Step 8/8] Verifying restored TPU memory matches expected array ===")
+    if dtype == torch.bfloat16:
+      np.testing.assert_array_equal(
+          tpu_cache.cpu().to(torch.float32).numpy(),
+          torch.tensor(expected_ref, dtype=dtype).cpu().to(torch.float32).numpy(),
+      )
+    else:
+      np.testing.assert_array_equal(tpu_cache.cpu().numpy(), expected_ref)
+    print(f"=== [SUCCESS] E2E Save/Load {list(save_blocks)} -> {list(load_blocks)} (dtype={dtype}) verified on TPU! ===")
     del manager, store
 
   def test_e2e_save_and_load(self):
     self._run_e2e_save_and_load()
 
-  # The same save/load/compare pipeline, driven through the slices form of
-  # load. Running it as a variant rather than a separate test is the point:
-  # `slices` is a shortcut past the store's own lookup, not a different
-  # transfer, so the bytes that land in blocks [2, 3] must be the ones the
-  # no-slices path produces.
   def test_e2e_save_and_load_with_slices(self):
     self._run_e2e_save_and_load(use_slices=True)
+
+  def test_e2e_save_and_load_bfloat16(self):
+    self._run_e2e_save_and_load(dtype=torch.bfloat16)
+
+  def test_e2e_save_and_load_non_contiguous_blocks(self):
+    self._run_e2e_save_and_load(
+        save_blocks=(0, 2),
+        load_blocks=(1, 3),
+    )
+
+  def test_e2e_save_and_load_empty_batch(self):
+    controller_port = find_free_port()
+    tag = f"empty_{uuid.uuid4().hex[:8]}"
+    rid = kv_cache_store.RaidenId(f"{tag}_job", "0", f"{tag}_cache", 0)
+    store = kv_cache_store.KVCacheStore(
+        capacity=4,
+        raiden_id=rid,
+        num_shards=self.num_devices,
+        shard_size_bytes=1024,
+        store_server_ip="localhost",
+        raiden_controller_port=controller_port,
+    )
+    # Empty save is rejected by controller (returns False); empty load is a no-op (returns True)
+    self.assertFalse(store.save([]))
+    self.assertTrue(store.load([], []))
+    self.assertTrue(store.load([], [], slices=[]))
+    del store
+
+  def test_e2e_load_uninserted_hash_fails(self):
+    controller_port = find_free_port()
+    tag = f"missing_{uuid.uuid4().hex[:8]}"
+    rid = kv_cache_store.RaidenId(f"{tag}_job", "0", f"{tag}_cache", 0)
+    store = kv_cache_store.KVCacheStore(
+        capacity=4,
+        raiden_id=rid,
+        num_shards=self.num_devices,
+        shard_size_bytes=1024,
+        store_server_ip="localhost",
+        raiden_controller_port=controller_port,
+    )
+    # Attempting to load a hash that was never inserted/pinned should fail
+    self.assertFalse(store.load([b"nonexistent_hash"], [0]))
+    del store
 
   def _run_remote_read_e2e_test(
       self,
