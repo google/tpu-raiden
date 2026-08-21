@@ -207,6 +207,14 @@ class KVCacheManager:
     """Removes a previously registered strided push plan."""
     self._impl.unregister_active_plan(uuid)
 
+  def plan_host_blocks(self, uuid: int, block_ids: Sequence[int]) -> List[int]:
+    """Host blocks staging ``block_ids`` under a registered plan.
+
+    Returns the ids themselves when the plan stages blocks at their own ids.
+    A sender stages its device blocks into these before pushing.
+    """
+    return [int(b) for b in self._impl.plan_host_blocks(uuid, list(block_ids))]
+
   def push_registered_plan(
       self,
       uuid: int,
