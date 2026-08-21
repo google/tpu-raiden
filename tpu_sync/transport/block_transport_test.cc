@@ -33,6 +33,8 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/status_matchers.h"
 #include "absl/status/statusor.h"
@@ -43,11 +45,20 @@
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
+#include "grpcpp/channel.h"
+#include "grpcpp/create_channel.h"
+#include "grpcpp/security/credentials.h"
+#include "grpcpp/server.h"
+#include "grpcpp/server_builder.h"
+#include "grpcpp/support/channel_arguments.h"
 #include "tpu_sync/telemetry/metrics_api.h"
 #include "tpu_sync/telemetry/metrics_backend.h"
 #include "tpu_sync/telemetry/prometheus_exporter.h"
 #include "tpu_sync/transport/block_transport_delegate.h"
 #include "tpu_sync/transport/buffer_push_task.h"
+#include "tpu_sync/transport/lib/socket/psp_syscall_mock.h" // NOLINT
+#include "tpu_sync/transport/lib/socket/tcp_psp_helper.h"
+#include "absl/flags/flag.h"
 
 namespace tpu_raiden {
 namespace transport {
@@ -181,6 +192,22 @@ class MockDelegate : public BlockTransportDelegate {
     cb(absl::OkStatus());
   }
 
+  void SetPeerChannel(absl::string_view peer,
+                      std::shared_ptr<grpc::Channel> channel) {
+    absl::MutexLock lock(peer_channels_mu_);
+    peer_channels_[std::string(peer)] = std::move(channel);
+  }
+
+  std::shared_ptr<grpc::Channel> GetPeregrineChannel(
+      absl::string_view peer) override {
+    absl::MutexLock lock(peer_channels_mu_);
+    auto it = peer_channels_.find(peer);
+    if (it != peer_channels_.end()) {
+      return it->second;
+    }
+    return default_channel_;
+  }
+
   bool on_data_received_called() const { return on_data_received_called_; }
   void reset_data_received() { on_data_received_called_ = false; }
 
@@ -249,6 +276,11 @@ class MockDelegate : public BlockTransportDelegate {
   std::atomic<int> pool_completion_count_{0};
   absl::Mutex wait_events_mu_;
   std::vector<std::tuple<size_t, size_t, int>> wait_events_;
+  mutable absl::Mutex peer_channels_mu_;
+  std::shared_ptr<grpc::Channel> default_channel_
+      ABSL_GUARDED_BY(peer_channels_mu_);
+  absl::flat_hash_map<std::string, std::shared_ptr<grpc::Channel>>
+      peer_channels_ ABSL_GUARDED_BY(peer_channels_mu_);
 };
 
 class SamePeerFanoutDelegate : public MockDelegate {
@@ -286,7 +318,51 @@ class PlanRequiringDelegate : public MockDelegate {
   }
 };
 
-TEST(BlockTransportTest, PoolModeReceiverRejectsPlanlessExplicitPush) {
+class BlockTransportTest : public ::testing::TestWithParam<bool> {
+ protected:
+  void SetUp() override {
+    if (GetParam() && !lib::IsPspSupported()) {
+      GTEST_SKIP() << "PSP-TCP is unimplemented.";
+    }
+    absl::SetFlag(&FLAGS_require_psp_tcp, GetParam());
+  }
+
+  void TearDown() override {
+    for (auto& server : servers_) {
+      if (server) {
+        server->Shutdown();
+      }
+    }
+    servers_.clear();
+  }
+
+  std::shared_ptr<grpc::Channel> StartControlServer(
+      BlockTransport* transport) {
+    grpc::ServerBuilder builder;
+    builder.RegisterService(transport->peregrine_control_service());
+    std::unique_ptr<grpc::Server> server = builder.BuildAndStart();
+    std::shared_ptr<grpc::Channel> channel =
+        server->InProcessChannel(grpc::ChannelArguments());
+    servers_.push_back(std::move(server));
+    return channel;
+  }
+
+  void BindControlChannels(BlockTransport* transport1, MockDelegate* delegate1,
+                           BlockTransport* transport2,
+                           MockDelegate* delegate2) {
+    auto ch1 = StartControlServer(transport1);
+    auto ch2 = StartControlServer(transport2);
+    delegate1->SetPeerChannel(
+        absl::StrCat("localhost:", transport2->local_port()), ch2);
+    delegate2->SetPeerChannel(
+        absl::StrCat("localhost:", transport1->local_port()), ch1);
+  }
+
+ private:
+  std::vector<std::unique_ptr<grpc::Server>> servers_;
+};
+
+TEST_P(BlockTransportTest, PoolModeReceiverRejectsPlanlessExplicitPush) {
   size_t size = 1024;
   MockDelegate sender_delegate(size);
   PlanRequiringDelegate receiver_delegate(size);
@@ -295,6 +371,7 @@ TEST(BlockTransportTest, PoolModeReceiverRejectsPlanlessExplicitPush) {
 
   BlockTransport sender(&sender_delegate, 0);
   BlockTransport receiver(&receiver_delegate, 0);
+  BindControlChannels(&sender, &sender_delegate, &receiver, &receiver_delegate);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   // Explicit destination (op=6) without a registered plan: the pool-mode
@@ -318,7 +395,7 @@ TEST(BlockTransportTest, PoolModeReceiverRejectsPlanlessExplicitPush) {
   EXPECT_EQ(receiver_delegate.data()[0], 0xAB);
 }
 
-TEST(BlockTransportTest, PushAndPullCorrectness) {
+TEST_P(BlockTransportTest, PushAndPullCorrectness) {
   size_t size = 1024;
   MockDelegate delegate1(size);
   MockDelegate delegate2(size);
@@ -329,6 +406,7 @@ TEST(BlockTransportTest, PushAndPullCorrectness) {
 
   BlockTransport transport1(&delegate1, 0);
   BlockTransport transport2(&delegate2, 0);
+  BindControlChannels(&transport1, &delegate1, &transport2, &delegate2);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
@@ -360,7 +438,7 @@ TEST(BlockTransportTest, PushAndPullCorrectness) {
   EXPECT_EQ(delegate2.data()[size - 1], 0xAB);
 }
 
-TEST(BlockTransportTest, PullNonContiguous) {
+TEST_P(BlockTransportTest, PullNonContiguous) {
   size_t size = 1024;
   // Delegate 1 has 3 blocks capacity
   MockDelegate delegate1(size, 3);
@@ -377,6 +455,7 @@ TEST(BlockTransportTest, PullNonContiguous) {
 
   BlockTransport transport1(&delegate1, 0);
   BlockTransport transport2(&delegate2, 0);
+  BindControlChannels(&transport1, &delegate1, &transport2, &delegate2);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
@@ -399,7 +478,8 @@ TEST(BlockTransportTest, PullNonContiguous) {
   EXPECT_EQ(delegate2.block_data(1)[size - 1], 0xCC);
 }
 
-TEST(BlockTransportTest, PullExplicitDestPtrsMultiLayerUnevenParallelism) {
+TEST_P(BlockTransportTest,
+       PullExplicitDestPtrsMultiLayerUnevenParallelism) {
   constexpr size_t kSliceSize = 16;
   constexpr int kNumBlocks = 3;
   constexpr size_t kNumLayers = 2;
@@ -419,6 +499,8 @@ TEST(BlockTransportTest, PullExplicitDestPtrsMultiLayerUnevenParallelism) {
 
   BlockTransport source_transport(&source, 0);
   BlockTransport receiver_transport(&receiver, 0);
+  BindControlChannels(&source_transport, &source, &receiver_transport,
+                      &receiver);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
@@ -438,7 +520,7 @@ TEST(BlockTransportTest, PullExplicitDestPtrsMultiLayerUnevenParallelism) {
   }
 }
 
-TEST(BlockTransportTest, PullRejectsOutOfBoundsRemoteBlock) {
+TEST_P(BlockTransportTest, PullRejectsOutOfBoundsRemoteBlock) {
   constexpr size_t kSliceSize = 16;
   constexpr int kNumBlocks = 1;
   MockDelegate source(kSliceSize, kNumBlocks);
@@ -446,6 +528,8 @@ TEST(BlockTransportTest, PullRejectsOutOfBoundsRemoteBlock) {
 
   BlockTransport source_transport(&source, 0);
   BlockTransport receiver_transport(&receiver, 0);
+  BindControlChannels(&source_transport, &source, &receiver_transport,
+                      &receiver);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
@@ -458,7 +542,7 @@ TEST(BlockTransportTest, PullRejectsOutOfBoundsRemoteBlock) {
   EXPECT_FALSE(pull_res.ok());
 }
 
-TEST(BlockTransportTest, PullSupportsBlockMajorOrder) {
+TEST_P(BlockTransportTest, PullSupportsBlockMajorOrder) {
   constexpr size_t kSliceSize = 16;
   constexpr int kNumBlocks = 2;
   constexpr size_t kNumLayers = 2;
@@ -474,6 +558,8 @@ TEST(BlockTransportTest, PullSupportsBlockMajorOrder) {
 
   BlockTransport source_transport(&source, 0);
   BlockTransport receiver_transport(&receiver, 0);
+  BindControlChannels(&source_transport, &source, &receiver_transport,
+                      &receiver);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
@@ -499,7 +585,7 @@ TEST(BlockTransportTest, PullSupportsBlockMajorOrder) {
             }));
 }
 
-TEST(BlockTransportTest, SamePeerFanoutFiltersEachDestinationStream) {
+TEST_P(BlockTransportTest, SamePeerFanoutFiltersEachDestinationStream) {
   SamePeerFanoutDelegate sender;
   MockDelegate receiver(/*slice_size=*/64, /*max_blocks=*/4);
   for (int page = 0; page < 4; ++page) {
@@ -508,6 +594,8 @@ TEST(BlockTransportTest, SamePeerFanoutFiltersEachDestinationStream) {
 
   BlockTransport sender_transport(&sender, 0);
   BlockTransport receiver_transport(&receiver, 0);
+  BindControlChannels(&sender_transport, &sender, &receiver_transport,
+                      &receiver);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
   auto result = sender_transport.SyncPush(
       {absl::StrCat("localhost:", receiver_transport.local_port())},
@@ -524,7 +612,7 @@ TEST(BlockTransportTest, SamePeerFanoutFiltersEachDestinationStream) {
   }
 }
 
-TEST(BlockTransportTest, ForgetPushProgressAllowsUuidReuse) {
+TEST_P(BlockTransportTest, ForgetPushProgressAllowsUuidReuse) {
   constexpr uint64_t kUuid = 902;
   MockDelegate sender(/*slice_size=*/32, /*max_blocks=*/1,
                       /*num_layers=*/2);
@@ -532,6 +620,8 @@ TEST(BlockTransportTest, ForgetPushProgressAllowsUuidReuse) {
                         /*num_layers=*/2);
   BlockTransport sender_transport(&sender, 0);
   BlockTransport receiver_transport(&receiver, 0);
+  BindControlChannels(&sender_transport, &sender, &receiver_transport,
+                      &receiver);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
   auto push_layer = [&](int layer_idx) {
     return sender_transport.SyncPush(
@@ -554,8 +644,8 @@ TEST(BlockTransportTest, ForgetPushProgressAllowsUuidReuse) {
   EXPECT_EQ(receiver.layer_completion_count(), 4);
 }
 
-TEST(BlockTransportTest,
-     PoolProgressWaitsForEveryStreamOfEveryDeclaredPoolAndRetires) {
+TEST_P(BlockTransportTest,
+       PoolProgressWaitsForEveryStreamOfEveryDeclaredPoolAndRetires) {
   constexpr uint64_t kUuid = 903;
   MockDelegate sender(/*slice_size=*/32, /*max_blocks=*/1,
                       /*num_layers=*/2);
@@ -565,6 +655,8 @@ TEST(BlockTransportTest,
                                /*transfer_pool_indices=*/{0, 1});
   BlockTransport sender_transport(&sender, 0);
   BlockTransport receiver_transport(&receiver, 0);
+  BindControlChannels(&sender_transport, &sender, &receiver_transport,
+                      &receiver);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
   auto push_pool = [&](int pool_idx) {
     return sender_transport.SyncPush(
@@ -591,7 +683,7 @@ TEST(BlockTransportTest,
   EXPECT_EQ(receiver.pool_completion_count(), 3);
 }
 
-TEST(BlockTransportTest, ForgetPushProgressResetsPartialPoolGeneration) {
+TEST_P(BlockTransportTest, ForgetPushProgressResetsPartialPoolGeneration) {
   constexpr uint64_t kUuid = 904;
   MockDelegate sender(/*slice_size=*/32);
   MockDelegate receiver(/*slice_size=*/32);
@@ -599,6 +691,8 @@ TEST(BlockTransportTest, ForgetPushProgressResetsPartialPoolGeneration) {
                                /*transfer_pool_indices=*/{0});
   BlockTransport sender_transport(&sender, 0);
   BlockTransport receiver_transport(&receiver, 0);
+  BindControlChannels(&sender_transport, &sender, &receiver_transport,
+                      &receiver);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
   auto push_once = [&]() {
     return sender_transport.SyncPush(
@@ -646,7 +740,7 @@ class MockBlockTransport : public BlockTransport {
   std::vector<CallRecord> acquire_calls_ ABSL_GUARDED_BY(mock_mu_);
 };
 
-TEST(BlockTransportTest, RoundRobinDistribution) {
+TEST_P(BlockTransportTest, RoundRobinDistribution) {
   constexpr size_t kSliceSize = 16;
   MockDelegate delegate(kSliceSize);
 
@@ -688,7 +782,7 @@ TEST(BlockTransportTest, RoundRobinDistribution) {
 }
 #endif
 
-TEST(BlockTransportTest, SentBytesTelemetryIncrementedOnPushAndPull) {
+TEST_P(BlockTransportTest, SentBytesTelemetryIncrementedOnPushAndPull) {
   ScopedPrometheusBackend scoped_telemetry;
 
   constexpr size_t kSize = 1024;
@@ -700,6 +794,7 @@ TEST(BlockTransportTest, SentBytesTelemetryIncrementedOnPushAndPull) {
 
   BlockTransport transport1(&delegate1, 0);
   BlockTransport transport2(&delegate2, 0);
+  BindControlChannels(&transport1, &delegate1, &transport2, &delegate2);
 
   auto push_res = transport1.SyncPush(
       {absl::StrCat("localhost:", transport2.local_port())},
@@ -727,7 +822,7 @@ TEST(BlockTransportTest, SentBytesTelemetryIncrementedOnPushAndPull) {
   EXPECT_THAT(snapshot2, HasSubstr(kExpectedPullResponseMetric));
 }
 
-TEST(BlockTransportTest, ReceivedBytesTelemetryIncrementedOnPushAndPull) {
+TEST_P(BlockTransportTest, ReceivedBytesTelemetryIncrementedOnPushAndPull) {
   ScopedPrometheusBackend scoped_telemetry;
 
   constexpr size_t kSize = 1024;
@@ -739,6 +834,7 @@ TEST(BlockTransportTest, ReceivedBytesTelemetryIncrementedOnPushAndPull) {
 
   BlockTransport transport1(&delegate1, 0);
   BlockTransport transport2(&delegate2, 0);
+  BindControlChannels(&transport1, &delegate1, &transport2, &delegate2);
 
   auto push_res = transport1.SyncPush(
       {absl::StrCat("localhost:", transport2.local_port())},
@@ -770,7 +866,7 @@ TEST(BlockTransportTest, ReceivedBytesTelemetryIncrementedOnPushAndPull) {
   EXPECT_THAT(snapshot2, HasSubstr(kExpectedPullResponseMetric));
 }
 
-TEST(BlockTransportTest, TransferFailuresTelemetryPushValidationFailures) {
+TEST_P(BlockTransportTest, TransferFailuresTelemetryPushValidationFailures) {
   ScopedPrometheusBackend scoped_telemetry;
 
   constexpr size_t kSize = 1024;
@@ -814,11 +910,14 @@ TEST(BlockTransportTest, TransferFailuresTelemetryPushValidationFailures) {
               HasSubstr(kExpectedError3));
 }
 
-TEST(BlockTransportTest, TransferFailuresTelemetryPushTransferFailure) {
+TEST_P(BlockTransportTest, TransferFailuresTelemetryPushTransferFailure) {
   ScopedPrometheusBackend scoped_telemetry;
 
   constexpr size_t kSize = 1024;
   MockDelegate delegate(kSize);
+  delegate.SetPeerChannel(
+      "localhost:1",
+      grpc::CreateChannel("localhost:1", grpc::InsecureChannelCredentials()));
   BlockTransport transport(&delegate, 0);
 
   absl::StatusOr<std::vector<int>> res = transport.SyncPush(
@@ -832,11 +931,15 @@ TEST(BlockTransportTest, TransferFailuresTelemetryPushTransferFailure) {
   EXPECT_THAT(WaitForMetricSnapshot(kExpectedError), HasSubstr(kExpectedError));
 }
 
-TEST(BlockTransportTest, TransferFailuresTelemetryPushBufferAndPushBuffers) {
+TEST_P(BlockTransportTest,
+       TransferFailuresTelemetryPushBufferAndPushBuffers) {
   ScopedPrometheusBackend scoped_telemetry;
 
   constexpr size_t kSize = 1024;
   MockDelegate delegate(kSize);
+  delegate.SetPeerChannel(
+      "localhost:1",
+      grpc::CreateChannel("localhost:1", grpc::InsecureChannelCredentials()));
   BlockTransport transport(&delegate, 0);
 
   // PushBuffer failure to non-existent peer
@@ -871,7 +974,7 @@ TEST(BlockTransportTest, TransferFailuresTelemetryPushBufferAndPushBuffers) {
               HasSubstr(kExpectedError2));
 }
 
-TEST(BlockTransportTest, TransferFailuresTelemetryPullValidationFailures) {
+TEST_P(BlockTransportTest, TransferFailuresTelemetryPullValidationFailures) {
   ScopedPrometheusBackend scoped_telemetry;
 
   constexpr size_t kSize = 1024;
@@ -947,7 +1050,7 @@ TEST(BlockTransportTest, TransferFailuresTelemetryPullValidationFailures) {
               HasSubstr(kExpectedError5));
 }
 
-TEST(BlockTransportTest, TransferFailuresTelemetryPullTransferFailure) {
+TEST_P(BlockTransportTest, TransferFailuresTelemetryPullTransferFailure) {
   ScopedPrometheusBackend scoped_telemetry;
 
   constexpr size_t kSliceSize = 16;
@@ -957,6 +1060,8 @@ TEST(BlockTransportTest, TransferFailuresTelemetryPullTransferFailure) {
 
   BlockTransport source_transport(&source, 0);
   BlockTransport receiver_transport(&receiver, 0);
+  BindControlChannels(&source_transport, &source, &receiver_transport,
+                      &receiver);
 
   absl::StatusOr<std::vector<int>> pull_res = receiver_transport.SyncPull(
       {absl::StrCat("localhost:", source_transport.local_port())},
@@ -971,7 +1076,7 @@ TEST(BlockTransportTest, TransferFailuresTelemetryPullTransferFailure) {
   EXPECT_THAT(WaitForMetricSnapshot(kExpectedError), HasSubstr(kExpectedError));
 }
 
-TEST(BlockTransportTest, NoTransferFailuresTelemetryOnSuccess) {
+TEST_P(BlockTransportTest, NoTransferFailuresTelemetryOnSuccess) {
   ScopedPrometheusBackend scoped_telemetry;
 
   constexpr size_t kSize = 1024;
@@ -983,6 +1088,7 @@ TEST(BlockTransportTest, NoTransferFailuresTelemetryOnSuccess) {
 
   BlockTransport transport1(&delegate1, 0);
   BlockTransport transport2(&delegate2, 0);
+  BindControlChannels(&transport1, &delegate1, &transport2, &delegate2);
 
   ASSERT_OK(
       transport1.SyncPush({absl::StrCat("localhost:", transport2.local_port())},
@@ -1005,7 +1111,7 @@ TEST(BlockTransportTest, NoTransferFailuresTelemetryOnSuccess) {
               Not(HasSubstr(kNotExpectedError)));
 }
 
-TEST(BlockTransportTest, MultiShardPushBlockMajor) {
+TEST_P(BlockTransportTest, MultiShardPushBlockMajor) {
   constexpr size_t kBlockSize = 256;
   constexpr int kNumBlocks = 3;
   constexpr size_t kNumLayers = 2;
@@ -1028,6 +1134,8 @@ TEST(BlockTransportTest, MultiShardPushBlockMajor) {
 
   BlockTransport sender(&sender_delegate, 0);
   BlockTransport receiver(&receiver_delegate, 0);
+  BindControlChannels(&sender, &sender_delegate, &receiver,
+                      &receiver_delegate);
 
   ASSERT_OK(
       sender.SyncPush({absl::StrCat("localhost:", receiver.local_port())},
@@ -1047,7 +1155,7 @@ TEST(BlockTransportTest, MultiShardPushBlockMajor) {
   }
 }
 
-TEST(BlockTransportTest, MultiShardPushLayerMajor) {
+TEST_P(BlockTransportTest, MultiShardPushLayerMajor) {
   constexpr size_t kBlockSize = 256;
   constexpr int kNumBlocks = 3;
   constexpr size_t kNumLayers = 2;
@@ -1070,6 +1178,8 @@ TEST(BlockTransportTest, MultiShardPushLayerMajor) {
 
   BlockTransport sender(&sender_delegate, 0);
   BlockTransport receiver(&receiver_delegate, 0);
+  BindControlChannels(&sender, &sender_delegate, &receiver,
+                      &receiver_delegate);
 
   ASSERT_OK(
       sender.SyncPush({absl::StrCat("localhost:", receiver.local_port())},
@@ -1089,13 +1199,14 @@ TEST(BlockTransportTest, MultiShardPushLayerMajor) {
   }
 }
 
-TEST(BlockTransportTest, PushBufferCorrectness) {
+TEST_P(BlockTransportTest, PushBufferCorrectness) {
   constexpr size_t size = 64 * 1024;
   MockDelegate src(size);
   MockDelegate dst(size);
 
   BlockTransport src_transport(&src, 0);
   BlockTransport dst_transport(&dst, 0);
+  BindControlChannels(&src_transport, &src, &dst_transport, &dst);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   constexpr size_t kLen = 62 * 1024;
@@ -1121,7 +1232,7 @@ TEST(BlockTransportTest, PushBufferCorrectness) {
               Each(Eq(0)));
 }
 
-TEST(BlockTransportTest, PollEINTRIsBenign) {
+TEST_P(BlockTransportTest, PollEINTRIsBenign) {
   // Set up src/dst buffers.
   constexpr size_t size = 4096;
   MockDelegate src(size);
@@ -1130,6 +1241,7 @@ TEST(BlockTransportTest, PollEINTRIsBenign) {
   // Create two transports.
   BlockTransport src_transport(&src, 0);
   BlockTransport dst_transport(&dst, 0);
+  BindControlChannels(&src_transport, &src, &dst_transport, &dst);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   // Register a dummy signal handler.
@@ -1148,6 +1260,12 @@ TEST(BlockTransportTest, PollEINTRIsBenign) {
       /*uuid=*/0);
   EXPECT_OK(push_res) << push_res.message();
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    PspAndPlainTcp, BlockTransportTest, ::testing::Bool(),
+    [](const ::testing::TestParamInfo<bool>& info) {
+      return info.param ? "PSP" : "PlainTcp";
+    });
 
 }  // namespace
 }  // namespace transport

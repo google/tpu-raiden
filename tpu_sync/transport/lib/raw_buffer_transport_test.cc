@@ -20,24 +20,35 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <thread>  // NOLINT
+#include <utility>
 #include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/flags/flag.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
+#include "grpcpp/channel.h"
+#include "grpcpp/server.h"
+#include "grpcpp/server_builder.h"
+#include "grpcpp/support/channel_arguments.h"
 #include "tpu_sync/transport/buffer_push_task.h"
 #include "tpu_sync/transport/lib/conn/pool.h"
+#include "tpu_sync/transport/lib/peregrine_control_service.h"
 #include "tpu_sync/transport/lib/raw_buffer_transport_delegate.h"
+#include "tpu_sync/transport/lib/socket/psp_syscall_mock.h" // NOLINT
+#include "tpu_sync/transport/lib/socket/tcp_psp_helper.h"
 #include "tpu_sync/transport/peregrine/src/util/util.h"
 
-namespace tpu_raiden::transport::lib::testing {
+namespace tpu_raiden::transport::lib {
 namespace {
 
 using ::peregrine::util::AllZero;
@@ -71,9 +82,25 @@ class RawMockDelegate : public RawBufferTransportDelegate {
   }
 
   absl::Status OnDataReceived(uint64_t uuid = 0) override {
-    absl::MutexLock lock( mu_ );
+    absl::MutexLock lock(mu_);
     on_data_received_called_ = true;
     return absl::OkStatus();
+  }
+
+  void SetPeerChannel(absl::string_view peer,
+                      std::shared_ptr<grpc::Channel> channel) {
+    absl::MutexLock lock(mu_);
+    peer_channels_[std::string(peer)] = std::move(channel);
+  }
+
+  std::shared_ptr<grpc::Channel> GetPeregrineChannel(
+      absl::string_view peer) override {
+    absl::MutexLock lock(mu_);
+    auto it = peer_channels_.find(peer);
+    if (it != peer_channels_.end()) {
+      return it->second;
+    }
+    return default_channel_;
   }
 
   uint8_t* data() { return buffer_.data(); }
@@ -83,7 +110,7 @@ class RawMockDelegate : public RawBufferTransportDelegate {
   }
 
   bool on_data_received() const {
-    absl::MutexLock lock( mu_ );
+    absl::MutexLock lock(mu_);
     return on_data_received_called_;
   }
 
@@ -91,9 +118,64 @@ class RawMockDelegate : public RawBufferTransportDelegate {
   std::vector<uint8_t> buffer_;
   mutable absl::Mutex mu_;
   bool on_data_received_called_ ABSL_GUARDED_BY(mu_) = false;
+  std::shared_ptr<grpc::Channel> default_channel_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<std::string, std::shared_ptr<grpc::Channel>>
+      peer_channels_ ABSL_GUARDED_BY(mu_);
 };
 
-TEST(RawBufferTransportTest, PullBufferCorrectness) {
+class RawBufferTransportTest : public ::testing::TestWithParam<bool> {
+ protected:
+  void SetUp() override {
+    if (GetParam() && !IsPspSupported()) {
+      GTEST_SKIP() << "PSP-TCP is unimplemented.";
+    }
+    absl::SetFlag(&FLAGS_require_psp_tcp, GetParam());
+  }
+
+  void TearDown() override {
+    for (auto& entry : servers_) {
+      if (entry.server) {
+        entry.server->Shutdown();
+      }
+    }
+    servers_.clear();
+  }
+
+  std::shared_ptr<grpc::Channel> StartControlServer(
+      RawBufferTransport* transport) {
+    auto service =
+        std::make_unique<PeregrineControlServiceImpl>(transport);
+    grpc::ServerBuilder builder;
+    builder.RegisterService(service.get());
+    std::unique_ptr<grpc::Server> server = builder.BuildAndStart();
+    std::shared_ptr<grpc::Channel> channel =
+        server->InProcessChannel(grpc::ChannelArguments());
+    servers_.push_back({std::move(service), std::move(server), channel});
+    return channel;
+  }
+
+  void BindControlChannels(RawBufferTransport* transport1,
+                           RawMockDelegate* delegate1,
+                           RawBufferTransport* transport2,
+                           RawMockDelegate* delegate2) {
+    auto ch1 = StartControlServer(transport1);
+    auto ch2 = StartControlServer(transport2);
+    delegate1->SetPeerChannel(GetIpPort(*transport2), ch2);
+    delegate2->SetPeerChannel(GetIpPort(*transport1), ch1);
+  }
+
+ private:
+  struct ServerEntry {
+    std::unique_ptr<PeregrineControlServiceImpl> service;
+    std::unique_ptr<grpc::Server> server;
+    std::shared_ptr<grpc::Channel> channel;
+  };
+  std::vector<ServerEntry> servers_;
+};
+
+using ConnPoolTest = RawBufferTransportTest;
+
+TEST_P(RawBufferTransportTest, PullBufferCorrectness) {
   // Set up src/dst buffers.
   constexpr size_t size = 64 * 1024;
   RawMockDelegate src(size);
@@ -106,6 +188,7 @@ TEST(RawBufferTransportTest, PullBufferCorrectness) {
   // Create two transports.
   RawBufferTransport src_transport(&src, kLocalPort);
   RawBufferTransport dst_transport(&dst, kLocalPort);
+  BindControlChannels(&src_transport, &src, &dst_transport, &dst);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   // Pull a buffer segment from src to dst.
@@ -126,7 +209,7 @@ TEST(RawBufferTransportTest, PullBufferCorrectness) {
               Each(Eq(0)));
 }
 
-TEST(RawBufferTransportTest, PushBuffersCorrectness) {
+TEST_P(RawBufferTransportTest, PushBuffersCorrectness) {
   // Set up src/dst buffers.
   constexpr size_t size = 128 * 1024;
   RawMockDelegate src(size);
@@ -137,10 +220,13 @@ TEST(RawBufferTransportTest, PushBuffersCorrectness) {
   RawBufferTransport src_transport(&src, kLocalPort);
   RawBufferTransport dst_transport1(&dst1, kLocalPort);
   RawBufferTransport dst_transport2(&dst2, kLocalPort);
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
+  auto ch1 = StartControlServer(&dst_transport1);
+  auto ch2 = StartControlServer(&dst_transport2);
   const std::string dst1_addr = GetIpPort(dst_transport1);
   const std::string dst2_addr = GetIpPort(dst_transport2);
+  src.SetPeerChannel(dst1_addr, ch1);
+  src.SetPeerChannel(dst2_addr, ch2);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   // Prepare multiple payloads.
   std::vector<uint8_t> payload1(1024);
@@ -204,7 +290,7 @@ TEST(RawBufferTransportTest, PushBuffersCorrectness) {
   EXPECT_TRUE(dst2.on_data_received());
 }
 
-TEST(RawBufferTransportTest, RejectsOutOfBounds) {
+TEST_P(RawBufferTransportTest, RejectsOutOfBounds) {
   // Set up src/dst buffers.
   constexpr size_t size = 1024;
   RawMockDelegate src(size);
@@ -213,6 +299,7 @@ TEST(RawBufferTransportTest, RejectsOutOfBounds) {
   // Create two transports.
   RawBufferTransport src_transport(&src, 0);
   RawBufferTransport dst_transport(&dst, 0);
+  BindControlChannels(&src_transport, &src, &dst_transport, &dst);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   // Pulling an out-of-bounds buffer segment from src to dst should fail.
@@ -227,12 +314,13 @@ TEST(RawBufferTransportTest, RejectsOutOfBounds) {
   EXPECT_FALSE(pull_res.ok()) << pull_res.message();
 }
 
-TEST(ConnPoolTest, MultiIpPoolingIsolation) {
+TEST_P(ConnPoolTest, MultiIpPoolingIsolation) {
   // Set up src/dst buffers.
   RawMockDelegate src(1024);
 
   // Create a transport to serve as the peer.
   RawBufferTransport listener(&src, 0);
+  auto channel = StartControlServer(&listener);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   // Create a ConnPool.
@@ -240,7 +328,7 @@ TEST(ConnPoolTest, MultiIpPoolingIsolation) {
   const std::string addr = GetIpPort(listener);
 
   // 1. Borrow connection with local_ip = "127.0.0.1"
-  const auto fd1_or = pool.Borrow(addr, "127.0.0.1");
+  const auto fd1_or = pool.Borrow(addr, "127.0.0.1", channel);
   ASSERT_OK(fd1_or) << fd1_or.status().message();
   const int fd1 = fd1_or.value();
 
@@ -249,7 +337,7 @@ TEST(ConnPoolTest, MultiIpPoolingIsolation) {
 
   // 2. Borrow connection with local_ip = "127.0.0.2"
   // This should NOT reuse fd1 because it's a different local IP.
-  const auto fd2_or = pool.Borrow(addr, "127.0.0.2");
+  const auto fd2_or = pool.Borrow(addr, "127.0.0.2", channel);
   ASSERT_OK(fd2_or) << fd2_or.status().message();
   const int fd2 = fd2_or.value();
   EXPECT_NE(fd1, fd2);
@@ -259,7 +347,7 @@ TEST(ConnPoolTest, MultiIpPoolingIsolation) {
 
   // 3. Borrow connection with local_ip = "127.0.0.1" again.
   // This SHOULD reuse fd1.
-  const auto fd3_or = pool.Borrow(addr, "127.0.0.1");
+  const auto fd3_or = pool.Borrow(addr, "127.0.0.1", channel);
   ASSERT_OK(fd3_or) << fd3_or.status().message();
   const int fd3 = fd3_or.value();
   EXPECT_EQ(fd1, fd3);
@@ -267,7 +355,7 @@ TEST(ConnPoolTest, MultiIpPoolingIsolation) {
 
   // 4. Borrow connection with local_ip = "127.0.0.2" again.
   // This SHOULD reuse fd2.
-  const auto fd4_or = pool.Borrow(addr, "127.0.0.2");
+  const auto fd4_or = pool.Borrow(addr, "127.0.0.2", channel);
   ASSERT_OK(fd4_or) << fd4_or.status().message();
   const int fd4 = fd4_or.value();
   EXPECT_EQ(fd2, fd4);
@@ -277,7 +365,7 @@ TEST(ConnPoolTest, MultiIpPoolingIsolation) {
   pool.Close();
 }
 
-TEST(RawBufferTransportTest, PushBuffersCoalescedCorrectness) {
+TEST_P(RawBufferTransportTest, PushBuffersCoalescedCorrectness) {
   // Set up src/dst buffers.
   constexpr size_t size = 128 * 1024;
   RawMockDelegate src(size);
@@ -286,14 +374,17 @@ TEST(RawBufferTransportTest, PushBuffersCoalescedCorrectness) {
 
   // Create transports. Pass 4096 to enable coalescing for the sender.
   RawBufferTransport src_transport(&src, kLocalPort, /*local_ips=*/{},
-                                   /*custom_request_handler=*/nullptr,
-                                   /*coalesce_window_bytes=*/4096);
+                                    /*custom_request_handler=*/nullptr,
+                                    /*coalesce_window_bytes=*/4096);
   RawBufferTransport dst_transport1(&dst1, kLocalPort);
   RawBufferTransport dst_transport2(&dst2, kLocalPort);
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
+  auto ch1 = StartControlServer(&dst_transport1);
+  auto ch2 = StartControlServer(&dst_transport2);
   const std::string dst1_addr = GetIpPort(dst_transport1);
   const std::string dst2_addr = GetIpPort(dst_transport2);
+  src.SetPeerChannel(dst1_addr, ch1);
+  src.SetPeerChannel(dst2_addr, ch2);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   // Prepare multiple payloads.
   std::vector<uint8_t> payload1(1024);
@@ -357,7 +448,7 @@ TEST(RawBufferTransportTest, PushBuffersCoalescedCorrectness) {
   EXPECT_TRUE(dst2.on_data_received());
 }
 
-TEST(RawBufferTransportTest, PushBuffersLargeBatchCorrectness) {
+TEST_P(RawBufferTransportTest, PushBuffersLargeBatchCorrectness) {
   constexpr size_t num_tasks = 1025;  // IOV_MAX (1024) + 1
   constexpr size_t buffer_size = num_tasks;
 
@@ -367,6 +458,7 @@ TEST(RawBufferTransportTest, PushBuffersLargeBatchCorrectness) {
   // Create transports. Coalescing is disabled by default (0).
   RawBufferTransport src_transport(&src, kLocalPort);
   RawBufferTransport dst_transport(&dst, kLocalPort);
+  BindControlChannels(&src_transport, &src, &dst_transport, &dst);
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   const std::string dst_addr = GetIpPort(dst_transport);
@@ -400,5 +492,17 @@ TEST(RawBufferTransportTest, PushBuffersLargeBatchCorrectness) {
   EXPECT_TRUE(dst.on_data_received());
 }
 
+INSTANTIATE_TEST_SUITE_P(
+    PspAndPlainTcp, RawBufferTransportTest, ::testing::Bool(),
+    [](const ::testing::TestParamInfo<bool>& info) {
+      return info.param ? "PSP" : "PlainTcp";
+    });
+
+INSTANTIATE_TEST_SUITE_P(
+    PspAndPlainTcp, ConnPoolTest, ::testing::Bool(),
+    [](const ::testing::TestParamInfo<bool>& info) {
+      return info.param ? "PSP" : "PlainTcp";
+    });
+
 }  // namespace
-}  // namespace tpu_raiden::transport::lib::testing
+}  // namespace tpu_raiden::transport::lib
