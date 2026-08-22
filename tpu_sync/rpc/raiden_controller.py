@@ -60,6 +60,7 @@ class _CachedTransferSchedule:
   direct_dsts: list[Any]
   rpc_addresses: dict[Any, str]
   data_addresses: dict[Any, list[str]]
+  dst_unit_counts: dict[Any, int] = dataclasses.field(default_factory=dict)
 
 
 def to_physical(logical_shape, logical_mesh_shape, minor_to_major):
@@ -328,6 +329,9 @@ class TransferPlan:
   )
   dst_expected_layer_chunk_counts: dict[RaidenId, dict[int, int]] = (
       dataclasses.field(default_factory=dict)
+  )
+  dst_expected_block_counts: dict[RaidenId, int] = dataclasses.field(
+      default_factory=dict
   )
 
 
@@ -620,7 +624,9 @@ class WorkerRpcClient:
         is_sender=is_sender,
         dst_mem_type=int(transfer_plan.dst_mem_type),
         use_block_chunks=transfer_plan.use_block_chunks,
-        expected_block_count=transfer_plan.expected_block_count,
+        expected_block_count=transfer_plan.dst_expected_block_counts.get(
+            target_id, transfer_plan.expected_block_count
+        ),
         req_id=transfer_plan.req_id,
         transfer_pool_indices=transfer_plan.transfer_pool_indices,
         pool_dtype_tags=transfer_plan.pool_dtype_tags,
@@ -1634,7 +1640,7 @@ class RaidenController:
               shard_push_schedules=sub_schedule,
               worker_rpc_addresses=dict(final_plan.worker_rpc_addresses),
               worker_data_addresses=dict(final_plan.worker_data_addresses),
-              uuid=final_plan.uuid,
+              uuid=hop_uuid,
               dst_mem_type=dst_mem_type,
               use_block_chunks=True,
               is_sender=True,
@@ -2039,6 +2045,8 @@ class RaidenController:
           )
 
           cached_schedule = None
+          dst_unit_counts = {}
+          dst_unit_layer_counts = {}
           if (
               self.enable_plan_cache
               and use_cached_plan
@@ -2070,6 +2078,7 @@ class RaidenController:
             rpc_addresses = dict(self.worker_rpc_client.get_worker_endpoints())
             rpc_addresses.update(cached_schedule.rpc_addresses)
             data_addresses = copy.deepcopy(cached_schedule.data_addresses)
+            dst_unit_counts = copy.deepcopy(cached_schedule.dst_unit_counts)
 
           else:
             # 1. Retrieve destination metadata (either from remote dst_controller
@@ -2719,6 +2728,7 @@ class RaidenController:
                     dst_unit_counts,
                 )
             else:
+              dst_unit_counts = {}
               dst_unit_layer_counts = {}
 
             direct_dsts = []
@@ -2749,6 +2759,7 @@ class RaidenController:
                     direct_dsts=list(direct_dsts),
                     rpc_addresses=dict(rpc_addresses),
                     data_addresses=copy.deepcopy(data_addresses),
+                    dst_unit_counts=copy.deepcopy(dst_unit_counts),
                 )
 
           # Build final plan and replace the partial plan
@@ -2767,6 +2778,7 @@ class RaidenController:
               is_sender=True,
               expected_block_count=expected_block_count,
               dst_expected_layer_chunk_counts=dst_unit_layer_counts,
+              dst_expected_block_counts=dst_unit_counts,
               req_id=req_id,
               skip_d2h=skip_d2h,
               skip_tiling=local_skip_tiling,
@@ -2791,142 +2803,89 @@ class RaidenController:
                 is_sender=True,
                 expected_block_count=expected_block_count,
                 dst_expected_layer_chunk_counts=dst_unit_layer_counts,
+                dst_expected_block_counts=dst_unit_counts,
                 src_schedule_keys={
                     u: i for i, u in enumerate(direct_schedules.keys())
                 },
                 req_id=req_id,
-                skip_d2h=True,
+                skip_d2h=skip_d2h,
                 skip_tiling=local_skip_tiling,
                 parallelism=final_plan.parallelism,
             )
 
-          # --- Phase 1a: Source D2H Coroutine ---
-          async def _run_source_d2h() -> None:
-            if not final_plan.skip_d2h:
-              d2h_futures = []
-              for src_unit in src_units:
-                # Build a dummy plan to trigger D2H
-                d2h_uuid = random.randint(1, 2**63 - 1)
-                d2h_req_id = f"{req_id}_d2h_{src_unit.job_name}_{src_unit.job_replica_id}_{d2h_uuid}"
-                d2h_plan = TransferPlan(
-                    src_units=[src_unit],
-                    dst_units=[],
-                    plan=None,
-                    shard_push_schedules={src_unit: {0: []}},
-                    worker_rpc_addresses=dict(final_plan.worker_rpc_addresses),
-                    worker_data_addresses={},
-                    uuid=d2h_uuid,
-                    dst_mem_type=dst_mem_type,
-                    use_block_chunks=True,
-                    is_sender=True,
-                    expected_block_count=0,
-                    req_id=d2h_req_id,
-                    skip_d2h=False,
-                    skip_tiling=local_skip_tiling,
-                )
-                d2h_futures.append(
-                    self.worker_rpc_client.start_transfer(src_unit, d2h_plan)
-                )
-              await asyncio.gather(*d2h_futures)
-              final_plan.skip_d2h = True
+          # 1. Arm direct schedule receivers
+          if direct_schedules:
+            if dst_controller_address:
+              dst_facade = RaidenControllerClientFacade(
+                  dst_controller_address,
+                  name_resolver=self.worker_rpc_client.name_resolver,
+              )
+              loop = asyncio.get_running_loop()
+              success = await loop.run_in_executor(
+                  None,
+                  dst_facade.register_transfer_schedule,
+                  list(direct_schedules.keys()),
+                  direct_dsts,
+                  req_id,
+                  True,
+                  False,
+                  expected_block_count,
+                  uuid,
+                  dst_controller_address,
+                  src_controller_address,
+                  direct_schedules,
+                  dst_mem_type,
+                  skip_d2h,
+                  local_skip_tiling,
+              )
+              if not success:
+                raise RuntimeError("Failed remote prepare for direct schedules")
+            else:
+              local_direct_dsts = [
+                  u for u in direct_dsts if u in self._registered_shards
+              ]
+              if local_direct_dsts:
+                await asyncio.gather(*[
+                    self.worker_rpc_client.start_transfer(unit, direct_plan)
+                    for unit in local_direct_dsts
+                ])
 
-          # --- Phase 1b: Receiver Arming Coroutine ---
-          async def _arm_receivers() -> None:
-            arming_tasks = []
-
-            # 1. Arm direct schedule receivers
-            if direct_schedules:
-              if dst_controller_address:
-                dst_facade = RaidenControllerClientFacade(
-                    dst_controller_address,
-                    name_resolver=self.worker_rpc_client.name_resolver,
-                )
-                loop = asyncio.get_running_loop()
-
-                async def _arm_remote_direct():
-                  success = await loop.run_in_executor(
-                      None,
-                      dst_facade.register_transfer_schedule,
-                      list(direct_schedules.keys()),
-                      direct_dsts,
-                      req_id,
-                      True,
-                      False,
-                      expected_block_count,
-                      uuid,
-                      dst_controller_address,
-                      src_controller_address,
-                      direct_schedules,
-                      dst_mem_type,
-                      True,
-                      local_skip_tiling,
-                  )
-                  if not success:
-                    raise RuntimeError(
-                        "Failed remote prepare for direct schedules"
-                    )
-
-                arming_tasks.append(_arm_remote_direct())
-              else:
-                local_direct_dsts = [
-                    u for u in direct_dsts if u in self._registered_shards
-                ]
-                if local_direct_dsts:
-                  arming_tasks.append(
-                      asyncio.gather(*[
-                          self.worker_rpc_client.start_transfer(
-                              unit, direct_plan
-                          )
-                          for unit in local_direct_dsts
-                      ])
-                  )
-
-            # 2. Arm destination controller for tree broadcast top-level req_id
-            if broadcast_groups:
-              if dst_controller_address:
-                logging.vlog(
-                    1,
-                    "Registering top-level req_id %s on destination controller"
-                    " %s",
+          # 2. Arm destination controller for tree broadcast top-level req_id
+          if broadcast_groups:
+            if dst_controller_address:
+              logging.vlog(
+                  1,
+                  "Registering top-level req_id %s on destination controller"
+                  " %s",
+                  req_id,
+                  dst_controller_address,
+              )
+              dst_facade = RaidenControllerClientFacade(
+                  dst_controller_address,
+                  name_resolver=self.worker_rpc_client.name_resolver,
+              )
+              loop = asyncio.get_running_loop()
+              success = await loop.run_in_executor(
+                  None,
+                  dst_facade.register_transfer_schedule,
+                  src_units,
+                  dst_units,
+                  req_id,
+                  True,
+                  False,
+                  0,  # expected_block_count = 0 to complete immediately
+                  uuid,
+                  dst_controller_address,
+                  src_controller_address,
+                  None,
+                  dst_mem_type,
+              )
+              if not success:
+                logging.warning(
+                    "Failed to register top-level req_id %s on destination"
+                    " controller",
                     req_id,
-                    dst_controller_address,
                 )
-                dst_facade = RaidenControllerClientFacade(
-                    dst_controller_address,
-                    name_resolver=self.worker_rpc_client.name_resolver,
-                )
-                loop = asyncio.get_running_loop()
-
-                async def _arm_remote_broadcast_top():
-                  success = await loop.run_in_executor(
-                      None,
-                      dst_facade.register_transfer_schedule,
-                      src_units,
-                      dst_units,
-                      req_id,
-                      True,
-                      False,
-                      0,  # expected_block_count = 0 to complete immediately
-                      uuid,
-                      dst_controller_address,
-                      src_controller_address,
-                      None,
-                      dst_mem_type,
-                  )
-                  if not success:
-                    logging.warning(
-                        "Failed to register top-level req_id %s on destination"
-                        " controller",
-                        req_id,
-                    )
-
-                arming_tasks.append(_arm_remote_broadcast_top())
-
-            if arming_tasks:
-              await asyncio.gather(*arming_tasks)
-
-          await asyncio.gather(_run_source_d2h(), _arm_receivers())
-          skip_d2h = True
 
           push_tasks = []
 

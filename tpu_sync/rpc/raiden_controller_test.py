@@ -885,15 +885,9 @@ class RaidenControllerTest(absltest.TestCase):
     asyncio.run(future.wait())
 
     self.assertTrue(len(client.calls) > 0)
-    first_target_id, first_plan = client.calls[0]
-
-    self.assertEqual(first_target_id, src)
-    self.assertFalse(first_plan.skip_d2h)
-    self.assertEqual(first_plan.shard_push_schedules, {src: {0: []}})
-    self.assertEqual(first_plan.expected_block_count, 0)
-
-    for target_id, plan in client.calls[1:]:
-      self.assertTrue(plan.skip_d2h)
+    src_calls = [call for call in client.calls if call[0] == src]
+    self.assertNotEmpty(src_calls)
+    self.assertFalse(src_calls[0][1].skip_d2h)
 
   def test_skip_d2h_true_no_upfront_copy_legacy_path(self):
     client = RecordingWorkerRpcClient()
@@ -1468,7 +1462,7 @@ class RaidenControllerTest(absltest.TestCase):
     asyncio.run(future_both.wait())
     self.assertEqual(controller.get_plan_cache_size(), 3)
 
-  def test_overlapped_receiver_arming_and_d2h(self):
+  def test_pipelined_d2h_and_push_execution(self):
     client = RecordingWorkerRpcClient()
     controller = raiden_controller.RaidenController(
         port=10010, worker_rpc_client=client
@@ -1508,22 +1502,15 @@ class RaidenControllerTest(absltest.TestCase):
     )
     asyncio.run(future.wait())
 
-    self.assertGreaterEqual(len(client.calls), 3)
-    # Call 1: Source D2H dummy plan
-    d2h_target, d2h_plan = client.calls[0]
-    self.assertEqual(d2h_target, src)
-    self.assertFalse(d2h_plan.skip_d2h)
-    self.assertEqual(d2h_plan.expected_block_count, 0)
-
-    # Call 2: Destination receiver arming
-    dst_target, dst_plan = client.calls[1]
+    self.assertEqual(len(client.calls), 2)
+    # Call 1: Destination receiver arming
+    dst_target, dst_plan = client.calls[0]
     self.assertEqual(dst_target, target)
-    self.assertTrue(dst_plan.skip_d2h)
 
-    # Call 3: Source P2P push execution
-    src_target, src_plan = client.calls[2]
+    # Call 2: Source P2P push execution with skip_d2h=False for C++ pipelining
+    src_target, src_plan = client.calls[1]
     self.assertEqual(src_target, src)
-    self.assertTrue(src_plan.skip_d2h)
+    self.assertFalse(src_plan.skip_d2h)
     self.assertIn(src, src_plan.shard_push_schedules)
 
 
