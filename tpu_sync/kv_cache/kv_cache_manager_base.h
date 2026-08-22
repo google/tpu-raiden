@@ -364,8 +364,18 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   virtual absl::Status RegisterActivePlan(
       uint64_t uuid, const ::tpu_sync::rpc::StartTransferRequest& request,
       bool is_sender);
+  // Same, with the plan's device blocks staged in explicitly chosen host
+  // blocks instead of at their own ids.
+  absl::Status RegisterActivePlan(
+      uint64_t uuid, const ::tpu_sync::rpc::StartTransferRequest& request,
+      bool is_sender, absl::flat_hash_map<int64_t, int64_t> host_block_of);
 
   virtual absl::Status UnregisterActivePlan(uint64_t uuid);
+
+  // Host blocks staging `block_ids` under plan `uuid`; the ids themselves
+  // when the plan has no host mapping or is unknown.
+  std::vector<int64_t> PlanHostBlocks(
+      uint64_t uuid, const std::vector<int64_t>& block_ids) const;
 
   virtual absl::Status RegisterRecv(uint64_t uuid, const std::string& req_id,
                                     int64_t expected_block_count) {
@@ -537,6 +547,10 @@ class KVCacheManagerBase : public tpu_raiden::RaidenManagerBase {
   struct RegisteredPlan {
     ::tpu_sync::rpc::StartTransferRequest request;
     bool is_sender = false;
+    // Host block holding each device block the plan names on this side
+    // (src blocks for a sender, dst blocks for a receiver). Empty means the
+    // host mirror is addressed by device block id.
+    absl::flat_hash_map<int64_t, int64_t> host_block_of;
   };
   // Plans are stored behind shared_ptr so the per-push readers
   // (GetBlockChunks / GetPoolPushProgressSpec) snapshot with a refcount bump
